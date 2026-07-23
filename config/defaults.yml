@@ -806,6 +806,10 @@ cron_jobs:
     description: "Assemble uploaded device audio into speech-driven conversations"
     enabled: true
     schedule: "*/2 * * * *"
+  observation_curation:
+    description: "Curate novel ScreenPipe observations into durable vault context"
+    enabled: true
+    schedule: "*/5 * * * *"
 
 # Data Audit / auto-clean "level" (thresholds for the auto_clean cron job).
 # Kept separate from cron_jobs.auto_clean so toggling the schedule in the UI

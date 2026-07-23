@@ -51,7 +51,7 @@ class PairingCode(Document):
 class DeviceInputItem(Document):
     user_id: str
     source_id: str
-    kind: Literal["audio", "activity", "screen_context", "immich_memory"]
+    kind: Literal["audio", "activity", "observation", "screen_context", "immich_memory"]
     source_item_id: str
     captured_at: datetime
     ended_at: Optional[datetime] = None
@@ -63,6 +63,26 @@ class DeviceInputItem(Document):
     conversation_id: Optional[str] = None
     promoted_path: Optional[str] = None
     state: Literal["received", "linked", "promoted", "rejected"] = "received"
+    lifecycle: Optional[Literal["open", "closed"]] = None
+    curation: Optional[
+        Literal[
+            "pending",
+            "curating",
+            "discarded",
+            "duplicate",
+            "linked",
+            "promoted",
+            "failed",
+        ]
+    ] = None
+    samples: list[dict[str, Any]] = Field(default_factory=list)
+    frame_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    related_conversation_ids: list[str] = Field(default_factory=list)
+    duplicate_of: Optional[str] = None
+    curation_revision: Optional[str] = None
+    curated_at: Optional[datetime] = None
+    agent_reason: Optional[str] = None
+    vault_paths: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
 
     class Settings:

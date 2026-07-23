@@ -157,16 +157,33 @@ async def process_device_audio() -> dict[str, Any]:
             ):
                 continue
             conversation_id = result["files"][0]["conversation_id"]
+            session_start = min(_as_utc(item.captured_at) for item in session)
             conversation = await Conversation.find_one(
                 Conversation.conversation_id == conversation_id
             )
             if conversation is not None:
-                conversation.created_at = min(
-                    _as_utc(item.captured_at) for item in session
-                )
+                conversation.created_at = session_start
                 conversation.external_source_id = f"screenpipe:{source_id}:{direction}:{session[0].source_item_id}-{session[-1].source_item_id}"
                 conversation.external_source_type = "screenpipe"
                 await conversation.save()
+            observations = await DeviceInputItem.find(
+                DeviceInputItem.user_id == user_id,
+                DeviceInputItem.source_id == source_id,
+                DeviceInputItem.kind == "observation",
+                DeviceInputItem.captured_at <= session_end,
+                {
+                    "$or": [
+                        {"ended_at": None},
+                        {"ended_at": {"$gte": session_start}},
+                    ]
+                },
+            ).to_list()
+            for observation in observations:
+                if conversation_id not in observation.related_conversation_ids:
+                    observation.related_conversation_ids.append(conversation_id)
+                    observation.related_conversation_ids.sort()
+                    observation.curation = "pending"
+                    await observation.save()
             for item in session:
                 item.state = "linked"
                 item.conversation_id = conversation_id

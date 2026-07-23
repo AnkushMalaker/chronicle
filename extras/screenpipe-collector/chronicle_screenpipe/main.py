@@ -6,6 +6,7 @@ import logging
 import os
 import platform
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 
@@ -14,12 +15,22 @@ import httpx
 from .collector import Collector, Config
 
 
+def _shutdown_signal(_signum, _frame) -> None:
+    raise KeyboardInterrupt
+
+
 def config_dir() -> Path:
-    return Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")) / "chronicle-screenpipe"
+    return (
+        Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
+        / "chronicle-screenpipe"
+    )
 
 
 def state_dir() -> Path:
-    return Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local/state")) / "chronicle-screenpipe"
+    return (
+        Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local/state"))
+        / "chronicle-screenpipe"
+    )
 
 
 def load_config() -> Config:
@@ -36,7 +47,7 @@ def pair(args: argparse.Namespace) -> None:
             "name": args.name or platform.node(),
             "platform": platform.system().lower(),
             "provider": "screenpipe",
-            "capabilities": ["audio", "activity", "screen_context"],
+            "capabilities": ["audio", "observation", "screen_context"],
         },
         timeout=30,
     )
@@ -86,7 +97,9 @@ def install_service() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     parser = argparse.ArgumentParser(description="Chronicle companion for ScreenPipe")
     sub = parser.add_subparsers(dest="command", required=True)
     pair_parser = sub.add_parser("pair")
@@ -112,6 +125,7 @@ def main() -> None:
     if args.command == "pair":
         pair(args)
     elif args.command == "run":
+        signal.signal(signal.SIGTERM, _shutdown_signal)
         Collector(load_config(), state_dir()).run()
     else:
         install_service()

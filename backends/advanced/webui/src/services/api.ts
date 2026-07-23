@@ -178,12 +178,20 @@ export interface DeviceInputSource {
 export interface DeviceInputItem {
   id: string
   source_id: string
-  kind: 'audio' | 'activity' | 'screen_context' | 'immich_memory'
+  kind: 'audio' | 'activity' | 'observation' | 'screen_context' | 'immich_memory'
   source_item_id?: string
   captured_at: string
   ended_at: string | null
   metadata: Record<string, any>
   state: 'received' | 'linked' | 'promoted' | 'rejected'
+  lifecycle?: 'open' | 'closed' | null
+  curation?: 'pending' | 'curating' | 'discarded' | 'duplicate' | 'linked' | 'promoted' | 'failed' | null
+  samples?: Array<Record<string, any>>
+  frame_candidates?: Array<Record<string, any>>
+  related_conversation_ids?: string[]
+  duplicate_of?: string | null
+  agent_reason?: string | null
+  vault_paths?: string[]
 }
 
 export const deviceInputApi = {

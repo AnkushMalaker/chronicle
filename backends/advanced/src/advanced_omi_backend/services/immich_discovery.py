@@ -154,4 +154,13 @@ async def scan_immich_memories() -> dict[str, Any]:
     ).to_list()
     for conversation in conversations:
         await request_conversation_context_jobs(conversation)
+    if accepted:
+        observations = await DeviceInputItem.find(
+            DeviceInputItem.user_id == user_id,
+            DeviceInputItem.kind == "observation",
+            DeviceInputItem.captured_at >= since - timedelta(minutes=30),
+        ).to_list()
+        for observation in observations:
+            observation.curation = "pending"
+            await observation.save()
     return {"status": "ok", "assets": len(assets), "accepted": accepted}

@@ -1,0 +1,141 @@
+from chronicle_screenpipe.observations import (ObservationTracker,
+                                               content_fingerprint,
+                                               normalize_text, text_is_novel)
+
+
+def frame(
+    identifier: int,
+    second: int,
+    app: str,
+    title: str,
+    *,
+    trigger: str = "app_switch",
+    text: str = "",
+):
+    return {
+        "id": identifier,
+        "timestamp": f"2026-07-23T10:00:{second:02d}Z",
+        "app_name": app,
+        "window_name": title,
+        "browser_url": "",
+        "capture_trigger": trigger,
+        "full_text": text,
+    }
+
+
+def test_text_normalization_fingerprinting_and_novelty():
+    assert normalize_text("  hello\n world ") == "hello world"
+    assert content_fingerprint("hello  world") == content_fingerprint("hello world")
+    assert not text_is_novel("editing the same module", "editing the same module.")
+    assert text_is_novel("editing collector", "implementing observation state machine")
+
+
+def test_passive_short_switch_is_folded_into_open_observation():
+    tracker = ObservationTracker()
+    opened = tracker.process_rows(
+        [frame(1, 0, "Code", "collector.py", text="collector")],
+        "2026-07-23T10:00:11Z",
+    )
+    assert [event["event"] for event in opened] == ["open"]
+
+    events = tracker.process_rows(
+        [
+            frame(2, 20, "Switcher", "Alt-Tab"),
+            frame(3, 23, "Code", "collector.py", text="collector"),
+        ],
+        "2026-07-23T10:00:23Z",
+    )
+    assert events == []
+    assert tracker.active["source_item_id"] == "observation:1"
+
+
+def test_meaningful_short_music_excursion_bypasses_stability_and_sample_cooldown():
+    tracker = ObservationTracker()
+    tracker.process_rows(
+        [frame(1, 0, "Code", "collector.py", text="collector")],
+        "2026-07-23T10:00:11Z",
+    )
+    events = tracker.process_rows(
+        [
+            frame(2, 20, "Music", "Album", text="Track one"),
+            frame(
+                3,
+                22,
+                "Music",
+                "Album",
+                trigger="click",
+                text="Track two playing",
+            ),
+            frame(4, 24, "Code", "collector.py", text="collector"),
+        ],
+        "2026-07-23T10:00:24Z",
+    )
+
+    assert [(event["event"], event["source_item_id"]) for event in events] == [
+        ("close", "observation:1"),
+        ("open", "observation:2"),
+        ("close", "observation:2"),
+    ]
+    assert tracker.candidate["source_item_id"] == "observation:4"
+
+
+def test_long_activity_stays_one_observation_with_novel_and_liveness_samples():
+    tracker = ObservationTracker()
+    tracker.process_rows(
+        [frame(1, 0, "Code", "service.py", text="initial code")],
+        "2026-07-23T10:00:11Z",
+    )
+    inside_cooldown = tracker.process_rows(
+        [
+            frame(
+                2,
+                30,
+                "Code",
+                "service.py",
+                trigger="typing_pause",
+                text="a materially different implementation",
+            )
+        ],
+        "2026-07-23T10:00:30Z",
+    )
+    assert inside_cooldown == []
+
+    novel = tracker.process_rows(
+        [
+            {
+                **frame(
+                    3,
+                    0,
+                    "Code",
+                    "service.py",
+                    trigger="typing_pause",
+                    text="tests and backend integration are now implemented",
+                ),
+                "timestamp": "2026-07-23T10:03:00Z",
+            }
+        ],
+        "2026-07-23T10:03:00Z",
+    )
+    assert [(event["event"], event["source_item_id"]) for event in novel] == [
+        ("sample", "observation:1")
+    ]
+
+    liveness = tracker.process_rows(
+        [
+            {
+                **frame(
+                    4,
+                    0,
+                    "Code",
+                    "service.py",
+                    text="tests and backend integration are now implemented",
+                ),
+                "timestamp": "2026-07-23T10:18:01Z",
+            }
+        ],
+        "2026-07-23T10:18:01Z",
+    )
+    assert len(liveness) == 1
+    assert liveness[0]["event"] == "sample"
+    assert liveness[0]["sample"]["liveness"] is True
+    assert tracker.active["source_item_id"] == "observation:1"

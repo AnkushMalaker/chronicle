@@ -10,9 +10,11 @@ import wave
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import httpx
+
+from .observations import ObservationTracker
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,8 @@ class Config:
     forward_audio: str = "both"
     poll_seconds: float = 5.0
     activity_debounce_seconds: float = 10.0
+    sample_cooldown_seconds: float = 120.0
+    liveness_seconds: float = 900.0
 
 
 class Checkpoints:
@@ -92,114 +96,17 @@ def audio_duration(path: Path) -> float:
         return 30.0
 
 
-def activity_key(row: sqlite3.Row) -> tuple[str, str, str]:
-    return (row["app_name"] or "", row["window_name"] or "", row["browser_url"] or "")
-
-
-def text_excerpt(value: str | None, limit: int = 2000) -> str:
-    """Keep useful searchable context without mirroring ScreenPipe's full text."""
-    return " ".join((value or "").split())[:limit]
-
-
-def update_representative(current: dict[str, Any], row: sqlite3.Row) -> None:
-    text = text_excerpt(row["full_text"] if "full_text" in row.keys() else None)
-    if text:
-        current["text"] = text
-        current["text_source"] = (
-            row["text_source"] if "text_source" in row.keys() else None
-        )
-        current["representative_frame_id"] = row["id"]
-
-
-def activity_is_salient(
-    session: dict[str, Any], unknown_min_seconds: float = 10.0
-) -> bool:
-    """Keep named/textual changes immediately; gate unattributed visual noise."""
-    if any(session.get(key) for key in ("app_name", "window_name", "text")):
-        return True
-    duration = timestamp_seconds(session["ended_at"]) - timestamp_seconds(
-        session["captured_at"]
-    )
-    return session.get("frame_count", 0) >= 2 and duration >= unknown_min_seconds
-
-
-def build_activity_sessions(
-    rows: Iterable[sqlite3.Row], debounce_seconds: float = 10.0
-) -> list[dict[str, Any]]:
-    """Collapse frame headers into transitions; OCR and pixels are intentionally ignored."""
-    sessions: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
-    for row in rows:
-        key = activity_key(row)
-        captured = iso_timestamp(row["timestamp"])
-        if current is not None and current["key"] == key:
-            current["ended_at"] = captured
-            current["last_frame_id"] = row["id"]
-            current["frame_count"] += 1
-            update_representative(current, row)
-            continue
-        if current is not None:
-            sessions.append(current)
-        current = {
-            "key": key,
-            "source_item_id": f"activity:{row['id']}",
-            "captured_at": captured,
-            "ended_at": captured,
-            "first_frame_id": row["id"],
-            "last_frame_id": row["id"],
-            "frame_count": 1,
-            "app_name": key[0],
-            "window_name": key[1],
-            "browser_url": key[2],
-            "capture_trigger": row["capture_trigger"] or "",
-            "representative_frame_id": row["id"],
-        }
-        update_representative(current, row)
-    if current is not None:
-        sessions.append(current)
-    return sessions
-
-
-def fold_activity_rows(
-    rows: Iterable[sqlite3.Row], current: dict[str, Any] | None
-) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    """Extend the open activity across poll boundaries and return closed sessions."""
-    closed: list[dict[str, Any]] = []
-    for row in rows:
-        key = list(activity_key(row))
-        captured = iso_timestamp(row["timestamp"])
-        if current is not None and current["key"] == key:
-            current["ended_at"] = captured
-            current["last_frame_id"] = row["id"]
-            current["frame_count"] += 1
-            update_representative(current, row)
-            continue
-        if current is not None:
-            closed.append(current)
-        current = {
-            "key": key,
-            "source_item_id": f"activity:{row['id']}",
-            "captured_at": captured,
-            "ended_at": captured,
-            "first_frame_id": row["id"],
-            "last_frame_id": row["id"],
-            "frame_count": 1,
-            "app_name": key[0],
-            "window_name": key[1],
-            "browser_url": key[2],
-            "capture_trigger": row["capture_trigger"] or "",
-            "representative_frame_id": row["id"],
-        }
-        update_representative(current, row)
-    return closed, current
-
-
 class Collector:
     def __init__(self, config: Config, state_dir: Path):
         self.config = config
         self.checkpoints = Checkpoints(state_dir / "checkpoints.json")
-        self.activity_path = state_dir / "open_activity.json"
+        self.observations_path = state_dir / "observations.json"
         self.rejections_path = state_dir / "rejections.jsonl"
+        self.metrics = {
+            "observation_opens": 0,
+            "observation_closes": 0,
+            "observation_samples": 0,
+        }
         self.client = httpx.Client(
             base_url=config.backend_url.rstrip("/"),
             headers={"Authorization": f"Bearer {config.token}"},
@@ -215,6 +122,7 @@ class Collector:
             "screenpipe_db": str(self.database_path),
             "audio_cursor": self.checkpoints.get("audio"),
             "frame_cursor": self.checkpoints.get("frames"),
+            **self.metrics,
         }
         if error:
             health["error"] = error
@@ -318,14 +226,52 @@ class Collector:
             sent += 1
         return sent
 
-    def collect_activity(self, connection: sqlite3.Connection) -> int:
+    def _load_observation_tracker(self) -> ObservationTracker:
+        state = None
+        if self.observations_path.exists():
+            state = json.loads(self.observations_path.read_text(encoding="utf-8"))
+        return ObservationTracker(
+            state,
+            stability_seconds=self.config.activity_debounce_seconds,
+            sample_cooldown_seconds=self.config.sample_cooldown_seconds,
+            liveness_seconds=self.config.liveness_seconds,
+        )
+
+    def _save_observation_tracker(self, tracker: ObservationTracker) -> None:
+        self.observations_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.observations_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(tracker.state, sort_keys=True), encoding="utf-8"
+        )
+        temporary.replace(self.observations_path)
+
+    def _send_observation_events(self, events: list[dict[str, Any]]) -> int:
+        if not events:
+            return 0
+        response = self.client.post(
+            "/api/device-input/observations", json={"events": events}
+        )
+        response.raise_for_status()
+        for event in events:
+            key = {
+                "open": "observation_opens",
+                "close": "observation_closes",
+                "sample": "observation_samples",
+            }[event["event"]]
+            self.metrics[key] += 1
+        return len(events)
+
+    def collect_observations(self, connection: sqlite3.Connection) -> int:
         columns = table_columns(connection, "frames")
         required = {"id", "timestamp", "app_name", "window_name"}
         if not required <= columns:
             raise RuntimeError(
                 f"unsupported ScreenPipe frames schema; missing {sorted(required - columns)}"
             )
-        optional = lambda name: name if name in columns else f"NULL AS {name}"
+
+        def optional(name: str) -> str:
+            return name if name in columns else f"NULL AS {name}"
+
         cursor = self.checkpoints.get("frames")
         rows = connection.execute(
             f"SELECT id, timestamp, app_name, window_name, {optional('browser_url')}, "
@@ -333,49 +279,21 @@ class Collector:
             "FROM frames WHERE id > ? ORDER BY id LIMIT 1000",
             (cursor,),
         ).fetchall()
-        if not rows:
-            return 0
-        current = None
-        if self.activity_path.exists():
-            current = json.loads(self.activity_path.read_text(encoding="utf-8"))
-        closed, current = fold_activity_rows(rows, current)
-        sessions = [
-            session
-            for session in ([*closed, current] if current else closed)
-            if activity_is_salient(
-                session, unknown_min_seconds=self.config.activity_debounce_seconds
-            )
-        ]
-        if not sessions:
-            self.activity_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.activity_path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(current), encoding="utf-8")
-            temporary.replace(self.activity_path)
+        tracker = self._load_observation_tracker()
+        now = datetime.now(timezone.utc).isoformat()
+        events = tracker.process_rows(rows, now)
+        sent = self._send_observation_events(events)
+        self._save_observation_tracker(tracker)
+        if rows:
             self.checkpoints.set("frames", rows[-1]["id"])
-            return 0
-        payload = {
-            "items": [
-                {
-                    "source_item_id": session["source_item_id"],
-                    "captured_at": session["captured_at"],
-                    "ended_at": session["ended_at"],
-                    "metadata": {
-                        k: v
-                        for k, v in session.items()
-                        if k not in {"key", "source_item_id", "captured_at", "ended_at"}
-                    },
-                }
-                for session in sessions
-            ]
-        }
-        response = self.client.post("/api/device-input/activity", json=payload)
-        response.raise_for_status()
-        self.activity_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.activity_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(current), encoding="utf-8")
-        temporary.replace(self.activity_path)
-        self.checkpoints.set("frames", rows[-1]["id"])
-        return len(payload["items"])
+        return sent
+
+    def close_observation(self) -> int:
+        tracker = self._load_observation_tracker()
+        events = tracker.close(datetime.now(timezone.utc).isoformat())
+        sent = self._send_observation_events(events)
+        self._save_observation_tracker(tracker)
+        return sent
 
     def process_job(self) -> bool:
         response = self.client.get("/api/device-input/jobs/next")
@@ -384,7 +302,7 @@ class Collector:
         if not job:
             return False
         try:
-            if job["kind"] == "thumbnail":
+            if job["kind"] in {"thumbnail", "source_media"}:
                 frame_id = job.get("payload", {}).get("frame_id")
                 if frame_id is None:
                     raise RuntimeError("thumbnail job is missing frame_id")
@@ -393,9 +311,11 @@ class Collector:
                     if self.config.screenpipe_token
                     else None
                 )
+                width = int(job.get("payload", {}).get("width") or 640)
+                quality = 85 if width > 640 else 75
                 thumbnail = httpx.get(
                     f"{self.config.screenpipe_url.rstrip('/')}/frames/{frame_id}/thumbnail",
-                    params={"width": 640, "quality": 75},
+                    params={"width": width, "quality": quality},
                     headers=headers,
                     timeout=30,
                 )
@@ -478,12 +398,16 @@ class Collector:
             try:
                 with open_screenpipe_db(self.database_path) as connection:
                     self.collect_audio(connection)
-                    self.collect_activity(connection)
+                    self.collect_observations(connection)
                 self.process_job()
                 if time.monotonic() - last_heartbeat >= 30:
                     self.heartbeat()
                     last_heartbeat = time.monotonic()
             except KeyboardInterrupt:
+                try:
+                    self.close_observation()
+                except Exception:
+                    logger.exception("failed to close observation during shutdown")
                 return
             except Exception as exc:
                 logger.exception("collector pass failed")
@@ -494,4 +418,8 @@ class Collector:
             try:
                 time.sleep(self.config.poll_seconds)
             except KeyboardInterrupt:
+                try:
+                    self.close_observation()
+                except Exception:
+                    logger.exception("failed to close observation during shutdown")
                 return

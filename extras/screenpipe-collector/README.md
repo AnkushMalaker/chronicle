@@ -1,9 +1,10 @@
 # Chronicle ScreenPipe companion
 
-This service keeps ScreenPipe as the local capture store while forwarding compact
-application/window transitions and, only when enabled, completed audio chunks to
-Chronicle. Screen pixels and OCR are retrieved only for bounded jobs requested by
-Chronicle. See the full [capture-node architecture](../../docs/screenpipe.md).
+This service keeps ScreenPipe as the local capture store while forwarding compact,
+event-driven observations and, only when enabled, completed audio chunks to Chronicle.
+Long activities remain one observation with incremental novel-text samples. Screen
+pixels and OCR are retrieved only for bounded jobs requested by Chronicle. See the full
+[capture-node architecture](../../docs/screenpipe.md).
 
 ## Pair and run
 
@@ -59,4 +60,6 @@ Chronicle. See the full [capture-node architecture](../../docs/screenpipe.md).
 
 ScreenPipe itself can be installed independently with `screenpipe service install --record-args "..."`, using the recording arguments above.
 
-Configuration is stored with mode `0600` under `~/.config/chronicle-screenpipe`; checkpoints live under `~/.local/state/chronicle-screenpipe`.
+Configuration is stored with mode `0600` under `~/.config/chronicle-screenpipe`;
+checkpoints and crash-resumable observation state live under
+`~/.local/state/chronicle-screenpipe`.
