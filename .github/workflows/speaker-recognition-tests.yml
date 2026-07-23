@@ -2,7 +2,7 @@ name: Speaker Recognition Tests
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, dev ]
     paths:
       - 'extras/speaker-recognition/src/**'
       - 'extras/speaker-recognition/tests/**'
@@ -13,7 +13,7 @@ on:
       - 'extras/speaker-recognition/run-test.sh'
       - '.github/workflows/speaker-recognition-tests.yml'
   pull_request:
-    branches: [ main, develop ]
+    branches: [ main, dev ]
     paths:
       - 'extras/speaker-recognition/src/**'
       - 'extras/speaker-recognition/tests/**'
