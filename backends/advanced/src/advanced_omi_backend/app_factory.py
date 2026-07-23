@@ -267,6 +267,15 @@ async def lifespan(app: FastAPI):
                 get_scheduler,
                 register_cron_job,
             )
+            from advanced_omi_backend.services.device_audio_ingest import (
+                process_device_audio,
+            )
+            from advanced_omi_backend.services.immich_discovery import (
+                scan_immich_memories,
+            )
+            from advanced_omi_backend.services.observation_curation import (
+                process_observation_curation,
+            )
             from advanced_omi_backend.workers.annotation_jobs import (
                 surface_error_suggestions,
             )
@@ -278,12 +287,6 @@ async def lifespan(app: FastAPI):
             from advanced_omi_backend.workers.prompt_optimization_jobs import (
                 run_prompt_optimization_job,
             )
-            from advanced_omi_backend.services.device_audio_ingest import (
-                process_device_audio,
-            )
-            from advanced_omi_backend.services.immich_discovery import (
-                scan_immich_memories,
-            )
 
             register_cron_job("speaker_finetuning", run_speaker_finetuning_job)
             register_cron_job("asr_finetuning", run_asr_finetuning_job)
@@ -293,6 +296,7 @@ async def lifespan(app: FastAPI):
             register_cron_job("auto_clean", run_auto_clean_cron)
             register_cron_job("immich_memories", scan_immich_memories)
             register_cron_job("device_audio_ingest", process_device_audio)
+            register_cron_job("observation_curation", process_observation_curation)
 
             scheduler = get_scheduler()
             await scheduler.start()

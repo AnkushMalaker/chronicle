@@ -5,12 +5,17 @@ import json
 import logging
 import os
 import platform
+import signal
 import sys
 from pathlib import Path
 
 import httpx
 
 from .collector import Collector, Config
+
+
+def _shutdown_signal(_signum, _frame) -> None:
+    raise KeyboardInterrupt
 
 
 def config_dir() -> Path:
@@ -35,7 +40,7 @@ def pair(args: argparse.Namespace) -> None:
             "name": args.name or platform.node(),
             "platform": platform.system().lower(),
             "provider": "screenpipe",
-            "capabilities": ["audio", "activity", "screen_context"],
+            "capabilities": ["audio", "observation", "screen_context"],
         },
         timeout=30,
     )
@@ -53,6 +58,7 @@ def pair(args: argparse.Namespace) -> None:
                 "screenpipe_dir": str(Path(args.screenpipe_dir).expanduser()),
                 "screenpipe_url": args.screenpipe_url,
                 "screenpipe_token": args.screenpipe_token,
+                "forward_audio": args.forward_audio,
             },
             indent=2,
         ),
@@ -88,12 +94,19 @@ def main() -> None:
         default=os.getenv("SCREENPIPE_API_KEY"),
         help="token used by ScreenPipe's authenticated local API",
     )
+    pair_parser.add_argument(
+        "--forward-audio",
+        choices=("none", "output", "input", "both"),
+        default="both",
+        help="which locally captured ScreenPipe audio sources Chronicle receives",
+    )
     sub.add_parser("run")
     sub.add_parser("install-service")
     args = parser.parse_args()
     if args.command == "pair":
         pair(args)
     elif args.command == "run":
+        signal.signal(signal.SIGTERM, _shutdown_signal)
         Collector(load_config(), state_dir()).run()
     else:
         install_service()

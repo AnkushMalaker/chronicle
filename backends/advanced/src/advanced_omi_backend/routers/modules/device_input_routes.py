@@ -5,7 +5,6 @@ import hmac
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Literal, Optional
 
 import httpx
@@ -99,6 +98,32 @@ class ActivityItem(BaseModel):
 
 class ActivityBatch(BaseModel):
     items: list[ActivityItem] = Field(max_length=1000)
+
+
+class ObservationSample(BaseModel):
+    captured_at: datetime
+    elapsed_seconds: float = Field(ge=0)
+    capture_trigger: str = Field(default="", max_length=100)
+    text: str = Field(default="", max_length=2000)
+    content_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    previous_fingerprint: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    frame_id: int
+    liveness: bool = False
+    inactive: bool = False
+
+
+class ObservationEvent(BaseModel):
+    event: Literal["open", "sample", "close"]
+    source_item_id: str = Field(min_length=1, max_length=200)
+    captured_at: datetime
+    ended_at: Optional[datetime] = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    frame_candidates: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
+    sample: Optional[ObservationSample] = None
+
+
+class ObservationBatch(BaseModel):
+    events: list[ObservationEvent] = Field(min_length=1, max_length=1000)
 
 
 class JobRequest(BaseModel):
@@ -198,7 +223,7 @@ async def ingest_activity(
                     start_at=incoming.captured_at,
                     end_at=incoming.ended_at,
                     purpose="timeline_thumbnail",
-                    payload={"item_id": str(item.id), "frame_id": frame_id},
+                    payload={"item_id": str(item.id), "frame_id": frame_id, "width": 960},
                 ).insert()
         except DuplicateKeyError:
             duplicates += 1
@@ -213,6 +238,167 @@ async def ingest_activity(
                 existing.metadata = incoming.metadata
                 await existing.save()
     return {"accepted": accepted, "duplicates": duplicates}
+
+
+def _merge_frame_candidates(
+    existing: list[dict[str, Any]], incoming: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    by_frame: dict[int, dict[str, Any]] = {}
+    for candidate in [*existing, *incoming]:
+        frame_id = candidate.get("frame_id")
+        if not isinstance(frame_id, int):
+            continue
+        current = by_frame.get(frame_id)
+        if current is None or float(candidate.get("score") or 0) > float(
+            current.get("score") or 0
+        ):
+            by_frame[frame_id] = candidate
+    return sorted(
+        by_frame.values(),
+        key=lambda candidate: (
+            -float(candidate.get("score") or 0),
+            int(candidate["frame_id"]),
+        ),
+    )[:3]
+
+
+def _append_observation_sample(
+    item: DeviceInputItem, sample: ObservationSample | None
+) -> bool:
+    if sample is None:
+        return False
+    incoming = sample.model_dump(mode="json")
+    identity = (incoming["content_fingerprint"], incoming["captured_at"])
+    if any(
+        (row.get("content_fingerprint"), row.get("captured_at")) == identity
+        for row in item.samples
+    ):
+        return False
+    item.samples.append(incoming)
+    item.samples.sort(key=lambda row: row["captured_at"])
+    return True
+
+
+def _observation_has_visual_context(item: DeviceInputItem) -> bool:
+    if item.metadata.get("inactive") or not item.frame_candidates:
+        return False
+    latest_text = item.samples[-1].get("text") if item.samples else ""
+    return bool(
+        latest_text
+        or item.metadata.get("app_name")
+        or item.metadata.get("window_name")
+        or item.metadata.get("browser_url")
+    )
+
+
+async def _ensure_observation_preview(
+    item: DeviceInputItem, source: CaptureSource
+) -> None:
+    if (
+        "screen_context" not in source.capabilities
+        or item.media_data
+        or not _observation_has_visual_context(item)
+    ):
+        return
+    existing = await DeviceInputJob.find_one(
+        DeviceInputJob.source_id == source.source_id,
+        DeviceInputJob.kind == "thumbnail",
+        {"payload.item_id": str(item.id)},
+        {"status": {"$in": ["pending", "claimed", "complete"]}},
+    )
+    if existing:
+        return
+    frame_id = item.frame_candidates[0]["frame_id"]
+    await DeviceInputJob(
+        user_id=item.user_id,
+        source_id=item.source_id,
+        kind="thumbnail",
+        start_at=item.captured_at,
+        end_at=item.ended_at,
+        purpose="observation_preview",
+        payload={
+            "item_id": str(item.id),
+            "frame_id": frame_id,
+            "width": 960,
+            "preview_index": 1,
+        },
+    ).insert()
+
+
+@router.post("/observations")
+async def ingest_observations(
+    body: ObservationBatch, source: CaptureSource = Depends(_device_source)
+):
+    accepted = 0
+    duplicate_samples = 0
+    touched: dict[str, DeviceInputItem] = {}
+    for incoming in body.events:
+        item = await DeviceInputItem.find_one(
+            DeviceInputItem.user_id == source.user_id,
+            DeviceInputItem.source_id == source.source_id,
+            DeviceInputItem.kind == "observation",
+            DeviceInputItem.source_item_id == incoming.source_item_id,
+        )
+        if item is None:
+            if incoming.event != "open":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Observation {incoming.source_item_id} must be opened first",
+                )
+            item = DeviceInputItem(
+                user_id=source.user_id,
+                source_id=source.source_id,
+                kind="observation",
+                source_item_id=incoming.source_item_id,
+                captured_at=incoming.captured_at,
+                ended_at=incoming.ended_at,
+                metadata=incoming.metadata,
+                lifecycle="open",
+                curation="pending",
+                frame_candidates=incoming.frame_candidates,
+            )
+            _append_observation_sample(item, incoming.sample)
+            try:
+                await item.insert()
+                accepted += 1
+            except DuplicateKeyError:
+                item = await DeviceInputItem.find_one(
+                    DeviceInputItem.user_id == source.user_id,
+                    DeviceInputItem.source_id == source.source_id,
+                    DeviceInputItem.kind == "observation",
+                    DeviceInputItem.source_item_id == incoming.source_item_id,
+                )
+                if item is None:
+                    raise
+        else:
+            item.metadata = {**item.metadata, **incoming.metadata}
+            item.frame_candidates = _merge_frame_candidates(
+                item.frame_candidates, incoming.frame_candidates
+            )
+            if incoming.ended_at is not None:
+                item.ended_at = incoming.ended_at
+            if _append_observation_sample(item, incoming.sample):
+                item.curation = "pending"
+                accepted += 1
+            elif incoming.sample is not None:
+                duplicate_samples += 1
+            if incoming.event == "close":
+                item.lifecycle = "closed"
+                item.ended_at = incoming.ended_at or incoming.captured_at
+                item.curation = "pending"
+            await item.save()
+        touched[str(item.id)] = item
+
+    for item in touched.values():
+        await _ensure_observation_preview(item, source)
+    source.last_seen_at = utcnow()
+    source.status = "online"
+    await source.save()
+    return {
+        "accepted": accepted,
+        "duplicate_samples": duplicate_samples,
+        "observations": list(touched),
+    }
 
 
 @router.post("/audio")
@@ -334,7 +520,11 @@ async def complete_thumbnail_job(
     source: CaptureSource = Depends(_device_source),
 ):
     job = await DeviceInputJob.get(job_id)
-    if job is None or job.source_id != source.source_id or job.kind != "thumbnail":
+    if (
+        job is None
+        or job.source_id != source.source_id
+        or job.kind not in {"thumbnail", "source_media"}
+    ):
         raise HTTPException(status_code=404, detail="Thumbnail job not found")
     item_id = job.payload.get("item_id")
     item = await DeviceInputItem.get(item_id) if item_id else None
@@ -350,7 +540,17 @@ async def complete_thumbnail_job(
     item.media_filename = file.filename or "screenpipe-thumbnail.jpg"
     item.media_content_type = content_type
     item.content_hash = hashlib.sha256(data).hexdigest()
-    item.metadata = {**item.metadata, "thumbnail_available": True}
+    item.metadata = {
+        **item.metadata,
+        "thumbnail_available": True,
+        "preview_frame_id": job.payload.get("frame_id"),
+        "preview_count": max(
+            int(item.metadata.get("preview_count") or 0),
+            int(job.payload.get("preview_index") or 1),
+        ),
+        "source_media_available": job.kind == "source_media"
+        or bool(item.metadata.get("source_media_available")),
+    }
     await item.save()
     job.status = "complete"
     job.completed_at = utcnow()
@@ -427,6 +627,14 @@ async def timeline(
                 "ended_at": row.ended_at,
                 "metadata": row.metadata,
                 "state": row.state,
+                "lifecycle": row.lifecycle,
+                "curation": row.curation,
+                "samples": row.samples,
+                "frame_candidates": row.frame_candidates,
+                "related_conversation_ids": row.related_conversation_ids,
+                "duplicate_of": row.duplicate_of,
+                "agent_reason": row.agent_reason,
+                "vault_paths": row.vault_paths,
             }
             for row in rows
         ]
@@ -555,8 +763,10 @@ async def request_item_thumbnail(
     item_id: str, user: User = Depends(current_active_user)
 ):
     item = await _owned_item(item_id, user)
-    if item.kind != "activity":
-        raise HTTPException(status_code=409, detail="Only activity items have frames")
+    if item.kind not in {"activity", "observation"}:
+        raise HTTPException(
+            status_code=409, detail="Only screen items have source frames"
+        )
     if item.media_data:
         return {"status": "complete"}
     frame_id = (
@@ -581,7 +791,7 @@ async def request_item_thumbnail(
         start_at=item.captured_at,
         end_at=item.ended_at,
         purpose="timeline_thumbnail",
-        payload={"item_id": item_id, "frame_id": frame_id},
+        payload={"item_id": item_id, "frame_id": frame_id, "width": 960},
     )
     await job.insert()
     return {"status": "pending", "job_id": str(job.id)}

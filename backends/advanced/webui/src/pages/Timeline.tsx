@@ -3,6 +3,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { Activity, AppWindow, ArrowDownUp, CalendarDays, Copy, Image, Link2, Monitor, RefreshCw } from 'lucide-react'
 import { deviceInputApi, DeviceInputItem } from '../services/api'
 import { Button, Card, IconButton } from '../components/ui'
+import { timeAgo } from '../utils/timeAgo'
 
 function dayBounds(day: string) {
   const start = new Date(`${day}T00:00:00`)
@@ -13,7 +14,7 @@ function dayBounds(day: string) {
 
 function ItemIcon({ item }: { item: DeviceInputItem }) {
   if (item.kind === 'immich_memory') return <Image className="w-5 h-5" />
-  if (item.kind === 'activity' || item.kind === 'screen_context') return <AppWindow className="w-5 h-5" />
+  if (item.kind === 'activity' || item.kind === 'observation' || item.kind === 'screen_context') return <AppWindow className="w-5 h-5" />
   return <Activity className="w-5 h-5" />
 }
 
@@ -37,7 +38,7 @@ function TimelineThumbnail({ item }: { item: DeviceInputItem }) {
   )
   useEffect(() => () => { if (url) URL.revokeObjectURL(url) }, [url])
   if (!url) return null
-  return <img src={url} alt="Screen captured during this activity" loading="lazy" className="mt-3 w-full max-h-64 object-cover rounded-md bg-gray-100 dark:bg-gray-800" />
+  return <img src={url} alt="Screen captured during this activity" loading="lazy" className="mt-3 max-h-64 max-w-full w-auto rounded-md object-contain" />
 }
 
 const AUDIO_SESSION_GAP_MS = 90_000
@@ -196,7 +197,7 @@ export default function Timeline() {
               <div className="min-w-0">
                 <div className="truncate font-medium text-gray-900 dark:text-gray-100">{source.name}</div>
                 <div className="text-xs text-gray-500 dark:text-gray-400">{source.provider} · {source.platform}</div>
-                <div className={`mt-1 text-xs ${source.status === 'online' ? 'text-green-600 dark:text-green-400' : source.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'}`}>{source.status}{source.last_seen_at ? ` · ${new Date(source.last_seen_at).toLocaleTimeString()}` : ''}</div>
+                <div className={`mt-1 text-xs ${source.status === 'online' ? 'text-green-600 dark:text-green-400' : source.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'}`}>{source.status}{source.last_seen_at ? ` · ${timeAgo(source.last_seen_at)}` : ''}</div>
               </div>
             </Card>
           ))}
@@ -231,11 +232,17 @@ export default function Timeline() {
               >
                 <ItemIcon item={item} />
               </span>
-              <div className="text-xs text-gray-500 dark:text-gray-400">{new Date(item.captured_at).toLocaleTimeString()} {item.ended_at && `– ${new Date(item.ended_at).toLocaleTimeString()}`}</div>
-              <h3 className="mt-1 font-medium text-gray-900 dark:text-gray-100">{item.kind === 'audio' ? 'Audio capture' : item.metadata.app_name || item.metadata.window_name || (item.kind === 'activity' ? 'Screen change' : item.kind)}</h3>
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                {new Date(item.captured_at).toLocaleTimeString()} {item.ended_at && `– ${new Date(item.ended_at).toLocaleTimeString()}`}
+                {Date.now() - Date.parse(item.ended_at || item.captured_at) < 86_400_000 && <span className="ml-2 text-gray-400">· {timeAgo(item.ended_at || item.captured_at)}</span>}
+              </div>
+              <h3 className="mt-1 font-medium text-gray-900 dark:text-gray-100">{item.kind === 'audio' ? 'Audio capture' : item.metadata.app_name || item.metadata.window_name || (item.kind === 'activity' ? 'Screen change' : item.kind === 'observation' ? 'Screen observation' : item.kind)}</h3>
               {item.kind === 'audio' && <p className="text-sm text-gray-500 dark:text-gray-400">{formatDuration(item)} · {item.metadata.chunk_count} chunks{item.metadata.directions?.length ? ` · ${item.metadata.directions.join(' + ')}` : ''}</p>}
+              {item.kind === 'observation' && <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{item.lifecycle === 'open' ? 'Open' : formatDuration(item)} · {item.samples?.length || 0} context sample{item.samples?.length === 1 ? '' : 's'}{item.curation ? ` · ${item.curation}` : ''}{item.related_conversation_ids?.length ? ` · ${item.related_conversation_ids.length} audio link${item.related_conversation_ids.length === 1 ? '' : 's'}` : ''}</p>}
               {item.metadata.window_name && item.metadata.window_name !== item.metadata.app_name && <p className="truncate text-sm text-gray-500 dark:text-gray-400">{item.metadata.window_name}</p>}
               {item.kind === 'activity' && item.metadata.text && <p className="text-sm text-gray-600 dark:text-gray-300 mt-2 line-clamp-3">{item.metadata.text}</p>}
+              {item.kind === 'observation' && item.samples?.length ? <p className="mt-2 line-clamp-3 text-sm text-gray-600 dark:text-gray-300">{item.samples[item.samples.length - 1].text}</p> : null}
+              {item.kind === 'observation' && item.vault_paths?.length ? <p className="mt-2 text-xs text-green-600 dark:text-green-400">Vault: {item.vault_paths.join(', ')}</p> : null}
               <TimelineThumbnail item={item} />
             </article>
           ))}
