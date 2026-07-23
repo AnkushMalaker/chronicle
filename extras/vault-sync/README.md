@@ -11,8 +11,8 @@ Syncthing UI.
 > **The tray UI moved.** Vault sync now appears as a section in the unified
 > [Chronicle tray](../chronicle-tray/) (`extras/chronicle-tray`), alongside
 > ScreenPipe and pendant streaming. This project keeps the sync engine
-> (`vault_core.py`, `syncthing_manager.py`) and your `.env` config — the tray
-> imports them in place, so an existing setup needs no migration. If you had the
+> (`vault_core.py`, `syncthing_manager.py`), while the tray reads client
+> configuration from the repository-root `.env`. If you had the
 > old single-purpose app installed as a login item, `uv run python main.py
 > uninstall` removes it (installing the new tray also removes it automatically).
 
@@ -43,11 +43,11 @@ You also need the Chronicle **server** side running with vault sync enabled — 
 ## Setup
 
 ```bash
-cd extras/vault-sync
-cp .env.template .env
-#   edit .env: set AUTH_USERNAME (email), AUTH_PASSWORD, and BACKEND_URL
+cd ../..
+cp .env.template .env  # if the repository-root .env does not exist yet
+# edit .env: set AUTH_USERNAME (email), AUTH_PASSWORD, and BACKEND_URL
 
-cd ../chronicle-tray && uv run chronicle-tray   # tray with the Vault Sync section
+cd extras/chronicle-tray && uv run chronicle-tray
 ```
 
 The Mac needs only three things: `BACKEND_URL`, `AUTH_USERNAME` (your Chronicle email),

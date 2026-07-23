@@ -222,9 +222,11 @@ def _install_macos(name: str, extras=()) -> None:
     log_file = _MAC_LOG_DIR / f"{name}.log"
     _MAC_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    # launchd starts agents with no login env: carry the project's .env and a
-    # PATH that finds Homebrew binaries (syncthing, opus).
-    env = _dotenv_values(project / ".env")
+    # launchd starts agents with no login env. The tray reads the repository-root
+    # .env itself so edits take effect on restart instead of being copied into
+    # (and potentially shadowed by) its plist. Other components retain their
+    # project-local environment.
+    env = {} if name == "tray" else _dotenv_values(project / ".env")
     env["PATH"] = _unit_path_env(_find_uv()) + ":" + os.environ.get("PATH", "")
 
     plist = {
