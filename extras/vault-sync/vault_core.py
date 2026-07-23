@@ -55,14 +55,6 @@ class VaultSyncConfig:
     local_vault_dir: str
     device_name: str
 
-    @staticmethod
-    def root_env_file() -> Path:
-        return _REPO_ROOT / ".env"
-
-    @staticmethod
-    def local_env_file() -> Path:
-        return Path(__file__).resolve().parent / ".env"
-
     @classmethod
     def from_env(cls) -> "VaultSyncConfig":
         # Lazy import: sys.path-dependent (repo-root discovery.py, inserted above)

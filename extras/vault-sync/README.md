@@ -37,15 +37,6 @@ On Arch/CachyOS:
 sudo pacman -S obsidian syncthing
 ```
 
-Both platforms use the same desktop entry point and share their state, logging, and
-vault-sync orchestration; only the native menu UI is platform-specific. Both provide
-**View Logs** for recent desktop activity. The Linux tray also shows local ScreenPipe frame/audio counts and storage use, and
-provides start, stop, and restart controls for `screenpipe.service` and
-`chronicle-screenpipe.service`. Its top-level Settings menu can enable or disable audio
-and screen capture, while the ScreenPipe menu can pause capture for 5, 15, or 30
-minutes, or 1, 2, or 8 hours. Audio capture and audio forwarding are separate menus:
-each can independently select off/none, system audio, microphone, or both.
-
 You also need the Chronicle **server** side running with vault sync enabled — see
 [Server setup](#server-setup-once) below.
 
@@ -59,11 +50,8 @@ cp .env.template .env
 cd ../chronicle-tray && uv run chronicle-tray   # tray with the Vault Sync section
 ```
 
-Vault sync first reads the repository root `.env`, then the optional
-`extras/vault-sync/.env` as an override. You can use the root `ADMIN_EMAIL` and
-`ADMIN_PASSWORD`, or set `AUTH_USERNAME` and `AUTH_PASSWORD` specifically for the
-desktop sync app. It also needs `BACKEND_URL` unless backend discovery works on the
-machine. The pairing broker hands back everything else (server device id,
+The Mac needs only three things: `BACKEND_URL`, `AUTH_USERNAME` (your Chronicle email),
+and `AUTH_PASSWORD`. The pairing broker hands back everything else (server device id,
 sync address) — you never set `VAULT_SYNC_*` on the Mac; those are server-only.
 
 > **macOS + Tailscale: set `BACKEND_URL` explicitly.** Auto-discovery (minidisc) needs

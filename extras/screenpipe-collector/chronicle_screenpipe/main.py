@@ -5,9 +5,8 @@ import json
 import logging
 import os
 import platform
-import shutil
 import signal
-import subprocess
+import sys
 from pathlib import Path
 
 import httpx
