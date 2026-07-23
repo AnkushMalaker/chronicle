@@ -391,39 +391,28 @@ def test_speaker_recognition_pipeline(speaker_service):
     assert total_segments > 0, "No segments produced"
     print("✅ Conversation processing API works correctly")
 
-    # Phase 7: Word-Level Data Validation
-    print("📝 Phase 7: Validating word-level timestamp data in segments...")
-    segments_with_words = 0
-    total_words_found = 0
-
+    # Phase 7: Segment Structure Validation
+    print("📝 Phase 7: Validating segment structure...")
+    # /diarize-and-identify only diarizes and identifies speakers - it does not
+    # transcribe, so its segments carry no word-level data. Word-level timestamps
+    # are validated in Phase 8 against /v1/diarize-identify-match, which is handed
+    # a transcript to match against.
     for seg in result["segments"]:
-        # Each segment should have a words array (empty segments might have empty array)
-        assert "words" in seg, f"Segment missing 'words' field: {seg}"
-        words = seg.get("words", [])
+        assert isinstance(
+            seg["start"], (int, float)
+        ), f"Segment 'start' should be numeric: {seg}"
+        assert isinstance(
+            seg["end"], (int, float)
+        ), f"Segment 'end' should be numeric: {seg}"
+        assert seg["end"] >= seg["start"], f"Segment ends before it starts: {seg}"
+        assert seg.get("status") in {
+            "identified",
+            "unknown",
+            "error",
+        }, f"Unexpected segment status: {seg}"
 
-        if len(words) > 0:
-            segments_with_words += 1
-            total_words_found += len(words)
-
-            # Validate word structure
-            for word in words[:3]:  # Check first 3 words of each segment
-                assert "word" in word, f"Word missing 'word' field: {word}"
-                assert "start" in word, f"Word missing 'start' field: {word}"
-                assert "end" in word, f"Word missing 'end' field: {word}"
-                # confidence is optional
-                assert isinstance(
-                    word["start"], (int, float)
-                ), f"Word 'start' should be numeric: {word}"
-                assert isinstance(
-                    word["end"], (int, float)
-                ), f"Word 'end' should be numeric: {word}"
-
-    print(
-        f"  ✅ Word-level data: {segments_with_words}/{total_segments} segments have words ({total_words_found} total words)"
-    )
-    assert segments_with_words > 0, "No segments contain word-level timestamp data"
-    assert total_words_found > 0, "No words found across all segments"
-    print("✅ Word-level timestamp data validated successfully")
+    print(f"  ✅ All {total_segments} segments have a valid structure")
+    print("✅ Segment structure validated successfully")
 
     # Phase 8: Diarize-Identify-Match Endpoint (Backend Integration Mode)
     print(
@@ -512,9 +501,7 @@ def test_speaker_recognition_pipeline(speaker_service):
     print(
         f"✅ Conversation processing: PASS ({total_segments} segments, {identified_segments} identified)"
     )
-    print(
-        f"✅ Word-level timestamps: PASS ({total_words_found} words in {segments_with_words} segments)"
-    )
+    print(f"✅ Segment structure: PASS ({total_segments} segments)")
     print(
         f"✅ Diarize-identify-match: PASS ({match_total_words} matched words in {match_segments_with_words} segments)"
     )

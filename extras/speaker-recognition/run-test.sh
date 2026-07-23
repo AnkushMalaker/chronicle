@@ -134,10 +134,13 @@ docker compose -f docker-compose-test.yml down -v || true
 
 # Run speaker recognition integration tests
 print_info "Running speaker recognition integration tests..."
-print_info "Disabling BuildKit for integration tests (DOCKER_BUILDKIT=0)"
+print_info "Building with BuildKit, plain progress output (BUILDKIT_PROGRESS=plain)"
 
-# Set environment variables for the test
-export DOCKER_BUILDKIT=0
+# BuildKit is required: the Dockerfile uses `RUN --mount=type=cache` for the uv
+# cache, which the legacy builder rejects outright ("the --mount option requires
+# BuildKit"). Plain progress keeps the unrolled, greppable build log that the
+# legacy builder used to give us.
+export BUILDKIT_PROGRESS=plain
 
 # Run the integration test with timeout (speaker recognition models need time)
 print_info "Starting speaker recognition test (timeout: 30 minutes)..."
@@ -145,7 +148,8 @@ print_info "Starting speaker recognition test (timeout: 30 minutes)..."
 # Run test with proper signal forwarding and output handling
 {
     timeout --foreground --kill-after=60 1800 \
-        uv run pytest tests/test_speaker_service_integration.py -v -s --tb=short --log-cli-level=INFO
+        uv run --extra cpu --group test \
+        pytest tests/test_speaker_service_integration.py -v -s --tb=short --log-cli-level=INFO
 } || {
     exit_code=$?
     if [ $exit_code -eq 124 ]; then
