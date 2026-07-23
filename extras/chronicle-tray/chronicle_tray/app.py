@@ -11,8 +11,18 @@ import sys
 
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QLabel,
+    QMenu,
+    QPlainTextEdit,
+    QSystemTrayIcon,
+    QVBoxLayout,
+)
 
+from chronicle_tray.logs import configure_logging, log_buffer
 from chronicle_tray.sections.pendant import PendantSection
 from chronicle_tray.sections.screenpipe import ScreenPipeSection
 from chronicle_tray.sections.vault import VaultSection
@@ -69,6 +79,7 @@ class ChronicleTray(QSystemTrayIcon):
                 "Open Chronicle",
                 lambda: QDesktopServices.openUrl(QUrl(backend_url)),
             )
+        menu.addAction("View Logs", self.view_logs)
         menu.addAction("Quit tray", QApplication.quit)
         self.setContextMenu(menu)
         self.setToolTip("Chronicle")
@@ -90,6 +101,24 @@ class ChronicleTray(QSystemTrayIcon):
                 lines.append(line)
         self.setToolTip("\n".join(lines))
 
+    def view_logs(self) -> None:
+        dialog = QDialog()
+        dialog.setWindowTitle("Chronicle Tray — Logs")
+        dialog.resize(760, 440)
+        layout = QVBoxLayout(dialog)
+        lines = list(log_buffer.lines)
+        layout.addWidget(QLabel(f"Last {len(lines)} application log line(s)"))
+        viewer = QPlainTextEdit()
+        viewer.setReadOnly(True)
+        viewer.setLineWrapMode(QPlainTextEdit.NoWrap)
+        viewer.setPlainText("\n".join(lines) or "(no logs yet)")
+        viewer.verticalScrollBar().setValue(viewer.verticalScrollBar().maximum())
+        layout.addWidget(viewer)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
+
     def shutdown(self) -> None:
         for section in self.active:
             try:
@@ -99,10 +128,7 @@ class ChronicleTray(QSystemTrayIcon):
 
 
 def run() -> None:
-    logging.basicConfig(
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    configure_logging()
 
     if sys.platform == "darwin":
         # Menu-bar-only app: no Dock icon for a non-bundled Python process.

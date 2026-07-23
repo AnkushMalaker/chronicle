@@ -83,6 +83,7 @@ class ScreenPipeSection(Section):
         self.stats_item = None
         self.pause_menu = None
         self.pause_timer = None
+        self.unit_actions: dict[str, dict[str, QAction]] = {}
         self.audio_actions: dict[str, dict[str, QAction]] = {}
         self.screen_capture = None
 
@@ -112,12 +113,15 @@ class ScreenPipeSection(Section):
 
     def _unit_actions(self, menu: QMenu, label: str, unit: str) -> QMenu:
         submenu = menu.addMenu(label)
+        actions = {}
         for title, verb in (("Start", "start"), ("Stop", "stop"), ("Restart", "restart")):
             action = QAction(title, submenu)
             action.triggered.connect(
                 lambda _checked=False, v=verb, u=unit: self._unit(v, u)
             )
             submenu.addAction(action)
+            actions[verb] = action
+        self.unit_actions[unit] = actions
         return submenu
 
     def _pause_actions(self, submenu: QMenu) -> None:
@@ -272,7 +276,12 @@ class ScreenPipeSection(Section):
             self.engine_status.setText(f"ScreenPipe: {engine}")
             if self.pause_menu is not None:
                 self.pause_menu.setEnabled(engine == "active")
-        self.collector_status.setText(f"Chronicle collector: {self._collector_state()}")
+        collector = self._collector_state()
+        self.collector_status.setText(f"Chronicle collector: {collector}")
+        for unit, actions in self.unit_actions.items():
+            active = _unit_state(unit) == "active"
+            actions["start"].setEnabled(not active)
+            actions["stop"].setEnabled(active)
         self.stats_item.setText(_stats())
         self._refresh_capture_settings()
 

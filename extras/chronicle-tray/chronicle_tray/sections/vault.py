@@ -1,8 +1,8 @@
 """Vault sync section — Obsidian vault ↔ Chronicle server via private Syncthing.
 
 Reuses the vault-sync project's core (vault_core + syncthing_manager) in place;
-this module is only the Qt menu glue. Config stays in extras/vault-sync/.env,
-so existing vault-sync installs keep working unchanged.
+this module is only the Qt menu glue. Client configuration comes from the
+repository-root .env shared by Chronicle's native client components.
 """
 
 import logging
@@ -20,10 +20,15 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMenu
 
-from chronicle_tray.paths import VAULT_SYNC_DIR, add_vault_path
+from chronicle_tray.paths import REPO_ROOT, VAULT_SYNC_DIR, add_vault_path
 from chronicle_tray.sections import Section
 
 logger = logging.getLogger(__name__)
+
+
+def _load_vault_environment() -> None:
+    """Load the canonical client configuration before constructing the manager."""
+    load_dotenv(REPO_ROOT / ".env")
 
 
 @dataclass
@@ -70,7 +75,8 @@ class VaultSyncManager:
             cfg = self.config
             if not cfg.auth_username or not cfg.auth_password:
                 self.state.update(
-                    status="error", error="set Chronicle login in vault-sync/.env"
+                    status="error",
+                    error="set Chronicle login in the repository-root .env",
                 )
                 return
             self.state.update(status="starting", error=None)
@@ -149,7 +155,7 @@ class VaultSection(Section):
 
     def build(self, menu: QMenu) -> None:
         add_vault_path()
-        load_dotenv(VAULT_SYNC_DIR / ".env")
+        _load_vault_environment()
         self.manager = VaultSyncManager(self.state)
         self.manager.pair_async()
 
@@ -192,7 +198,9 @@ class VaultSection(Section):
 
     def _choose_folder(self) -> None:
         current = self.state.snapshot()["vault_dir"]
-        chosen = QFileDialog.getExistingDirectory(None, "Choose Chronicle vault", current)
+        chosen = QFileDialog.getExistingDirectory(
+            None, "Choose Chronicle vault", current
+        )
         if chosen and self.manager:
             self.manager.set_vault_dir(chosen)
 
