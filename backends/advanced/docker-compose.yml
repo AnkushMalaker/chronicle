@@ -230,6 +230,8 @@ services:
     volumes:
       - ./webui/src:/app/src
       - ./webui/public:/app/public
+      - ./webui/tailwind.config.js:/app/tailwind.config.js:ro
+      - ./webui/chronicle-espresso-preset.js:/app/chronicle-espresso-preset.js:ro
     depends_on:
       chronicle-backend:
         condition: service_healthy

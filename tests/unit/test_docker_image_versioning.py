@@ -219,6 +219,14 @@ class TestBackendDockerComposeImages:
         assert "build" in webui
         assert "image" not in webui
 
+    def test_webui_dev_mounts_tailwind_palette_configuration(self):
+        volumes = self.COMPOSE["services"]["webui-dev"]["volumes"]
+        assert "./webui/tailwind.config.js:/app/tailwind.config.js:ro" in volumes
+        assert (
+            "./webui/chronicle-espresso-preset.js:"
+            "/app/chronicle-espresso-preset.js:ro"
+        ) in volumes
+
     def test_backend_services_share_same_image_name(self):
         """chronicle-backend, workers, and annotation-cron should use the same image."""
         backend_img = _image_for(self.COMPOSE, "chronicle-backend")
