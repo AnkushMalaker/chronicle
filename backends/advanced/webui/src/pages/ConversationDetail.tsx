@@ -4,7 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft, Calendar, User, Trash2, RefreshCw, MoreVertical,
   RotateCcw, Zap, Download, Scissors,
-  Save, X, Pencil, Clock, Database, Layers, Star, BarChart3, Hash, AudioLines
+  Save, X, Pencil, Clock, Database, Layers, Star, BarChart3, Hash, AudioLines, ChevronRight
 } from 'lucide-react'
 import { annotationsApi, speakerApi, systemApi, BACKEND_URL } from '../services/api'
 import {
@@ -14,12 +14,14 @@ import {
 import ConversationVersionHeader from '../components/ConversationVersionHeader'
 import MemoryAuditCard from '../components/MemoryAuditCard'
 import ConversationContextLens from '../components/ConversationContextLens'
+import BackgroundSuppressionCard from '../components/BackgroundSuppressionCard'
 import { useGaplessPlayer } from '../hooks/useGaplessPlayer'
 import { AUDIO_FORMAT } from '../utils/audioFormat'
 import TranscriptEditor from '../components/transcript/TranscriptEditor'
 import { useWaveformZoomDisabled } from '../components/transcript/useWaveformZoom'
 import SplitConversationModal from '../components/dataAudit/SplitConversationModal'
 import { getStorageKey } from '../utils/storage'
+import { Button } from '../components/ui'
 
 interface Segment {
   text: string
@@ -48,6 +50,8 @@ interface Conversation {
   active_transcript_version_number?: number
   starred?: boolean
   starred_at?: string
+  speaker_recognition?: any
+  diarization_source?: 'provider' | 'pyannote'
 }
 
 export default function ConversationDetail() {
@@ -236,12 +240,16 @@ export default function ConversationDetail() {
     }
   }
 
-  const handleReprocessSpeakers = async () => {
+  const handleReprocessSpeakers = async (diarizationSource: 'provider' | 'pyannote') => {
     if (!id) return
     setReprocessingSpeakers(true)
     setOpenDropdown(false)
     try {
-      await reprocessSpeakersMutation.mutateAsync({ conversationId: id, transcriptVersionId: 'active' })
+      await reprocessSpeakersMutation.mutateAsync({
+        conversationId: id,
+        transcriptVersionId: 'active',
+        diarizationSource,
+      })
       refetch()
     } catch (err: any) {
       setActionError(`Failed to reprocess speakers: ${err.message || 'Unknown error'}`)
@@ -416,15 +424,38 @@ export default function ConversationDetail() {
                 {reprocessingMemory ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
                 <span>Reprocess Memory</span>
               </button>
-              <button
-                onClick={handleReprocessSpeakers}
-                disabled={reprocessingSpeakers}
-                className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2 disabled:opacity-50"
-                title="Re-identify speakers"
-              >
-                {reprocessingSpeakers ? <RefreshCw className="h-4 w-4 animate-spin" /> : <User className="h-4 w-4" />}
-                <span>Reprocess Speakers</span>
-              </button>
+              <div className="relative group/speakers">
+                <button
+                  disabled={reprocessingSpeakers}
+                  className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 disabled:opacity-50"
+                  title="Choose a speaker diarization engine"
+                >
+                  {reprocessingSpeakers ? <RefreshCw className="h-4 w-4 animate-spin" /> : <User className="h-4 w-4" />}
+                  <span className="flex-1">Reprocess Speakers</span>
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+                {!reprocessingSpeakers && (() => {
+                  const currentSource = conversation.diarization_source === 'pyannote' ? 'pyannote' : 'provider'
+                  const alternateSource = currentSource === 'pyannote' ? 'provider' : 'pyannote'
+                  const label = (source: 'provider' | 'pyannote') => source === 'pyannote' ? 'Pyannote' : 'Provider'
+                  return (
+                    <div className="absolute right-full top-0 mr-1 w-48 invisible opacity-0 group-hover/speakers:visible group-hover/speakers:opacity-100 group-focus-within/speakers:visible group-focus-within/speakers:opacity-100 transition-opacity bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-600 py-2">
+                      <button
+                        onClick={() => handleReprocessSpeakers(currentSource)}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                      >
+                        Current ({label(currentSource)})
+                      </button>
+                      <button
+                        onClick={() => handleReprocessSpeakers(alternateSource)}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                      >
+                        {label(alternateSource)}
+                      </button>
+                    </div>
+                  )
+                })()}
+              </div>
               <button
                 onClick={() => setWaveformZoomDisabled(!waveformZoomDisabled)}
                 className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
@@ -479,19 +510,6 @@ export default function ConversationDetail() {
         </div>
       )}
 
-      {/* Version Selector */}
-      <ConversationVersionHeader
-        conversationId={conversation.conversation_id}
-        versionInfo={{
-          transcript_count: conversation.transcript_version_count || 0,
-          active_transcript_version: conversation.active_transcript_version,
-          active_transcript_version_number: conversation.active_transcript_version_number,
-        }}
-        onVersionChange={() => {
-          refetch()
-        }}
-      />
-
       {/* Main Content Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
         {/* Left Column - Main Content */}
@@ -510,21 +528,22 @@ export default function ConversationDetail() {
                     autoFocus
                     disabled={savingTitle}
                   />
-                  <button
+                  <Button
+                    variant="primary"
+                    size="sm"
                     onClick={handleSaveTitleEdit}
                     disabled={savingTitle || editedTitle === (conversation.title || 'Conversation')}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                    icon={<Save className="w-3.5 h-3.5" />}
                   >
-                    <Save className="w-3.5 h-3.5" />
                     {savingTitle ? 'Saving...' : 'Save'}
-                  </button>
-                  <button
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     onClick={handleCancelTitleEdit}
                     disabled={savingTitle}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-200 dark:bg-gray-600 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 disabled:opacity-50 transition-colors"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
+                    icon={<X className="w-3.5 h-3.5" />}
+                  />
                 </div>
                 {titleEditError && (
                   <span className="text-xs text-red-600 dark:text-red-400">{titleEditError}</span>
@@ -553,12 +572,12 @@ export default function ConversationDetail() {
               <div className="mt-3">
                 <button
                   onClick={() => setShowDetailedSummary(!showDetailedSummary)}
-                  className="text-xs text-blue-600 dark:text-blue-400 hover:underline flex items-center space-x-1"
+                  className="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:underline flex items-center space-x-1"
                 >
                   <span>{showDetailedSummary ? '\u25BC' : '\u25B6'} Detailed Summary</span>
                 </button>
                 {showDetailedSummary && (
-                  <div className="mt-2 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+                  <div className="mt-2 p-3 bg-gray-50 dark:bg-gray-800/50 rounded-lg border border-gray-200 dark:border-gray-700">
                     <p className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
                       {conversation.detailed_summary}
                     </p>
@@ -584,6 +603,18 @@ export default function ConversationDetail() {
                   <span className="text-sm text-gray-500 dark:text-gray-400 ml-2">({segments.length} segments)</span>
                 )}
               </h2>
+              {/* Transcript version selector — renders nothing unless multiple versions exist */}
+              <ConversationVersionHeader
+                conversationId={conversation.conversation_id}
+                versionInfo={{
+                  transcript_count: conversation.transcript_version_count || 0,
+                  active_transcript_version: conversation.active_transcript_version,
+                  active_transcript_version_number: conversation.active_transcript_version_number,
+                }}
+                onVersionChange={() => {
+                  refetch()
+                }}
+              />
             </div>
             <TranscriptEditor
               conversationId={conversation.conversation_id!}
@@ -593,6 +624,7 @@ export default function ConversationDetail() {
               showWaveform
               isLive={isLive}
               enrolledSpeakers={enrolledSpeakers}
+              speakerRecognition={conversation.speaker_recognition}
               onChanged={refetch}
             />
           </div>
@@ -611,8 +643,15 @@ export default function ConversationDetail() {
                 <dt className="text-gray-600 dark:text-gray-400 flex items-center gap-1.5 shrink-0">
                   <Hash className="w-3.5 h-3.5" /> ID
                 </dt>
-                <dd className="text-gray-900 dark:text-gray-100 text-right font-mono text-xs break-all">
-                  {conversation.conversation_id}
+                <dd className="text-right">
+                  <button
+                    type="button"
+                    onClick={() => navigator.clipboard?.writeText(conversation.conversation_id || '')}
+                    title={`${conversation.conversation_id} — click to copy`}
+                    className="font-mono text-xs text-gray-900 dark:text-gray-100 hover:text-gray-600 dark:hover:text-gray-300 rounded focus:outline-none focus-visible:ring-1 focus-visible:ring-gray-400"
+                  >
+                    {conversation.conversation_id?.slice(0, 8)}…
+                  </button>
                 </dd>
               </div>
               <div className="flex justify-between items-start">
@@ -666,7 +705,7 @@ export default function ConversationDetail() {
 
           <a
             href="#memory-history"
-            className="flex w-full items-center justify-between rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-medium text-blue-700 transition-colors hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-300 dark:hover:bg-blue-900/35"
+            className="flex items-center gap-1.5 px-1 text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
           >
             <span>Memory history</span>
             <span aria-hidden="true">↓</span>
@@ -674,6 +713,14 @@ export default function ConversationDetail() {
 
         </div>
       </div>
+
+      {/* Background-suppression disclosure: what was marked background (or
+          would be), cluster-grouped, with restore/confirm. Renders nothing
+          when the ledger is empty. */}
+      <BackgroundSuppressionCard
+        conversationId={conversation.conversation_id}
+        onChanged={() => queryClient.invalidateQueries({ queryKey: ['conversation', id] })}
+      />
 
       {/* Memory change history is intentionally full-width: paths, summaries, and
           timestamps become unreadable in the narrow metadata rail. */}

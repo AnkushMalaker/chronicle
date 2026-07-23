@@ -8,6 +8,7 @@ import {
 import { useAuth } from '../contexts/AuthContext'
 import { useSystemEvents, useSystemEventsSummary } from '../hooks/useSystemEvents'
 import { systemEventsApi, type SystemEvent, type SystemEventsFilter } from '../services/api'
+import { Button, Alert, Checkbox } from '../components/ui'
 
 // ---- Severity + category styling ------------------------------------------
 
@@ -323,14 +324,15 @@ export default function SystemEvents() {
         <div className="flex flex-wrap items-center gap-2">
           {selected.size > 0 && (
             <>
-              <button
+              <Button
+                variant="primary"
+                size="md"
                 onClick={onCopySelected}
-                className="flex items-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
                 title="Copy the selected events to the clipboard"
+                icon={copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
               >
-                {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
                 {copied ? 'Copied!' : `Copy errors (${selected.size})`}
-              </button>
+              </Button>
               <button
                 onClick={onAckSelected}
                 className="flex items-center gap-2 rounded-md bg-green-600 px-3 py-2 text-sm font-medium text-white hover:bg-green-700"
@@ -350,20 +352,18 @@ export default function SystemEvents() {
             <Check className="h-4 w-4" />
             Acknowledge all
           </button>
-          <button
-            onClick={onClearAcked}
-            className="flex items-center gap-2 rounded-md bg-gray-100 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
-          >
+          <Button variant="secondary" size="md" onClick={onClearAcked}>
             Clear acknowledged
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="secondary"
+            size="md"
             onClick={() => refetch()}
             disabled={isFetching}
-            className="flex items-center gap-2 rounded-md bg-gray-100 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200 disabled:opacity-50 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600"
+            icon={<RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />}
           >
-            <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
             Refresh
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -374,9 +374,9 @@ export default function SystemEvents() {
       </p>
 
       {error && (
-        <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300">
+        <Alert tone="danger" className="mb-4">
           {(error as Error).message || 'Failed to load system events.'}
-        </div>
+        </Alert>
       )}
 
       <div className="mb-5">
@@ -416,21 +416,15 @@ export default function SystemEvents() {
           {[50, 100, 200, 500].map(n => <option key={n} value={n}>Last {n}</option>)}
         </select>
 
-        <label className="flex items-center gap-1.5 text-sm text-gray-600 dark:text-gray-300">
-          <input type="checkbox" checked={showAcked} onChange={e => setShowAcked(e.target.checked)} className="rounded" />
-          Show acknowledged
-        </label>
+        <Checkbox label="Show acknowledged" checked={showAcked} onChange={e => setShowAcked(e.target.checked)} />
 
-        <label className="flex items-center gap-1.5 text-sm text-gray-600 dark:text-gray-300" title="Select all unacknowledged events shown below">
-          <input
-            type="checkbox"
-            checked={allVisibleSelected}
-            disabled={unackedVisibleIds.length === 0}
-            onChange={toggleSelectAllVisible}
-            className="rounded"
-          />
-          Select all visible
-        </label>
+        <Checkbox
+          label="Select all visible"
+          title="Select all unacknowledged events shown below"
+          checked={allVisibleSelected}
+          disabled={unackedVisibleIds.length === 0}
+          onChange={toggleSelectAllVisible}
+        />
       </div>
 
       {/* List */}

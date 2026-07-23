@@ -1,5 +1,6 @@
 import { Radio, Zap, Archive, Settings, Monitor, Mic } from 'lucide-react'
 import { useRecording } from '../contexts/RecordingContext'
+import { Button } from '../components/ui'
 import SimplifiedControls from '../components/audio/SimplifiedControls'
 import StatusDisplay from '../components/audio/StatusDisplay'
 import AudioVisualizer from '../components/audio/AudioVisualizer'
@@ -75,7 +76,7 @@ export default function LiveRecord() {
             disabled={recording.isRecording}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
               recording.audioSource === 'meeting'
-                ? 'bg-purple-600 text-white shadow-sm'
+                ? 'bg-blue-600 text-white shadow-sm'
                 : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
             }`}
           >
@@ -88,7 +89,7 @@ export default function LiveRecord() {
             disabled={recording.isRecording}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
               recording.audioSource === 'tab'
-                ? 'bg-indigo-600 text-white shadow-sm'
+                ? 'bg-blue-600 text-white shadow-sm'
                 : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200'
             }`}
           >
@@ -100,10 +101,60 @@ export default function LiveRecord() {
           {recording.audioSource === 'mic'
             ? 'Microphone only'
             : recording.audioSource === 'meeting'
-              ? 'Mic + tab audio (you\'ll be asked to select a tab)'
-              : 'Browser tab audio only (no microphone)'}
+              ? recording.supportsDisplayAudio
+                ? 'Mic + tab audio (you\'ll be asked to select a tab)'
+                : 'Mic + system audio (captured from a monitor device)'
+              : recording.supportsDisplayAudio
+                ? 'Browser tab audio only (no microphone)'
+                : 'System audio only (captured from a monitor device)'}
         </span>
       </div>
+
+      {/* Firefox/Zen: getDisplayMedia can't deliver audio, so system audio comes
+          from a PipeWire/PulseAudio "Monitor of …" loopback input instead */}
+      {recording.audioSource !== 'mic' && !recording.supportsDisplayAudio && (() => {
+        const monitors = recording.availableDevices.filter(d => /monitor/i.test(d.label))
+        return (
+          <div className="mb-4 space-y-2">
+            <div className="flex items-center gap-2">
+              <Monitor className="h-4 w-4 text-gray-500 dark:text-gray-400 flex-shrink-0" />
+              <label className="text-sm font-medium text-gray-700 dark:text-gray-300 flex-shrink-0">
+                System audio:
+              </label>
+              {monitors.length > 0 ? (
+                <select
+                  value={recording.monitorDeviceId ?? ''}
+                  onChange={(e) => recording.setMonitorDeviceId(e.target.value || null)}
+                  disabled={recording.isRecording}
+                  className={`
+                    flex-1 min-w-0 text-sm px-2 py-1.5 rounded-lg border
+                    bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100
+                    border-gray-300 dark:border-gray-600
+                    ${recording.isRecording ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                  `}
+                >
+                  <option value="">Choose "Monitor of …" output device</option>
+                  {monitors.map((device) => (
+                    <option key={device.deviceId} value={device.deviceId}>
+                      {device.label}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <Button variant="secondary" size="sm" onClick={() => recording.requestDeviceAccess()}>
+                  Load audio devices…
+                </Button>
+              )}
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
+              Firefox-based browsers (like Zen) can't share tab audio, so system audio is recorded from a
+              PipeWire/PulseAudio "Monitor of …" loopback device — no share dialog will appear. Pick the
+              monitor of the output you're actually listening through (headphones vs speakers each have
+              their own); it captures everything playing through that output.
+            </p>
+          </div>
+        )
+      })()}
 
       {/* Microphone Selector (hidden in tab-only mode) */}
       {recording.audioSource !== 'tab' && recording.availableDevices.length > 1 && (
@@ -124,7 +175,10 @@ export default function LiveRecord() {
             `}
           >
             <option value="">System Default</option>
-            {recording.availableDevices.map((device) => (
+            {recording.availableDevices
+              // In Firefox meeting mode, monitor devices belong in the System audio selector
+              .filter(d => recording.supportsDisplayAudio || recording.audioSource === 'mic' || !/monitor/i.test(d.label))
+              .map((device) => (
               <option key={device.deviceId} value={device.deviceId}>
                 {device.label || `Microphone (${device.deviceId.slice(0, 8)}...)`}
               </option>
@@ -152,6 +206,28 @@ export default function LiveRecord() {
 
       {/* Main Controls - Single START button */}
       <SimplifiedControls recording={recording} />
+
+      {/* System-audio capture health (meeting/tab mode) */}
+      {recording.isRecording && recording.audioSource !== 'mic' && (
+        <div className={`mb-6 -mt-2 p-3 rounded-lg border text-sm ${
+          recording.systemAudioStatus === 'silent'
+            ? 'bg-orange-50 dark:bg-orange-900/20 border-orange-200 dark:border-orange-800 text-orange-700 dark:text-orange-300'
+            : 'bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400'
+        }`}>
+          <span className="font-medium">System audio:</span>{' '}
+          {recording.systemAudioLabel ?? 'not captured'}
+          {recording.systemAudioStatus === 'active' && (
+            <span className="text-green-600 dark:text-green-400"> — receiving audio ✓</span>
+          )}
+          {recording.systemAudioStatus === 'silent' && (
+            <span>
+              {' '}— <strong>no signal detected.</strong> If something is playing, this is the wrong capture
+              device: pick the "Monitor of …" entry matching the output you're actually listening through
+              (headphones vs speakers each have their own monitor), then restart the recording.
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Status Display - Shows setup progress */}
       <StatusDisplay recording={recording} />
@@ -191,11 +267,11 @@ export default function LiveRecord() {
       <WakeFeedback />
 
       {/* Instructions */}
-      <div className="mt-8 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
-        <h3 className="font-medium text-blue-800 dark:text-blue-200 mb-2">
+      <div className="mt-8 bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+        <h3 className="font-medium text-gray-700 dark:text-gray-200 mb-2">
           📝 How it Works
         </h3>
-        <ul className="text-sm text-blue-700 dark:text-blue-300 space-y-1">
+        <ul className="text-sm text-gray-600 dark:text-gray-400 space-y-1">
           <li>• <strong>Choose your mode:</strong> Streaming for real-time or Batch for complete file processing</li>
           <li>• <strong>One-click recording:</strong> Single button handles complete setup automatically</li>
           <li>• <strong>Sequential process:</strong> Mic access → WebSocket connection → Audio session → Recording</li>

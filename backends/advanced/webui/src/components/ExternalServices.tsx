@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, ArrowUpCircle, Check, CheckCircle, Circle, Play, RefreshCw, RotateCcw, Server, Square, Wrench, XCircle } from 'lucide-react'
+import { AlertCircle, ArrowUpCircle, Check, CheckCircle, Circle, ExternalLink, Play, RefreshCw, RotateCcw, Server, Square, Wrench, XCircle } from 'lucide-react'
 import { systemApi } from '../services/api'
 import { useExternalServices, ExternalService, ServiceOperation, UpdateCheckResult } from '../hooks/useSystem'
+import { Alert, Button, Card, Checkbox, IconButton, MetadataChip } from './ui'
 
 type Lane = 'batch' | 'streaming'
 
@@ -130,14 +131,14 @@ function NodeUpdateControl({
           <span className="font-mono text-gray-600 dark:text-gray-300">
             {current?.describe ?? '?'} → {target.ref} ({target.commit.slice(0, 7)})
           </span>
-          <button
+          <Button
+            variant="primary"
             onClick={startUpdate}
             disabled={busy || starting}
-            className="flex items-center gap-1 px-2 py-1 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50"
+            icon={<ArrowUpCircle className="h-3.5 w-3.5" />}
           >
-            <ArrowUpCircle className="h-3.5 w-3.5" />
-            <span>Update node</span>
-          </button>
+            Update node
+          </Button>
         </>
       ) : (
         <>
@@ -318,28 +319,27 @@ export default function ExternalServices({
     const heavy = pendingIsHeavy(service, lane)
     return (
       <span className="flex items-center gap-1.5">
-        <button
+        <Button
+          variant="primary"
           onClick={() => applyProvider(service, lane)}
           disabled={busy}
-          className="flex items-center gap-1 px-2 py-1 text-xs bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50"
           title={heavy
             ? 'Apply: stops the current container and starts the new provider — model load/download can take minutes'
             : 'Apply: config change only — no container restart'}
+          icon={<Check className="h-3 w-3" />}
         >
-          <Check className="h-3 w-3" />
-          <span>Apply</span>
-        </button>
+          Apply
+        </Button>
         <span className={`text-[10px] whitespace-nowrap ${heavy ? 'text-amber-600 dark:text-amber-400' : 'text-green-600 dark:text-green-400'}`}>
           {heavy ? 'restarts service' : 'config only'}
         </span>
-        <button
+        <IconButton
           onClick={() => cancelPending(service, lane)}
           disabled={busy}
-          className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 disabled:opacity-50"
-          title="Discard pending change"
+          label="Discard pending change"
         >
           <XCircle className="h-3.5 w-3.5" />
-        </button>
+        </IconButton>
       </span>
     )
   }
@@ -351,7 +351,7 @@ export default function ExternalServices({
   // blank space where the section will appear.
   if (isLoading) {
     return (
-      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+      <Card raised padded={false} className="p-6">
         <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
           <Wrench className="h-5 w-5 mr-2 text-blue-600" />
           {title}
@@ -360,14 +360,14 @@ export default function ExternalServices({
           <RefreshCw className="h-4 w-4 text-blue-500 animate-spin" />
           <span>Loading services…</span>
         </div>
-      </div>
+      </Card>
     )
   }
 
   if (!data?.available) {
     if (data?.reason === 'unreachable') {
       return (
-        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+        <Card raised padded={false} className="p-6">
           <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2 flex items-center">
             <Wrench className="h-5 w-5 mr-2 text-blue-600" />
             {title}
@@ -377,7 +377,7 @@ export default function ExternalServices({
             <code className="px-1 bg-gray-100 dark:bg-gray-700 rounded">./start.sh</code> or{' '}
             <code className="px-1 bg-gray-100 dark:bg-gray-700 rounded">uv run python services.py manager start</code>.
           </p>
-        </div>
+        </Card>
       )
     }
     // Not configured at all — hide the section
@@ -413,7 +413,7 @@ export default function ExternalServices({
   const showNodeHeaders = serviceGroups.length > 1 || visibleServices.some(s => s.remote)
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+    <Card raised padded={false} className="p-6">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 flex items-center">
           <Wrench className="h-5 w-5 mr-2 text-blue-600" />
@@ -427,26 +427,19 @@ export default function ExternalServices({
             </span>
           )}
         </h3>
-        <label className="flex items-center space-x-2 text-sm text-gray-600 dark:text-gray-400 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={buildImages}
-            onChange={e => setBuildImages(e.target.checked)}
-            className="rounded border-gray-300"
-          />
-          <span>Build images</span>
-        </label>
+        <Checkbox
+          checked={buildImages}
+          onChange={e => setBuildImages(e.target.checked)}
+          label="Build images"
+        />
       </div>
 
       {/* Active operation banner */}
       {busy && activeOp && (
-        <div className="mb-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md p-3 flex items-center space-x-2">
-          <RefreshCw className="h-4 w-4 text-blue-500 animate-spin" />
-          <span className="text-sm text-blue-700 dark:text-blue-300">
-            {operationLabel(activeOp)}
-            {activeOp.phase ? ` — ${activeOp.phase}` : '… this can take a few minutes.'}
-          </span>
-        </div>
+        <Alert tone="info" icon={<RefreshCw className="h-4 w-4 animate-spin" />} className="mb-4">
+          {operationLabel(activeOp)}
+          {activeOp.phase ? ` — ${activeOp.phase}` : '… this can take a few minutes.'}
+        </Alert>
       )}
 
       {/* Failure detail */}
@@ -471,11 +464,7 @@ export default function ExternalServices({
         </div>
       )}
 
-      {error && (
-        <div className="mb-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md p-3">
-          <span className="text-sm text-red-700 dark:text-red-300">{error}</span>
-        </div>
-      )}
+      {error && <Alert tone="danger" className="mb-4">{error}</Alert>}
 
       <div className="space-y-4">
         {serviceGroups.map(([nodeKey, groupServices]) => (
@@ -486,15 +475,7 @@ export default function ExternalServices({
                 <span className="font-mono text-sm font-medium text-gray-700 dark:text-gray-300">
                   {groupServices[0]?.node ?? nodeKey}
                 </span>
-                <span
-                  className={`text-xs px-1.5 py-0.5 rounded ${
-                    groupServices[0]?.remote
-                      ? 'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300'
-                      : 'bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-300'
-                  }`}
-                >
-                  {groupServices[0]?.remote ? 'remote node' : 'hub'}
-                </span>
+                <MetadataChip>{groupServices[0]?.remote ? 'remote node' : 'hub'}</MetadataChip>
               </div>
             )}
             {mode === 'lifecycle' && (
@@ -535,6 +516,19 @@ export default function ExternalServices({
                         <span className="text-yellow-600 dark:text-yellow-400"> — {service.health_detail}</span>
                       ) : null}
                     </div>
+                    {service.ui_url && (
+                      <a
+                        href={service.ui_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-1 inline-flex max-w-full items-center gap-1 text-xs font-mono text-blue-600 dark:text-blue-400 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-700 rounded-sm"
+                        title={`Open ${service.name} UI in a new tab`}
+                      >
+                        <span className="truncate">{service.ui_url}</span>
+                        <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
+                        <span className="sr-only">(opens in a new tab)</span>
+                      </a>
+                    )}
                   </div>
                 </div>
 
@@ -597,32 +591,32 @@ export default function ExternalServices({
                       <span>Start</span>
                     </button>
                   ) : starting ? (
-                    <button
+                    <Button
+                      variant="danger"
                       onClick={() => runAction(service, 'stop')}
                       disabled={busy}
-                      className="flex items-center space-x-1 px-3 py-1.5 text-sm bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors disabled:opacity-50"
+                      icon={<Square className="h-3.5 w-3.5" />}
                     >
-                      <Square className="h-3.5 w-3.5" />
-                      <span>Stop</span>
-                    </button>
+                      Stop
+                    </Button>
                   ) : (
                     <>
-                      <button
+                      <Button
+                        variant="primary"
                         onClick={() => runAction(service, 'restart')}
                         disabled={busy}
-                        className="flex items-center space-x-1 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50"
+                        icon={<RotateCcw className="h-3.5 w-3.5" />}
                       >
-                        <RotateCcw className="h-3.5 w-3.5" />
-                        <span>Restart</span>
-                      </button>
-                      <button
+                        Restart
+                      </Button>
+                      <Button
+                        variant="danger"
                         onClick={() => runAction(service, 'stop')}
                         disabled={busy}
-                        className="flex items-center space-x-1 px-3 py-1.5 text-sm bg-red-600 text-white rounded-md hover:bg-red-700 transition-colors disabled:opacity-50"
+                        icon={<Square className="h-3.5 w-3.5" />}
                       >
-                        <Square className="h-3.5 w-3.5" />
-                        <span>Stop</span>
-                      </button>
+                        Stop
+                      </Button>
                     </>
                   )}
                 </div>
@@ -639,6 +633,6 @@ export default function ExternalServices({
           ? 'Provider changes stop the old container before starting the new one; GPU models may take a few minutes to load after start. This switches the running service and its model together — use Settings → Active Models to repoint a role at a model without a container.'
           : 'Managed by the host service-manager agent. Start/stop/restart the container stack here.'}
       </p>
-    </div>
+    </Card>
   )
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Mic, Save, Sparkles, Tag } from 'lucide-react'
 import { systemApi } from '../services/api'
+import { Button, Card, StateBadge, Textarea } from './ui'
 
 interface AsrModelInfo {
   name: string
@@ -19,23 +20,19 @@ interface AsrContextData {
 function HintTypeBadge({ hintType }: { hintType: AsrModelInfo['hint_type'] }) {
   if (hintType === 'context_prompt') {
     return (
-      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+      <StateBadge tone="suggest" className="inline-flex items-center gap-1">
         <Sparkles className="h-3 w-3" /> Context prompt (LLM)
-      </span>
+      </StateBadge>
     )
   }
   if (hintType === 'keyword_boosting') {
     return (
-      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+      <StateBadge tone="info" className="inline-flex items-center gap-1">
         <Tag className="h-3 w-3" /> Keyword boosting (acoustic)
-      </span>
+      </StateBadge>
     )
   }
-  return (
-    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400">
-      No recognition hints
-    </span>
-  )
+  return <StateBadge tone="neutral">No recognition hints</StateBadge>
 }
 
 function ProviderRow({ label, model, onSaved }: {
@@ -88,22 +85,21 @@ function ProviderRow({ label, model, onSaved }: {
             Context — describe the domain, names, or jargon to help this LLM-based model.
             It informs recognition but is never transcribed.
           </label>
-          <textarea
+          <Textarea
             value={context}
             onChange={e => setContext(e.target.value)}
             rows={2}
             placeholder="e.g. A tech podcast about ASR, wearables, and the Chronicle app. Speakers: Ankush, Hermes."
-            className="w-full text-sm px-2 py-1.5 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
           />
           <div className="mt-2 flex items-center gap-3">
-            <button
+            <Button
+              variant="primary"
               onClick={save}
               disabled={!dirty || saving}
-              className="flex items-center gap-1 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50"
+              icon={<Save className="h-3.5 w-3.5" />}
             >
-              <Save className="h-3.5 w-3.5" />
-              <span>{saving ? 'Saving…' : 'Save context'}</span>
-            </button>
+              {saving ? 'Saving…' : 'Save context'}
+            </Button>
             {savedAt && !dirty && (
               <span className="text-xs text-green-600 dark:text-green-400">Saved — applies on next transcription.</span>
             )}
@@ -148,7 +144,7 @@ export default function AsrContextSettings({ isAdmin }: { isAdmin: boolean }) {
   const showStream = data.stream && data.stream.name !== data.batch?.name
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+    <Card raised padded={false} className="p-6">
       <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-1 flex items-center">
         <Mic className="h-5 w-5 mr-2 text-blue-600" />
         ASR Recognition Hints
@@ -163,6 +159,6 @@ export default function AsrContextSettings({ isAdmin }: { isAdmin: boolean }) {
           <ProviderRow label="Streaming transcription" model={data.stream} onSaved={load} />
         )}
       </div>
-    </div>
+    </Card>
   )
 }

@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Play, Pause, RefreshCw, ShieldCheck, Check, AlertTriangle } from 'lucide-react'
 import { finetuningApi } from '../../services/api'
 import { useGaplessPlayer } from '../../hooks/useGaplessPlayer'
+import { Alert, Button, IconButton } from '../ui'
 
 interface Clip {
   conversation_id: string
@@ -15,6 +16,7 @@ interface Clip {
   gated_in: boolean
   default_selected: boolean
   reasons: string[]
+  auto_identified?: boolean
 }
 interface SpeakerGroup {
   speaker: string
@@ -44,10 +46,13 @@ export default function EnrollmentCandidates() {
   const [enrolling, setEnrolling] = useState(false)
   const [resultMsg, setResultMsg] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Off by default: only clips you relabelled by hand are candidates. When on,
+  // segments auto-labelled by identification are also shown (never pre-ticked).
+  const [includeIdentified, setIncludeIdentified] = useState(false)
 
   const { data, isLoading, refetch, isFetching } = useQuery<CandidatesResponse>({
-    queryKey: ['finetuning', 'enrollmentCandidates'],
-    queryFn: () => finetuningApi.getEnrollmentCandidates().then((r) => r.data),
+    queryKey: ['finetuning', 'enrollmentCandidates', includeIdentified],
+    queryFn: () => finetuningApi.getEnrollmentCandidates(includeIdentified).then((r) => r.data),
   })
 
   // Seed the selection from the gate's defaults whenever fresh data arrives.
@@ -75,6 +80,30 @@ export default function EnrollmentCandidates() {
       return n
     })
   }
+
+  const setSpeakerSelected = (group: SpeakerGroup, shouldSelect: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      group.clips.forEach((clip) => {
+        const key = clipKey(clip)
+        if (shouldSelect && clip.default_selected) next.add(key)
+        else next.delete(key)
+      })
+      return next
+    })
+  }
+
+  const selectAllSpeakers = () => {
+    setSelected(
+      new Set(
+        (data?.candidates || []).flatMap((group) =>
+          group.clips.filter((clip) => clip.default_selected).map(clipKey)
+        )
+      )
+    )
+  }
+
+  const deselectAllSpeakers = () => setSelected(new Set())
 
   const playClip = (c: Clip) => {
     const segId = `enroll-${clipKey(c)}`
@@ -118,32 +147,40 @@ export default function EnrollmentCandidates() {
           <ShieldCheck className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Curated Speaker Enrollment</h2>
         </div>
-        <button
+        <Button
+          variant="secondary"
           onClick={() => refetch()}
           disabled={isFetching}
-          className="flex items-center space-x-1.5 px-3 py-1.5 text-sm bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50"
+          icon={<RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />}
         >
-          <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
-          <span>Refresh</span>
-        </button>
+          Refresh
+        </Button>
       </div>
-      <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-        Clips from each conversation's active version, gated for quality (≥ {data?.min_duration ?? 3}s, no cross-talk,
-        deduped). Clean clips are pre-selected; greyed clips are excluded with a reason — tick them to override.
-        Only the checked clips are enrolled.
+      <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+        Only the segments <strong>you relabelled by hand</strong> are candidates, gated for quality
+        (≥ {data?.min_duration ?? 3}s, no cross-talk, deduped). Clean clips are pre-selected; greyed clips are
+        excluded with a reason — tick them to override. Only the checked clips are enrolled.
       </p>
+      <label className="mb-4 inline-flex items-center gap-2 cursor-pointer select-none text-sm text-gray-600 dark:text-gray-400">
+        <input
+          type="checkbox"
+          checked={includeIdentified}
+          onChange={(e) => setIncludeIdentified(e.target.checked)}
+          className="h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
+        />
+        Also show auto-identified segments
+        <span className="text-xs text-gray-400">(off by default — never pre-ticked; enrolling auto-matches reinforces weak IDs)</span>
+      </label>
 
       {resultMsg && (
-        <div className="mb-4 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 rounded-lg flex items-center space-x-2">
-          <Check className="h-4 w-4 text-green-600 dark:text-green-400" />
-          <span className="text-sm text-green-700 dark:text-green-300">{resultMsg}</span>
-        </div>
+        <Alert tone="success" className="mb-4" icon={<Check className="h-4 w-4" />}>
+          {resultMsg}
+        </Alert>
       )}
       {error && (
-        <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg flex items-center space-x-2">
-          <AlertTriangle className="h-4 w-4 text-red-600 dark:text-red-400" />
-          <span className="text-sm text-red-700 dark:text-red-300">{error}</span>
-        </div>
+        <Alert tone="danger" className="mb-4" icon={<AlertTriangle className="h-4 w-4" />}>
+          {error}
+        </Alert>
       )}
 
       {isLoading ? (
@@ -154,16 +191,50 @@ export default function EnrollmentCandidates() {
         </p>
       ) : (
         <>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border-y border-gray-200 py-3 dark:border-gray-700">
+            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+              Choose speakers to enroll
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={selectAllSpeakers}
+                className="rounded-md px-3 py-1.5 text-sm font-medium text-emerald-700 hover:bg-emerald-50 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 dark:text-emerald-300 dark:hover:bg-emerald-900/20 dark:focus:ring-offset-gray-800"
+              >
+                Select all
+              </button>
+              <Button
+                variant="ghost"
+                onClick={deselectAllSpeakers}
+                disabled={selectedClips.length === 0}
+              >
+                Deselect all
+              </Button>
+            </div>
+          </div>
           <div className="space-y-5">
-            {data.candidates.map((group) => (
-              <div key={group.speaker}>
-                <div className="flex items-center space-x-2 mb-1.5">
-                  <h3 className="font-medium text-gray-900 dark:text-gray-100">{group.speaker}</h3>
-                  <span className="text-xs text-gray-500 dark:text-gray-400">
-                    {group.clips.filter((c) => selected.has(clipKey(c))).length} of {group.clips.length} selected
-                  </span>
-                </div>
-                <div className="space-y-1">
+            {data.candidates.map((group) => {
+              const selectedCount = group.clips.filter((c) => selected.has(clipKey(c))).length
+              const defaultCount = group.clips.filter((c) => c.default_selected).length
+              const speakerSelected = selectedCount > 0
+              return (
+                <div key={group.speaker}>
+                  <div className="mb-1.5 flex items-center justify-between gap-3">
+                    <label className="flex min-w-0 cursor-pointer items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={speakerSelected}
+                        onChange={() => setSpeakerSelected(group, !speakerSelected)}
+                        disabled={defaultCount === 0}
+                        className="h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+                      />
+                      <span className="truncate font-medium text-gray-900 dark:text-gray-100">{group.speaker}</span>
+                    </label>
+                    <span className="flex-shrink-0 text-xs text-gray-500 dark:text-gray-400">
+                      {selectedCount} of {group.clips.length} clips selected
+                    </span>
+                  </div>
+                  <div className="space-y-1">
                   {group.clips.map((c) => {
                     const isSel = selected.has(clipKey(c))
                     const segId = `enroll-${clipKey(c)}`
@@ -185,17 +256,22 @@ export default function EnrollmentCandidates() {
                           onChange={() => toggle(c)}
                           className="h-4 w-4 rounded border-gray-300 text-emerald-600 focus:ring-emerald-500"
                         />
-                        <button
+                        <IconButton
                           onClick={() => playClip(c)}
-                          className="flex-shrink-0 p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600"
-                          title={`Play ${c.duration}s`}
+                          className="flex-shrink-0"
+                          label={`Play ${c.duration}s`}
                         >
                           {playing ? <Pause className="h-3.5 w-3.5 text-emerald-600" /> : <Play className="h-3.5 w-3.5 text-gray-500" />}
-                        </button>
+                        </IconButton>
                         <span className="text-xs tabular-nums text-gray-500 dark:text-gray-400 w-12 flex-shrink-0">{c.duration}s</span>
                         <span className="text-sm text-gray-700 dark:text-gray-300 truncate flex-1" title={c.text}>
                           {c.text || <em className="text-gray-400">(no text)</em>}
                         </span>
+                        {c.auto_identified && (
+                          <span className="text-xs font-medium text-purple-600 dark:text-purple-400 flex-shrink-0" title="Labelled by speaker identification, not by you — review before enrolling">
+                            auto-identified
+                          </span>
+                        )}
                         {!c.gated_in && (
                           <span className="text-xs text-amber-600 dark:text-amber-400 flex-shrink-0" title={c.reasons.join(', ')}>
                             {c.reasons.join(', ')}
@@ -210,9 +286,10 @@ export default function EnrollmentCandidates() {
                       </div>
                     )
                   })}
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
 
           <div className="mt-5 flex items-center justify-between">

@@ -47,6 +47,8 @@ interface AnalysisData {
     enrolled_speakers?: number
     expected_speakers?: number
     analysis_type?: string
+    unique_speakers?: string[]
+    total_duration?: number
   }
   smart_suggestion?: {
     suggested_threshold: number
@@ -102,7 +104,6 @@ export default function EmbeddingPlot({
   compact = false,
   title,
   autoAnalyze = true,
-  onRefresh,
   onAnalysisComplete
 }: EmbeddingPlotProps) {
   const plotRef = useRef<HTMLDivElement>(null)

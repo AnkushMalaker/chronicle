@@ -2,7 +2,6 @@
  * Component for recording controls and status display
  */
 
-import React from 'react'
 import { Mic } from 'lucide-react'
 
 export type DeepgramStatus = 'disconnected' | 'connecting' | 'connected' | 'error'

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  ArrowUp,
   Check,
   AudioLines,
   Eraser,
@@ -31,6 +32,7 @@ import { formatClock } from './format'
 import SpeakerInlineInput from '../SpeakerInlineInput'
 import { Region, WaveformRegionEditor } from '../audio/WaveformRegionEditor'
 import { useJobPolling } from '../../hooks/useJobPolling'
+import { Button, StateBadge } from '../ui'
 
 type EnrolledSpeaker = { speaker_id: string; name: string }
 
@@ -100,15 +102,18 @@ function EnrollmentTrend({ sessions }: { sessions: GuidedEnrollmentSession[] }) 
     <div className="mb-4">
       <div className="flex items-baseline justify-between gap-3 mb-1">
         <h3 className="text-xs font-medium text-gray-700 dark:text-gray-200">Observed gallery cohesion</h3>
-        <span className="text-[11px] text-gray-500 dark:text-gray-400">higher is more internally consistent</span>
+        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
+          <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
+          Higher is better
+        </span>
       </div>
       <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-[150px] border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-900/30" role="img" aria-label="Gallery cohesion by clip count">
         <line x1={pad} y1={height - pad} x2={width - pad} y2={height - pad} stroke="currentColor" className="text-gray-300 dark:text-gray-600" />
         <line x1={pad} y1={pad} x2={pad} y2={height - pad} stroke="currentColor" className="text-gray-300 dark:text-gray-600" />
-        <polyline points={line} fill="none" stroke="#2563eb" strokeWidth="2.5" />
+        <polyline points={line} fill="none" stroke="#c2551f" strokeWidth="2.5" />
         {points.map((point) => (
           <g key={`${point.clips}:${point.cohesion}`}>
-            <circle cx={x(point.clips)} cy={y(point.cohesion)} r="4" fill="#2563eb" />
+            <circle cx={x(point.clips)} cy={y(point.cohesion)} r="4" fill="#c2551f" />
             <text x={x(point.clips)} y={y(point.cohesion) - 8} textAnchor="middle" fontSize="10" fill="currentColor">{point.cohesion.toFixed(3)}</text>
           </g>
         ))}
@@ -187,10 +192,14 @@ function BenchmarkPanel({ speakerName }: { speakerName: string }) {
         <div className="space-y-3 pt-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-xs text-gray-500 dark:text-gray-400">Five folds grouped by conversation; cached embeddings; live galleries unchanged.</p>
-            <button onClick={run} disabled={running} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-blue-600 text-white text-sm disabled:opacity-50">
-              {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            <Button
+              variant="primary"
+              onClick={run}
+              disabled={running}
+              icon={running ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            >
               {running ? 'Benchmarking' : report ? 'Run again' : 'Run benchmark'}
-            </button>
+            </Button>
           </div>
           {progress && <p className="text-xs text-blue-700 dark:text-blue-300">{progress}</p>}
           {benchmarkError && <p className="text-xs text-red-600 dark:text-red-400">{benchmarkError}</p>}
@@ -224,22 +233,14 @@ function BenchmarkPanel({ speakerName }: { speakerName: string }) {
 function flagBadge(clip: GuidedEnrollmentGalleryResponse['clips'][number]) {
   if (clip.flags.includes('mislabel'))
     return (
-      <span className="text-[11px] px-1.5 py-0.5 rounded bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300">
+      <StateBadge tone="danger">
         sounds like {clip.suggested?.name || 'another speaker'}
-      </span>
+      </StateBadge>
     )
   if (clip.flags.includes('junk'))
-    return (
-      <span className="text-[11px] px-1.5 py-0.5 rounded bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300">
-        junk
-      </span>
-    )
+    return <StateBadge tone="danger">junk</StateBadge>
   if (clip.flags.includes('weak'))
-    return (
-      <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300">
-        weak match
-      </span>
-    )
+    return <StateBadge tone="warning">weak match</StateBadge>
   return null
 }
 
@@ -846,18 +847,20 @@ export default function GuidedEnrollment() {
       {speaker && (
         <section className="space-y-3 border-t border-gray-200 dark:border-gray-700 pt-4">
           <div className="flex flex-wrap items-center gap-2">
-            <button
+            <Button
+              variant="primary"
               onClick={() => speaker && suggest(speaker)}
               disabled={!speaker || loading || submitting}
-              className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded bg-blue-600 text-white disabled:opacity-50"
+              icon={
+                loading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )
+              }
             >
-              {loading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <RefreshCw className="h-4 w-4" />
-              )}
               Fresh batch
-            </button>
+            </Button>
             <select
               value={sortOrder}
               onChange={(e) => {
@@ -872,15 +875,15 @@ export default function GuidedEnrollment() {
               <option value="informative">Sort: most informative</option>
               <option value="confidence">Sort: best match first</option>
             </select>
-            <button
+            <Button
+              variant="secondary"
               onClick={() => discoverCorpus(speaker)}
               disabled={discovering}
-              className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 disabled:opacity-50"
               title="Refresh the reusable speech-embedding index and rescore it against this gallery"
+              icon={discovering ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
             >
-              {discovering ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
               {discovering ? 'Searching corpus' : 'Refresh corpus'}
-            </button>
+            </Button>
             <label
               className="inline-flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300"
               title="Also scan speech from soft-deleted conversations whose audio is still stored"
@@ -900,15 +903,15 @@ export default function GuidedEnrollment() {
               className="hidden"
               onChange={(e) => mineFiles(speaker, Array.from(e.target.files || []))}
             />
-            <button
+            <Button
+              variant="secondary"
               onClick={() => miningInputRef.current?.click()}
               disabled={mining || discovering}
-              className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 disabled:opacity-50"
               title="Upload unlabelled audio (recordings, exports) and mine it for this speaker's voice. Files are kept out of memory processing."
+              icon={mining ? <Loader2 className="h-4 w-4 animate-spin" /> : <AudioLines className="h-4 w-4" />}
             >
-              {mining ? <Loader2 className="h-4 w-4 animate-spin" /> : <AudioLines className="h-4 w-4" />}
               {mining ? 'Uploading…' : 'Mine audio files'}
-            </button>
+            </Button>
             {suggestion && (
               <span className="text-xs text-gray-500 dark:text-gray-400">
                 gallery: {suggestion.speaker.n_clips ?? '?'} clips
@@ -1071,15 +1074,23 @@ export default function GuidedEnrollment() {
                   )
                 })}
               </ul>
-              <button
+              <Button
+                variant="primary"
                 onClick={submit}
                 disabled={submitting || decidedCount === 0}
-                className="inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded bg-blue-600 text-white disabled:opacity-50"
+                icon={submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : undefined}
               >
-                {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
                 Submit {decidedCount}/{suggestion.batch.length} & next batch
-              </button>
-              <button onClick={freshBatch} disabled={submitting} className="ml-2 inline-flex items-center gap-1.5 text-sm px-3 py-1.5 rounded border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 disabled:opacity-50"><RefreshCw className="h-4 w-4" />Skip remaining & fresh batch</button>
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={freshBatch}
+                disabled={submitting}
+                className="ml-2"
+                icon={<RefreshCw className="h-4 w-4" />}
+              >
+                Skip remaining & fresh batch
+              </Button>
             </>
           )}
 

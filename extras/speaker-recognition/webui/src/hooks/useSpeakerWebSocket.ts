@@ -210,7 +210,7 @@ export const useSpeakerWebSocket = (
 
   // Start streaming
   const startStreaming = useCallback(() => {
-    const serviceConnected = wsServiceRef.current?.connectionStatus === 'connected'
+    const serviceConnected = wsServiceRef.current?.status === 'connected'
     console.log(`🎙️ [WS] Attempting to start streaming - React isConnected: ${isConnected}, Service connected: ${serviceConnected}`)
 
     // Check WebSocket service state directly to avoid React state timing issues

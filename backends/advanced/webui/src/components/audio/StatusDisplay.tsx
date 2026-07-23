@@ -1,6 +1,7 @@
 import React from 'react'
 import { Check, Loader2, AlertCircle, Mic, Monitor, Wifi, Play, Radio } from 'lucide-react'
 import { RecordingContextType, RecordingStep, AudioSource } from '../../contexts/RecordingContext'
+import { Card } from '../ui'
 
 interface StatusDisplayProps {
   recording: RecordingContextType
@@ -107,7 +108,7 @@ export default function StatusDisplay({ recording }: StatusDisplayProps) {
   }
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
+    <Card raised padded={false} className="p-6 mb-6">
       <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4 flex items-center">
         <Radio className="h-5 w-5 mr-2 text-blue-600" />
         Recording Setup Progress
@@ -160,6 +161,6 @@ export default function StatusDisplay({ recording }: StatusDisplayProps) {
           </span>
         </div>
       </div>
-    </div>
+    </Card>
   )
 }

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { Search, Download, Trash2, Eye, BarChart3, User, Clock, CheckCircle, XCircle, Upload, FileJson } from 'lucide-react'
+import { Search, Download, Trash2, Eye, User, Clock, CheckCircle, XCircle, Upload, FileJson } from 'lucide-react'
 import { useUser } from '../contexts/UserContext'
 import { apiService } from '../services/api'
 import { formatDuration } from '../utils/audioUtils'
@@ -80,8 +80,8 @@ export default function Speakers() {
       // Calculate stats from filtered speakers
       const stats = {
         total_speakers: userSpeakers.length,
-        total_audio_samples: userSpeakers.reduce((sum, s) => sum + (s.audio_sample_count || 0), 0),
-        total_duration: userSpeakers.reduce((sum, s) => sum + (s.total_audio_duration || 0), 0),
+        total_audio_samples: userSpeakers.reduce((sum: number, s: any) => sum + (s.audio_sample_count || 0), 0),
+        total_duration: userSpeakers.reduce((sum: number, s: any) => sum + (s.total_audio_duration || 0), 0),
         average_quality: 0, // Not available from backend yet
         speakers_by_status: {
           pending: 0,
@@ -124,8 +124,8 @@ export default function Speakers() {
     })
 
     filtered.sort((a, b) => {
-      let aValue = a[sortBy]
-      let bValue = b[sortBy]
+      let aValue: any = a[sortBy]
+      let bValue: any = b[sortBy]
 
       if (typeof aValue === 'string') {
         aValue = aValue.toLowerCase()
@@ -610,15 +610,15 @@ export default function Speakers() {
                     </div>
                 <div>
                   <label className="block text-sm font-medium text-muted">Created</label>
-                  <p className="text-primary">{new Date(selectedSpeaker.created_at).toLocaleString()}</p>
+                  <p className="text-primary">{new Date(selectedSpeaker.created_at as string).toLocaleString()}</p>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-muted">Last Updated</label>
-                  <p className="text-primary">{new Date(selectedSpeaker.updated_at).toLocaleString()}</p>
+                  <p className="text-primary">{new Date(selectedSpeaker.updated_at as string).toLocaleString()}</p>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-muted">Last Enrollment</label>
-                  <p className="text-primary">{new Date(selectedSpeaker.last_enrollment).toLocaleString()}</p>
+                  <p className="text-primary">{new Date(selectedSpeaker.last_enrollment as string).toLocaleString()}</p>
                 </div>
               </div>
             </div>

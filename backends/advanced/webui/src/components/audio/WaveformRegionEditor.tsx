@@ -194,7 +194,7 @@ export const WaveformRegionEditor: React.FC<WaveformRegionEditorProps> = ({
       const sr = data.sample_rate || 3
       const i0 = Math.max(0, Math.floor(t0 * sr))
       const i1 = Math.min(data.samples.length - 1, Math.ceil(t1 * sr))
-      ctx.fillStyle = '#3b82f6'
+      ctx.fillStyle = '#d2694a'
       for (let i = i0; i <= i1; i++) {
         const xA = ((i / sr - t0) / span) * w
         const xB = (((i + 1) / sr - t0) / span) * w
@@ -227,7 +227,7 @@ export const WaveformRegionEditor: React.FC<WaveformRegionEditorProps> = ({
     const ct = playheadRef.current
     if (ct != null && ct >= t0 && ct <= t1) {
       const xp = ((ct - t0) / span) * w
-      ctx.strokeStyle = '#ef4444' // red-500
+      ctx.strokeStyle = '#dc4a3a' // danger-500
       ctx.lineWidth = 2
       ctx.beginPath()
       ctx.moveTo(xp, 0)

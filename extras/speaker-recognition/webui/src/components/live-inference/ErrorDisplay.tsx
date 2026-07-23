@@ -2,7 +2,6 @@
  * Component for displaying session errors with helpful tips
  */
 
-import React from 'react'
 import { AlertCircle } from 'lucide-react'
 
 export interface ErrorDisplayProps {

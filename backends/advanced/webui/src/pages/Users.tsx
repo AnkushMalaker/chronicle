@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { Users as UsersIcon, Plus, Edit, Trash2, RefreshCw, Shield, User, Mail } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useUsers, useCreateUser, useUpdateUser, useDeleteUser } from '../hooks/useUsers'
+import { Button, IconButton, Input, Label, Checkbox, StateBadge } from '../components/ui'
 
 interface User {
   _id: string
@@ -126,20 +127,8 @@ export default function Users() {
           </h1>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => refetch()}
-            className="flex items-center space-x-2 px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
-          >
-            <RefreshCw className="h-4 w-4" />
-            <span>Refresh</span>
-          </button>
-          <button
-            onClick={() => setShowCreateForm(true)}
-            className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-          >
-            <Plus className="h-4 w-4" />
-            <span>Add User</span>
-          </button>
+          <Button variant="secondary" size="md" onClick={() => refetch()} icon={<RefreshCw className="h-4 w-4" />}>Refresh</Button>
+          <Button variant="primary" size="md" onClick={() => setShowCreateForm(true)} icon={<Plus className="h-4 w-4" />}>Add User</Button>
         </div>
       </div>
 
@@ -165,79 +154,61 @@ export default function Users() {
           <form onSubmit={editingUser ? handleUpdateUser : handleCreateUser} className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                <Label className="mb-2">
                   Name
-                </label>
-                <input
+                </Label>
+                <Input
                   type="text"
                   required
                   value={formData.display_name}
                   onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                <Label className="mb-2">
                   Email
-                </label>
-                <input
+                </Label>
+                <Input
                   type="email"
                   required
                   value={formData.email}
                   onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+              <Label className="mb-2">
                 Password {editingUser && "(leave blank to keep current password)"}
-              </label>
-              <input
+              </Label>
+              <Input
                 type="password"
                 required={!editingUser}
                 value={formData.password}
                 onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
 
             <div className="flex items-center space-x-6">
-              <label className="flex items-center space-x-2">
-                <input
-                  type="checkbox"
-                  checked={formData.is_superuser}
-                  onChange={(e) => setFormData({ ...formData, is_superuser: e.target.checked })}
-                  className="rounded border-gray-300"
-                />
-                <span className="text-sm text-gray-700 dark:text-gray-300">Administrator</span>
-              </label>
-              <label className="flex items-center space-x-2">
-                <input
-                  type="checkbox"
-                  checked={formData.is_active}
-                  onChange={(e) => setFormData({ ...formData, is_active: e.target.checked })}
-                  className="rounded border-gray-300"
-                />
-                <span className="text-sm text-gray-700 dark:text-gray-300">Active</span>
-              </label>
+              <Checkbox
+                label="Administrator"
+                checked={formData.is_superuser}
+                onChange={(e) => setFormData({ ...formData, is_superuser: e.target.checked })}
+              />
+              <Checkbox
+                label="Active"
+                checked={formData.is_active}
+                onChange={(e) => setFormData({ ...formData, is_active: e.target.checked })}
+              />
             </div>
 
             <div className="flex space-x-2">
-              <button
-                type="submit"
-                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
-              >
+              <Button type="submit" variant="primary" size="md">
                 {editingUser ? 'Update User' : 'Create User'}
-              </button>
-              <button
-                type="button"
-                onClick={resetForm}
-                className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 transition-colors"
-              >
+              </Button>
+              <Button type="button" variant="secondary" size="md" onClick={resetForm}>
                 Cancel
-              </button>
+              </Button>
             </div>
           </form>
         </div>
@@ -293,38 +264,24 @@ export default function Users() {
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="flex items-center">
                       {user.is_superuser && <Shield className="h-4 w-4 text-blue-600 mr-1" />}
-                      <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                        user.is_superuser
-                          ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
-                          : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
-                      }`}>
+                      <StateBadge tone={user.is_superuser ? 'info' : 'neutral'}>
                         {user.is_superuser ? 'Admin' : 'User'}
-                      </span>
+                      </StateBadge>
                     </div>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
-                    <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                      user.is_active
-                        ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-                        : 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
-                    }`}>
+                    <StateBadge tone={user.is_active ? 'success' : 'danger'}>
                       {user.is_active ? 'Active' : 'Inactive'}
-                    </span>
+                    </StateBadge>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                     <div className="flex justify-end space-x-2">
-                      <button
-                        onClick={() => handleEditUser(user)}
-                        className="text-blue-600 hover:text-blue-900 dark:text-blue-400 dark:hover:text-blue-300"
-                      >
+                      <IconButton label="Edit user" onClick={() => handleEditUser(user)}>
                         <Edit className="h-4 w-4" />
-                      </button>
-                      <button
-                        onClick={() => handleDeleteUser(user)}
-                        className="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300"
-                      >
+                      </IconButton>
+                      <IconButton label="Delete user" danger onClick={() => handleDeleteUser(user)}>
                         <Trash2 className="h-4 w-4" />
-                      </button>
+                      </IconButton>
                     </div>
                   </td>
                 </tr>

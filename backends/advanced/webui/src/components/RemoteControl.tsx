@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { CheckCircle, Circle, Play, RefreshCw, Smartphone, Square } from 'lucide-react'
 import { systemApi } from '../services/api'
+import { Button, Card, MetadataChip } from './ui'
 
 interface RemoteControlData {
   available: boolean
@@ -54,7 +55,7 @@ export default function RemoteControl({ isAdmin }: { isAdmin: boolean }) {
   const missingDeps = data.tmux_available === false || data.claude_available === false
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+    <Card raised padded={false} className="p-6">
       <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-1 flex items-center">
         <Smartphone className="h-5 w-5 mr-2 text-blue-600" />
         Claude Remote Control
@@ -85,9 +86,7 @@ export default function RemoteControl({ isAdmin }: { isAdmin: boolean }) {
               {running ? 'Running' : 'Stopped'}
               {data.name && <span className="ml-2 text-xs text-gray-500 dark:text-gray-400">{data.name}</span>}
               {data.managed && (
-                <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
-                  auto-start on boot
-                </span>
+                <MetadataChip className="ml-2">auto-start on boot</MetadataChip>
               )}
             </div>
             {data.dir && (
@@ -102,22 +101,22 @@ export default function RemoteControl({ isAdmin }: { isAdmin: boolean }) {
         <div className="flex items-center space-x-2">
           {running ? (
             <>
-              <button
+              <Button
+                variant="primary"
                 onClick={() => act('restart')}
                 disabled={busy}
-                className="flex items-center gap-1 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+                icon={<RefreshCw className={`h-3.5 w-3.5 ${busy ? 'animate-spin' : ''}`} />}
               >
-                <RefreshCw className={`h-3.5 w-3.5 ${busy ? 'animate-spin' : ''}`} />
-                <span>Restart</span>
-              </button>
-              <button
+                Restart
+              </Button>
+              <Button
+                variant="danger"
                 onClick={() => act('stop')}
                 disabled={busy}
-                className="flex items-center gap-1 px-3 py-1.5 text-sm bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
+                icon={<Square className="h-3.5 w-3.5" />}
               >
-                <Square className="h-3.5 w-3.5" />
-                <span>Stop</span>
-              </button>
+                Stop
+              </Button>
             </>
           ) : (
             <button
@@ -139,6 +138,6 @@ export default function RemoteControl({ isAdmin }: { isAdmin: boolean }) {
         the desktop). Make it survive reboots from the wizard's "auto-start on boot" step, or{' '}
         <code className="text-xs">services.py remote-control install</code>.
       </p>
-    </div>
+    </Card>
   )
 }

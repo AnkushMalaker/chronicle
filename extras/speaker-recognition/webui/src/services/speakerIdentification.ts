@@ -111,19 +111,20 @@ export class SpeakerIdentificationService {
 
     } catch (error) {
       // Provide more helpful error messages based on the error type
-      let errorMessage = `Processing failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+      const rawMessage = error instanceof Error ? error.message : String(error)
+      let errorMessage = `Processing failed: ${rawMessage}`
 
-      if (error.message?.includes('500') || error.message?.includes('Internal Server Error')) {
+      if (rawMessage.includes('500') || rawMessage.includes('Internal Server Error')) {
         errorMessage = `Server error during ${options.mode} processing. This might be due to a backend issue. Please try again or contact support.`
-      } else if (error.message?.includes('404') || error.message?.includes('Not Found')) {
+      } else if (rawMessage.includes('404') || rawMessage.includes('Not Found')) {
         errorMessage = `Processing endpoint not available. The ${options.mode} mode might not be fully implemented yet.`
-      } else if (error.message?.includes('400') || error.message?.includes('Bad Request')) {
+      } else if (rawMessage.includes('400') || rawMessage.includes('Bad Request')) {
         errorMessage = `Bad request during ${options.mode} processing. This might be due to invalid audio format or missing transcript data. Please check your input files.`
-      } else if (error.message?.includes('timeout')) {
+      } else if (rawMessage.includes('timeout')) {
         errorMessage = `Processing timed out. The audio file might be too large or the server is busy. Please try a shorter audio file.`
-      } else if (error.message?.includes('transcript data is required')) {
+      } else if (rawMessage.includes('transcript data is required')) {
         errorMessage = `Transcript data is required for ${options.mode} mode. Please upload a Deepgram JSON file first.`
-      } else if (error.message?.includes('Failed to transform Deepgram data')) {
+      } else if (rawMessage.includes('Failed to transform Deepgram data')) {
         errorMessage = `Invalid Deepgram JSON format. Please ensure you've uploaded a valid Deepgram API response file.`
       }
 
@@ -216,7 +217,7 @@ export class SpeakerIdentificationService {
         deepgram_response: deepgramResponse
       }
     } catch (error) {
-      throw new Error(`Deepgram processing failed: ${error.message}`)
+      throw new Error(`Deepgram processing failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -308,7 +309,7 @@ export class SpeakerIdentificationService {
         deepgram_response: deepgramResponse
       }
     } catch (error) {
-      throw new Error(`Hybrid processing failed: ${error.message}`)
+      throw new Error(`Hybrid processing failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -368,7 +369,7 @@ export class SpeakerIdentificationService {
         }
       }
     } catch (error) {
-      throw new Error(`Diarization-only processing failed: ${error.message}`)
+      throw new Error(`Diarization-only processing failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -442,7 +443,7 @@ export class SpeakerIdentificationService {
         }
       }
     } catch (error) {
-      throw new Error(`Diarization processing failed: ${error.message}`)
+      throw new Error(`Diarization processing failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -529,7 +530,7 @@ export class SpeakerIdentificationService {
         }
       }
     } catch (error) {
-      throw new Error(`Diarize-identify-match processing failed: ${error.message}`)
+      throw new Error(`Diarize-identify-match processing failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 

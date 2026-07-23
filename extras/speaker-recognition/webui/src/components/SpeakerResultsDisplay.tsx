@@ -5,7 +5,7 @@
  */
 
 import React from 'react'
-import { Users, Clock, Download, Play, Pause, CheckCircle, AlertTriangle, Info } from 'lucide-react'
+import { Users, Clock, Download, Play, AlertTriangle } from 'lucide-react'
 import { ProcessingResult, SpeakerSegment } from '../services/speakerIdentification'
 import { TranscriptSegment } from '../hooks/useDeepgramIntegration'
 
@@ -83,9 +83,9 @@ export const SpeakerResultsDisplay: React.FC<SpeakerResultsDisplayProps> = ({
     const isLiveSegment = 'isInterim' in segment
 
     // Extract common fields
-    const start = segment.start || 0
+    const start = (segment as SpeakerSegment).start || 0
     const end = isProcessingSegment
-      ? segment.end
+      ? (segment as SpeakerSegment).end
       : start // For live segments, we don't have a proper end time yet
     const duration = isProcessingSegment ? (end - start) : 0 // Only calculate duration for processed segments
     const text = isProcessingSegment ? (segment as SpeakerSegment).text : (segment as TranscriptSegment).text

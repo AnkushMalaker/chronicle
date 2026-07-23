@@ -5,6 +5,8 @@ import { AuditConversation } from '../../services/api'
 import { formatDate, formatDuration, processingStatusChip } from './format'
 import PreviewStrip from './PreviewStrip'
 import SegmentTriage from './SegmentTriage'
+import BackgroundReview from './BackgroundReview'
+import { MetadataChip, StateBadge } from '../ui'
 
 type SortKey = 'title' | 'created_at' | 'duration_seconds' | 'speech_fraction' | 'archive_reason'
 type SortDir = 'asc' | 'desc'
@@ -253,9 +255,7 @@ export default function AuditTable({
                     <div className="flex items-center space-x-1.5 text-xs text-gray-400">
                       <span>{r.client_id}</span>
                       {r.derived_operation && (
-                        <span className="px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300">
-                          {r.derived_operation}
-                        </span>
+                        <MetadataChip>{r.derived_operation}</MetadataChip>
                       )}
                       {(() => {
                         const chip = processingStatusChip(r.processing_status, r.failure_stage)
@@ -284,17 +284,15 @@ export default function AuditTable({
                     <div className="flex flex-wrap gap-1">
                       {r.speakers.length === 0 && <span className="text-gray-400 text-xs">none</span>}
                       {r.speakers.map((s) => (
-                        <span key={s} className="px-1.5 py-0.5 rounded text-xs bg-gray-100 dark:bg-gray-700">
-                          {s}
-                        </span>
+                        <MetadataChip key={s}>{s}</MetadataChip>
                       ))}
                       {r.unknown_speech_segments > 0 && (
-                        <span
-                          className="px-1.5 py-0.5 rounded text-xs bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300"
+                        <StateBadge
+                          tone="warning"
                           title="Speech segments not matched to an enrolled speaker — open the preview to triage them"
                         >
                           {r.unknown_speech_segments} to review
-                        </span>
+                        </StateBadge>
                       )}
                       {r.marginal_identified_segments > 0 && (
                         <span
@@ -321,9 +319,7 @@ export default function AuditTable({
                 </>
               ) : (
                 <td className="px-3 py-2">
-                  <span className="px-2 py-0.5 rounded text-xs bg-gray-100 dark:bg-gray-700">
-                    {r.archive_reason || 'archived'}
-                  </span>
+                  <MetadataChip>{r.archive_reason || 'archived'}</MetadataChip>
                 </td>
               )}
             </tr>
@@ -342,6 +338,12 @@ export default function AuditTable({
                     onDecisionsChanged={onTriageChanged}
                     marginalThreshold={marginalThreshold}
                   />
+                  <div className="mt-3">
+                    <BackgroundReview
+                      conversationId={r.conversation_id}
+                      onDecisionsChanged={onTriageChanged}
+                    />
+                  </div>
                 </td>
               </tr>
             )}

@@ -1,6 +1,7 @@
 import { Wifi, WifiOff, Radio } from 'lucide-react'
 import { UseAudioRecordingReturn } from '../../hooks/useAudioRecording'
 import { useAuth } from '../../contexts/AuthContext'
+import { Card } from '../ui'
 
 interface RecordingStatusProps {
   recording: UseAudioRecordingReturn
@@ -38,7 +39,7 @@ export default function RecordingStatus({ recording }: RecordingStatusProps) {
   return (
     <>
       {/* Connection Status */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 mb-6">
+      <Card raised className="mb-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center space-x-3">
             {getStatusIcon()}
@@ -61,10 +62,10 @@ export default function RecordingStatus({ recording }: RecordingStatusProps) {
             </p>
           </div>
         </div>
-      </div>
+      </Card>
 
       {/* Component Status Indicators */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
+      <Card raised padded={false} className="p-6 mb-6">
         <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">📊 Component Status</h3>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -138,7 +139,7 @@ export default function RecordingStatus({ recording }: RecordingStatusProps) {
             </p>
           </div>
         </div>
-      </div>
+      </Card>
     </>
   )
 }

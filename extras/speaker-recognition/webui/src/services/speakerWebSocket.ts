@@ -90,7 +90,6 @@ export class SpeakerWebSocketService {
   private options: SpeakerWebSocketOptions
   private connectionStatus: 'connecting' | 'connected' | 'disconnected' | 'error' = 'disconnected'
   private baseUrl: string
-  private fallbackUrls: string[] = []
 
   constructor(options: SpeakerWebSocketOptions = {}) {
     this.options = options

@@ -1,5 +1,6 @@
 import { Mic, Square, Loader2, Monitor } from 'lucide-react'
 import { RecordingContextType } from '../../contexts/RecordingContext'
+import { Card } from '../ui'
 
 interface SimplifiedControlsProps {
   recording: RecordingContextType
@@ -46,7 +47,7 @@ export default function SimplifiedControls({ recording }: SimplifiedControlsProp
   const isDisabled = recording.isRecording ? false : (processing || !canStart)
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-8 mb-6">
+    <Card raised padded={false} className="p-8 mb-6">
       <div className="text-center">
         {/* Single Toggle Button */}
         <div className="mb-6 flex justify-center">
@@ -116,6 +117,6 @@ export default function SimplifiedControls({ recording }: SimplifiedControlsProp
           )}
         </div>
       </div>
-    </div>
+    </Card>
   )
 }

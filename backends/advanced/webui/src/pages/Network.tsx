@@ -3,6 +3,7 @@ import { Network as NetworkIcon, RefreshCw, CheckCircle, XCircle, Wifi, WifiOff,
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '../contexts/AuthContext'
 import { systemApi, clientsApi } from '../services/api'
+import { Button } from '../components/ui'
 
 interface DiscoveredService {
   name: string
@@ -172,18 +173,15 @@ export default function Network() {
               Last scan: {lastUpdated.toLocaleTimeString()}
             </span>
           )}
-          <button
+          <Button
+            variant="primary"
+            size="md"
             onClick={handleScan}
             disabled={loading}
-            className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+            icon={loading ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
           >
-            {loading ? (
-              <RefreshCw className="h-4 w-4 animate-spin" />
-            ) : (
-              <Search className="h-4 w-4" />
-            )}
-            <span>{loading ? 'Scanning...' : 'Scan Network'}</span>
-          </button>
+            {loading ? 'Scanning...' : 'Scan Network'}
+          </Button>
         </div>
       </div>
 

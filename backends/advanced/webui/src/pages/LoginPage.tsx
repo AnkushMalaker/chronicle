@@ -3,6 +3,7 @@ import { Navigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { BACKEND_URL } from '../services/api'
 import { Music, Eye, EyeOff } from 'lucide-react'
+import { Button } from '../components/ui'
 
 export default function LoginPage() {
   const [email, setEmail] = useState('')
@@ -118,17 +119,13 @@ export default function LoginPage() {
           )}
 
           <div>
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
+            <Button type="submit" variant="primary" size="md" disabled={isLoading} className="w-full">
               {isLoading ? (
                 <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
               ) : (
                 'Sign in'
               )}
-            </button>
+            </Button>
           </div>
         </form>
       </div>

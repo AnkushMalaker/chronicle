@@ -21,7 +21,7 @@ input[type="range"].slider::-webkit-slider-thumb {
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  background: #3B82F6;
+  background: #d2694a;
   cursor: pointer;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
   transition: transform 0.2s, box-shadow 0.2s;
@@ -29,7 +29,7 @@ input[type="range"].slider::-webkit-slider-thumb {
 
 input[type="range"].slider::-webkit-slider-thumb:hover {
   transform: scale(1.1);
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.5);
+  box-shadow: 0 2px 8px rgba(210, 105, 74, 0.5);
 }
 
 /* Firefox */
@@ -38,7 +38,7 @@ input[type="range"].slider::-moz-range-thumb {
   height: 20px;
   border: none;
   border-radius: 50%;
-  background: #3B82F6;
+  background: #d2694a;
   cursor: pointer;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
   transition: transform 0.2s, box-shadow 0.2s;
@@ -46,7 +46,7 @@ input[type="range"].slider::-moz-range-thumb {
 
 input[type="range"].slider::-moz-range-thumb:hover {
   transform: scale(1.1);
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.5);
+  box-shadow: 0 2px 8px rgba(210, 105, 74, 0.5);
 }
 
 /* Track styling for gradient effect */
@@ -66,13 +66,13 @@ input[type="range"].slider::-moz-range-track {
 
 /* Dark mode adjustments */
 .dark input[type="range"].slider {
-  background: linear-gradient(to right, #3B82F6 var(--progress), #374151 var(--progress));
+  background: linear-gradient(to right, #d2694a var(--progress), #2c251d var(--progress));
 }
 
 .dark input[type="range"].slider::-webkit-slider-thumb {
-  background: #60A5FA;
+  background: #e07856;
 }
 
 .dark input[type="range"].slider::-moz-range-thumb {
-  background: #60A5FA;
+  background: #e07856;
 }

@@ -7,7 +7,6 @@ import {
   PackageOpen,
   ShieldCheck,
   Trash2,
-  X,
 } from 'lucide-react'
 import {
   AuditConversation,
@@ -16,6 +15,7 @@ import {
   ScreenResult,
   dataAuditApi,
 } from '../../services/api'
+import { Alert, Button, Modal, Textarea } from '../../components/ui'
 import { useJobPolling } from '../../hooks/useJobPolling'
 import { formatDate, formatDuration } from './format'
 
@@ -351,27 +351,24 @@ export default function ExportModal({ selected, onClose }: Props) {
   const needsScreenFirst = screenEnabled && !resultValid && !screening
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-xl bg-white dark:bg-gray-800 shadow-xl">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-          <div className="flex items-center space-x-2">
-            <PackageOpen className="h-5 w-5 text-blue-600" />
-            <h3 className="font-semibold text-gray-900 dark:text-gray-100">
-              Export for annotation
-            </h3>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-
-        <div className="px-6 py-4 space-y-5">
+    <Modal
+      open
+      onClose={onClose}
+      title="Export for annotation"
+      icon={<PackageOpen className="h-5 w-5 text-blue-600" />}
+      maxWidthClassName="max-w-2xl"
+      className="max-h-[85vh] overflow-y-auto"
+      footer={
+        <Button variant="secondary" size="md" onClick={onClose}>
+          Close
+        </Button>
+      }
+    >
+      <div className="space-y-5">
           {error && (
-            <div className="flex items-center space-x-2 text-sm px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-200">
-              <AlertTriangle className="h-4 w-4" />
-              <span>{error}</span>
-            </div>
+            <Alert tone="danger" icon={<AlertTriangle className="h-4 w-4" />}>
+              {error}
+            </Alert>
           )}
 
           {/* New export */}
@@ -484,12 +481,12 @@ export default function ExportModal({ selected, onClose }: Props) {
                       </span>
                       <Hint text="Describe what you would NOT be comfortable sending to an annotator. This is about personal comfort, not a strict PII definition. Editing it re-runs the screen." />
                     </div>
-                    <textarea
+                    <Textarea
                       value={policy}
                       onChange={(e) => setPolicy(e.target.value)}
                       rows={5}
                       disabled={screening}
-                      className="w-full px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-xs text-gray-900 dark:text-gray-100 font-mono disabled:opacity-60"
+                      className="text-xs font-mono"
                     />
                   </div>
 
@@ -549,27 +546,26 @@ export default function ExportModal({ selected, onClose }: Props) {
             </div>
 
             <div className="flex items-center space-x-3">
-              <button
+              <Button
+                variant="primary"
+                size="md"
                 onClick={needsScreenFirst ? runScreen : runExport}
                 disabled={busy || selected.length === 0}
-                className="flex items-center space-x-2 px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                icon={busy ? <Loader2 className="h-4 w-4 animate-spin" /> : undefined}
               >
-                {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-                <span>
-                  {screening
-                    ? progress && progress.total
-                      ? `Screening ${progress.done}/${progress.total}…`
-                      : 'Screening…'
-                    : exporting
-                    ? status || 'Exporting…'
-                    : needsScreenFirst
-                    ? `Screen ${selected.length} conversation${selected.length === 1 ? '' : 's'}`
-                    : `Export ${selected.length} conversation${selected.length === 1 ? '' : 's'}` +
-                      (screenEnabled && totalExcluded > 0
-                        ? ` · withholding ${totalExcluded} segment${totalExcluded === 1 ? '' : 's'}`
-                        : '')}
-                </span>
-              </button>
+                {screening
+                  ? progress && progress.total
+                    ? `Screening ${progress.done}/${progress.total}…`
+                    : 'Screening…'
+                  : exporting
+                  ? status || 'Exporting…'
+                  : needsScreenFirst
+                  ? `Screen ${selected.length} conversation${selected.length === 1 ? '' : 's'}`
+                  : `Export ${selected.length} conversation${selected.length === 1 ? '' : 's'}` +
+                    (screenEnabled && totalExcluded > 0
+                      ? ` · withholding ${totalExcluded} segment${totalExcluded === 1 ? '' : 's'}`
+                      : '')}
+              </Button>
               {selected.length === 0 && !busy && (
                 <span className="text-xs text-gray-400">
                   Select conversations in the table first
@@ -668,17 +664,7 @@ export default function ExportModal({ selected, onClose }: Props) {
           </div>
         </div>
 
-        {/* Footer */}
-        <div className="flex items-center justify-end px-6 py-4 border-t border-gray-200 dark:border-gray-700">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-          >
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
+    </Modal>
   )
 }
 

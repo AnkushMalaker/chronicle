@@ -1,9 +1,13 @@
-import { useState, useEffect } from 'react'
-import { Zap, RefreshCw, AlertCircle, AlertTriangle, CheckCircle, Clock, Play, ToggleLeft, ToggleRight, Edit3, X, Check, Eye } from 'lucide-react'
-import cronstrue from 'cronstrue'
-import { finetuningApi } from '../services/api'
-import { useFinetuningStatus, useCronJobs, useToggleCronJob, useUpdateCronSchedule, useRunCronJob, useProcessAnnotations, useDeleteOrphanedAnnotations, useRetryFailedAnnotations, useDeleteFailedAnnotations } from '../hooks/useFinetuning'
-import EnrollmentCandidates from '../components/finetuning/EnrollmentCandidates'
+import { useState } from 'react'
+import { Link } from 'react-router-dom'
+import {
+  Zap, RefreshCw, AlertTriangle, Play, Mic, FileAudio, Sparkles, Clock,
+  CheckCircle2, CircleDashed, ArrowUpRight,
+} from 'lucide-react'
+import { useFinetuningStatus, useCronJobs, useRunCronJob, useDeleteOrphanedAnnotations, useRetryFailedAnnotations, useDeleteFailedAnnotations } from '../hooks/useFinetuning'
+import { useExternalServices } from '../hooks/useSystem'
+import { useAuth } from '../contexts/AuthContext'
+import { Button, Alert } from '../components/ui'
 
 interface AnnotationTypeCounts {
   total: number
@@ -14,143 +18,118 @@ interface AnnotationTypeCounts {
   failed: number
 }
 
-function humanCron(expr: string): string {
-  try {
-    return cronstrue.toString(expr)
-  } catch {
-    return expr
-  }
-}
-
-function formatTimestamp(iso: string | null): string {
-  if (!iso) return 'Never'
+function formatTimestamp(iso: string | null | undefined): string {
+  if (!iso) return 'never run'
   return new Date(iso).toLocaleString()
 }
 
-const JOB_DISPLAY_NAMES: Record<string, string> = {
-  speaker_finetuning: 'Speaker Fine-tuning',
-  asr_jargon_extraction: 'ASR Jargon Extraction',
-  annotation_suggestions: 'Transcript Suggestion Detection',
-}
-
-const ANNOTATION_TYPE_DISPLAY: Record<string, { label: string; description: string }> = {
-  diarization: { label: 'Diarization', description: 'Speaker identification corrections' },
-  entity: { label: 'Entity', description: 'Knowledge graph entity corrections' },
-  transcript: { label: 'Transcript', description: 'Transcript text corrections' },
-  memory: { label: 'Memory', description: 'Memory content corrections' },
-  title: { label: 'Title', description: 'Conversation title corrections' },
-  speech_suggestion_correction: { label: 'Speech Suggestion Correction', description: 'User-refined model suggestions (ASR training signal)' },
-}
-
-function getAnnotationDisplay(key: string): { label: string; description: string } {
-  if (ANNOTATION_TYPE_DISPLAY[key]) return ANNOTATION_TYPE_DISPLAY[key]
-  const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-  return { label, description: `${label} annotations` }
-}
-
-const COLOR_CLASSES = {
-  blue: 'text-blue-600 dark:text-blue-400',
-  green: 'text-green-600 dark:text-green-400',
-  default: 'text-gray-900 dark:text-gray-100',
-}
-
-function StatCard({ label, value, color, subtitle }: {
+// One card per model we can teach. Speaker recognition is instant kNN enrollment
+// (managed in Data Audit); ASR and prompts are real batch training triggered here.
+interface ModelTarget {
+  key: 'speaker' | 'asr' | 'prompts'
   label: string
-  value: number
-  color?: 'blue' | 'green'
-  subtitle?: string
-}) {
-  return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-      <div className="text-sm text-gray-600 dark:text-gray-400 mb-1">{label}</div>
-      <div className={`text-2xl font-bold ${color ? COLOR_CLASSES[color] : COLOR_CLASSES.default}`}>
-        {value}
-      </div>
-      {subtitle && <div className="text-xs text-gray-500 mt-1">{subtitle}</div>}
-    </div>
-  )
+  blurb: string
+  icon: any
+  /** Applied-but-not-trained human signal, grouped from annotation_counts. */
+  readyTypes: string[]
+  /** null = no batch trigger here (link out instead). */
+  cronJobId: string | null
+  runVerb: string
+}
+
+const MODEL_TARGETS: ModelTarget[] = [
+  {
+    key: 'speaker',
+    label: 'Speaker recognition',
+    blurb: 'Voiceprints built from your speaker relabels + enrollment.',
+    icon: Mic,
+    readyTypes: ['diarization'],
+    cronJobId: null, // instant kNN — enrolled deliberately in Data Audit
+    runVerb: 'Enroll',
+  },
+  {
+    key: 'asr',
+    label: 'ASR model (VibeVoice LoRA)',
+    blurb: 'Transcript corrections exported as fine-tuning data.',
+    icon: FileAudio,
+    readyTypes: ['transcript', 'speech_suggestion_correction', 'timing', 'insert', 'deletion'],
+    cronJobId: 'asr_finetuning',
+    runVerb: 'Export & train',
+  },
+  {
+    key: 'prompts',
+    label: 'LLM prompts',
+    blurb: 'Title & memory edits tune the extraction prompts.',
+    icon: Sparkles,
+    readyTypes: ['title', 'memory'],
+    cronJobId: 'prompt_optimization',
+    runVerb: 'Optimize prompts',
+  },
+]
+
+const TYPE_LABEL: Record<string, string> = {
+  diarization: 'speaker relabels',
+  transcript: 'transcript corrections',
+  speech_suggestion_correction: 'suggestion-correction triples',
+  timing: 'timing edits',
+  insert: 'inserts',
+  deletion: 'deletions',
+  title: 'title edits',
+  memory: 'memory edits',
 }
 
 export default function Finetuning() {
-  const { data: status = null, isLoading: statusLoading, error: statusError, refetch: refetchStatus } = useFinetuningStatus()
-  const { data: cronJobs = [], isLoading: cronLoading, error: cronError, refetch: refetchCron } = useCronJobs()
-
-  const loading = statusLoading || cronLoading
-  const queryError = statusError?.message || cronError?.message || null
+  const { isAdmin } = useAuth()
+  const { data: externalServices } = useExternalServices(isAdmin, false)
+  const { data: status = null, isLoading: statusLoading, refetch: refetchStatus } = useFinetuningStatus()
+  const { data: cronJobs = [], isLoading: cronLoading, refetch: refetchCron } = useCronJobs()
+  const runJob = useRunCronJob()
+  const retryFailed = useRetryFailedAnnotations()
+  const deleteFailed = useDeleteFailedAnnotations()
+  const deleteOrphaned = useDeleteOrphanedAnnotations()
 
   const [error, setError] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
-  const [runningJobId, setRunningJobId] = useState<string | null>(null)
-  const [showOrphanPanel, setShowOrphanPanel] = useState(false)
+  const [runningKey, setRunningKey] = useState<string | null>(null)
   const [cleaningType, setCleaningType] = useState<string | null>(null)
-  const [editingSchedule, setEditingSchedule] = useState<string | null>(null)
-  const [scheduleInput, setScheduleInput] = useState('')
-  const [autoShowSwipe, setAutoShowSwipe] = useState(() => {
-    try { return localStorage.getItem('userloop-auto-show') === 'true' } catch { return false }
-  })
 
-  useEffect(() => {
-    try { localStorage.setItem('userloop-auto-show', String(autoShowSwipe)) } catch {}
-  }, [autoShowSwipe])
+  const loading = statusLoading || cronLoading
+  const counts = (status?.annotation_counts || {}) as Record<string, AnnotationTypeCounts>
 
-  const toggleJob = useToggleCronJob()
-  const updateSchedule = useUpdateCronSchedule()
-  const runJob = useRunCronJob()
-  const processAnnotations = useProcessAnnotations()
-  const deleteOrphaned = useDeleteOrphanedAnnotations()
-  const retryFailed = useRetryFailedAnnotations()
-  const deleteFailed = useDeleteFailedAnnotations()
+  const cronFor = (jobId: string | null) => (jobId ? cronJobs.find((j: any) => j.job_id === jobId) : undefined)
 
-  const loadAll = () => {
-    refetchStatus()
-    refetchCron()
-  }
-
-  const displayError = queryError || error
-
-  const handleProcessAnnotations = async () => {
+  const handleRun = async (t: ModelTarget) => {
+    if (!t.cronJobId) return
+    setError(null)
+    setSuccessMessage(null)
+    setRunningKey(t.key)
     try {
-      setError(null)
-      setSuccessMessage(null)
-      const data = await processAnnotations.mutateAsync('diarization')
-      const totalProcessed = data.total_processed ?? 0
-      const failedCount = data.failed_count ?? 0
-
-      if (totalProcessed === 0 && failedCount === 0) {
-        setError(data.message || 'No annotations ready for training')
-      } else if (totalProcessed === 0 && failedCount > 0) {
-        const errorDetail = data.errors?.length ? `: ${data.errors.join(', ')}` : ''
-        setError(`All ${failedCount} annotations failed to process${errorDetail}. See "Failed" below to retry or discard them.`)
-      } else if (failedCount > 0) {
-        // Partial failure — surface it as an error (not a green success) so the
-        // user knows some annotations are stuck and can act on them below.
-        setError(`Processed ${totalProcessed} annotations, but ${failedCount} failed. See "Failed" below to retry or discard them.`)
-      } else {
-        setSuccessMessage(`Successfully processed ${totalProcessed} annotations for training`)
-      }
+      const data = await runJob.mutateAsync(t.cronJobId)
+      if (data.error) setError(`${t.label}: ${data.error}`)
+      else if (data.processed === 0 && data.message) setError(`${t.label}: ${data.message}`)
+      else setSuccessMessage(`${t.label}: ${data.processed ?? 0} processed`)
+      refetchStatus(); refetchCron()
     } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Failed to process annotations')
+      setError(err.response?.data?.detail || err.message || 'Run failed')
+    } finally {
+      setRunningKey(null)
     }
   }
 
   const handleRetryFailed = async () => {
+    setError(null); setSuccessMessage(null)
     try {
-      setError(null)
-      setSuccessMessage(null)
       const data = await retryFailed.mutateAsync('diarization')
-      setSuccessMessage(`Reset ${data.reset_count ?? 0} failed annotations — they will be retried on the next training run`)
+      setSuccessMessage(`Reset ${data.reset_count ?? 0} failed annotations — retried on the next run`)
     } catch (err: any) {
       setError(err.response?.data?.detail || err.message || 'Failed to reset annotations')
     }
   }
 
   const handleDiscardFailed = async () => {
-    if (!window.confirm('Discard all failed annotations? This permanently deletes annotations that keep failing to train. This cannot be undone.')) {
-      return
-    }
+    if (!window.confirm('Discard all failed annotations? This permanently deletes annotations that keep failing to train.')) return
+    setError(null); setSuccessMessage(null)
     try {
-      setError(null)
-      setSuccessMessage(null)
       const data = await deleteFailed.mutateAsync('diarization')
       setSuccessMessage(`Discarded ${data.deleted_count ?? 0} failed annotations`)
     } catch (err: any) {
@@ -159,83 +138,15 @@ export default function Finetuning() {
   }
 
   const handleCleanOrphaned = async (annotationType: string) => {
+    setCleaningType(annotationType)
+    setError(null); setSuccessMessage(null)
     try {
-      setCleaningType(annotationType)
-      setError(null)
-      setSuccessMessage(null)
       const data = await deleteOrphaned.mutateAsync(annotationType)
-      if (data.deleted_count > 0) {
-        setSuccessMessage(`Cleaned up ${data.deleted_count} orphaned ${annotationType} annotations`)
-      } else {
-        setSuccessMessage('No orphaned annotations found')
-      }
-      setShowOrphanPanel(false)
+      setSuccessMessage(data.deleted_count > 0 ? `Cleaned ${data.deleted_count} orphaned ${annotationType} annotations` : 'No orphaned annotations found')
     } catch (err: any) {
       setError(err.response?.data?.detail || err.message || 'Failed to clean orphaned annotations')
     } finally {
       setCleaningType(null)
-    }
-  }
-
-  const handleReattach = async () => {
-    try {
-      await finetuningApi.reattachOrphanedAnnotations()
-    } catch (err: any) {
-      const detail = err.response?.data?.detail || 'Reattach functionality coming soon'
-      setSuccessMessage(detail)
-    }
-  }
-
-  const handleToggleJob = async (jobId: string, currentEnabled: boolean) => {
-    try {
-      setError(null)
-      await toggleJob.mutateAsync({ jobId, enabled: !currentEnabled })
-    } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Failed to update job')
-    }
-  }
-
-  const handleRunNow = async (jobId: string) => {
-    try {
-      setRunningJobId(jobId)
-      setError(null)
-      setSuccessMessage(null)
-      const data = await runJob.mutateAsync(jobId)
-      const jobName = JOB_DISPLAY_NAMES[jobId] || jobId
-
-      if (data.error) {
-        setError(`Job '${jobName}' failed: ${data.error}`)
-      } else if (data.processed === 0 && data.message) {
-        setError(`${jobName}: ${data.message}`)
-      } else if (data.processed !== undefined) {
-        const parts: string[] = []
-        if (data.enrolled) parts.push(`${data.enrolled} new speakers enrolled`)
-        if (data.appended) parts.push(`${data.appended} speakers updated`)
-        if (data.failed) parts.push(`${data.failed} failed`)
-        const detail = parts.length ? ` (${parts.join(', ')})` : ''
-        setSuccessMessage(`${jobName}: ${data.processed} annotations processed${detail}`)
-      } else {
-        setSuccessMessage(`Job '${jobName}' completed successfully`)
-      }
-    } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Failed to run job')
-    } finally {
-      setRunningJobId(null)
-    }
-  }
-
-  const handleEditSchedule = (jobId: string, currentSchedule: string) => {
-    setEditingSchedule(jobId)
-    setScheduleInput(currentSchedule)
-  }
-
-  const handleSaveSchedule = async (jobId: string) => {
-    try {
-      setError(null)
-      await updateSchedule.mutateAsync({ jobId, schedule: scheduleInput })
-      setEditingSchedule(null)
-    } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Invalid cron expression')
     }
   }
 
@@ -248,335 +159,151 @@ export default function Finetuning() {
     )
   }
 
+  const totalOrphaned = Object.values(counts).reduce((s, c) => s + (c.orphaned || 0), 0)
+  const failedCount = status?.failed_annotation_count || 0
+  const speakerHealthUrl = externalServices?.services
+    ?.find(service => service.name === 'speaker-recognition')
+    ?.ui_url?.replace(/\/$/, '')
+
   return (
     <div className="max-w-4xl">
       {/* Header */}
-      <div className="flex justify-between items-center mb-6">
+      <div className="flex justify-between items-start mb-6">
         <div className="flex items-center space-x-2">
           <Zap className="h-6 w-6 text-blue-600" />
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Fine-tuning & Jobs</h1>
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Training</h1>
+            <p className="text-sm text-gray-500 dark:text-gray-400">Teach the models from what you've corrected. Schedules live in Settings → Automation.</p>
+          </div>
         </div>
-        <button
-          onClick={loadAll}
-          className="flex items-center space-x-2 px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
-        >
-          <RefreshCw className="h-4 w-4" />
-          <span>Refresh</span>
-        </button>
+        <Button variant="secondary" size="md" onClick={() => { refetchStatus(); refetchCron() }} icon={<RefreshCw className="h-4 w-4" />}>Refresh</Button>
       </div>
 
-      {/* Error/Success Messages */}
-      {displayError && (
-        <div className="mb-4 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg flex items-start space-x-2">
-          <AlertCircle className="h-5 w-5 text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5" />
-          <span className="text-red-700 dark:text-red-300">{displayError}</span>
-        </div>
+      {error && (
+        <Alert tone="danger" className="mb-4" icon={<AlertTriangle className="h-5 w-5 flex-shrink-0" />}>{error}</Alert>
       )}
-
       {successMessage && (
-        <div className="mb-4 p-4 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 rounded-lg flex items-start space-x-2">
-          <CheckCircle className="h-5 w-5 text-green-600 dark:text-green-400 flex-shrink-0 mt-0.5" />
-          <span className="text-green-700 dark:text-green-300">{successMessage}</span>
-        </div>
+        <Alert tone="success" className="mb-4" icon={<CheckCircle2 className="h-5 w-5 flex-shrink-0" />}>{successMessage}</Alert>
       )}
 
-      {/* Cron Jobs Section */}
-      <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">Scheduled Jobs</h2>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-        {cronJobs.map((job) => (
-          <div
-            key={job.job_id}
-            className="bg-white dark:bg-gray-800 rounded-lg shadow p-5 border border-gray-200 dark:border-gray-700"
-          >
-            {/* Job Header */}
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-                {JOB_DISPLAY_NAMES[job.job_id] || job.job_id}
-              </h3>
-              <button
-                onClick={() => handleToggleJob(job.job_id, job.enabled)}
-                title={job.enabled ? 'Disable' : 'Enable'}
-              >
-                {job.enabled ? (
-                  <ToggleRight className="h-6 w-6 text-green-500" />
-                ) : (
-                  <ToggleLeft className="h-6 w-6 text-gray-400" />
-                )}
-              </button>
-            </div>
-
-            {/* Description */}
-            <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">{job.description}</p>
-
-            {/* Schedule */}
-            <div className="flex items-center space-x-2 mb-2">
-              <Clock className="h-4 w-4 text-gray-400 flex-shrink-0" />
-              {editingSchedule === job.job_id ? (
-                <div className="flex items-center space-x-1 flex-1">
-                  <input
-                    type="text"
-                    value={scheduleInput}
-                    onChange={(e) => setScheduleInput(e.target.value)}
-                    className="flex-1 text-sm font-mono px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleSaveSchedule(job.job_id)
-                      if (e.key === 'Escape') setEditingSchedule(null)
-                    }}
-                    autoFocus
-                  />
-                  <button onClick={() => handleSaveSchedule(job.job_id)}>
-                    <Check className="h-4 w-4 text-green-500" />
-                  </button>
-                  <button onClick={() => setEditingSchedule(null)}>
-                    <X className="h-4 w-4 text-gray-400" />
-                  </button>
+      {/* Model cards */}
+      <div className="space-y-4">
+        {MODEL_TARGETS.map((t) => {
+          const breakdown = t.readyTypes.map((ty) => ({ ty, count: counts[ty]?.applied || 0 }))
+          const ready = breakdown.reduce((s, b) => s + b.count, 0)
+          const trained = t.readyTypes.reduce((s, ty) => s + (counts[ty]?.trained || 0), 0)
+          const cron = cronFor(t.cronJobId)
+          const Icon = t.icon
+          const running = runningKey === t.key || cron?.running
+          return (
+            <div key={t.key} className="bg-white dark:bg-gray-800 rounded-xl shadow p-6 border border-gray-200 dark:border-gray-700">
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex items-start gap-3 min-w-0">
+                  <div className="p-2.5 rounded-lg bg-blue-50 dark:bg-blue-900/30"><Icon className="h-6 w-6 text-blue-600 dark:text-blue-400" /></div>
+                  <div className="min-w-0">
+                    <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{t.label}</h3>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">{t.blurb}</p>
+                    <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
+                      {breakdown.map((b) => (
+                        <span key={b.ty} className="text-xs text-gray-600 dark:text-gray-300">
+                          <span className={`font-semibold ${b.count ? 'text-gray-900 dark:text-gray-100' : 'text-gray-400'}`}>{b.count}</span> {TYPE_LABEL[b.ty] || b.ty}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              ) : (
-                <>
-                  <span className="text-sm text-gray-700 dark:text-gray-300">
-                    {humanCron(job.schedule)}
-                  </span>
-                  <span className="text-xs font-mono text-gray-400">({job.schedule})</span>
-                  <button onClick={() => handleEditSchedule(job.job_id, job.schedule)}>
-                    <Edit3 className="h-3.5 w-3.5 text-gray-400 hover:text-gray-600" />
-                  </button>
-                </>
-              )}
-            </div>
-
-            {/* Last / Next Run */}
-            <div className="text-xs text-gray-500 dark:text-gray-400 space-y-1 mb-3">
-              <div>Last run: {formatTimestamp(job.last_run)}</div>
-              <div>Next run: {formatTimestamp(job.next_run)}</div>
-            </div>
-
-            {/* Error */}
-            {job.last_error && (
-              <div className="text-xs text-red-500 mb-3 truncate" title={job.last_error}>
-                Error: {job.last_error}
+                <div className="text-right flex-shrink-0">
+                  <div className="text-3xl font-bold text-gray-900 dark:text-gray-100">{ready}</div>
+                  <div className="text-[11px] uppercase tracking-wide text-gray-400">ready to teach</div>
+                </div>
               </div>
-            )}
 
-            {/* Action Buttons */}
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={() => handleRunNow(job.job_id)}
-                disabled={runningJobId === job.job_id || job.running}
-                className="flex items-center space-x-2 px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-              >
-                {runningJobId === job.job_id || job.running ? (
-                  <>
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                    <span>Running...</span>
-                  </>
-                ) : (
-                  <>
-                    <Play className="h-4 w-4" />
-                    <span>Run Now</span>
-                  </>
-                )}
-              </button>
-
-              {/* Review Suggestions button + auto-show toggle for annotation_suggestions job */}
-              {job.job_id === 'annotation_suggestions' && (
-                <>
-                  <button
-                    onClick={() => window.dispatchEvent(new Event('open-swipe-ui'))}
-                    className="flex items-center space-x-2 px-4 py-2 bg-purple-600 text-white text-sm rounded-lg hover:bg-purple-700 transition-colors"
-                  >
-                    <Eye className="h-4 w-4" />
-                    <span>Review</span>
-                  </button>
-                  <button
-                    onClick={() => setAutoShowSwipe(!autoShowSwipe)}
-                    className="flex items-center space-x-1.5 px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
-                    title={autoShowSwipe ? 'Auto-show enabled: modal opens automatically when suggestions exist' : 'Auto-show disabled: use Review button to open'}
-                  >
-                    {autoShowSwipe ? (
-                      <ToggleRight className="h-5 w-5 text-purple-500" />
-                    ) : (
-                      <ToggleLeft className="h-5 w-5 text-gray-400" />
-                    )}
-                    <span className="text-xs">Auto</span>
-                  </button>
-                </>
+              {t.key === 'speaker' && (
+                <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-gray-600 dark:text-gray-300">
+                  <span>Enrollment changes identification immediately; review its evidence after adding or relabeling clips.</span>
+                  {speakerHealthUrl && (
+                    <a
+                      href={`${speakerHealthUrl}/enrollment-health`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 font-medium text-blue-700 dark:text-blue-300 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded-sm"
+                    >
+                      Check enrollment health <ArrowUpRight className="h-3.5 w-3.5" />
+                    </a>
+                  )}
+                </div>
               )}
+
+              <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between">
+                <div className="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400">
+                  {cron?.enabled
+                    ? <span className="inline-flex items-center gap-1 text-green-700 dark:text-green-400"><CheckCircle2 className="h-3.5 w-3.5" /> auto-on</span>
+                    : <span className="inline-flex items-center gap-1"><CircleDashed className="h-3.5 w-3.5" /> {t.cronJobId ? 'manual' : 'instant'}</span>}
+                  {t.cronJobId && <span className="inline-flex items-center gap-1"><Clock className="h-3.5 w-3.5" /> {formatTimestamp(cron?.last_run)}</span>}
+                  <span>{trained} taught</span>
+                  {cron?.last_error && <span className="text-red-500 truncate max-w-[180px]" title={cron.last_error}>error</span>}
+                </div>
+                {t.cronJobId ? (
+                  <Button
+                    variant="primary"
+                    size="md"
+                    onClick={() => handleRun(t)}
+                    disabled={!!running || ready === 0}
+                    icon={running ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  >
+                    {running ? 'Running…' : t.runVerb}
+                  </Button>
+                ) : (
+                  <Link
+                    to="/data-audit"
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 text-sm font-medium hover:bg-blue-50 dark:hover:bg-blue-900/20"
+                  >
+                    Review &amp; enroll in Data Audit <ArrowUpRight className="h-4 w-4" />
+                  </Link>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
 
-      {/* Annotation Statistics — All Types */}
-      {(() => {
-        const totalOrphaned = Object.values((status?.annotation_counts || {}) as Record<string, AnnotationTypeCounts>)
-          .reduce((sum, c) => sum + (c.orphaned || 0), 0)
-
-        return (
-          <div className="mb-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Annotations</h2>
-              {totalOrphaned > 0 && (
-                <button
-                  onClick={() => setShowOrphanPanel(!showOrphanPanel)}
-                  className="flex items-center space-x-1.5 px-3 py-1.5 bg-amber-50 dark:bg-amber-900/30 border border-amber-300 dark:border-amber-600 text-amber-700 dark:text-amber-400 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors text-sm"
-                >
-                  <AlertTriangle className="h-4 w-4" />
-                  <span>{totalOrphaned} orphaned</span>
-                </button>
-              )}
-            </div>
-
-            {/* Orphan cleanup panel */}
-            {showOrphanPanel && totalOrphaned > 0 && (
-              <div className="mt-3 p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg">
-                <p className="text-sm text-amber-800 dark:text-amber-300 mb-3">
-                  These annotations reference conversations that no longer exist.
-                </p>
-                <div className="space-y-2">
-                  {Object.entries((status?.annotation_counts || {}) as Record<string, AnnotationTypeCounts>).map(([key, counts]) => {
-                    const orphaned = counts.orphaned || 0
-                    if (orphaned === 0) return null
-                    const { label } = getAnnotationDisplay(key)
-                    return (
-                      <div key={key} className="flex items-center justify-between">
-                        <span className="text-sm text-gray-700 dark:text-gray-300">
-                          {label}: {orphaned} orphaned
-                        </span>
-                        <div className="flex space-x-2">
-                          <button
-                            onClick={() => handleCleanOrphaned(key)}
-                            disabled={cleaningType === key}
-                            className="px-3 py-1 bg-amber-600 text-white text-xs rounded hover:bg-amber-700 disabled:bg-gray-300 transition-colors"
-                          >
-                            {cleaningType === key ? 'Cleaning...' : 'Clean up'}
-                          </button>
-                          <button
-                            onClick={handleReattach}
-                            className="px-3 py-1 bg-gray-200 dark:bg-gray-600 text-gray-500 dark:text-gray-400 text-xs rounded cursor-not-allowed"
-                            title="Coming soon"
-                          >
-                            Reattach
-                          </button>
-                        </div>
-                      </div>
-                    )
-                  })}
+      {/* Maintenance — failed/orphaned annotation recovery (collapsed) */}
+      {(failedCount > 0 || totalOrphaned > 0) && (
+        <details className="mt-6 group">
+          <summary className="cursor-pointer text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 select-none">
+            Maintenance — {failedCount > 0 && `${failedCount} failed`}{failedCount > 0 && totalOrphaned > 0 && ', '}{totalOrphaned > 0 && `${totalOrphaned} orphaned`} annotation{failedCount + totalOrphaned === 1 ? '' : 's'}
+          </summary>
+          <div className="mt-3 space-y-4">
+            {failedCount > 0 && (
+              <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-semibold text-red-700 dark:text-red-300">{failedCount} annotation{failedCount === 1 ? '' : 's'} failed to train</span>
+                  <div className="flex space-x-2">
+                    <Button variant="primary" onClick={handleRetryFailed} disabled={retryFailed.isPending || deleteFailed.isPending}>{retryFailed.isPending ? 'Retrying…' : 'Retry'}</Button>
+                    <Button variant="danger" onClick={handleDiscardFailed} disabled={retryFailed.isPending || deleteFailed.isPending}>{deleteFailed.isPending ? 'Discarding…' : 'Discard'}</Button>
+                  </div>
                 </div>
+                {status?.failed_annotation_errors?.length > 0 && (
+                  <ul className="text-xs text-red-600 dark:text-red-400 list-disc list-inside space-y-0.5">
+                    {status.failed_annotation_errors.map((e: string, i: number) => <li key={i} className="truncate" title={e}>{e}</li>)}
+                  </ul>
+                )}
+              </div>
+            )}
+            {totalOrphaned > 0 && (
+              <div className="p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg space-y-2">
+                <p className="text-sm text-amber-800 dark:text-amber-300">These annotations reference conversations that no longer exist.</p>
+                {Object.entries(counts).map(([key, c]) => c.orphaned > 0 && (
+                  <div key={key} className="flex items-center justify-between">
+                    <span className="text-sm text-gray-700 dark:text-gray-300">{key}: {c.orphaned} orphaned</span>
+                    <button onClick={() => handleCleanOrphaned(key)} disabled={cleaningType === key} className="px-3 py-1 bg-amber-600 text-white text-xs rounded hover:bg-amber-700 disabled:bg-gray-300">{cleaningType === key ? 'Cleaning…' : 'Clean up'}</button>
+                  </div>
+                ))}
               </div>
             )}
           </div>
-        )
-      })()}
-      {status?.annotation_counts && (
-        <div className="space-y-6 mb-6">
-          {Object.entries(status.annotation_counts! as Record<string, AnnotationTypeCounts>).map(([key, counts]) => {
-            const { label, description } = getAnnotationDisplay(key)
-            return (
-              <div key={key}>
-                <div className="flex items-center space-x-2 mb-2">
-                  <h3 className="text-base font-medium text-gray-900 dark:text-gray-100">{label}</h3>
-                  <span className="text-xs text-gray-500 dark:text-gray-400">{description}</span>
-                </div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <StatCard label="Total" value={counts.total} />
-                  <StatCard label="Pending" value={counts.pending} subtitle="Not yet applied" />
-                  <StatCard label="Applied" value={counts.applied} color="blue" subtitle="Applied, not trained" />
-                  <StatCard label="Trained" value={counts.trained} color="green" subtitle="Sent to model" />
-                </div>
-              </div>
-            )
-          })}
-        </div>
+        </details>
       )}
-
-      {/* Fallback if annotation_counts not available */}
-      {!status?.annotation_counts && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-          <StatCard label="Pending" value={status?.pending_annotation_count || 0} subtitle="Not yet applied" />
-          <StatCard label="Ready for Training" value={status?.applied_annotation_count || 0} color="blue" subtitle="Applied but not trained" />
-          <StatCard label="Trained" value={status?.trained_annotation_count || 0} color="green" subtitle="Sent to model" />
-        </div>
-      )}
-
-      {/* Failed (stuck) annotations panel */}
-      {(status?.failed_annotation_count || 0) > 0 && (
-        <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center space-x-2">
-              <AlertTriangle className="h-5 w-5 text-red-600 dark:text-red-400" />
-              <h3 className="text-base font-semibold text-red-700 dark:text-red-300">
-                {status?.failed_annotation_count} annotation{(status?.failed_annotation_count || 0) === 1 ? '' : 's'} failed to train
-              </h3>
-            </div>
-            <div className="flex space-x-2">
-              <button
-                onClick={handleRetryFailed}
-                disabled={retryFailed.isPending || deleteFailed.isPending}
-                className="px-3 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-              >
-                {retryFailed.isPending ? 'Retrying...' : 'Retry'}
-              </button>
-              <button
-                onClick={handleDiscardFailed}
-                disabled={retryFailed.isPending || deleteFailed.isPending}
-                className="px-3 py-1.5 bg-red-600 text-white text-sm rounded-lg hover:bg-red-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-              >
-                {deleteFailed.isPending ? 'Discarding...' : 'Discard'}
-              </button>
-            </div>
-          </div>
-          <p className="text-sm text-red-700 dark:text-red-300 mb-2">
-            These annotations keep failing (corrupt segment times, missing audio, or speaker-service errors).
-            <strong> Retry</strong> re-attempts them on the next training run (fix the root cause first, e.g. reprocess the conversation);
-            <strong> Discard</strong> permanently deletes them.
-          </p>
-          {status?.failed_annotation_errors && status.failed_annotation_errors.length > 0 && (
-            <ul className="text-xs text-red-600 dark:text-red-400 list-disc list-inside space-y-0.5">
-              {status.failed_annotation_errors.map((e: string, i: number) => (
-                <li key={i} className="truncate" title={e}>{e}</li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-
-      {/* Curated enrollment — the safe, quality-gated path (primary) */}
-      <EnrollmentCandidates />
-
-      {/* Legacy blast trigger — sends EVERY applied annotation with no gate. Kept
-          behind a disclosure because it mismatched audio↔label and enrolled
-          cross-talk/short scraps; use Curated Enrollment above instead. */}
-      <details className="mt-6 group">
-        <summary className="cursor-pointer text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 select-none">
-          Advanced: legacy bulk training (sends all applied annotations, no quality gate)
-        </summary>
-        <div className="mt-3 bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-          <div className="flex items-start space-x-2 mb-4">
-            <AlertTriangle className="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" />
-            <p className="text-sm text-gray-600 dark:text-gray-400">
-              Processes <strong>every</strong> applied diarization annotation and enrolls it with no duration or
-              cross-talk gating — this can contaminate voiceprints with overlap/short audio. Prefer Curated Enrollment.
-            </p>
-          </div>
-          <button
-            onClick={handleProcessAnnotations}
-            disabled={processAnnotations.isPending || (status?.applied_annotation_count || 0) === 0}
-            className="flex items-center space-x-2 px-6 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
-          >
-            {processAnnotations.isPending ? (
-              <>
-                <RefreshCw className="h-5 w-5 animate-spin" />
-                <span>Processing...</span>
-              </>
-            ) : (
-              <>
-                <Zap className="h-5 w-5" />
-                <span>Process {status?.applied_annotation_count || 0} Diarization Annotations</span>
-              </>
-            )}
-          </button>
-        </div>
-      </details>
     </div>
   )
 }

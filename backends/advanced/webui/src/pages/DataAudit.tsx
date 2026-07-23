@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Sparkles, Archive as ArchiveIcon, AlertTriangle, Mic, ArrowRight } from 'lucide-react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Sparkles, Archive as ArchiveIcon, AlertTriangle, Mic, Radio, ArrowRight } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
 import { dataAuditApi, AuditConversation } from '../services/api'
 import { useJobPolling } from '../hooks/useJobPolling'
 import AuditFilterBar from '../components/dataAudit/AuditFilterBar'
@@ -13,9 +13,18 @@ import AuditToolbar from '../components/dataAudit/AuditToolbar'
 import AuditTable from '../components/dataAudit/AuditTable'
 import SpeakerConfidencePanel from '../components/dataAudit/SpeakerConfidencePanel'
 import DriftPanel from '../components/dataAudit/DriftPanel'
+import BackgroundReviewPanel from '../components/dataAudit/BackgroundReviewPanel'
 import SplitConversationModal from '../components/dataAudit/SplitConversationModal'
 import MergePreviewModal from '../components/dataAudit/MergePreviewModal'
 import ExportModal from '../components/dataAudit/ExportModal'
+import GuidedEnrollment from '../components/dataAudit/GuidedEnrollment'
+import EnrollmentCandidates from '../components/finetuning/EnrollmentCandidates'
+import { Alert, Button, Label, Modal, Select, Tabs } from '../components/ui'
+
+// Data Audit is the single home for curation. A task hub picks the active flow:
+// audit conversations, enroll speakers (queue + guided enhance), or classify
+// background/role. Each flow reuses its existing panel(s).
+type CurationView = 'conversations' | 'enroll' | 'background'
 
 type ArchiveReason = 'near_silent' | 'bad_speaker' | 'manual_cleanup'
 
@@ -80,6 +89,8 @@ export default function DataAudit() {
   const [archivedOnly, setArchivedOnly] = useState(() =>
     loadArchivedView(initialDatasetId)
   )
+  // Which curation flow is active (task hub). Conversation audit is the default.
+  const [curationView, setCurationView] = useState<CurationView>('conversations')
 
   // Data
   const [speakers, setSpeakers] = useState<string[]>([])
@@ -372,140 +383,148 @@ export default function DataAudit() {
         <div className="flex-1 min-w-[240px]">
           <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Data Audit</h2>
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            Inspect recordings: find speech-free or mis-attributed audio, split long recordings at
-            silence gaps, merge adjacent conversations, and archive audio.
+            Decide what the audio is — audit conversations, enroll speakers, and classify
+            background &amp; role. One home for all curation.
           </p>
         </div>
-        {!archivedOnly && (
-          <Link
-            to="/speaker-enrollment"
-            className="inline-flex items-center gap-2 px-3 py-2 rounded border border-gray-300 dark:border-gray-600 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700"
-          >
-            <Mic className="h-4 w-4" />
-            Speaker enrollment
-            <ArrowRight className="h-4 w-4" />
-          </Link>
-        )}
       </div>
 
-      {/* View toggle */}
-      <div className="flex items-center space-x-1 border-b border-gray-200 dark:border-gray-700">
-        <button
-          onClick={() => setArchivedOnly(false)}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            !archivedOnly
-              ? 'border-blue-600 text-blue-600 dark:text-blue-400'
-              : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
-          }`}
-        >
-          Conversations
-        </button>
-        <button
-          onClick={() => setArchivedOnly(true)}
-          className={`flex items-center space-x-1 px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-            archivedOnly
-              ? 'border-blue-600 text-blue-600 dark:text-blue-400'
-              : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
-          }`}
-        >
-          <ArchiveIcon className="h-4 w-4" />
-          <span>Archived stubs</span>
-        </button>
+      {/* Task hub — pick a curation flow */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {([
+          { key: 'conversations', icon: Sparkles, title: 'Audit conversations', metric: total ? `${total}` : '', blurb: 'Find speech-free or mis-attributed audio; split, merge, archive.' },
+          { key: 'enroll', icon: Mic, title: 'Enroll speakers', metric: triagePending.pending_count ? `${triagePending.pending_count}` : '', blurb: 'Review the relabel queue and strengthen voiceprints — deliberate, gated.' },
+          { key: 'background', icon: Radio, title: 'Background & role', metric: '', blurb: 'Content vs real people vs noise. Feeds background suppression.' },
+        ] as { key: CurationView; icon: any; title: string; metric: string; blurb: string }[]).map((t) => {
+          const active = curationView === t.key
+          const Icon = t.icon
+          return (
+            <button
+              key={t.key}
+              onClick={() => setCurationView(t.key)}
+              className={`text-left rounded-xl border p-4 transition-colors ${active ? 'border-blue-400 bg-blue-50/60 dark:bg-blue-900/15 dark:border-blue-700' : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 hover:border-blue-300'}`}
+            >
+              <div className="flex items-center justify-between">
+                <Icon className={`h-5 w-5 ${active ? 'text-blue-600' : 'text-gray-400'}`} />
+                {t.metric && <span className="text-lg font-bold text-blue-600">{t.metric}</span>}
+              </div>
+              <div className="mt-2 font-semibold text-gray-900 dark:text-gray-100">{t.title}</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{t.blurb}</div>
+              {active && <div className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-blue-600">Active <ArrowRight className="h-3.5 w-3.5" /></div>}
+            </button>
+          )
+        })}
       </div>
 
-      {/* Filters (hidden in archived view) */}
-      {!archivedOnly && (
-        <AuditFilterBar
-          filters={filters}
-          onChangeFilter={(key, value) => setFilters((prev) => ({ ...prev, [key]: value }))}
-          onResetFilter={(key) => {
-            // Compute next state synchronously so the refetch can't see a
-            // stale filters snapshot.
-            const next = {
-              ...filters,
-              [key]: AUDIT_FILTERS.find((d) => d.key === key)?.defaultValue,
-            }
-            setFilters(next)
-            loadConversations(next)
-          }}
-          onToggleFilter={(key, value) => {
-            // Set + refetch synchronously so the single click takes effect now.
-            const next = { ...filters, [key]: value }
-            setFilters(next)
-            loadConversations(next)
-          }}
-          onApply={() => loadConversations()}
-          ctx={{ speakers, datasets }}
-          loading={loading}
-        />
-      )}
-
-      {/* Messages */}
-      {message && (
-        <div className="text-sm px-4 py-2 rounded-lg bg-blue-50 dark:bg-blue-900/30 text-blue-800 dark:text-blue-200">
-          {message}
-        </div>
-      )}
+      {/* Messages (shared across flows) */}
+      {message && <Alert tone="info">{message}</Alert>}
       {error && (
-        <div className="flex items-center space-x-2 text-sm px-4 py-2 rounded-lg bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-200">
-          <AlertTriangle className="h-4 w-4" />
-          <span>{error}</span>
+        <Alert tone="danger" icon={<AlertTriangle className="h-4 w-4" />}>
+          {error}
+        </Alert>
+      )}
+
+      {/* ── Enroll speakers flow: queue (deliberate, gated) + guided enhance ── */}
+      {curationView === 'enroll' && (
+        <div className="space-y-6">
+          <SpeakerConfidencePanel />
+          <EnrollmentCandidates />
+          <GuidedEnrollment />
+          <DriftPanel />
         </div>
       )}
-      {scanCapped && !archivedOnly && (
-        <div className="flex items-center space-x-2 text-sm px-4 py-2 rounded-lg bg-yellow-50 dark:bg-yellow-900/30 text-yellow-800 dark:text-yellow-200">
-          <AlertTriangle className="h-4 w-4" />
-          <span>Showing a capped working set — narrow filters or archive in batches to see the rest.</span>
-        </div>
-      )}
 
-      {/* Speaker confidence overview (per-speaker baselines + noise magnets) */}
-      {!archivedOnly && <SpeakerConfidencePanel />}
+      {/* ── Background & role flow ─────────────────────────────────────────── */}
+      {curationView === 'background' && <BackgroundReviewPanel />}
 
-      {/* Guided enrollment: confirm high-information clips to improve a voiceprint */}
+      {/* ── Conversation audit flow ────────────────────────────────────────── */}
+      {curationView === 'conversations' && (
+        <>
+          {/* View toggle */}
+          <Tabs
+            variant="underline"
+            value={archivedOnly ? 'archived' : 'conversations'}
+            onChange={(v) => setArchivedOnly(v === 'archived')}
+            tabs={[
+              { value: 'conversations', label: 'Conversations' },
+              { value: 'archived', label: 'Archived stubs', icon: <ArchiveIcon className="h-4 w-4" /> },
+            ]}
+          />
 
-      {/* Drift: conversations whose speaker labels would change under the current gallery */}
-      {!archivedOnly && <DriftPanel />}
+          {/* Filters (hidden in archived view) */}
+          {!archivedOnly && (
+            <AuditFilterBar
+              filters={filters}
+              onChangeFilter={(key, value) => setFilters((prev) => ({ ...prev, [key]: value }))}
+              onResetFilter={(key) => {
+                // Compute next state synchronously so the refetch can't see a
+                // stale filters snapshot.
+                const next = {
+                  ...filters,
+                  [key]: AUDIT_FILTERS.find((d) => d.key === key)?.defaultValue,
+                }
+                setFilters(next)
+                loadConversations(next)
+              }}
+              onToggleFilter={(key, value) => {
+                // Set + refetch synchronously so the single click takes effect now.
+                const next = { ...filters, [key]: value }
+                setFilters(next)
+                loadConversations(next)
+              }}
+              onApply={() => loadConversations()}
+              ctx={{ speakers, datasets }}
+              loading={loading}
+            />
+          )}
 
-      {/* Toolbar */}
-      {!archivedOnly && (
-        <AuditToolbar
-          total={total}
-          selectedCount={selected.size}
-          mergeEligible={mergeEligible}
-          unanalyzedCount={unanalyzedCount}
-          analyzing={analyzing}
-          archiving={archiving}
-          triagePendingCount={triagePending.pending_count}
-          triageConversationCount={triagePending.conversation_count}
-          applyingTriage={applyingTriage}
-          onApplyTriage={applyTriage}
-          onAnalyze={runAnalysis}
-          onMerge={() => setMergeTargets(selectedRows)}
-          onArchive={archiveSelected}
-          onExport={() => setExportOpen(true)}
-        />
-      )}
+          {scanCapped && !archivedOnly && (
+            <Alert tone="warning" icon={<AlertTriangle className="h-4 w-4" />}>
+              Showing a capped working set — narrow filters or archive in batches to see the rest.
+            </Alert>
+          )}
 
-      {/* Table */}
-      <AuditTable
-        rows={rows}
-        loading={loading}
-        archivedView={archivedOnly}
-        selected={selected}
-        onToggleSelect={toggleSelect}
-        onSelectMany={selectMany}
-        onToggleSelectAll={toggleSelectAll}
-        onSplit={(row) => setSplitTarget(row)}
-        onTriageChanged={refreshTriagePending}
-        marginalThreshold={marginalThreshold}
-      />
+          {/* Toolbar */}
+          {!archivedOnly && (
+            <AuditToolbar
+              total={total}
+              selectedCount={selected.size}
+              mergeEligible={mergeEligible}
+              unanalyzedCount={unanalyzedCount}
+              analyzing={analyzing}
+              archiving={archiving}
+              triagePendingCount={triagePending.pending_count}
+              triageConversationCount={triagePending.conversation_count}
+              applyingTriage={applyingTriage}
+              onApplyTriage={applyTriage}
+              onAnalyze={runAnalysis}
+              onMerge={() => setMergeTargets(selectedRows)}
+              onArchive={archiveSelected}
+              onExport={() => setExportOpen(true)}
+            />
+          )}
 
-      {!archivedOnly && (
-        <p className="text-xs text-gray-400">
-          Tip: run <strong>Analyze audio</strong> first to populate speech metrics. Conversations
-          showing “—” haven’t been analyzed yet and won’t match a speech-fraction filter.
-        </p>
+          {/* Table */}
+          <AuditTable
+            rows={rows}
+            loading={loading}
+            archivedView={archivedOnly}
+            selected={selected}
+            onToggleSelect={toggleSelect}
+            onSelectMany={selectMany}
+            onToggleSelectAll={toggleSelectAll}
+            onSplit={(row) => setSplitTarget(row)}
+            onTriageChanged={refreshTriagePending}
+            marginalThreshold={marginalThreshold}
+          />
+
+          {!archivedOnly && (
+            <p className="text-xs text-gray-400">
+              Tip: run <strong>Analyze audio</strong> first to populate speech metrics. Conversations
+              showing “—” haven’t been analyzed yet and won’t match a speech-fraction filter.
+            </p>
+          )}
+        </>
       )}
 
       {/* Modals */}
@@ -527,55 +546,43 @@ export default function DataAudit() {
         <ExportModal selected={selectedRows} onClose={() => setExportOpen(false)} />
       )}
       {archiveReason !== null && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-xl bg-white dark:bg-gray-800 shadow-xl p-5 space-y-4">
-            <div className="flex items-start space-x-2">
-              <AlertTriangle className="h-5 w-5 text-red-500 mt-0.5 flex-shrink-0" />
-              <div>
-                <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-                  Permanently delete audio for {selected.size} conversation(s)?
-                </h3>
-                <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                  The audio bytes will be deleted to reclaim storage. A metadata stub
-                  (date, duration, reason) is kept so you know something was recorded.
-                  This cannot be undone.
-                </p>
-              </div>
-            </div>
+        <Modal
+          open
+          onClose={() => setArchiveReason(null)}
+          title={`Permanently delete audio for ${selected.size} conversation(s)?`}
+          icon={<AlertTriangle className="h-5 w-5 text-red-500 flex-shrink-0" />}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setArchiveReason(null)} disabled={archiving}>
+                Cancel
+              </Button>
+              <Button variant="danger" onClick={confirmArchive} disabled={archiving}>
+                Delete audio
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-4">
+            <p className="text-gray-500 dark:text-gray-400">
+              The audio bytes will be deleted to reclaim storage. A metadata stub
+              (date, duration, reason) is kept so you know something was recorded.
+              This cannot be undone.
+            </p>
             <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Reason
-              </label>
-              <select
+              <Label className="mb-1">Reason</Label>
+              <Select
                 value={archiveReason}
                 onChange={(e) => setArchiveReason(e.target.value as ArchiveReason)}
-                className="w-full px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm text-gray-900 dark:text-gray-100"
               >
                 {(Object.keys(REASON_LABELS) as ArchiveReason[]).map((r) => (
                   <option key={r} value={r}>
                     {REASON_LABELS[r]}
                   </option>
                 ))}
-              </select>
-            </div>
-            <div className="flex justify-end space-x-2 pt-1">
-              <button
-                onClick={() => setArchiveReason(null)}
-                disabled={archiving}
-                className="px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmArchive}
-                disabled={archiving}
-                className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Delete audio
-              </button>
+              </Select>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   )

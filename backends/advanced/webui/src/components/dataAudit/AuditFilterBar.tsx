@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Plus, RefreshCw, X } from 'lucide-react'
 import { AUDIT_FILTERS, FilterContext } from './filters'
+import { Button } from '../ui'
 
 interface Props {
   filters: Record<string, unknown>
@@ -171,15 +172,15 @@ export default function AuditFilterBar({
       )}
 
       <div className="flex-1" />
-      <button
+      <Button
+        variant="ghost"
         onClick={onApply}
         disabled={loading}
-        className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 transition-colors"
         title="Refresh results"
+        icon={<RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />}
       >
-        <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-        <span>Refresh</span>
-      </button>
+        Refresh
+      </Button>
     </div>
   )
 }

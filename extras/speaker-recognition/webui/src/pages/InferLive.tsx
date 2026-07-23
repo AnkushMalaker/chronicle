@@ -3,7 +3,7 @@
  * Real-time transcription and speaker identification with dramatically reduced code complexity
  */
 
-import React, { useEffect, useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { Mic, Users, Clock, Volume2 } from 'lucide-react'
 import { useUser } from '../contexts/UserContext'
 import { useDeepgramIntegration } from '../hooks/useDeepgramIntegration'
@@ -104,10 +104,11 @@ export default function InferLive() {
     } catch (error) {
       console.error('Failed to start audio capture:', error)
 
+      const err = error as DOMException
       let errorMessage = 'Failed to access microphone. '
-      if (error.name === 'NotAllowedError') {
+      if (err.name === 'NotAllowedError') {
         errorMessage += 'Please allow microphone access and try again.'
-      } else if (error.name === 'NotFoundError') {
+      } else if (err.name === 'NotFoundError') {
         errorMessage += 'No microphone found. Please check your device.'
       } else {
         errorMessage += 'Please check permissions and try again.'

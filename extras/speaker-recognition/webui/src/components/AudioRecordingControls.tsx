@@ -5,7 +5,7 @@
  */
 
 import React from 'react'
-import { Mic, MicOff, Square, AlertCircle, CheckCircle, Clock } from 'lucide-react'
+import { Mic, MicOff, Square, AlertCircle, CheckCircle } from 'lucide-react'
 import { UseAudioRecordingReturn } from '../hooks/useAudioRecording'
 import { formatDuration } from '../utils/audioUtils'
 
@@ -74,7 +74,7 @@ export const AudioRecordingControls: React.FC<AudioRecordingControlsProps> = ({
     if (!processedAudio?.quality) return null
 
     const { level, snr } = processedAudio.quality
-    const colors = {
+    const colors: Record<string, string> = {
       excellent: 'bg-green-100 text-green-800',
       good: 'bg-blue-100 text-blue-800',
       fair: 'bg-yellow-100 text-yellow-800',

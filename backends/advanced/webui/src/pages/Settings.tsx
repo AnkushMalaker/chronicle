@@ -6,6 +6,8 @@ import { useAuth } from '../contexts/AuthContext'
 import { useDiarizationSettings, useLLMOperations, useMiscSettings, useModels, ModelView, ModelType } from '../hooks/useSystem'
 import ExternalServices from '../components/ExternalServices'
 import AsrContextSettings from '../components/AsrContextSettings'
+import AutomationSettings from '../components/AutomationSettings'
+import { Alert, Button, IconButton, Input, Modal, Select, Textarea } from '../components/ui'
 
 interface DiarizationSettings {
   diarization_source: 'provider' | 'pyannote'
@@ -38,7 +40,6 @@ export default function Settings() {
   const [diarizationLoading, setDiarizationLoading] = useState(false)
 
   const [miscSettings, setMiscSettings] = useState({
-    always_persist_enabled: false,
     per_segment_speaker_id: false,
     streaming_fallback_timeout_seconds: 120,
     always_batch_retranscribe: false,
@@ -166,41 +167,31 @@ export default function Settings() {
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 Your name
               </label>
-              <input
+              <Input
                 type="text"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 placeholder="e.g. Ankush"
-                className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               />
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 Assistant name
               </label>
-              <input
+              <Input
                 type="text"
                 value={assistantName}
                 onChange={(e) => setAssistantName(e.target.value)}
                 placeholder="e.g. Chronicle"
-                className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               />
             </div>
-            <button
-              onClick={saveIdentity}
-              disabled={identityLoading}
-              className="w-full px-3 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
+            <Button variant="primary" size="md" className="w-full" onClick={saveIdentity} disabled={identityLoading}>
               {identityLoading ? 'Saving...' : 'Save Identity'}
-            </button>
+            </Button>
             {identityMessage && (
-              <div className={`p-2 rounded-md text-xs ${
-                identityMessage.includes('Error')
-                  ? 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
-                  : 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
-              }`}>
+              <Alert tone={identityMessage.includes('Error') ? 'danger' : 'success'} className="text-xs">
                 {identityMessage}
-              </div>
+              </Alert>
             )}
           </div>
         </div>
@@ -391,13 +382,15 @@ export default function Settings() {
 
             {/* Save Button */}
             <div className="pt-4 border-t border-gray-200 dark:border-gray-600">
-              <button
+              <Button
+                variant="primary"
+                size="md"
+                className="w-full"
                 onClick={saveDiarizationSettings}
                 disabled={diarizationLoading}
-                className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {diarizationLoading ? 'Saving...' : 'Save Diarization Settings'}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -410,38 +403,6 @@ export default function Settings() {
           </h3>
 
           <div className="space-y-4">
-            {/* Always Persist Audio Toggle */}
-            <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
-              <div className="flex-1">
-                <div className="font-medium text-gray-900 dark:text-gray-100">
-                  Always Persist Audio
-                </div>
-                <div className="text-sm text-gray-600 dark:text-gray-400">
-                  Create conversations for all audio sessions, even when no speech is detected
-                </div>
-                {miscSettings.live_segmentation === 'off' && !miscSettings.always_persist_enabled && (
-                  <div className="mt-2 flex items-start gap-1.5 text-sm font-medium text-red-600 dark:text-red-400">
-                    <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
-                    <span>
-                      Overridden to <strong>on</strong> for this backend: with Live Segmentation set to <strong>Off</strong> there is no live transcript to detect speech on, so audio must always be persisted — otherwise batch transcription at conversation end would have nothing to read. Your saved setting is unchanged and takes effect again if you enable a live transcript mode.
-                    </span>
-                  </div>
-                )}
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer ml-4">
-                <input
-                  type="checkbox"
-                  checked={miscSettings.always_persist_enabled}
-                  onChange={(e) => setMiscSettings(prev => ({
-                    ...prev,
-                    always_persist_enabled: e.target.checked
-                  }))}
-                  className="sr-only peer"
-                />
-                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
-              </label>
-            </div>
-
             {/* Always Batch Re-Transcribe Toggle */}
             <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
               <div className="flex-1">
@@ -554,24 +515,24 @@ export default function Settings() {
 
             {/* Status Message */}
             {miscMessage && (
-              <div className={`p-2 rounded-md text-sm ${
-                miscMessage.includes('Error') || miscMessage.includes('Failed')
-                  ? 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
-                  : 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
-              }`}>
+              <Alert
+                tone={miscMessage.includes('Error') || miscMessage.includes('Failed') ? 'danger' : 'success'}
+              >
                 {miscMessage}
-              </div>
+              </Alert>
             )}
 
             {/* Save Button */}
             <div className="pt-4 border-t border-gray-200 dark:border-gray-600">
-              <button
+              <Button
+                variant="primary"
+                size="md"
+                className="w-full"
                 onClick={saveMiscSettings}
                 disabled={miscLoading}
-                className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {miscLoading ? 'Saving...' : 'Save Processing Settings'}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -589,6 +550,9 @@ export default function Settings() {
 
         {/* Active Models — repoint which registry model each role uses */}
         <ActiveModelsCard isAdmin={isAdmin} />
+
+        {/* Automation & schedules — when background jobs run (run-now lives on Training) */}
+        <AutomationSettings isAdmin={isAdmin} />
 
         {/* ASR recognition hints (keyword boosting vs LLM context prompt) */}
         <div className="lg:col-span-2">
@@ -791,24 +755,19 @@ function LLMOperationsCard({ data, onSaved }: { data: LLMOpsData; onSaved: () =>
 
       {/* Status Message */}
       {message && (
-        <div className={`mt-4 p-2 rounded-md text-sm ${
-          message.includes('Error') || message.includes('Failed')
-            ? 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
-            : 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
-        }`}>
+        <Alert
+          tone={message.includes('Error') || message.includes('Failed') ? 'danger' : 'success'}
+          className="mt-4"
+        >
           {message}
-        </div>
+        </Alert>
       )}
 
       {/* Save Button */}
       <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-600">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
+        <Button variant="primary" size="md" className="w-full" onClick={handleSave} disabled={saving}>
           {saving ? 'Saving...' : 'Save AI Model Settings'}
-        </button>
+        </Button>
       </div>
     </div>
   )
@@ -1051,13 +1010,9 @@ function SpeakerConfiguration({ user }: { user: any }) {
                 </p>
               )}
             </div>
-            <button
-              onClick={saveSpeakerConfiguration}
-              disabled={saving}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
+            <Button variant="primary" size="md" onClick={saveSpeakerConfiguration} disabled={saving}>
               {saving ? 'Saving...' : 'Save Configuration'}
-            </button>
+            </Button>
           </div>
 
           {/* Wake Word Speaker Gate */}
@@ -1134,13 +1089,9 @@ function SpeakerConfiguration({ user }: { user: any }) {
                   </p>
                 )}
               </div>
-              <button
-                onClick={saveWakewordGate}
-                disabled={gateSaving}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
+              <Button variant="primary" size="md" onClick={saveWakewordGate} disabled={gateSaving}>
                 {gateSaving ? 'Saving...' : 'Save Wake Word Access'}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -1246,22 +1197,17 @@ function ActiveModelsCard({ isAdmin }: { isAdmin: boolean }) {
         })}
       </div>
       {message && (
-        <div className={`mt-4 p-2 rounded-md text-sm ${
-          message.startsWith('Error') || message.includes('Failed')
-            ? 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300'
-            : 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300'
-        }`}>
+        <Alert
+          tone={message.startsWith('Error') || message.includes('Failed') ? 'danger' : 'success'}
+          className="mt-4"
+        >
           {message}
-        </div>
+        </Alert>
       )}
       <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-600">
-        <button
-          onClick={handleSave}
-          disabled={saving || !dirty}
-          className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
+        <Button variant="primary" size="md" className="w-full" onClick={handleSave} disabled={saving || !dirty}>
           {saving ? 'Saving...' : 'Save Active Models'}
-        </button>
+        </Button>
       </div>
     </div>
   )
@@ -1408,13 +1354,9 @@ function ModelRegistryCard({ isAdmin }: { isAdmin: boolean }) {
           <Database className="h-5 w-5 mr-2 text-blue-600" />
           Model Registry
         </h3>
-        <button
-          onClick={openAdd}
-          className="flex items-center gap-1 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
-        >
-          <Plus className="h-4 w-4" />
-          <span>Add Model</span>
-        </button>
+        <Button variant="primary" icon={<Plus className="h-4 w-4" />} onClick={openAdd}>
+          Add Model
+        </Button>
       </div>
       <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
         Provider/model definitions. Built-in templates (defaults.yml) are read-only; models
@@ -1451,14 +1393,14 @@ function ModelRegistryCard({ isAdmin }: { isAdmin: boolean }) {
                       <td className="py-2 pr-3">
                         <span className="font-medium text-gray-900 dark:text-gray-100">{m.name}</span>
                         {m.is_default && (
-                          <span className="ml-2 px-1.5 py-0.5 text-[10px] rounded bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">default</span>
+                          <span className="ml-2 px-1.5 py-0.5 text-[10px] rounded bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-300">default</span>
                         )}
                       </td>
                       <td className="py-2 px-3 text-gray-600 dark:text-gray-400">{m.model_provider}</td>
                       <td className="py-2 px-3 text-gray-600 dark:text-gray-400 truncate max-w-[180px]" title={m.model_url || m.model_name}>{m.model_name}</td>
                       <td className="py-2 px-3 text-gray-600 dark:text-gray-400">{keyState(m)}</td>
                       <td className="py-2 px-3">
-                        <span className={`px-1.5 py-0.5 text-[10px] rounded ${isBuiltin ? 'bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-300' : 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'}`}>
+                        <span className={`px-1.5 py-0.5 text-[10px] rounded ${isBuiltin ? 'bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-300' : 'bg-gray-100 text-gray-500 dark:bg-gray-700 dark:text-gray-400'}`}>
                           {isBuiltin ? 'built-in' : 'config'}
                         </span>
                       </td>
@@ -1478,21 +1420,17 @@ function ModelRegistryCard({ isAdmin }: { isAdmin: boolean }) {
                               {test?.latency ? `${test.latency}ms` : 'Test'}
                             </button>
                           )}
-                          <button
-                            onClick={() => openEdit(m)}
-                            className="p-1.5 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700"
-                            title="Edit model"
-                          >
-                            <Pencil className="h-3.5 w-3.5 text-gray-600 dark:text-gray-300" />
-                          </button>
-                          <button
+                          <IconButton label="Edit model" onClick={() => openEdit(m)}>
+                            <Pencil className="h-3.5 w-3.5" />
+                          </IconButton>
+                          <IconButton
+                            label={m.is_default ? 'Active default — repoint first' : isBuiltin ? 'Built-in template (defaults.yml)' : 'Delete model'}
+                            danger
                             onClick={() => handleDelete(m)}
                             disabled={m.is_default || isBuiltin}
-                            className="p-1.5 rounded border border-gray-300 dark:border-gray-600 hover:bg-red-50 dark:hover:bg-red-900/30 disabled:opacity-30 disabled:cursor-not-allowed"
-                            title={m.is_default ? 'Active default — repoint first' : isBuiltin ? 'Built-in template (defaults.yml)' : 'Delete model'}
                           >
                             <Trash2 className="h-3.5 w-3.5 text-red-600" />
-                          </button>
+                          </IconButton>
                         </div>
                       </td>
                     </tr>
@@ -1531,59 +1469,61 @@ function ModelEditModal({
   onSubmit: () => void
 }) {
   const set = (field: keyof ModelForm, value: string) => setForm({ ...form, [field]: value } as ModelForm)
-  const input = 'w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500'
   const label = 'block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
-      <div
-        className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 w-full max-w-lg max-h-[90vh] overflow-y-auto p-6"
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-            {isNew ? 'Add Model' : `Edit ${form.name}`}
-          </h3>
-          <button onClick={onCancel} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-
+    <Modal
+      open
+      onClose={onCancel}
+      title={isNew ? 'Add Model' : `Edit ${form.name}`}
+      maxWidthClassName="max-w-lg"
+      className="max-h-[90vh] overflow-y-auto"
+      closeOnEscape={false}
+      footer={
+        <>
+          <Button variant="secondary" size="md" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button variant="primary" size="md" onClick={onSubmit} disabled={saving}>
+            {saving ? 'Saving…' : 'Save Model'}
+          </Button>
+        </>
+      }
+    >
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className={label}>Name {isNew && <span className="text-red-500">*</span>}</label>
-            <input className={input} value={form.name} onChange={e => set('name', e.target.value)} disabled={!isNew} placeholder="e.g. openai-llm" />
+            <Input value={form.name} onChange={e => set('name', e.target.value)} disabled={!isNew} placeholder="e.g. openai-llm" />
           </div>
           <div>
             <label className={label}>Type</label>
-            <select className={input} value={form.model_type} onChange={e => set('model_type', e.target.value)} disabled={!isNew}>
+            <Select value={form.model_type} onChange={e => set('model_type', e.target.value)} disabled={!isNew}>
               {MODEL_TYPE_ORDER.map(t => <option key={t} value={t}>{MODEL_TYPE_LABELS[t]}</option>)}
-            </select>
+            </Select>
           </div>
           <div>
             <label className={label}>Provider</label>
-            <input className={input} value={form.model_provider} onChange={e => set('model_provider', e.target.value)} placeholder="openai, ollama, deepgram…" />
+            <Input value={form.model_provider} onChange={e => set('model_provider', e.target.value)} placeholder="openai, ollama, deepgram…" />
           </div>
           <div>
             <label className={label}>API family</label>
-            <input className={input} value={form.api_family} onChange={e => set('api_family', e.target.value)} placeholder="openai, http, websocket" />
+            <Input value={form.api_family} onChange={e => set('api_family', e.target.value)} placeholder="openai, http, websocket" />
           </div>
           <div>
             <label className={label}>Model name</label>
-            <input className={input} value={form.model_name} onChange={e => set('model_name', e.target.value)} placeholder="provider-specific id" />
+            <Input value={form.model_name} onChange={e => set('model_name', e.target.value)} placeholder="provider-specific id" />
           </div>
           <div>
             <label className={label}>Embedding dims</label>
-            <input className={input} value={form.embedding_dimensions} onChange={e => set('embedding_dimensions', e.target.value)} placeholder="e.g. 1536" />
+            <Input value={form.embedding_dimensions} onChange={e => set('embedding_dimensions', e.target.value)} placeholder="e.g. 1536" />
           </div>
           <div className="col-span-2">
             <label className={label}>Base URL</label>
-            <input className={input} value={form.model_url} onChange={e => set('model_url', e.target.value)} placeholder="https://api.openai.com/v1 (blank = Tailnet discovery)" />
+            <Input value={form.model_url} onChange={e => set('model_url', e.target.value)} placeholder="https://api.openai.com/v1 (blank = Tailnet discovery)" />
           </div>
           <div className="col-span-2">
             <label className={label}>API key</label>
-            <input
-              className={input}
+            <Input
               type={form.api_key === API_KEY_MASK ? 'text' : 'password'}
               value={form.api_key}
               onChange={e => set('api_key', e.target.value)}
@@ -1595,33 +1535,23 @@ function ModelEditModal({
           </div>
           <div className="col-span-2">
             <label className={label}>Capabilities (comma-separated)</label>
-            <input className={input} value={form.capabilities} onChange={e => set('capabilities', e.target.value)} placeholder="word_timestamps, segments, keyword_boosting…" />
+            <Input value={form.capabilities} onChange={e => set('capabilities', e.target.value)} placeholder="word_timestamps, segments, keyword_boosting…" />
           </div>
           <div className="col-span-2">
             <label className={label}>Description</label>
-            <input className={input} value={form.description} onChange={e => set('description', e.target.value)} />
+            <Input value={form.description} onChange={e => set('description', e.target.value)} />
           </div>
           <div className="col-span-2">
             <label className={label}>Model params (JSON)</label>
-            <textarea className={`${input} font-mono text-xs`} rows={3} value={form.model_params} onChange={e => set('model_params', e.target.value)} placeholder='{"temperature": 0.2, "max_tokens": 2000}' />
+            <Textarea className="font-mono text-xs" rows={3} value={form.model_params} onChange={e => set('model_params', e.target.value)} placeholder='{"temperature": 0.2, "max_tokens": 2000}' />
           </div>
         </div>
 
         {error && (
-          <div className="mt-3 p-2 rounded-md text-sm bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300">
+          <Alert tone="danger" className="mt-3">
             {error}
-          </div>
+          </Alert>
         )}
-
-        <div className="mt-4 flex justify-end gap-2">
-          <button onClick={onCancel} className="px-4 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
-            Cancel
-          </button>
-          <button onClick={onSubmit} disabled={saving} className="px-4 py-2 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50">
-            {saving ? 'Saving…' : 'Save Model'}
-          </button>
-        </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

@@ -5,7 +5,7 @@
  */
 
 import React, { useState } from 'react'
-import { Settings, Eye, EyeOff, Key, Volume2, Users, AlertCircle, Info } from 'lucide-react'
+import { Settings, Eye, EyeOff, Key, Volume2, Users, Info } from 'lucide-react'
 
 export interface SettingsPanelProps {
   // Confidence threshold

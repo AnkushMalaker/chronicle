@@ -1,4 +1,5 @@
 import { useWakeFeedback } from '../../hooks/useWakeFeedback'
+import { Card } from '../ui'
 
 /**
  * Live wake-word feedback for the Live Recording screen.
@@ -14,7 +15,7 @@ export default function WakeFeedback() {
   if (phase === 'idle' && !lastCommand && !lastBlocked) return null
 
   return (
-    <div className="mt-4 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3 space-y-2">
+    <Card raised padded={false} className="mt-4 p-3 space-y-2">
       {/* Phase badge with a pulsing dot */}
       {phase !== 'idle' && (
         <div className="flex items-center gap-2">
@@ -70,6 +71,6 @@ export default function WakeFeedback() {
       {lastBlocked && (
         <div className="text-sm text-amber-600 dark:text-amber-400">{lastBlocked}</div>
       )}
-    </div>
+    </Card>
   )
 }

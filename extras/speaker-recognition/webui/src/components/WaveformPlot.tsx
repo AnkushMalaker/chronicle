@@ -45,7 +45,7 @@ export default function WaveformPlot({
       type: 'scatter',
       mode: 'lines',
       name: 'Waveform',
-      line: { color: '#1f77b4', width: 1 },
+      line: { color: '#c2551f', width: 1 },
       hovertemplate: 'Time: %{x:.2f}s<br>Amplitude: %{y:.3f}<extra></extra>'
     })
 

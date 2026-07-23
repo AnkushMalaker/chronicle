@@ -7,6 +7,7 @@ import { useSSE, SSEStatus } from '../../hooks/useSSE'
 import { useSystemEventsSummary } from '../../hooks/useSystemEvents'
 import GlobalRecordingIndicator from './GlobalRecordingIndicator'
 import UserLoopModal from '../UserLoopModal'
+import { IconButton } from '../ui'
 
 export default function Layout() {
   const location = useLocation()
@@ -43,7 +44,7 @@ export default function Layout() {
       { path: '/wakeword-lab', label: 'Wake-Word Lab', icon: Target },
       { path: '/queue', label: 'Queue & Events', icon: Layers },
       { path: '/plugins', label: 'Plugins', icon: Puzzle },
-      { path: '/finetuning', label: 'Fine-tuning', icon: Zap },
+      { path: '/finetuning', label: 'Training', icon: Zap },
       { path: '/network', label: 'Network', icon: Network },
       { path: '/system', label: 'System Status', icon: Activity },
       { path: '/system-errors', label: 'System Errors', icon: AlertTriangle },
@@ -81,13 +82,13 @@ export default function Layout() {
           <div className="flex justify-between items-center h-16 gap-2">
             <div className="flex items-center space-x-2 sm:space-x-4 min-w-0">
               {/* Hamburger — opens the nav drawer on mobile only */}
-              <button
+              <IconButton
+                label="Open navigation menu"
                 onClick={() => setMobileNavOpen(true)}
-                className="lg:hidden p-2 -ml-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
-                aria-label="Open navigation menu"
+                className="lg:hidden -ml-2"
               >
                 <Menu className="h-6 w-6" />
-              </button>
+              </IconButton>
               <Music className="h-8 w-8 text-blue-600 flex-shrink-0" />
               <h1 className="text-base sm:text-xl font-semibold text-gray-900 dark:text-gray-100 whitespace-nowrap truncate">
                 Chronicle Dashboard
@@ -100,13 +101,9 @@ export default function Layout() {
               {/* Global Recording Indicator */}
               <GlobalRecordingIndicator />
 
-              <button
-                onClick={toggleTheme}
-                className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors text-gray-600 dark:text-gray-300"
-                aria-label="Toggle theme"
-              >
+              <IconButton label="Toggle theme" onClick={toggleTheme}>
                 {isDark ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
-              </button>
+              </IconButton>
 
               {/* User info — hidden on small screens to avoid overflow */}
               <div className="hidden md:flex items-center space-x-2 text-sm text-gray-700 dark:text-gray-300">
@@ -145,13 +142,12 @@ export default function Layout() {
                 <Music className="h-6 w-6 text-blue-600" />
                 <span className="font-semibold text-gray-900 dark:text-gray-100">Chronicle</span>
               </div>
-              <button
+              <IconButton
+                label="Close navigation menu"
                 onClick={() => setMobileNavOpen(false)}
-                className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300"
-                aria-label="Close navigation menu"
               >
                 <X className="h-6 w-6" />
-              </button>
+              </IconButton>
             </div>
             <ul className="flex-1 overflow-y-auto p-4 space-y-1">
               {navLinks}
