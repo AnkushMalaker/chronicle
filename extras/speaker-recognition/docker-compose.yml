@@ -112,6 +112,8 @@ services:
       - ./webui/package.json:/app/package.json
       - ./webui/vite.config.ts:/app/vite.config.ts
       - ./webui/tailwind.config.js:/app/tailwind.config.js
+      # tailwind.config.js imports this preset; mount it too or the import resolves to a missing file
+      - ./webui/chronicle-espresso-preset.js:/app/chronicle-espresso-preset.js
       - ./webui/postcss.config.js:/app/postcss.config.js
       - ./webui/tsconfig.json:/app/tsconfig.json
     environment:
