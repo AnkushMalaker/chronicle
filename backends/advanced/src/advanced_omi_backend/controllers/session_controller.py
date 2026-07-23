@@ -18,6 +18,10 @@ from advanced_omi_backend.controllers.queue_controller import (
     memory_queue,
     transcription_queue,
 )
+from advanced_omi_backend.services.audio_stream.durability import (
+    AUDIO_PERSISTENCE_GROUP,
+    delete_stream_if_durable,
+)
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
@@ -103,17 +107,17 @@ async def get_streaming_status(request):
                 # are temporarily terminal but status is still "active")
                 active_sessions.append(session_obj)
 
-        # Get stream health for all streams (per-client streams)
+        # Get stream health for all session-scoped streams.
         # Categorize as active or completed based on consumer activity
         active_streams = {}
         completed_streams = {}
 
-        # Create a map of client_id to session for quick lookup
-        client_to_session = {}
+        # Create a map of session_id to session for quick lookup.
+        session_by_id = {}
         for session in active_sessions + completed_sessions_from_redis:
-            client_id = session.get("client_id")
-            if client_id:
-                client_to_session[client_id] = session
+            session_id = session.get("session_id")
+            if session_id:
+                session_by_id[session_id] = session
 
         # Discover all audio streams
         stream_keys = await redis_client.keys("audio:stream:*")
@@ -171,14 +175,15 @@ async def get_streaming_status(request):
                     except (ValueError, IndexError, AttributeError):
                         stream_age_seconds = 0
 
-                # Extract client_id from stream name (audio:stream:{client_id})
-                client_id = stream_name.split(":")[-1] if ":" in stream_name else ""
+                # Stream suffix is the immutable recording session id.
+                session_id = stream_name.removeprefix("audio:stream:")
+                session_data = session_by_id.get(session_id, {})
+                client_id = session_data.get("client_id", "")
 
                 # Get session age from associated session (more meaningful than stream age)
                 session_age_seconds = 0
                 session_idle_seconds = 0
-                if client_id and client_id in client_to_session:
-                    session_data = client_to_session[client_id]
+                if session_data:
                     session_age_seconds = session_data.get("age_seconds", 0)
                     session_idle_seconds = session_data.get("idle_seconds", 0)
 
@@ -193,6 +198,7 @@ async def get_streaming_status(request):
                     "last_entry_id": last_entry_id,
                     "session_age_seconds": session_age_seconds,  # Age since session started
                     "session_idle_seconds": session_idle_seconds,  # Time since last audio chunk
+                    "session_id": session_id,
                     "client_id": client_id,  # Include client_id for reference
                     "consumer_groups": [],
                 }
@@ -360,148 +366,94 @@ async def get_streaming_status(request):
 
 
 async def cleanup_old_sessions(request, max_age_seconds: int = 3600):
-    """Clean up old session tracking metadata and old audio streams from Redis."""
+    """Clean terminal metadata only after the raw audio log is durably drained."""
     try:
-        # Get Redis client from request.app.state (initialized during startup)
         redis_client = request.app.state.redis_audio_stream
-
         if not redis_client:
             return JSONResponse(
                 status_code=503,
                 content={"error": "Redis client for audio streaming not initialized"},
             )
 
-        # Clean up old session hashes
         store = SessionStore(redis_client)
-        cleaned_sessions = 0
-        old_sessions = []
-
+        views = [view async for view in store.iter_views()]
+        by_stream = {view.stream_name: view for view in views if view.stream_name}
         current_time = time.time()
-
-        async for view in store.iter_views():
-            age_seconds = current_time - view.started_at
-
-            # Clean up sessions older than max_age or stuck in "finalizing"
-            should_clean = age_seconds > max_age_seconds or (
-                view.status == SessionStatus.FINALIZING and age_seconds > 300
-            )  # Finalizing for more than 5 minutes
-
-            if should_clean:
-                old_sessions.append(
-                    {
-                        "session_id": view.session_id,
-                        "age_seconds": age_seconds,
-                        "status": view.status.value if view.status else "",
-                    }
-                )
-                await store.delete(view.session_id)
-                cleaned_sessions += 1
-
-        # Also clean up old audio streams (per-client streams that are inactive)
-        stream_keys = await redis_client.keys("audio:stream:*")
         cleaned_streams = 0
-        old_streams = []
+        stream_details = []
 
-        for stream_key in stream_keys:
+        for stream_key in await redis_client.keys("audio:stream:*"):
             stream_name = (
                 stream_key.decode() if isinstance(stream_key, bytes) else stream_key
             )
+            view = by_stream.get(stream_name)
 
-            try:
-                # Check stream info to get last activity
-                stream_info = await redis_client.execute_command(
-                    "XINFO", "STREAM", stream_name
+            # A momentarily-drained group on an ACTIVE or unknown session is not a
+            # terminal state; the producer may append again immediately.
+            if view is None or view.status not in (
+                SessionStatus.FINALIZING,
+                SessionStatus.FINISHED,
+            ):
+                await redis_client.persist(stream_name)
+                stream_details.append(
+                    {
+                        "stream_name": stream_name,
+                        "deleted": False,
+                        "reason": "session_not_terminal",
+                    }
                 )
-
-                # Parse stream info
-                info_dict = {}
-                for i in range(0, len(stream_info), 2):
-                    key_name = (
-                        stream_info[i].decode()
-                        if isinstance(stream_info[i], bytes)
-                        else str(stream_info[i])
-                    )
-                    info_dict[key_name] = stream_info[i + 1]
-
-                stream_length = int(info_dict.get("length", 0))
-                last_entry = info_dict.get("last-entry")
-
-                # Check stream age via last entry ID (Redis Stream IDs are timestamps)
-                should_delete = False
-                age_seconds = 0
-
-                if stream_length == 0:
-                    # Empty stream - safe to delete
-                    should_delete = True
-                    reason = "empty"
-                elif (
-                    last_entry and isinstance(last_entry, list) and len(last_entry) > 0
-                ):
-                    # Extract timestamp from last entry ID
-                    last_id = last_entry[0]
-                    if isinstance(last_id, bytes):
-                        last_id = last_id.decode()
-
-                    # Redis Stream IDs format: "milliseconds-sequence"
-                    try:
-                        last_timestamp_ms = int(last_id.split("-")[0])
-                        last_timestamp_s = last_timestamp_ms / 1000
-                        age_seconds = current_time - last_timestamp_s
-
-                        # Delete streams older than max_age regardless of size
-                        if age_seconds > max_age_seconds:
-                            should_delete = True
-                            reason = "old"
-                    except (ValueError, IndexError):
-                        # If we can't parse timestamp, check if first entry is old
-                        first_entry = info_dict.get("first-entry")
-                        if (
-                            first_entry
-                            and isinstance(first_entry, list)
-                            and len(first_entry) > 0
-                        ):
-                            try:
-                                first_id = first_entry[0]
-                                if isinstance(first_id, bytes):
-                                    first_id = first_id.decode()
-                                first_timestamp_ms = int(first_id.split("-")[0])
-                                first_timestamp_s = first_timestamp_ms / 1000
-                                age_seconds = current_time - first_timestamp_s
-
-                                if age_seconds > max_age_seconds:
-                                    should_delete = True
-                                    reason = "old_unparseable"
-                            except (ValueError, IndexError):
-                                pass
-
-                if should_delete:
-                    await redis_client.delete(stream_name)
-                    cleaned_streams += 1
-                    old_streams.append(
-                        {
-                            "stream_name": stream_name,
-                            "reason": reason,
-                            "age_seconds": age_seconds,
-                            "length": stream_length,
-                        }
-                    )
-
-            except Exception as e:
-                logger.debug(f"Error checking stream {stream_name}: {e}")
                 continue
+
+            await redis_client.persist(stream_name)
+            decision = await delete_stream_if_durable(
+                redis_client,
+                stream_name,
+                required_groups={AUDIO_PERSISTENCE_GROUP},
+            )
+            cleaned_streams += int(decision.safe_to_delete)
+            stream_details.append(
+                {
+                    "stream_name": stream_name,
+                    "deleted": decision.safe_to_delete,
+                    "reason": decision.reason,
+                }
+            )
+
+        cleaned_sessions = 0
+        session_details = []
+        for view in views:
+            age_seconds = current_time - view.started_at
+            stream_name = view.stream_name
+            stream_exists = bool(stream_name and await redis_client.exists(stream_name))
+            should_clean = (
+                view.status is SessionStatus.FINISHED
+                and age_seconds > max_age_seconds
+                and not stream_exists
+            )
+            if not should_clean:
+                continue
+
+            await store.delete(view.session_id)
+            cleaned_sessions += 1
+            session_details.append(
+                {
+                    "session_id": view.session_id,
+                    "age_seconds": age_seconds,
+                    "status": view.status.value,
+                }
+            )
 
         return {
             "success": True,
             "cleaned_sessions": cleaned_sessions,
             "cleaned_streams": cleaned_streams,
-            "cleaned_session_details": old_sessions,
-            "cleaned_stream_details": old_streams,
+            "cleaned_session_details": session_details,
+            "cleaned_stream_details": stream_details,
             "timestamp": time.time(),
         }
-
-    except Exception as e:
-        logger.error(f"Error cleaning up old sessions: {e}", exc_info=True)
+    except Exception as error:
+        logger.error(f"Error cleaning up old sessions: {error}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"error": f"Failed to cleanup old sessions: {str(e)}"},
+            content={"error": f"Failed to cleanup old sessions: {str(error)}"},
         )

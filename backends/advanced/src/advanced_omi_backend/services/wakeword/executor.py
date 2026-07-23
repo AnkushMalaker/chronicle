@@ -28,6 +28,7 @@ import redis.asyncio as redis
 
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.plugins.router import PluginRouter
+from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 from advanced_omi_backend.services.tts_client import synthesize_speech
 from advanced_omi_backend.services.wakeword.timing import WakeTimer
 
@@ -260,9 +261,7 @@ async def get_current_conversation_id(
     if not session_id:
         return None
     try:
-        val = await redis_client.get(f"conversation:current:{session_id}")
-        if val is not None:
-            return val.decode() if isinstance(val, bytes) else val
+        return await SessionStore(redis_client).get_current_conversation_id(session_id)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Could not read current conversation for {session_id}: {e}")
     return None

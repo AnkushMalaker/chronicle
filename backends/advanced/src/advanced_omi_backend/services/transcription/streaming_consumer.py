@@ -27,7 +27,14 @@ from advanced_omi_backend.models.user import get_user_by_id
 from advanced_omi_backend.observability.otel_setup import set_span_attrs
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.plugins.router import PluginRouter
-from advanced_omi_backend.services.audio_stream.session_store import SessionStore
+from advanced_omi_backend.services.audio_stream.durability import (
+    AUDIO_PERSISTENCE_GROUP,
+    delete_stream_if_durable,
+)
+from advanced_omi_backend.services.audio_stream.session_store import (
+    SessionStatus,
+    SessionStore,
+)
 from advanced_omi_backend.services.transcription import get_transcription_provider
 from advanced_omi_backend.services.wakeword.followup import maybe_handle_followup
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
@@ -1111,75 +1118,32 @@ class StreamingTranscriptionConsumer:
 
     async def _try_delete_finished_stream(self, stream_name: str):
         """
-        Delete a Redis stream if all consumer groups have finished processing.
+        Delete only after Redis proves every registered group has no pending or lag.
 
-        Both consumer groups (streaming-transcription and audio_persistence) read from
-        the same stream. We only delete when both have 0 pending messages to avoid
-        breaking the other consumer. If any group still has pending messages or not all
-        expected groups are registered, the 60s TTL fallback handles cleanup.
-
-        The standalone wakeword-service adds a third group (wakeword_detection) when
-        deployed. It's treated as OPTIONAL: if that group is registered on the stream
-        we wait for its pending to drain too (so we don't delete out from under its
-        pending entries), but if the service isn't running the group never exists and
-        deletion proceeds on the two core groups as before.
+        This consumer and Mongo persistence are required. Optional groups such as
+        wakeword_detection also block deletion when present. There is deliberately no
+        age/TTL fallback: inability to prove durability means retaining the stream.
         """
-        _EXPECTED_GROUPS = {"streaming-transcription", "audio_persistence"}
-        _OPTIONAL_GROUPS = {"wakeword_detection"}
-
-        if not await self.redis_client.exists(stream_name):
-            return
-
-        groups = await self.redis_client.execute_command("XINFO", "GROUPS", stream_name)
-        if not groups:
-            return
-
-        # Parse all groups — XINFO GROUPS returns a flat key-value array per group
-        registered_names = set()
-        total_pending = 0
-        for group in groups:
-            group_dict = {}
-            for i in range(0, len(group), 2):
-                key = (
-                    group[i].decode() if isinstance(group[i], bytes) else str(group[i])
-                )
-                value = group[i + 1]
-                if isinstance(value, bytes):
-                    try:
-                        value = value.decode()
-                    except UnicodeDecodeError:
-                        value = str(value)
-                group_dict[key] = value
-
-            name = group_dict.get("name", "")
-            pending = int(group_dict.get("pending", 0))
-            registered_names.add(name)
-            total_pending += pending
-
-        if not _EXPECTED_GROUPS.issubset(registered_names):
+        session_id = stream_name.removeprefix("audio:stream:")
+        status = await SessionStore(self.redis_client).get_status(session_id)
+        if status not in (SessionStatus.FINALIZING, SessionStatus.FINISHED):
             logger.debug(
-                f"Stream {stream_name}: not all core consumer groups registered yet "
-                f"(found: {registered_names}, optional present: "
-                f"{registered_names & _OPTIONAL_GROUPS}), skipping delete"
+                f"Retaining stream {stream_name}: session status {status} is not terminal"
             )
             return
 
-        # total_pending sums ALL registered groups, including the optional
-        # wakeword_detection group when present — so its pending entries also
-        # block deletion without needing to be in the required-subset gate above.
-        if total_pending > 0:
-            logger.debug(
-                f"Stream {stream_name} still has {total_pending} pending messages "
-                f"across consumer groups, skipping delete"
-            )
-            return
-
-        # All expected groups registered, all have 0 pending — safe to delete
-        await self.redis_client.delete(stream_name)
-        logger.info(
-            f"Deleted stream {stream_name} "
-            f"(all {len(_EXPECTED_GROUPS)} consumer groups have 0 pending)"
+        decision = await delete_stream_if_durable(
+            self.redis_client,
+            stream_name,
+            required_groups={self.group_name, AUDIO_PERSISTENCE_GROUP},
         )
+        if decision.safe_to_delete:
+            logger.info(
+                f"Deleted stream {stream_name} after durability proof "
+                f"({len(decision.groups)} groups drained)"
+            )
+        else:
+            logger.debug(f"Retaining stream {stream_name}: {decision.reason}")
 
     def _on_stream_task_done(self, stream_name: str, task: asyncio.Task) -> None:
         """Surface a finished per-stream task and free a crashed stream.

@@ -1,14 +1,13 @@
 *** Settings ***
-Documentation    Always Persist Audio Feature Tests
+Documentation    Durable Audio Persistence Tests
 ...
-...              Tests that verify the always_persist flag ensures audio is saved
-...              to MongoDB even when transcription fails.
+...              Tests that verify raw audio is saved to MongoDB independently of
+...              transcription success.
 ...
 ...              Critical scenarios:
 ...              - Placeholder conversation created immediately
 ...              - Audio chunks persisted despite transcription failure
 ...              - Processing status transitions correctly
-...              - Normal behavior preserved when always_persist=false
 
 Resource         ../resources/websocket_keywords.robot
 Resource         ../resources/conversation_keywords.robot
@@ -46,8 +45,8 @@ Test Cleanup
 
 *** Test Cases ***
 
-Placeholder Conversation Created Immediately With Always Persist
-    [Documentation]    Verify that when always_persist=true, a conversation is created
+Placeholder Conversation Created Before Audio Ingress
+    [Documentation]    Verify that a durable conversation owner is created
     ...                immediately (before speech detection) with placeholder title and
     ...                processing_status="active".
     [Tags]    conversation	audio-streaming
@@ -60,8 +59,7 @@ Placeholder Conversation Created Immediately With Always Persist
     ${count_before}=    Get Length    ${convs_before}
     ${expected_count}=    Evaluate    ${count_before} + 1
 
-    # Start stream with always_persist=true
-    ${stream_id}=    Open Audio Stream With Always Persist    device_name=${device_name}
+    ${stream_id}=    Open Durable Audio Stream    device_name=${device_name}
 
     # Poll for conversation to be created by audio persistence job (may take 10-15s to start)
     ${convs_after}=    Wait Until Keyword Succeeds    30s    2s
@@ -82,57 +80,17 @@ Placeholder Conversation Created Immediately With Always Persist
     # Verify processing_status (3-state machine: still in flight -> active)
     Verify Conversation Processing Status    ${conversation_id}    active
 
-    # Verify always_persist flag
-    Verify Conversation Always Persist Flag    ${conversation_id}
+    Verify Durable Audio Placeholder Flag    ${conversation_id}
 
     # Close stream
     Close Audio Stream    ${stream_id}
 
-    Log    ✅ Placeholder conversation created immediately with always_persist=true
+    Log    ✅ Durable placeholder conversation created before ingress
 
 
-Normal Behavior Preserved When Always Persist Disabled
-    [Documentation]    Verify that when always_persist=false, the system
-    ...                behaves as before: no conversation created until speech detected.
-    ...                This test temporarily disables the global always_persist setting.
-    [Tags]    conversation	audio-streaming
-
-    ${device_name}=    Set Variable    test-normal
-    ${client_id}=    Get Client ID From Device Name    ${device_name}
-
-    # Temporarily disable always_persist for this test
-    Set Always Persist Enabled    ${API_SESSION}    ${False}
-
-    TRY
-        # Get baseline conversation count for THIS client_id only
-        ${convs_before}=    Get Conversations By Client ID    ${client_id}
-        ${count_before}=    Get Length    ${convs_before}
-
-        # Start stream with always_persist=false (disabled via API above)
-        ${stream_id}=    Open Audio Stream    device_name=${device_name}
-
-        # Conversation should NOT exist immediately for this client
-        Sleep    3s
-        ${convs_after}=    Get Conversations By Client ID    ${client_id}
-        ${count_after}=    Get Length    ${convs_after}
-
-        # Verify no new conversation created yet for this client
-        Should Be Equal As Integers    ${count_after}    ${count_before}
-        ...    Expected no conversation for client ${client_id}, but found ${count_after} - ${count_before} new conversations
-
-        Log    ✅ No placeholder conversation created (always_persist=false)
-
-        # Close stream
-        Close Audio Stream    ${stream_id}
-    FINALLY
-        # Re-enable always_persist for other tests
-        Set Always Persist Enabled    ${API_SESSION}    ${True}
-    END
-
-
-Redis Key Set Immediately With Always Persist
+Redis Owner Key Set Before Audio Ingress
     [Documentation]    Verify that conversation:current:{session_id} Redis key is set
-    ...                immediately when always_persist=true, allowing audio persistence
+    ...                immediately, allowing audio persistence
     ...                job to start saving chunks.
     [Tags]    audio-streaming	infra
 
@@ -144,11 +102,11 @@ Redis Key Set Immediately With Always Persist
     ${count_before}=    Get Length    ${convs_before}
     ${expected_count}=    Evaluate    ${count_before} + 1
 
-    # Start stream with always_persist=true
-    ${stream_id}=    Open Audio Stream With Always Persist    device_name=${device_name}
+    ${stream_id}=    Open Durable Audio Stream    device_name=${device_name}
 
-    # session_id == client_id for streaming mode (not stream_id!)
-    ${session_id}=    Set Variable    ${client_id}
+    # Every recording attempt has its own immutable session/WAL.
+    ${session_id}=    Wait Until Keyword Succeeds    10s    250ms
+    ...    Get Active Session ID For Client    ${client_id}
 
     # Poll for conversation to be created by audio persistence job
     ${convs_after}=    Wait Until Keyword Succeeds    30s    2s
@@ -200,11 +158,11 @@ Multiple Sessions Create Separate Conversations
     ${expected_count_3}=    Evaluate    ${count_before_3} + 1
 
     # Start 3 separate sessions
-    ${stream_1}=    Open Audio Stream With Always Persist    device_name=multi-1
+    ${stream_1}=    Open Durable Audio Stream    device_name=multi-1
     Sleep    1s
-    ${stream_2}=    Open Audio Stream With Always Persist    device_name=multi-2
+    ${stream_2}=    Open Durable Audio Stream    device_name=multi-2
     Sleep    1s
-    ${stream_3}=    Open Audio Stream With Always Persist    device_name=multi-3
+    ${stream_3}=    Open Durable Audio Stream    device_name=multi-3
 
     # Poll for each conversation to be created (audio persistence jobs may take 10-15s)
     ${convs_after_1}=    Wait Until Keyword Succeeds    30s    2s
@@ -259,7 +217,7 @@ Audio Chunks Persisted Despite Transcription Failure
     ${client_id}=    Get Client ID From Device Name    ${device_name}
 
     # Start stream with always_persist=true
-    ${stream_id}=    Open Audio Stream With Always Persist    device_name=${device_name}
+    ${stream_id}=    Open Durable Audio Stream    device_name=${device_name}
 
     # Poll for conversation to be created by audio persistence job
     ${conversations}=    Wait Until Keyword Succeeds    30s    2s
@@ -316,7 +274,7 @@ Conversation Updates To Completed When Transcription Succeeds
     ${expected_count}=    Evaluate    ${count_before} + 1
 
     # Start stream with always_persist=true
-    ${stream_id}=    Open Audio Stream With Always Persist    device_name=${device_name}
+    ${stream_id}=    Open Durable Audio Stream    device_name=${device_name}
 
     # Poll for placeholder conversation to be created by audio persistence job
     ${convs_after}=    Wait Until Keyword Succeeds    30s    2s

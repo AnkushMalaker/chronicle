@@ -41,6 +41,10 @@ class ClientState:
     # Streaming-mode session id, set when a streaming session is initialized and
     # reset to None when finalized. Doubles as the "session active" flag.
     stream_session_id: Optional[str] = None
+    # Monotonic timestamp of the last persistence-consumer liveness check. Streaming
+    # ASR and durable persistence are parallel consumers, so an active session must
+    # periodically verify that persistence has not silently terminated.
+    last_persistence_healthcheck: float = 0.0
     # NOTE: reserved — nothing populates this yet, so the streaming-finalize
     # buffer flush currently falls back to default 16kHz/mono/16-bit.
     stream_audio_format: Dict = field(default_factory=dict)

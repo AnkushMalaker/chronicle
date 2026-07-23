@@ -39,6 +39,10 @@ from advanced_omi_backend.observability.otel_setup import (
 )
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
+from advanced_omi_backend.services.audio_stream.conversation_lifecycle import (
+    ensure_active_session_placeholder,
+    rotate_active_session_placeholder,
+)
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
@@ -346,10 +350,9 @@ async def handle_end_of_conversation(
     store = SessionStore(redis_client)
     # Clean up Redis streams to prevent memory leaks
     try:
-        # NOTE: Do NOT delete audio:stream:{client_id} here!
-        # The audio stream is per-client (WebSocket connection), not per-conversation.
-        # It's still actively receiving audio and will be reused by the next conversation.
-        # Only delete it on WebSocket disconnect (handled in websocket_controller.py)
+        # Do NOT delete audio:stream:{session_id} here. It is the immutable WAL for
+        # the whole recording and remains active across conversation rotations.
+        # Only consumer-group drain proof may delete it after producer finalization.
 
         # Delete the transcription results stream (per-session/conversation)
         results_stream_key = f"transcription:results:{session_id}"
@@ -366,9 +369,17 @@ async def handle_end_of_conversation(
     # May already be deleted by open_conversation_job for close_requested/timeout cases
     # (early delete to stop audio persistence writing to the closed conversation).
     # Redis DEL on a non-existent key is a no-op.
-    current_conversation_key = f"conversation:current:{session_id}"
-    await redis_client.delete(current_conversation_key)
-    logger.info(f"🧹 Deleted conversation:current signal for session {session_id[:12]}")
+    async with store.conversation_create_lock(session_id):
+        assignment_cleared = await store.clear_current_conversation(
+            session_id, expected_id=conversation_id
+        )
+    if assignment_cleared:
+        logger.info(f"🧹 Cleared conversation assignment for session {session_id[:12]}")
+    else:
+        logger.info(
+            f"🧹 Conversation assignment for session {session_id[:12]} had already "
+            "moved; preserving its successor"
+        )
 
     # Update conversation in database with end reason and completion time
     conversation = await Conversation.find_one(
@@ -417,6 +428,21 @@ async def handle_end_of_conversation(
                 f"— not restarting speech detection."
             )
 
+        if should_restart and conversation and conversation.always_persist:
+            assignment = await ensure_active_session_placeholder(
+                store,
+                session_id=session_id,
+                user_id=user_id,
+                client_id=client_id,
+            )
+            if assignment is None:
+                # The session crossed into finalizing after our first status read.
+                # Do not start another listener or create an ownerless placeholder.
+                should_restart = False
+                status, ws_connected, completion_reason = (
+                    await store.get_status_ws_reason(session_id)
+                )
+
         if should_restart:
             # Session still active - enqueue new speech detection for next conversation.
             # Clear any TTL: the hash must live as long as the connection does, otherwise
@@ -444,8 +470,9 @@ async def handle_end_of_conversation(
             # Session ending (finalizing/finished): set a backstop TTL so the hash
             # self-cleans if the disconnect path didn't already remove it.
             await store.expire_session(session_id, 3600)
+            status_label = status.value if status is not None else "missing"
             logger.info(
-                f"Session {session_id} status={status.value}, ws_connected={ws_connected}, "
+                f"Session {session_id} status={status_label}, ws_connected={ws_connected}, "
                 f"not restarting (user stopped recording) — set 1h cleanup TTL"
             )
     else:
@@ -683,80 +710,32 @@ async def _initialize_conversation(
     Returns:
         conversation_id of the created/reused conversation.
     """
-    # Check if a placeholder conversation already exists for this session
-    conversation_key = f"conversation:current:{session_id}"
-    existing_conversation_id_bytes = await redis_client.get(conversation_key)
-
-    logger.info(
-        f"🔍 Checking for placeholder: key={conversation_key}, found={existing_conversation_id_bytes is not None}"
+    store = SessionStore(redis_client)
+    assignment = await ensure_active_session_placeholder(
+        store,
+        session_id=session_id,
+        user_id=user_id,
+        client_id=client_id,
     )
-
-    conversation = None
-    if existing_conversation_id_bytes:
-        existing_conversation_id = existing_conversation_id_bytes.decode()
-        logger.info(
-            f"🔍 Found Redis key with conversation_id={existing_conversation_id}"
+    if assignment is None:
+        raise RuntimeError(
+            f"Session {session_id} has no active durable conversation assignment"
         )
 
-        # Try to fetch the existing conversation by conversation_id
-        conversation = await Conversation.find_one(
-            Conversation.conversation_id == existing_conversation_id
+    conversation_id = assignment.conversation_id
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
+    if conversation is None:
+        raise RuntimeError(
+            f"Assigned conversation {conversation_id} disappeared during initialization"
         )
+    conversation_created = assignment.created
+    conversation.title = "Recording..."
+    conversation.summary = "Transcribing audio..."
+    await conversation.save()
 
-        if conversation:
-            always_persist = getattr(conversation, "always_persist", False)
-            processing_status = getattr(conversation, "processing_status", None)
-            logger.info(
-                f"🔍 Found conversation in DB: always_persist={always_persist}, "
-                f"processing_status={processing_status}"
-            )
-        else:
-            logger.warning(
-                f"⚠️ Conversation {existing_conversation_id} not found in database!"
-            )
-
-        # Verify it's a fresh placeholder to reuse: always_persist, still active
-        # (in-flight), and with no transcript yet. The "no transcript" check is the
-        # precise condition — a placeholder that already has a transcript is a real
-        # conversation, not a reusable slot.
-        if (
-            conversation
-            and getattr(conversation, "always_persist", False)
-            and getattr(conversation, "processing_status", None)
-            == Conversation.ConversationStatus.ACTIVE.value
-            and not conversation.has_meaningful_transcript
-        ):
-            logger.info(
-                f"🔄 Reusing placeholder conversation {conversation.conversation_id} for session {session_id}"
-            )
-            # Update placeholder with active recording status
-            conversation.title = "Recording..."
-            conversation.summary = "Transcribing audio..."
-            await conversation.save()
-            conversation_id = conversation.conversation_id
-        else:
-            if conversation:
-                logger.info(
-                    f"⚠️ Found conversation {existing_conversation_id} but not a valid placeholder "
-                    f"(always_persist={getattr(conversation, 'always_persist', False)}, "
-                    f"processing_status={getattr(conversation, 'processing_status', None)}), creating new"
-                )
-            conversation = None
-    else:
-        logger.info(
-            f"🔍 No Redis key found for {conversation_key}, creating new conversation"
-        )
-
-    # If no valid placeholder found, create new conversation
-    if not conversation:
-        conversation = create_conversation(
-            user_id=user_id,
-            client_id=client_id,
-            title="Recording...",
-            summary="Transcribing audio...",
-        )
-        await conversation.insert()
-        conversation_id = conversation.conversation_id
+    if conversation_created:
         logger.info(
             f"✅ Created streaming conversation {conversation_id} for session {session_id}"
         )
@@ -771,7 +750,7 @@ async def _initialize_conversation(
         )
 
     # Attach markers from Redis session (e.g., button events captured during streaming)
-    markers = await SessionStore(redis_client).get_markers(session_id)
+    markers = await store.get_markers(session_id)
     if markers:
         conversation.markers = markers
         await conversation.save()
@@ -814,11 +793,6 @@ async def _initialize_conversation(
         else:
             raise
 
-    # Signal audio persistence job to rotate to this conversation's file
-    rotation_signal_key = f"conversation:current:{session_id}"
-    await redis_client.set(
-        rotation_signal_key, conversation_id, ex=86400
-    )  # 24 hour TTL
     logger.info(
         f"🔄 Signaled audio persistence to rotate file for conversation {conversation_id[:12]}"
     )
@@ -1685,20 +1659,27 @@ async def open_conversation_job(
 
     await _monitor_conversation_loop(state, aggregator, current_job, redis_client)
 
-    # When session stays active (timeout or close_requested), immediately clear
-    # conversation:current so audio persistence stops writing to this conversation.
-    # Without this, audio persistence keeps adding chunks during phases 4-7
-    # (potentially 30+ seconds), corrupting the closed conversation's data and
-    # delaying the start of the next speech detection cycle.
-    # For session finalization (disconnect), audio persistence exits on its own
-    # via the session status check, so this is not needed.
+    # When the session stays active, rotate ownership before post-processing. The
+    # compare-and-swap has no ownerless interval: producer XADD observes either the
+    # closing conversation or its fresh successor. Every WAL entry therefore keeps
+    # a durable, immutable owner even if this worker crashes during phases 4-7.
     if state.timeout_triggered:
-        current_conversation_key = f"conversation:current:{session_id}"
-        await redis_client.delete(current_conversation_key)
-        logger.info(
-            f"🔄 Cleared conversation:current for {conversation_id[:12]} — "
-            f"audio persistence will flush buffer and wait for next conversation"
+        store = SessionStore(redis_client)
+        successor = await rotate_active_session_placeholder(
+            store,
+            session_id=session_id,
+            expected_conversation_id=conversation_id,
+            user_id=user_id,
+            client_id=client_id,
         )
+        if (
+            successor is None
+            and await store.get_status(session_id) == SessionStatus.ACTIVE
+        ):
+            raise RuntimeError(
+                f"Active session {session_id} could not rotate durable audio owner"
+            )
+        logger.info(f"🔄 Rotated durable audio owner after {conversation_id[:12]}")
 
     logger.info(
         f"✅ Conversation {conversation_id} updates complete, checking for meaningful speech..."

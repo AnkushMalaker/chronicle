@@ -96,9 +96,6 @@ models:
     start:
       message: {}
 backend:
-  audio:
-    # Enable always_persist for testing - creates placeholder conversations immediately
-    always_persist_enabled: true
   diarization:
     # Trust provider segments (mock provider returns pre-built segments)
     diarization_source: provider

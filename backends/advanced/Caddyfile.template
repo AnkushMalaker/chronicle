@@ -11,6 +11,7 @@
 # will automatically obtain Let's Encrypt certificates.
 
 localhost TAILSCALE_IP {
+    # TLS_CERT_DIRECTIVE
 
     # WebSocket endpoints - proxy to backend with upgrade support
     handle /ws* {
@@ -59,4 +60,12 @@ localhost TAILSCALE_IP {
     handle {
         reverse_proxy webui-dev:5173
     }
+}
+
+# LangFuse cannot be served from a subpath, so it gets a dedicated HTTPS
+# listener on the same Chronicle/Tailscale host. Port 3443 is published by the
+# backend Caddy service and langfuse-web shares chronicle-network with it.
+https://localhost:3443 https://TAILSCALE_IP:3443 {
+    # TLS_CERT_DIRECTIVE
+    reverse_proxy langfuse-web:3000
 }

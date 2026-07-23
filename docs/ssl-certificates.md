@@ -1,7 +1,7 @@
 # SSL Certificates & HTTPS
 
-Chronicle uses **Caddy** for automatic HTTPS — for both the advanced backend and the
-speaker-recognition service — so certificates are obtained and renewed automatically.
+Chronicle uses **Caddy** for automatic HTTPS. The backend Caddy serves both the main
+dashboard and Langfuse; speaker recognition has its own Caddy on a non-conflicting port.
 
 ## Why HTTPS is Needed
 
@@ -20,7 +20,13 @@ Both services front their containers with Caddy:
 | Service | Config | HTTP → HTTPS ports |
 |---------|--------|--------------------|
 | Advanced Backend | `backends/advanced/Caddyfile` | `80` → `443` |
+| Langfuse | `backends/advanced/Caddyfile` | direct `3002`; HTTPS `3443` |
 | Speaker Recognition | `extras/speaker-recognition/Caddyfile` | `8081` → `8444` |
+
+With a Tailscale host such as `node.example.ts.net`, the browser UIs are therefore
+`https://node.example.ts.net`, `https://node.example.ts.net:3443` (Langfuse), and
+`https://node.example.ts.net:8444` (speaker recognition). The WebUI System page shows
+these canonical URLs for each running node.
 
 The wizard records the chosen approach as `HTTPS_CERT_MODE` in each service's `.env`:
 

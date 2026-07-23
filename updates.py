@@ -17,6 +17,12 @@ On a compose failure after the checkout moved, the checkout is rolled back to
 the previous commit (detached, so local branches are never rewritten) and the
 services are restarted from the old code.
 
+Native client components (tray, ScreenPipe collector — see clients.py) also run
+from this checkout via user units; after either outcome they're restarted
+best-effort so they pick up whatever code the checkout ends on. On client-only
+nodes there are no compose services at all — the update is just checkout move +
+client-unit restarts.
+
 Used by ``services.py update`` (CLI) and the node agent's ``/update`` routes
 (edge/service_manager.py), which the hub fans out across the cluster.
 """
@@ -26,6 +32,7 @@ import re
 import subprocess
 from pathlib import Path
 
+import clients
 import services
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -202,6 +209,24 @@ def _restart_enabled_services(build: bool, progress) -> str | None:
     return None
 
 
+def _restart_client_units(progress) -> None:
+    """Restart installed client components (tray, collector — see clients.py).
+
+    They ``uv run`` straight from this checkout, so restarting is all an update
+    needs. Best-effort: a tray that fails to relaunch is reported but never
+    fails (or rolls back) the node update — on client-only nodes there may be
+    nothing else to restart at all.
+    """
+    for unit, ok in clients.restart_installed(progress):
+        if ok:
+            services.console.print(f"[green]✅ Restarted {unit}[/green]")
+        else:
+            services.console.print(
+                f"[yellow]⚠️  {unit} failed to restart — check it manually "
+                f"(systemctl --user / launchctl)[/yellow]"
+            )
+
+
 def perform_update(
     target: str | None = None,
     prebuilt: str | None = None,
@@ -253,6 +278,7 @@ def perform_update(
 
     failed = _restart_enabled_services(build=not prebuilt, progress=progress)
     if failed is None:
+        _restart_client_units(progress)
         return True
 
     # Roll back: old code, old services. Best-effort — report both outcomes.
@@ -269,6 +295,8 @@ def perform_update(
         )
         return False
     refailed = _restart_enabled_services(build=not prebuilt, progress=progress)
+    # Client units run from the checkout too — put them back on the old code.
+    _restart_client_units(progress)
     if refailed:
         services.console.print(
             f"[red]❌ {refailed} also failed on the previous code — the update "

@@ -47,16 +47,6 @@ export function useRunCronJob() {
   })
 }
 
-export function useProcessAnnotations() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (annotationType: string) => finetuningApi.processAnnotations(annotationType).then(r => r.data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['finetuning'] })
-    },
-  })
-}
-
 export function useDeleteOrphanedAnnotations() {
   const queryClient = useQueryClient()
   return useMutation({

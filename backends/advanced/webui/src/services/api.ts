@@ -121,8 +121,16 @@ export const conversationsApi = {
     }
   }),
   getById: (id: string) => api.get(`/api/conversations/${id}`),
-  search: (query: string, limit?: number, offset?: number) =>
-    api.get('/api/conversations/search', { params: { q: query, limit, offset } }),
+  search: (
+    query: string,
+    limit?: number,
+    offset?: number,
+    fields?: Array<'title' | 'summary' | 'speakers'>,
+  ) =>
+    api.get('/api/conversations/search', {
+      params: { q: query, limit, offset, fields },
+      paramsSerializer: { indexes: null },
+    }),
   star: (id: string) => api.post(`/api/conversations/${id}/star`),
   delete: (id: string) => api.delete(`/api/conversations/${id}`),
   restore: (id: string) => api.post(`/api/conversations/${id}/restore`),
@@ -138,16 +146,25 @@ export const conversationsApi = {
   }),
   reprocessSpeakers: (
     conversationId: string,
-    transcriptVersionId: string = 'active'
+    transcriptVersionId: string = 'active',
+    diarizationSource?: 'provider' | 'pyannote'
   ) =>
     api.post(`/api/conversations/${conversationId}/reprocess-speakers`, null, {
       params: {
-        transcript_version_id: transcriptVersionId
+        transcript_version_id: transcriptVersionId,
+        diarization_source: diarizationSource
       }
     }),
 
   // Conversations whose speaker labels would change under the current gallery (admin).
-  getDrift: () => api.get('/api/conversations/drift'),
+  // Fingerprint-cached: returns { status: 'cached', report } instantly when nothing
+  // relevant changed; otherwise { job_id } — poll progress via dataAuditApi.
+  scanDrift: (force = false) =>
+    api.post<{ job_id?: string; status: string; report?: unknown }>(
+      '/api/conversations/drift/scan',
+      undefined,
+      { params: force ? { force: true } : undefined }
+    ),
   backfillDriftClusterEmbeddings: () =>
     api.post<{ job_id: string; status: string }>(
       '/api/conversations/drift/backfill-cluster-embeddings'
@@ -368,19 +385,17 @@ export const annotationsApi = {
 }
 
 export const finetuningApi = {
-  // Process annotations for training
-  processAnnotations: (annotationType: string = 'diarization') =>
-    api.post('/api/finetuning/process-annotations', null, {
-      params: { annotation_type: annotationType }
-    }),
-
   // Get fine-tuning status
   getStatus: () => api.get('/api/finetuning/status'),
 
-  // Curated enrollment: quality-gated candidate clips + enroll only selected
-  getEnrollmentCandidates: (minDuration?: number) =>
+  // Curated enrollment: quality-gated candidate clips + enroll only selected.
+  // includeIdentified surfaces auto-labelled (identification) segments too.
+  getEnrollmentCandidates: (includeIdentified = false, minDuration?: number) =>
     api.get('/api/finetuning/enrollment-candidates', {
-      params: minDuration != null ? { min_duration: minDuration } : {},
+      params: {
+        include_identified: includeIdentified,
+        ...(minDuration != null ? { min_duration: minDuration } : {}),
+      },
     }),
   enrollSelectedClips: (clips: Array<{
     conversation_id: string
@@ -448,7 +463,6 @@ export const systemApi = {
   // Miscellaneous Configuration Settings
   getMiscSettings: () => api.get('/api/misc-settings'),
   saveMiscSettings: (settings: {
-    always_persist_enabled?: boolean;
     per_segment_speaker_id?: boolean;
     streaming_fallback_timeout_seconds?: number;
     always_batch_retranscribe?: boolean;
@@ -897,6 +911,8 @@ export interface SpeakerConfidenceRow {
   marginal_pct: number
   // % that would still clear the live threshold.
   keep_pct: number
+  // Enrolled but zero stored identifications (e.g. just enrolled); stats are null.
+  never_identified?: boolean
 }
 
 export interface SpeakerConfidenceOverview {
@@ -1206,6 +1222,203 @@ export interface GuidedEnrollmentResetResponse {
   status: string
 }
 
+export interface BackgroundCandidate {
+  conversation_id: string
+  title?: string
+  segment_index: number
+  segment_start_time: number
+  start: number
+  end: number
+  text: string
+  bucket_similarity: number
+  snr_db: number | null
+  background_likelihood: number
+  candidate_type: 'noise' | 'background_speech'
+  bucket_similarities: Partial<Record<'noise' | 'background_speech', number>>
+}
+
+export interface BackgroundSuggestResponse {
+  conversation_id: string
+  bucket_size: number
+  candidates: BackgroundCandidate[]
+}
+
+export interface BackgroundScanResponse {
+  bucket_sizes: Record<'noise' | 'background_speech', number>
+  scanned_conversations: number
+  candidates: BackgroundCandidate[]
+}
+
+export interface BackgroundSuppressionSegment {
+  conversation_id: string
+  segment_start: number
+  segment_end: number
+  text?: string
+  cluster_signature?: string
+  background_similarity: number
+  foreground_similarity: number
+  bucket_type?: 'noise' | 'background_speech'
+  zone: 'confident_background' | 'unsure'
+  status: 'applied' | 'shadow' | 'queued' | 'restored' | 'confirmed'
+  source: string
+  previous_identified_as?: string | null
+}
+
+export interface BackgroundSuppressionCluster {
+  cluster_signature: string
+  segments: BackgroundSuppressionSegment[]
+  statuses: Record<string, number>
+  zones: Record<string, number>
+  max_background_similarity: number
+}
+
+export interface BackgroundSuppressionsResponse {
+  conversation_id: string
+  total: number
+  status_counts: Record<string, number>
+  clusters: BackgroundSuppressionCluster[]
+  subject_override: boolean
+}
+
+export interface BackgroundClusterSample {
+  clip_key: string
+  conversation_id: string
+  conversation_title?: string
+  segment_index: number
+  start: number
+  end: number
+  text: string
+  candidate_type: 'noise' | 'background_speech'
+  current_label?: string
+  review_role: 'typical' | 'edge'
+}
+
+export interface BackgroundCluster {
+  cluster_id: string
+  candidate_type: 'noise' | 'background_speech'
+  conversation_id: string
+  conversation_title?: string
+  size: number
+  member_keys: string[]
+  samples: BackgroundClusterSample[]
+  known_speaker_fraction?: number
+  known_speaker_count?: number
+  mean_foreground_confidence?: number
+  mean_foreground_similarity?: number
+  mean_background_similarity?: number
+  suggestion_score?: number
+  mined?: 'harvest' | 'novel' | null
+}
+
+export type BackgroundClusterLane = 'harvest' | 'novel' | 'similar'
+// Review dial: how aggressively the queue surfaces candidates ("more" widens
+// lane thresholds / smaller clusters; production suppression is unaffected).
+export type BackgroundSurface = 'less' | 'default' | 'more'
+
+export interface BackgroundClustersResponse {
+  clusters: BackgroundCluster[]
+  indexed: number
+  remaining: number
+  bucket_sizes: Record<'noise' | 'background_speech', number>
+  review_focus?: 'bootstrap' | 'hard_speech' | 'discovery'
+  lane?: BackgroundClusterLane | null
+  lane_counts?: Partial<Record<BackgroundClusterLane, number>>
+  // "quick_confirms" = clusters the system already believes are background
+  // (sign-off only); "uncertain" is the number that shrinks as it learns.
+  queue_summary?: { unreviewed: number; quick_confirms: number; uncertain: number }
+}
+
+export interface BackgroundClusterDecisionResponse {
+  review_id: string
+  reviewed: number
+  exemplars_added: number
+  duplicates_covered: number
+  decision: 'noise' | 'background_speech' | 'not_background' | 'mixed' | 'dismissed'
+}
+
+export interface BackgroundLatestDecision {
+  review_id?: string
+  decision: 'noise' | 'background_speech' | 'not_background' | 'skip' | 'mixed' | 'dismissed' | null
+  reviewed?: number
+  reviewed_at?: string
+}
+
+export interface BackgroundDecisionHistoryItem {
+  review_id: string
+  cluster_id: string
+  decision: 'noise' | 'background_speech' | 'not_background' | 'skip' | 'mixed' | 'dismissed'
+  reviewed: number
+  clips_affected: number
+  reviewed_at: string
+  samples_reconstructed: boolean
+  samples: (Omit<BackgroundClusterSample, 'review_role'> & {
+    decision?: 'noise' | 'background_speech' | 'not_background'
+  })[]
+}
+
+export interface BackgroundCleanupSample {
+  clip_key: string
+  conversation_id: string
+  conversation_title?: string
+  start: number
+  end: number
+  text: string
+  current_label?: string
+  proposed_label: 'Noise' | 'Background Speech'
+  background_score: number
+  foreground_score: number
+  margin: number
+  tier: 'high' | 'ambiguous'
+}
+
+export interface BackgroundCleanupReport {
+  ready: boolean
+  reason?: string
+  recommendation?: string
+  report_id?: string
+  reference_counts?: Record<'noise' | 'background_speech' | 'foreground', number>
+  high_confidence?: number
+  ambiguous?: number
+  conversations_affected?: number
+  proposed_counts?: Record<'noise' | 'background_speech', number>
+  high_samples?: BackgroundCleanupSample[]
+  ambiguous_samples?: BackgroundCleanupSample[]
+}
+
+export interface BackgroundAccuracyMetric {
+  precision: number
+  recall: number
+  f1: number
+  accuracy: number
+  confusion: { tp: number; fp: number; fn: number; tn: number }
+  samples: number
+}
+
+export interface BackgroundAccuracyReport {
+  ready: boolean
+  reason?: string
+  method?: string
+  reconstructed_review_samples?: boolean
+  reviewed_clusters?: number
+  reviewed_samples?: number
+  decision_counts?: Record<string, number>
+  background_speech_samples?: number
+  baseline?: BackgroundAccuracyMetric
+  adapted?: BackgroundAccuracyMetric
+  f1_change?: number
+  learning_curve?: { annotations: number; f1: number; samples: number }[]
+  errors?: Array<{
+    clip_key: string
+    conversation_id: string
+    conversation_title?: string
+    start: number
+    end: number
+    text: string
+    decision: string
+    predicted: 'background' | 'foreground'
+  }>
+}
+
 export const dataAuditApi = {
   // Enqueue batch VAD analysis. Returns { job_id, status }.
   analyze: (conversationIds?: string[], force: boolean = false) =>
@@ -1403,6 +1616,118 @@ export const dataAuditApi = {
   // Bulk-apply all pending speaker-triage decisions across every conversation.
   applyTriage: () =>
     api.post<TriageApplyResponse>('/api/data-audit/triage/apply'),
+
+  // Rank a conversation's unknown segments as "potentially background" by
+  // similarity to the confirmed-background bucket + low SNR.
+  backgroundSuggest: (conversationId: string, limit = 10) =>
+    api.get<BackgroundSuggestResponse>('/api/data-audit/background/suggest', {
+      params: { conversation_id: conversationId, limit },
+    }),
+
+  // Corpus-wide "potentially background" feed across recent conversations.
+  backgroundScan: (limit = 40, maxConversations = 8) =>
+    api.get<BackgroundScanResponse>('/api/data-audit/background/scan', {
+      params: { limit, max_conversations: maxConversations },
+    }),
+
+  backgroundAdd: (
+    conversationId: string,
+    start: number,
+    end: number,
+    bucketType: 'noise' | 'background_speech'
+  ) =>
+    api.post('/api/data-audit/background/add', {
+      conversation_id: conversationId,
+      start,
+      end,
+      bucket_type: bucketType,
+      source: 'review',
+    }),
+
+  startBackgroundIndex: () =>
+    api.post<{ job_id: string; status: string; reused: boolean }>(
+      '/api/data-audit/background/index'
+    ),
+
+  getBackgroundIndex: () =>
+    api.get<{ job_id: string | null; status: string | null; indexed: number }>(
+      '/api/data-audit/background/index'
+    ),
+
+  getBackgroundClusters: (
+    limit = 6,
+    samplesPerCluster = 5,
+    lane?: BackgroundClusterLane,
+    surface: BackgroundSurface = 'default'
+  ) =>
+    api.get<BackgroundClustersResponse>('/api/data-audit/background/clusters', {
+      params: { limit, samples_per_cluster: samplesPerCluster, lane, surface },
+    }),
+
+  decideBackgroundCluster: (
+    cluster: BackgroundCluster,
+    decision: 'noise' | 'background_speech' | 'not_background' | 'mixed' | 'dismissed',
+    sampleDecisions: Record<string, 'noise' | 'background_speech' | 'not_background'> = {}
+  ) =>
+    api.post<BackgroundClusterDecisionResponse>('/api/data-audit/background/clusters/decide', {
+      cluster_id: cluster.cluster_id,
+      member_keys: cluster.member_keys,
+      review_sample_keys: cluster.samples.map((sample) => sample.clip_key),
+      decision,
+      sample_decisions: sampleDecisions,
+    }),
+
+  getLatestBackgroundDecision: () =>
+    api.get<BackgroundLatestDecision>('/api/data-audit/background/clusters/latest-decision'),
+
+  getBackgroundDecisionHistory: (limit = 50) =>
+    api.get<{ decisions: BackgroundDecisionHistoryItem[] }>(
+      '/api/data-audit/background/clusters/decisions',
+      { params: { limit } }
+    ),
+
+  undoBackgroundDecision: (reviewId: string) =>
+    api.delete<{ undone: boolean; clips_restored: number; references_removed: number }>(
+      `/api/data-audit/background/clusters/decisions/${reviewId}`
+    ),
+
+  getBackgroundCleanupReport: () =>
+    api.get<BackgroundCleanupReport>('/api/data-audit/background/cleanup/report'),
+
+  getBackgroundAccuracyReport: () =>
+    api.get<BackgroundAccuracyReport>('/api/data-audit/background/accuracy/report'),
+
+  applyBackgroundCleanup: (reportId: string) =>
+    api.post<{ job_id: string; status: string; report_id: string }>(
+      '/api/data-audit/background/cleanup/apply',
+      { report_id: reportId }
+    ),
+
+  // Change a past cluster review's verdict in place (annotation-history edit).
+  editBackgroundDecision: (
+    reviewId: string,
+    decision: 'noise' | 'background_speech' | 'not_background' | 'dismissed'
+  ) =>
+    api.post(`/api/data-audit/background/clusters/decisions/${reviewId}/edit`, {
+      decision,
+    }),
+
+  // Suppression ledger: what was marked background in one conversation.
+  backgroundSuppressions: (conversationId: string) =>
+    api.get<BackgroundSuppressionsResponse>(
+      `/api/data-audit/background/suppressions/${conversationId}`
+    ),
+
+  backgroundSuppressionDecide: (
+    conversationId: string,
+    clusterSignature: string,
+    decision: 'restore' | 'confirm'
+  ) =>
+    api.post('/api/data-audit/background/suppressions/decide', {
+      conversation_id: conversationId,
+      cluster_signature: clusterSignature,
+      decision,
+    }),
 
   // Split a conversation at the given time points (seconds)
   split: (conversationId: string, splitPoints: number[]) =>

@@ -4,25 +4,23 @@ Audio-related RQ job functions.
 This module contains jobs related to audio file processing and cropping.
 """
 
-import asyncio
 import logging
-import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from bson import Binary
+from pymongo.errors import DuplicateKeyError
 from rq import get_current_job
 
-from advanced_omi_backend.controllers.queue_controller import (
-    JOB_RESULT_TTL,
-    default_queue,
-)
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
-from advanced_omi_backend.models.job import (
-    JobPriority,
-    _ensure_beanie_initialized,
-    async_job,
+from advanced_omi_backend.models.job import async_job
+from advanced_omi_backend.services.audio_stream.durability import (
+    AUDIO_PERSISTENCE_GROUP,
+    PersistenceRuntimeState,
+    ReadPhase,
+    SessionPhase,
+    parse_consumer_groups,
 )
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
@@ -37,552 +35,340 @@ from advanced_omi_backend.utils.job_utils import check_job_alive
 logger = logging.getLogger(__name__)
 
 
+class AudioPersistenceError(RuntimeError):
+    """A persistence attempt failed while Redis still owns the source messages."""
+
+
+class AudioPersistenceInvariantError(AudioPersistenceError):
+    """The configured lifecycle cannot provide a durable owner for raw audio."""
+
+
+def _message_id_text(message_id: bytes | str) -> str:
+    return message_id.decode() if isinstance(message_id, bytes) else str(message_id)
+
+
 @async_job(redis=True, beanie=True)
 async def audio_streaming_persistence_job(
     session_id: str,
     user_id: str,
     client_id: str,
-    always_persist: bool = False,
     *,
     redis_client=None,
 ) -> Dict[str, Any]:
+    """Commit a Redis raw-audio WAL to MongoDB with at-least-once delivery.
+
+    Delivery state is strict: group lag -> pending -> Mongo commit -> XACK.
+
+    A failed attempt raises. It never ACKs, trims, expires, or routes bytes through
+    another store. RQ retries re-enter through pending recovery using the same
+    deterministic consumer name.
     """
-    Long-running RQ job that stores audio chunks in MongoDB with Opus compression.
-
-    Buffers incoming PCM audio from Redis Stream into 10-second chunks, encodes
-    them to Opus format, and stores in MongoDB audio_chunks collection.
-
-    Runs in parallel with transcription processing to reduce memory pressure.
-
-    Args:
-        session_id: Stream session ID
-        user_id: User ID
-        client_id: Client ID
-        always_persist: Whether to create placeholder conversation immediately
-                        (read from global config at enqueue time by backend)
-        redis_client: Redis client (injected by decorator)
-
-    Returns:
-        Dict with chunk_count, total_bytes, compressed_bytes, duration_seconds
-
-    Note:
-        - Replaces disk-based WAV file storage with MongoDB chunk storage.
-        - always_persist is passed by the backend at enqueue time to avoid
-          cross-process config cache issues.
-    """
-
-    logger.info(
-        f"🎵 Starting MongoDB audio persistence for session {session_id} (always_persist={always_persist})"
-    )
-
-    # Setup audio persistence consumer group (separate from transcription consumer)
-    audio_stream_name = f"audio:stream:{client_id}"
-    audio_group_name = "audio_persistence"
-    audio_consumer_name = f"persistence-{session_id[:8]}"
+    audio_stream_name = f"audio:stream:{session_id}"
+    audio_group_name = AUDIO_PERSISTENCE_GROUP
+    audio_consumer_name = f"persistence-{session_id[-16:]}"
+    logger.info(f"🎵 Starting durable Mongo audio persistence for session {session_id}")
 
     try:
         await redis_client.xgroup_create(
             audio_stream_name, audio_group_name, "0", mkstream=True
         )
-        logger.info(
-            f"📦 Created audio persistence consumer group for {audio_stream_name}"
-        )
-    except Exception as e:
-        if "BUSYGROUP" not in str(e):
-            logger.warning(f"Failed to create audio consumer group: {e}")
-        logger.debug(f"Audio consumer group already exists for {audio_stream_name}")
+    except Exception as error:
+        if "BUSYGROUP" not in str(error):
+            raise
 
-    # Conversation this job should persist chunks under at startup. Seeded below for
-    # always_persist sessions so the very first flush (e.g. a short session that is
-    # already finalizing on the first loop iteration) writes to MongoDB instead of
-    # no-opping because current_conversation_id is still None.
-    initial_conversation_id = None
-
-    # If always_persist enabled, create placeholder conversation if it doesn't exist
-    if always_persist:
-        conversation_key = f"conversation:current:{session_id}"
-        existing_conversation_id = await redis_client.get(conversation_key)
-
-        # Guard against stale Redis keys: the conversation:current key has no TTL
-        # for always_persist and can survive container rebuilds (Redis uses appendonly
-        # persistence with a bind mount). If the key points to a MongoDB document
-        # that was deleted (e.g., data directory cleared during rebuild), we must
-        # create a fresh placeholder instead of silently reusing a non-existent conversation.
-        if existing_conversation_id:
-            existing_id_str = existing_conversation_id.decode()
-            existing_conv = await Conversation.find_one(
-                Conversation.conversation_id == existing_id_str
-            )
-            if not existing_conv:
-                logger.warning(
-                    f"⚠️ Stale Redis key: conversation {existing_id_str} not found in MongoDB. "
-                    f"Clearing key and creating fresh placeholder."
-                )
-                await redis_client.delete(conversation_key)
-                existing_conversation_id = None
-
-        if not existing_conversation_id:
-            logger.info(
-                f"📝 always_persist=True - creating placeholder conversation for session {session_id[:12]}"
-            )
-
-            # TODO: Route to ERRLOG and create interface to create conversation
-            # Create placeholder conversation
-            conversation = Conversation(
-                user_id=user_id,
-                client_id=client_id,
-                title="Audio Recording (Processing...)",
-                summary="Transcription in progress...",
-                transcript_versions=[],
-                processing_status=Conversation.ConversationStatus.ACTIVE.value,
-                always_persist=True,
-            )
-            await conversation.insert()
-
-            # Set conversation:current Redis key.
-            # No TTL for always_persist — key lives until the session ends or is
-            # explicitly cleaned up.  Stale keys from crashed sessions are handled
-            # by the guard above (checks MongoDB on next startup).
-            await redis_client.set(conversation_key, conversation.conversation_id)
-
-            initial_conversation_id = conversation.conversation_id
-            logger.info(
-                f"✅ Created placeholder conversation {conversation.conversation_id} "
-                f"and set Redis key {conversation_key}"
-            )
-        else:
-            initial_conversation_id = existing_conversation_id.decode()
-            logger.info(
-                f"📋 always_persist=True - placeholder conversation already exists: "
-                f"{initial_conversation_id}"
-            )
-    else:
-        logger.info(
-            f"🔍 always_persist=False - will wait for speech detection to create conversation"
-        )
-
-    # Job control
     store = SessionStore(redis_client)
-    max_runtime = 86340  # 24 hours - 60 seconds (graceful exit before RQ timeout)
+    sample_rate, channels, sample_width = await store.get_audio_format(session_id)
+    bytes_per_second = sample_rate * sample_width * channels
+    chunk_size_bytes = int(10.0 * bytes_per_second)
+
+    runtime = PersistenceRuntimeState()
+    pending_cursor: bytes | str = "0-0"
     start_time = time.time()
+    max_runtime = 86340
+    current_job = get_current_job()
+    seen_conversations: set[str] = set()
+    conversation_positions: dict[str, tuple[int, float]] = {}
 
-    # Conversation rotation state. Seed from the placeholder created above so the
-    # first flush persists to MongoDB and the first-iteration rotation check is a
-    # no-op (instead of discarding the initial buffer as a spurious rotation).
-    current_conversation_id = initial_conversation_id
-    conversation_start_time = time.time() if initial_conversation_id else None
-    conversation_count = 0
-
-    # PCM buffer for current 10-second chunk
     pcm_buffer = bytearray()
-    # Resume chunk numbering from any audio the seeded conversation already has, so
-    # a reconnect re-attaching to an existing placeholder APPENDS rather than
-    # rewriting from index 0 (which created overlapping duplicate chunks).
-    if initial_conversation_id:
-        chunk_index, chunk_start_time = await get_resume_position(
-            initial_conversation_id
-        )
-    else:
-        chunk_index = 0  # Sequential chunk counter for current conversation
-        chunk_start_time = 0.0  # Start time of current buffered chunk
-
-    # Read actual sample rate from the session's audio_format stored in Redis
-    SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH = await store.get_audio_format(session_id)
-    logger.info(
-        f"🎵 Audio format from Redis: {SAMPLE_RATE}Hz, {SAMPLE_WIDTH*8}-bit, {CHANNELS}ch"
-    )
-
-    CHUNK_DURATION_SECONDS = 10.0
-    BYTES_PER_SECOND = SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS
-    CHUNK_SIZE_BYTES = int(CHUNK_DURATION_SECONDS * BYTES_PER_SECOND)
-
-    # Session stats (across all conversations)
+    pcm_message_ids: list[bytes | str] = []
+    pcm_conversation_id: str | None = None
     total_pcm_bytes = 0
     total_compressed_bytes = 0
     total_mongo_chunks_written = 0
     end_signal_received = False
-    consecutive_empty_reads = 0
-    max_empty_reads = 3
 
-    # Get current job for zombie detection
-    current_job = get_current_job()
+    async def find_existing_chunk(source_ids: list[str]):
+        return await AudioChunkDocument.find_one(
+            AudioChunkDocument.source_stream == audio_stream_name,
+            AudioChunkDocument.source_first_message_id == source_ids[0],
+        )
 
-    async def flush_pcm_buffer() -> bool:
-        """
-        Flush current PCM buffer to MongoDB as Opus-compressed chunk.
-
-        Updates conversation metadata with chunk count and compression stats.
-        Returns True on success, False on failure. On failure the buffer is
-        NOT cleared so the caller can retry on the next incoming message.
-        """
-        nonlocal pcm_buffer, chunk_index, chunk_start_time
-        nonlocal total_pcm_bytes, total_compressed_bytes, total_mongo_chunks_written
-
-        if len(pcm_buffer) == 0 or not current_conversation_id:
-            return True
-
-        try:
-            # Encode PCM → Opus
-            opus_data = await encode_pcm_to_opus(
-                pcm_data=bytes(pcm_buffer),
-                sample_rate=SAMPLE_RATE,
-                channels=CHANNELS,
-                bitrate=24,  # 24kbps for speech
+    def validate_existing_chunk(
+        existing,
+        source_ids: list[str],
+        original_size: int,
+        conversation_id: str,
+    ) -> None:
+        if existing.conversation_id != conversation_id:
+            raise AudioPersistenceInvariantError(
+                f"Committed chunk {source_ids[0]} belongs to "
+                f"{existing.conversation_id}, not WAL owner {conversation_id}"
+            )
+        if list(existing.source_message_ids) != source_ids:
+            raise AudioPersistenceInvariantError(
+                "Redis replay grouped source messages differently from the committed "
+                f"chunk beginning at {source_ids[0]}"
+            )
+        if existing.original_size != original_size:
+            raise AudioPersistenceInvariantError(
+                f"Committed chunk {source_ids[0]} has a different PCM size"
             )
 
-            # Calculate chunk metadata
-            original_size = len(pcm_buffer)
-            compressed_size = len(opus_data)
-            duration = original_size / BYTES_PER_SECOND
-            end_time = chunk_start_time + duration
+    async def commit_and_ack_buffer() -> None:
+        """Commit the local PCM buffer, then ACK exactly its source messages."""
+        nonlocal pcm_buffer, pcm_message_ids, pcm_conversation_id
+        nonlocal total_pcm_bytes, total_compressed_bytes, total_mongo_chunks_written
 
-            # Create MongoDB document
-            audio_chunk = AudioChunkDocument(
-                conversation_id=current_conversation_id,
+        if not pcm_buffer:
+            return
+        if not pcm_conversation_id:
+            raise AudioPersistenceInvariantError(
+                "PCM reached persistence without a conversation owner"
+            )
+        if not pcm_message_ids:
+            raise AudioPersistenceInvariantError(
+                "PCM buffer has no Redis source-message provenance"
+            )
+
+        source_ids = [_message_id_text(message_id) for message_id in pcm_message_ids]
+        original_size = len(pcm_buffer)
+        chunk_index, chunk_start_time = conversation_positions.get(
+            pcm_conversation_id, (None, None)
+        )
+        if chunk_index is None or chunk_start_time is None:
+            chunk_index, chunk_start_time = await get_resume_position(
+                pcm_conversation_id
+            )
+        existing = await find_existing_chunk(source_ids)
+        inserted = False
+
+        if existing is None:
+            opus_data = await encode_pcm_to_opus(
+                pcm_data=bytes(pcm_buffer),
+                sample_rate=sample_rate,
+                channels=channels,
+                bitrate=24,
+            )
+            duration = original_size / bytes_per_second
+            end_time = chunk_start_time + duration
+            candidate = AudioChunkDocument(
+                conversation_id=pcm_conversation_id,
                 chunk_index=chunk_index,
                 audio_data=Binary(opus_data),
                 original_size=original_size,
-                compressed_size=compressed_size,
+                compressed_size=len(opus_data),
                 start_time=chunk_start_time,
                 end_time=end_time,
                 duration=duration,
-                sample_rate=SAMPLE_RATE,
-                channels=CHANNELS,
+                sample_rate=sample_rate,
+                channels=channels,
+                source_stream=audio_stream_name,
+                source_first_message_id=source_ids[0],
+                source_last_message_id=source_ids[-1],
+                source_message_ids=source_ids,
             )
+            try:
+                await candidate.insert()
+                existing = candidate
+                inserted = True
+            except DuplicateKeyError:
+                existing = await find_existing_chunk(source_ids)
+                if existing is None:
+                    raise
 
-            # Save to MongoDB
-            await audio_chunk.insert()
+        validate_existing_chunk(
+            existing, source_ids, original_size, pcm_conversation_id
+        )
 
-            # Update session stats
-            total_pcm_bytes += original_size
-            total_compressed_bytes += compressed_size
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == existing.conversation_id
+        )
+        if conversation is None:
+            raise AudioPersistenceInvariantError(
+                f"WAL owner {existing.conversation_id} does not exist in MongoDB"
+            )
+        if conversation.source_session_id != session_id:
+            raise AudioPersistenceInvariantError(
+                f"WAL owner {existing.conversation_id} belongs to session "
+                f"{conversation.source_session_id}, not {session_id}"
+            )
+        conversation.audio_chunks_count = max(
+            conversation.audio_chunks_count or 0, existing.chunk_index + 1
+        )
+        conversation.audio_total_duration = max(
+            conversation.audio_total_duration or 0.0, existing.end_time
+        )
+        conversation.audio_compression_ratio = (
+            existing.compressed_size / existing.original_size
+        )
+        await conversation.save()
+
+        await redis_client.xack(audio_stream_name, audio_group_name, *pcm_message_ids)
+
+        if inserted:
+            total_pcm_bytes += existing.original_size
+            total_compressed_bytes += existing.compressed_size
             total_mongo_chunks_written += 1
 
-            # Update conversation metadata
-            conversation = await Conversation.find_one(
-                Conversation.conversation_id == current_conversation_id
-            )
+        conversation_positions[pcm_conversation_id] = (
+            max(chunk_index, existing.chunk_index + 1),
+            max(chunk_start_time, existing.end_time),
+        )
+        pcm_buffer = bytearray()
+        pcm_message_ids = []
+        pcm_conversation_id = None
 
-            if conversation:
-                # Calculate running totals
-                chunk_count = chunk_index + 1
-                total_duration = end_time
-                compression_ratio = (
-                    compressed_size / original_size if original_size > 0 else 0.0
+    async def process_messages(messages) -> bytes | str | None:
+        """Move delivered entries to Mongo or leave them pending on any error."""
+        nonlocal end_signal_received, pcm_conversation_id
+        last_message_id = None
+        for _stream_name, stream_messages in messages:
+            for message_id, fields in stream_messages:
+                last_message_id = message_id
+                audio_data = (
+                    fields.get(b"audio_data") or fields.get("audio_data") or b""
                 )
-
-                # Update conversation fields. Use max() against any existing value:
-                # chunk_index resets to 0 if a placeholder is reused for a second
-                # persistence cycle, and a plain assignment would clobber the real
-                # cumulative totals down to the last write (e.g. 82 chunks → 2).
-                conversation.audio_chunks_count = max(
-                    conversation.audio_chunks_count or 0, chunk_count
+                raw_chunk_id = fields.get(b"chunk_id") or fields.get("chunk_id") or b""
+                chunk_id = (
+                    raw_chunk_id.decode()
+                    if isinstance(raw_chunk_id, bytes)
+                    else str(raw_chunk_id)
                 )
-                conversation.audio_total_duration = max(
-                    conversation.audio_total_duration or 0, total_duration
+                is_terminal = chunk_id == "END" or bool(
+                    fields.get(b"end_marker") or fields.get("end_marker")
                 )
-                conversation.audio_compression_ratio = compression_ratio
-                await conversation.save()
-
-            logger.debug(
-                f"💾 Saved chunk {chunk_index} for conversation {current_conversation_id[:12]}: "
-                f"{original_size} → {compressed_size} bytes ({compression_ratio:.3f} ratio), "
-                f"{duration:.1f}s duration"
-            )
-
-            # Log every 6 chunks (60 seconds) to avoid spam
-            if (chunk_index + 1) % 6 == 0:
-                logger.info(
-                    f"📦 Conversation {current_conversation_id[:12]}: "
-                    f"{chunk_index + 1} chunks, {total_duration:.1f}s total"
+                raw_conversation_id = fields.get(b"conversation_id") or fields.get(
+                    "conversation_id"
                 )
-
-            return True
-
-        except Exception as e:
-            logger.error(
-                f"❌ Failed to save audio chunk {chunk_index}: {e}", exc_info=True
-            )
-            return False
-
-    while True:
-        # Check if job still exists in Redis (detect zombie state)
-        if not await check_job_alive(redis_client, current_job, session_id):
-            # Flush remaining buffer before exit
-            if len(pcm_buffer) > 0:
-                await flush_pcm_buffer()
-            break
-
-        # Check timeout
-        if time.time() - start_time > max_runtime:
-            logger.warning(f"⏱️ Timeout reached for audio persistence {session_id}")
-            # Flush remaining buffer
-            if len(pcm_buffer) > 0:
-                await flush_pcm_buffer()
-            break
-
-        # Idle detection: no new chunks + websocket gone = zombie
-        last_chunk_at = await store.get_last_chunk_at(session_id)
-        if last_chunk_at is not None:
-            idle_seconds = time.time() - last_chunk_at
-            if idle_seconds > 300:  # 5 minutes no new data
-                if not await store.is_websocket_connected(session_id):
-                    logger.warning(
-                        f"⚠️ Idle {idle_seconds:.0f}s + WS disconnected — exiting audio persistence"
+                if not raw_conversation_id:
+                    raise AudioPersistenceInvariantError(
+                        f"Redis WAL entry {_message_id_text(message_id)} has no owner"
                     )
-                    if len(pcm_buffer) > 0:
-                        await flush_pcm_buffer()
-                    break
-        else:
-            # Session hash key missing entirely — nothing to persist for
-            logger.warning(
-                f"⚠️ Session hash missing last_chunk_at — exiting audio persistence"
-            )
-            if len(pcm_buffer) > 0:
-                await flush_pcm_buffer()
-            break
-
-        # Check if session is finalizing
-        if await store.get_status(session_id) in (
-            SessionStatus.FINALIZING,
-            SessionStatus.FINISHED,
-        ):
-            logger.info(f"🛑 Session finalizing detected, flushing final chunks...")
-            await asyncio.sleep(0.5)  # Brief wait for in-flight chunks
-
-            # Final read to collect remaining chunks
-            try:
-                final_messages = await redis_client.xreadgroup(
-                    audio_group_name,
-                    audio_consumer_name,
-                    {audio_stream_name: ">"},
-                    count=50,
-                    block=500,
+                conversation_id = (
+                    raw_conversation_id.decode()
+                    if isinstance(raw_conversation_id, bytes)
+                    else str(raw_conversation_id)
                 )
 
-                if final_messages:
-                    for stream_name, msgs in final_messages:
-                        for message_id, fields in msgs:
-                            audio_data = fields.get(b"audio_data", b"")
-                            chunk_id = fields.get(b"chunk_id", b"").decode()
+                if audio_data:
+                    if pcm_conversation_id and pcm_conversation_id != conversation_id:
+                        await commit_and_ack_buffer()
+                    if pcm_conversation_id is None:
+                        pcm_conversation_id = conversation_id
+                        seen_conversations.add(conversation_id)
+                    pcm_buffer.extend(audio_data)
+                    pcm_message_ids.append(message_id)
+                    if len(pcm_buffer) >= chunk_size_bytes:
+                        await commit_and_ack_buffer()
+                else:
+                    if is_terminal:
+                        end_signal_received = True
+                    await redis_client.xack(
+                        audio_stream_name, audio_group_name, message_id
+                    )
+        return last_message_id
 
-                            if chunk_id != "END" and len(audio_data) > 0:
-                                pcm_buffer.extend(audio_data)
+    async def persistence_group_drained() -> bool:
+        raw_groups = await redis_client.execute_command(
+            "XINFO", "GROUPS", audio_stream_name
+        )
+        progress = parse_consumer_groups(raw_groups or []).get(audio_group_name)
+        return bool(progress and progress.drained)
 
-                                # Flush if buffer reaches chunk size
-                                if len(pcm_buffer) >= CHUNK_SIZE_BYTES:
-                                    if await flush_pcm_buffer():
-                                        pcm_buffer = bytearray()
-                                        chunk_index += 1
-                                        chunk_start_time += CHUNK_DURATION_SECONDS
+    try:
+        while True:
+            if not await check_job_alive(redis_client, current_job, session_id):
+                raise AudioPersistenceError(
+                    f"RQ no longer owns persistence attempt for {session_id}"
+                )
+            if time.time() - start_time > max_runtime:
+                raise AudioPersistenceError(
+                    f"Persistence attempt for {session_id} reached its 24h handoff"
+                )
 
-                            await redis_client.xack(
-                                audio_stream_name, audio_group_name, message_id
-                            )
-
+            status = await store.get_status(session_id)
+            if status in (SessionStatus.FINALIZING, SessionStatus.FINISHED):
+                if runtime.session is SessionPhase.ACTIVE:
+                    runtime.begin_draining()
                     logger.info(
-                        f"📦 Final read processed {len(final_messages[0][1])} messages"
+                        f"🛑 Persistence draining terminal session {session_id}"
                     )
-
-            except Exception as e:
-                logger.debug(f"Final audio read error (non-fatal): {e}")
-
-            # Flush any remaining partial chunk
-            if len(pcm_buffer) > 0:
-                await flush_pcm_buffer()
-
-            break
-
-        # Check for conversation change (rotation signal)
-        conversation_key = f"conversation:current:{session_id}"
-        new_conversation_id = await redis_client.get(conversation_key)
-
-        if new_conversation_id:
-            new_conversation_id = new_conversation_id.decode()
-
-            # Conversation changed - flush current buffer and rotate
-            if new_conversation_id != current_conversation_id:
-                # Flush remaining buffer from previous conversation
-                if len(pcm_buffer) > 0 and current_conversation_id:
-                    if await flush_pcm_buffer():
-                        logger.info(
-                            f"✅ Finalized conversation {current_conversation_id[:12]}: "
-                            f"{chunk_index + 1} chunks saved to MongoDB"
-                        )
-                    else:
-                        logger.warning(
-                            f"⚠️ Failed to flush final chunk for conversation "
-                            f"{current_conversation_id[:12]} during rotation — "
-                            f"{len(pcm_buffer)} bytes lost"
-                        )
-
-                # Start new conversation
-                current_conversation_id = new_conversation_id
-                conversation_count += 1
-                conversation_start_time = time.time()
-
-                # Reset chunk state, resuming from any audio this conversation
-                # already has so a rotation back onto a reused id appends instead
-                # of overwriting from index 0 (returns (0, 0.0) for a fresh id).
-                pcm_buffer = bytearray()
-                chunk_index, chunk_start_time = await get_resume_position(
-                    current_conversation_id
+            elif status is not SessionStatus.ACTIVE:
+                raise AudioPersistenceInvariantError(
+                    f"Session {session_id} has invalid/missing status {status}"
                 )
 
-                logger.info(
-                    f"📁 Started MongoDB persistence for conversation #{conversation_count} "
-                    f"({current_conversation_id[:12]}) from chunk_index={chunk_index}"
-                )
-        else:
-            # Conversation key deleted - conversation ended
-            if current_conversation_id and len(pcm_buffer) > 0:
-                # Flush final partial chunk
-                await flush_pcm_buffer()
-                duration = (
-                    (time.time() - conversation_start_time)
-                    if conversation_start_time
-                    else 0
-                )
-                logger.info(
-                    f"✅ Conversation {current_conversation_id[:12]} ended: "
-                    f"{chunk_index + 1} chunks, {duration:.1f}s"
-                )
-
-                # Reset state
-                pcm_buffer = bytearray()
-                current_conversation_id = None
-
-        # Wait for conversation to be created
-        if not current_conversation_id:
-            # For always_persist sessions where the key was deleted (e.g. by
-            # open_conversation_job rotation), recreate a placeholder so audio
-            # is never silently dropped.
-            if always_persist:
-                conversation_key = f"conversation:current:{session_id}"
-                logger.warning(
-                    f"⚠️ always_persist=True but no conversation key — recreating placeholder"
-                )
-                # TODO: Route to ERRLOG and create interface to create conversation
-                conversation = Conversation(
-                    user_id=user_id,
-                    client_id=client_id,
-                    title="Audio Recording (Processing...)",
-                    summary="Transcription in progress...",
-                    transcript_versions=[],
-                    processing_status=Conversation.ConversationStatus.ACTIVE.value,
-                    always_persist=True,
-                )
-                await conversation.insert()
-                await redis_client.set(conversation_key, conversation.conversation_id)
-                current_conversation_id = conversation.conversation_id
-                conversation_count += 1
-                conversation_start_time = time.time()
-                chunk_index = 0
-                chunk_start_time = 0.0
-                pcm_buffer = bytearray()
-                logger.info(
-                    f"✅ Recreated placeholder conversation {conversation.conversation_id[:12]}"
-                )
-            else:
-                await asyncio.sleep(0.0001)
-                continue
-
-        # Read audio chunks from Redis Stream
-        try:
-            audio_messages = await redis_client.xreadgroup(
+            read_cursor = (
+                pending_cursor
+                if runtime.reader is ReadPhase.RECOVERING_PENDING
+                else ">"
+            )
+            messages = await redis_client.xreadgroup(
                 audio_group_name,
                 audio_consumer_name,
-                {audio_stream_name: ">"},
-                count=20,  # Read up to 20 chunks at a time
-                block=100,  # 100ms timeout
+                {audio_stream_name: read_cursor},
+                count=50,
+                block=500,
             )
 
-            if audio_messages:
-                consecutive_empty_reads = 0  # Reset counter
+            # Redis returns [(stream, [])] (a truthy outer list) when a pending-ID
+            # read has no entries for this consumer. Only a non-empty inner list is
+            # delivery; otherwise pending recovery must advance to new entries.
+            if any(stream_messages for _stream, stream_messages in messages):
+                last_message_id = await process_messages(messages)
+                if (
+                    runtime.reader is ReadPhase.RECOVERING_PENDING
+                    and last_message_id is not None
+                ):
+                    pending_cursor = last_message_id
+                continue
 
-                for stream_name, msgs in audio_messages:
-                    for message_id, fields in msgs:
-                        audio_data = fields.get(b"audio_data", b"")
-                        chunk_id = fields.get(b"chunk_id", b"").decode()
+            if runtime.reader is ReadPhase.RECOVERING_PENDING:
+                runtime.pending_recovered()
+                logger.info(
+                    f"↩️ Pending recovery complete for persistence session {session_id}"
+                )
+                continue
 
-                        # Check for END signal
-                        if chunk_id == "END":
-                            logger.info(f"📡 Received END signal in audio persistence")
-                            end_signal_received = True
-                        elif len(audio_data) > 0:
-                            # Append to PCM buffer
-                            pcm_buffer.extend(audio_data)
+            if runtime.session is SessionPhase.DRAINING:
+                await commit_and_ack_buffer()
+                if await persistence_group_drained():
+                    runtime.complete()
+                    break
 
-                            # Flush if buffer reaches 10-second chunk size
-                            if len(pcm_buffer) >= CHUNK_SIZE_BYTES:
-                                if await flush_pcm_buffer():
-                                    # Reset for next chunk only on success;
-                                    # on failure the buffer is retained and
-                                    # the next message triggers a retry.
-                                    pcm_buffer = bytearray()
-                                    chunk_index += 1
-                                    chunk_start_time += CHUNK_DURATION_SECONDS
-
-                        # ACK the message
-                        await redis_client.xack(
-                            audio_stream_name, audio_group_name, message_id
-                        )
-
-            else:
-                # No new messages
-                if end_signal_received:
-                    consecutive_empty_reads += 1
-                    logger.info(
-                        f"📭 No new messages ({consecutive_empty_reads}/{max_empty_reads})"
-                    )
-
-                    if consecutive_empty_reads >= max_empty_reads:
-                        logger.info(f"✅ Stream empty after END signal - stopping")
-                        # Flush remaining buffer
-                        if len(pcm_buffer) > 0:
-                            await flush_pcm_buffer()
-                        break
-
-        except Exception as audio_error:
-            logger.debug(f"Audio stream read error (non-fatal): {audio_error}")
-
-        await asyncio.sleep(0.0001)
-
-    # Job complete - calculate final stats
-    runtime_seconds = time.time() - start_time
-
-    # Calculate total duration
-    if total_pcm_bytes > 0:
-        duration = total_pcm_bytes / BYTES_PER_SECOND
-        compression_ratio = (
-            total_compressed_bytes / total_pcm_bytes if total_pcm_bytes > 0 else 0.0
+    except Exception:
+        runtime.fail()
+        logger.exception(
+            f"❌ Durable audio persistence attempt failed for session {session_id}; "
+            "Redis entries remain unread/pending"
         )
-    else:
-        logger.warning(f"⚠️ No audio chunks written for session {session_id}")
-        duration = 0.0
-        compression_ratio = 0.0
+        raise
 
-    logger.info(
-        f"🎵 MongoDB audio persistence complete for session {session_id}: "
-        f"{conversation_count} conversations, {total_mongo_chunks_written} chunks, "
-        f"{total_pcm_bytes / 1024 / 1024:.2f} MB PCM → {total_compressed_bytes / 1024 / 1024:.2f} MB Opus "
-        f"(compression: {compression_ratio:.3f}, {(1 - compression_ratio) * 100:.1f}% savings), "
-        f"{runtime_seconds:.1f}s runtime"
+    runtime_seconds = time.time() - start_time
+    duration = total_pcm_bytes / bytes_per_second if total_pcm_bytes else 0.0
+    compression_ratio = (
+        total_compressed_bytes / total_pcm_bytes if total_pcm_bytes else 0.0
     )
 
-    # Clean up Redis tracking keys
-    audio_job_key = f"audio_persistence:session:{session_id}"
-    await redis_client.delete(audio_job_key)
-
-    # NOTE: Do NOT delete conversation:current:{session_id} key here!
-    # It's needed for speech detection to reuse placeholder conversations (always_persist feature).
-    # For always_persist sessions the key has no TTL (cleaned up by the stale-key guard on next startup).
-    # For non-always_persist sessions, open_conversation_job manages the key lifecycle.
-    logger.info(f"🧹 Cleaned up tracking keys for session {session_id}")
-
+    await redis_client.delete(f"audio_persistence:session:{session_id}")
+    logger.info(
+        f"🎵 Durable audio persistence complete for session {session_id}: "
+        f"{total_mongo_chunks_written} new Mongo chunks, "
+        f"{total_pcm_bytes} PCM bytes, terminal_marker={end_signal_received}"
+    )
     return {
         "session_id": session_id,
-        "conversation_count": conversation_count,
+        "conversation_count": len(seen_conversations),
         "total_mongo_chunks": total_mongo_chunks_written,
         "total_pcm_bytes": total_pcm_bytes,
         "total_compressed_bytes": total_compressed_bytes,

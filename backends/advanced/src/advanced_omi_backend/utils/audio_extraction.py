@@ -80,7 +80,7 @@ async def extract_audio_for_results(
     )
 
     # Read from audio stream
-    stream_name = f"audio:stream:{client_id}"
+    stream_name = f"audio:stream:{session_id}"
     logger.info(f"🎵 [AUDIO EXTRACT] Reading from Redis stream: {stream_name}")
 
     # Get all messages (we'll filter by session and chunk)

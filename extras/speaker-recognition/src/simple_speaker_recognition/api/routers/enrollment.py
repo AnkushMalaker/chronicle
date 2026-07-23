@@ -1,5 +1,6 @@
 """Speaker enrollment endpoints."""
 
+import hashlib
 import json
 import logging
 import uuid
@@ -25,6 +26,31 @@ from sqlalchemy import func
 
 router = APIRouter()
 log = logging.getLogger("speaker_service")
+
+
+def audio_content_hash(audio_data: bytes) -> str:
+    """Return the enrollment deduplication key for one encoded audio file."""
+    return hashlib.sha256(audio_data).hexdigest()
+
+
+def existing_enrollment_hashes(user_id: int, speaker_id: str) -> set[str]:
+    """Hash the audio already enrolled for one speaker.
+
+    Enrollment galleries are small, so reading the files here keeps deduplication
+    correct for existing databases without a schema migration or backfill.
+    """
+    speaker_dir = get_auth().enrollment_audio_dir / str(user_id) / speaker_id
+    if not speaker_dir.exists():
+        return set()
+    hashes = set()
+    for path in speaker_dir.iterdir():
+        if not path.is_file() or path.name == "enrollment_manifest.json":
+            continue
+        try:
+            hashes.add(audio_content_hash(path.read_bytes()))
+        except OSError:
+            log.warning("Could not hash existing enrollment audio %s", path)
+    return hashes
 
 
 # Import dependencies from parent service module
@@ -249,6 +275,18 @@ async def enroll_upload(
 
     # Read file content
     file_content = await file.read()
+    if audio_content_hash(file_content) in existing_enrollment_hashes(
+        user_id, speaker_id
+    ):
+        log.info("Skipping duplicate enrollment audio for speaker %s", speaker_id)
+        return {
+            "status": "already_enrolled",
+            "updated": True,
+            "speaker_id": speaker_id,
+            "audio_saved": False,
+            "duplicate": True,
+            "duplicates_skipped": 1,
+        }
 
     # Persist temporary file for processing
     with secure_temp_file() as tmp:
@@ -318,6 +356,7 @@ async def enroll_upload(
         )
 
         return {
+            "status": "enrolled",
             "updated": updated,
             "speaker_id": speaker_id,
             "audio_saved": True,
@@ -360,6 +399,8 @@ async def enroll_batch(
     total_duration = 0.0
     saved_audio_files = []
     segment_records: List[tuple] = []
+    seen_hashes = existing_enrollment_hashes(user_id, speaker_id)
+    duplicates_skipped = 0
 
     try:
         # Process each audio file
@@ -368,6 +409,12 @@ async def enroll_batch(
 
             # Read file content
             file_content = await file.read()
+            content_hash = audio_content_hash(file_content)
+            if content_hash in seen_hashes:
+                duplicates_skipped += 1
+                log.info("Skipping duplicate batch clip %s", file.filename)
+                continue
+            seen_hashes.add(content_hash)
 
             # Save to temporary file for processing
             with secure_temp_file() as tmp:
@@ -417,6 +464,18 @@ async def enroll_batch(
                 continue
 
         if not embeddings:
+            if duplicates_skipped:
+                return {
+                    "status": "already_enrolled",
+                    "updated": False,
+                    "speaker_id": speaker_id,
+                    "num_segments": 0,
+                    "num_files": len(files),
+                    "total_duration": 0.0,
+                    "audio_saved": False,
+                    "saved_files": 0,
+                    "duplicates_skipped": duplicates_skipped,
+                }
             raise HTTPException(400, "No valid audio files could be processed")
 
         # Save manifest with all audio files
@@ -452,6 +511,7 @@ async def enroll_batch(
             save_segment_record(speaker_id, sp, du, ev, original_file_path=orig)
 
         return {
+            "status": "enrolled",
             "updated": updated,
             "speaker_id": speaker_id,
             "num_segments": len(embeddings),
@@ -459,6 +519,7 @@ async def enroll_batch(
             "total_duration": round(total_duration, 2),
             "audio_saved": True,
             "saved_files": len(saved_audio_files),
+            "duplicates_skipped": duplicates_skipped,
         }
 
     except Exception as e:
@@ -524,6 +585,8 @@ async def enroll_append(
     new_total_duration = 0.0
     saved_audio_files = []
     segment_records: List[tuple] = []
+    seen_hashes = existing_enrollment_hashes(user_id, speaker_id)
+    duplicates_skipped = 0
 
     try:
         # Process each new audio file
@@ -532,6 +595,12 @@ async def enroll_append(
 
             # Read file content
             file_content = await file.read()
+            content_hash = audio_content_hash(file_content)
+            if content_hash in seen_hashes:
+                duplicates_skipped += 1
+                log.info("Skipping duplicate appended clip %s", file.filename)
+                continue
+            seen_hashes.add(content_hash)
 
             # Save to temporary file for processing
             with secure_temp_file() as tmp:
@@ -582,6 +651,19 @@ async def enroll_append(
                 continue
 
         if not embeddings:
+            if duplicates_skipped:
+                return {
+                    "status": "already_enrolled",
+                    "updated": False,
+                    "speaker_id": speaker_id,
+                    "previous_samples": existing_count,
+                    "new_samples": 0,
+                    "total_samples": existing_count,
+                    "total_duration": round(existing_duration, 2),
+                    "audio_saved": False,
+                    "saved_files": 0,
+                    "duplicates_skipped": duplicates_skipped,
+                }
             raise HTTPException(400, "No valid audio files could be processed")
 
         # Update manifest with appended files
@@ -617,6 +699,7 @@ async def enroll_append(
             save_segment_record(speaker_id, sp, du, ev, original_file_path=orig)
 
         return {
+            "status": "enrolled",
             "updated": True,
             "speaker_id": speaker_id,
             "previous_samples": existing_count,
@@ -625,6 +708,7 @@ async def enroll_append(
             "total_duration": round(existing_duration + new_total_duration, 2),
             "audio_saved": True,
             "saved_files": len(saved_audio_files),
+            "duplicates_skipped": duplicates_skipped,
         }
 
     except Exception as e:

@@ -14,7 +14,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from advanced_omi_backend.auth import current_active_user
-from advanced_omi_backend.constants import NOISE_LABEL
+from advanced_omi_backend.constants import BACKGROUND_SPEECH_LABEL, NOISE_LABEL
+from advanced_omi_backend.controllers import background_bucket_controller
 from advanced_omi_backend.controllers.queue_controller import (
     conversation_edit_chain_in_flight,
 )
@@ -54,9 +55,10 @@ def _apply_diarization_label(segment, corrected_speaker: str) -> None:
     playback. Any other label is a normal speaker correction.
     """
     segment.speaker = corrected_speaker
-    if corrected_speaker == NOISE_LABEL:
+    if corrected_speaker in {NOISE_LABEL, BACKGROUND_SPEECH_LABEL}:
         segment.identified_as = None
         segment.confidence = None
+    if corrected_speaker == NOISE_LABEL:
         segment.segment_type = Conversation.SegmentType.EVENT.value
 
 
@@ -796,6 +798,28 @@ async def create_diarization_annotation(
         logger.info(
             f"Created diarization annotation {annotation.id} for conversation {annotation_data.conversation_id} segment {annotation_data.segment_index}"
         )
+
+        # Accumulation loop: either background decision feeds its matching bucket
+        # immediately, so future suggestions improve as the user labels.
+        bucket_type = {
+            NOISE_LABEL: "noise",
+            BACKGROUND_SPEECH_LABEL: "background_speech",
+        }.get(annotation_data.corrected_speaker)
+        if bucket_type and annotation_data.segment_start_time is not None:
+            try:
+                start = float(annotation_data.segment_start_time)
+                seg = active_transcript.segments[annotation_data.segment_index]
+                seg_end = float(getattr(seg, "end", None) or start + 4.0)
+                await background_bucket_controller.add_background_clip(
+                    annotation_data.conversation_id,
+                    start,
+                    seg_end,
+                    bucket_type=bucket_type,
+                    source="triage",
+                    user=current_user,
+                )
+            except Exception as e:  # noqa: BLE001 - bucket add is best-effort
+                logger.warning(f"Background bucket add failed for {annotation.id}: {e}")
 
         return AnnotationResponse.model_validate(annotation)
 

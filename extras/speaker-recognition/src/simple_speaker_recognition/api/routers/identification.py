@@ -973,7 +973,9 @@ async def identify(
         original_threshold = db.similarity_thr
         db.similarity_thr = threshold
         try:
-            found, speaker_info, confidence = await db.identify(emb, user_id=user_id)
+            found, speaker_info, confidence, candidates = await db.identify_with_candidates(
+                emb, user_id=user_id
+            )
             confidence = validate_confidence(confidence, "speaker_identification")
         finally:
             db.similarity_thr = original_threshold
@@ -995,6 +997,7 @@ async def identify(
                 status=SpeakerStatus.IDENTIFIED,
                 similarity_threshold=threshold,
                 duration=round(duration, 3),
+                candidates=candidates,
             )
         else:
             log.info(
@@ -1009,6 +1012,7 @@ async def identify(
                 status=SpeakerStatus.UNKNOWN,
                 similarity_threshold=threshold,
                 duration=round(duration, 3),
+                candidates=candidates,
             )
 
     except Exception as e:

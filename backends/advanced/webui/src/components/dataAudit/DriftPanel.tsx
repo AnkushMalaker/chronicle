@@ -16,9 +16,17 @@ interface DriftReport {
   total_drifted: number
   conversations_scanned: number
   no_centroid_data: number
+  not_analyzable: number
   similarity_threshold: number | null
+  cached?: boolean
+  computed_at?: string
 }
-interface BackfillResult { backfilled: number; skipped: number; failed: number }
+interface BackfillResult {
+  backfilled: number
+  skipped: number
+  failed: number
+  marked_unanalyzable: number
+}
 
 const lbl = (s: string | null) => s || 'Unknown'
 
@@ -34,6 +42,7 @@ export default function DriftPanel() {
   const [open, setOpen] = useState(false)
   const [data, setData] = useState<DriftReport | null>(null)
   const [loading, setLoading] = useState(false)
+  const [scanProgress, setScanProgress] = useState<{ percent: number; message: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [reprocessed, setReprocessed] = useState<Set<string>>(new Set())
@@ -41,16 +50,42 @@ export default function DriftPanel() {
   const [backfillProgress, setBackfillProgress] = useState<string | null>(null)
   const [backfillResult, setBackfillResult] = useState<BackfillResult | null>(null)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (force = false) => {
     setLoading(true)
+    setScanProgress(null)
     setError(null)
     try {
-      const res = await conversationsApi.getDrift()
-      setData(res.data)
+      const queued = await conversationsApi.scanDrift(force)
+      if (queued.data.report) {
+        // Cache hit — nothing the report depends on has changed since last scan.
+        setData(queued.data.report as DriftReport)
+        setLoading(false)
+        return
+      }
+      const jobId = queued.data.job_id as string
+      while (true) {
+        const statusResponse = await dataAuditApi.getJobStatus(jobId)
+        const { status, batch_progress: progress } = statusResponse.data
+        if (progress?.message) {
+          setScanProgress({ percent: progress.percent ?? 0, message: progress.message })
+        } else if (status === 'queued') {
+          setScanProgress({ percent: 0, message: 'Waiting for a worker…' })
+        }
+        if (status === 'finished') {
+          const resultResponse = await dataAuditApi.getJobResult<DriftReport>(jobId)
+          setData(resultResponse.data.result)
+          break
+        }
+        if (status === 'failed' || status === 'canceled' || status === 'stopped') {
+          throw new Error(`Drift scan ${status}`)
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1000))
+      }
     } catch {
       setError('Failed to load drift analysis')
     } finally {
       setLoading(false)
+      setScanProgress(null)
     }
   }, [])
 
@@ -121,7 +156,7 @@ export default function DriftPanel() {
         {data && (
           <span className="text-xs text-gray-500 dark:text-gray-400">
             {data.total_drifted} would change
-            {data.no_centroid_data > 0 && ` · ${data.no_centroid_data} not analyzable`}
+            {data.no_centroid_data > 0 && ` · ${data.no_centroid_data} need backfill`}
           </span>
         )}
       </button>
@@ -134,17 +169,30 @@ export default function DriftPanel() {
           </p>
           <div className="flex items-center gap-3">
             <button
-              onClick={load}
+              onClick={() => load(true)}
               disabled={loading}
               className="flex items-center gap-1.5 px-2.5 py-1 text-xs bg-gray-200 dark:bg-gray-700 rounded hover:bg-gray-300 dark:hover:bg-gray-600 disabled:opacity-50"
             >
               <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
               {loading ? 'Analyzing…' : 'Re-analyze'}
             </button>
-            {data && (
+            {loading && scanProgress && (
+              <div className="flex items-center gap-2 flex-1 min-w-0">
+                <div className="w-32 h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-blue-600 rounded-full transition-all"
+                    style={{ width: `${scanProgress.percent}%` }}
+                  />
+                </div>
+                <span className="text-xs text-gray-500 truncate">{scanProgress.message}</span>
+              </div>
+            )}
+            {!loading && data && (
               <span className="text-xs text-gray-500">
                 scanned {data.conversations_scanned}
                 {data.similarity_threshold != null && ` · threshold ${data.similarity_threshold.toFixed(2)}`}
+                {data.cached && data.computed_at &&
+                  ` · cached from ${new Date(data.computed_at).toLocaleString()}`}
               </span>
             )}
           </div>
@@ -169,16 +217,26 @@ export default function DriftPanel() {
             </div>
           )}
 
+          {data && data.not_analyzable > 0 && (
+            <p className="text-[11px] text-gray-400 dark:text-gray-500">
+              {data.not_analyzable} conversations excluded — no usable speech audio
+              (silent or audio not stored).
+            </p>
+          )}
+
           {backfillResult && (
             <p className={`text-[11px] ${backfillResult.failed ? 'text-amber-600 dark:text-amber-400' : 'text-green-600 dark:text-green-400'}`}>
               Backfill complete: {backfillResult.backfilled} added, {backfillResult.skipped} skipped,
-              {' '}{backfillResult.failed} failed. Drift analysis refreshed.
+              {' '}{backfillResult.failed} failed
+              {backfillResult.marked_unanalyzable > 0 &&
+                `, ${backfillResult.marked_unanalyzable} marked not-analyzable`}
+              . Drift analysis refreshed.
             </p>
           )}
 
           {data &&
             data.total_drifted === 0 &&
-            data.conversations_scanned > data.no_centroid_data &&
+            data.conversations_scanned > data.no_centroid_data + data.not_analyzable &&
             !loading && (
               <p className="text-sm text-green-600 dark:text-green-400">
                 No drift — every analyzable conversation still matches the current gallery.

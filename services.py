@@ -16,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 
+import clients
 import requests
 import yaml
 from config_manager import ConfigManager
@@ -174,7 +175,13 @@ SERVICES = {
         "path": "extras/langfuse",
         "compose_file": "docker-compose.yml",
         "description": "LangFuse Observability & Prompt Management",
-        "ports": ["3002"],
+        "ports": ["3002", "3443"],
+        "ui": {
+            "http_port": "3002",
+            "https_port": "3443",
+            "https_caddyfile": "backends/advanced/Caddyfile",
+            "https_marker": "langfuse-web:3000",
+        },
         "health_endpoints": [
             ("langfuse", None, "3002", "/api/public/health"),
         ],
@@ -183,7 +190,14 @@ SERVICES = {
         "path": "backends/advanced",
         "compose_file": "docker-compose.yml",
         "description": "Advanced Backend + WebUI",
-        "ports": ["8000", "5173"],
+        "ports": ["8000", "5173", "443"],
+        "ui": {
+            "http_port": "5173",
+            "http_port_env": "WEBUI_DEV_PORT",
+            "https_port": "443",
+            "https_caddyfile": "backends/advanced/Caddyfile",
+            "https_marker": "webui-dev:5173",
+        },
         "health_endpoints": [
             ("backend", "BACKEND_PUBLIC_PORT", "8000", "/readiness"),
         ],
@@ -192,7 +206,14 @@ SERVICES = {
         "path": "extras/speaker-recognition",
         "compose_file": "docker-compose.yml",
         "description": "Speaker Recognition Service",
-        "ports": ["8085", "5174/8444"],
+        "ports": ["8085", "5175", "8444"],
+        "ui": {
+            "http_port": "5175",
+            "http_port_env": "REACT_UI_PORT",
+            "https_port": "8444",
+            "https_caddyfile": "extras/speaker-recognition/Caddyfile",
+            "https_marker": "web-ui:",
+        },
         "health_endpoints": [
             ("speaker", "SPEAKER_SERVICE_PORT", "8085", "/health"),
         ],
@@ -235,6 +256,43 @@ SERVICES = {
         ],
     },
 }
+
+
+def service_ui_url(service_name: str, host: str) -> str | None:
+    """Return the canonical browser UI URL for a managed service on ``host``.
+
+    Browser access is declarative in :data:`SERVICES`: the plain HTTP port is the
+    fallback, while HTTPS is preferred only when the expected Caddy route exists in
+    the generated Caddyfile. This keeps the WebUI from guessing that a published
+    port is usable (the exact gap that previously made LangFuse's :3443 reset).
+    """
+    service = SERVICES.get(service_name)
+    ui = service.get("ui") if service else None
+    if not ui:
+        return None
+
+    service_path = Path(__file__).parent / service["path"]
+    env_path = service_path / ".env"
+    env_values = dotenv_values(env_path) if env_path.exists() else {}
+
+    http_port = str(env_values.get(ui.get("http_port_env"), "") or ui["http_port"])
+    https_port = str(ui["https_port"])
+    caddyfile = Path(__file__).parent / ui["https_caddyfile"]
+    marker = ui.get("https_marker")
+    https_ready = caddyfile.is_file()
+    if https_ready and marker:
+        try:
+            https_ready = marker in caddyfile.read_text()
+        except OSError:
+            https_ready = False
+
+    scheme = "https" if https_ready else "http"
+    port = https_port if https_ready else http_port
+    display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    port_suffix = (
+        "" if (scheme, port) in (("http", "80"), ("https", "443")) else f":{port}"
+    )
+    return f"{scheme}://{display_host}{port_suffix}"
 
 
 _DISCOVERY_NAMES = {
@@ -1038,6 +1096,81 @@ def _ensure_service_manager_token() -> str:
     return token
 
 
+def handle_client_command(args) -> None:
+    """``services.py client install|uninstall|status`` — client-node components.
+
+    Client nodes stream data (tray, ScreenPipe collector) with no compose
+    services; the components are native user units defined in clients.py.
+    Install also puts the node agent on the machine (unless --no-agent) so the
+    hub WebUI can see, control, and update it like any other node.
+    """
+    if args.client_action == "status":
+        table = Table(title="Client components")
+        table.add_column("Component")
+        table.add_column("Description")
+        table.add_column("Status")
+        for name in clients.CLIENT_COMPONENTS:
+            status = clients.component_status(name)
+            if not status["installed"]:
+                state = "[dim]not installed[/dim]"
+            elif status["active"]:
+                state = "[green]active[/green]"
+            else:
+                state = "[yellow]installed, inactive[/yellow]"
+            table.add_row(name, status["description"], state)
+        console.print(table)
+        for check in clients.binary_checks():
+            mark = "[green]✓[/green]" if check["found"] else "[yellow]✗[/yellow]"
+            line = f"{mark} {check['name']} (needed by {check['needed_by']})"
+            if not check["found"]:
+                line += f" — {check['suggest']}"
+            console.print(line)
+        return
+
+    names = args.components or ["tray"]
+    invalid = [n for n in names if n not in clients.CLIENT_COMPONENTS]
+    if invalid:
+        console.print(f"[red]❌ Unknown component(s): {', '.join(invalid)}[/red]")
+        console.print(f"Available: {', '.join(clients.CLIENT_COMPONENTS)}")
+        return
+
+    if args.client_action == "uninstall":
+        for name in names:
+            clients.uninstall_component(name)
+            console.print(f"[green]✅ Removed {name}[/green]")
+        return
+
+    # install
+    for check in clients.binary_checks():
+        if not check["found"]:
+            console.print(
+                f"[yellow]⚠️  {check['name']} not found (needed by "
+                f"{check['needed_by']}) — {check['suggest']}[/yellow]"
+            )
+    for name in names:
+        extras = ("pendant",) if (name == "tray" and args.pendant) else ()
+        try:
+            clients.install_component(name, extras)
+        except RuntimeError as e:
+            console.print(f"[red]❌ {name}: {e}[/red]")
+            continue
+        console.print(f"[green]✅ Installed & started {name}[/green]")
+
+    if args.no_agent:
+        return
+    # The node agent gives the hub WebUI visibility/control and delivers
+    # updates (which restart these units). chronicle-stack is skipped — a
+    # client node has no containers to bring up on boot.
+    if sys.platform == "darwin":
+        console.print(
+            "[dim]Node agent auto-install is Linux/systemd-only for now — run "
+            "'./start.sh' or 'services.py manager start' to control this "
+            "machine from the hub.[/dim]"
+        )
+    else:
+        install_systemd_agents(["chronicle-service-manager"])
+
+
 def _start_service_manager():
     """Start the service manager agent as a native background process."""
     # Heal legacy installs: the old standalone discovery agent is now folded in.
@@ -1763,7 +1896,8 @@ def start_services(services, build=False, force_recreate=False):
     if "langfuse" in services and check_service_enabled("langfuse"):
         backend_env = _get_backend_env_path()
         langfuse_host = read_env_value(backend_env, "SERVER_IP") or "localhost"
-        langfuse_url = f"http://{langfuse_host}:3002/project/chronicle/prompts"
+        langfuse_base_url = service_ui_url("langfuse", langfuse_host)
+        langfuse_url = f"{langfuse_base_url}/project/chronicle/prompts"
         console.print(f"   Prompt Mgmt:    {langfuse_url}")
 
 
@@ -2005,6 +2139,31 @@ def main():
         help="Agent action ('run' = foreground, for systemd; 'install'/'uninstall' = systemd user service)",
     )
 
+    # Client-node components: native user units (tray, ScreenPipe collector).
+    # A "client node" only captures/streams data — no compose services, no GPU.
+    client_parser = subparsers.add_parser(
+        "client",
+        help="Manage client-node components (desktop tray, ScreenPipe collector)",
+    )
+    client_parser.add_argument(
+        "client_action", choices=["install", "uninstall", "status"]
+    )
+    client_parser.add_argument(
+        "components",
+        nargs="*",
+        help=f"Components ({', '.join(clients.CLIENT_COMPONENTS)}); default: tray",
+    )
+    client_parser.add_argument(
+        "--pendant",
+        action="store_true",
+        help="Tray: include BLE wearable (pendant) streaming support",
+    )
+    client_parser.add_argument(
+        "--no-agent",
+        action="store_true",
+        help="Skip installing the node agent (no WebUI control / remote updates)",
+    )
+
     # Claude remote-control session command
     rc_parser = subparsers.add_parser(
         "remote-control",
@@ -2150,6 +2309,9 @@ def main():
             install_systemd_agents()
         elif args.manager_action == "uninstall":
             uninstall_systemd_agents()
+
+    elif args.command == "client":
+        handle_client_command(args)
 
     elif args.command == "remote-control":
         if args.remote_control_action == "start":

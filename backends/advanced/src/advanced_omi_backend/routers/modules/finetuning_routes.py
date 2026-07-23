@@ -16,7 +16,11 @@ from pydantic import BaseModel
 from advanced_omi_backend.auth import current_active_user
 from advanced_omi_backend.constants import is_non_enrollable_speaker
 from advanced_omi_backend.cron_scheduler import get_scheduler
-from advanced_omi_backend.models.annotation import Annotation, AnnotationType
+from advanced_omi_backend.models.annotation import (
+    Annotation,
+    AnnotationSource,
+    AnnotationType,
+)
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.services.observability.system_events import record_event
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
@@ -69,289 +73,6 @@ async def _record_training_failure(annotation: Annotation, reason: str) -> None:
     await annotation.save()
 
 
-@router.post("/process-annotations")
-async def process_annotations_for_training(
-    current_user: User = Depends(current_active_user),
-    annotation_type: Optional[str] = Query(
-        "diarization", description="Type of annotations to process"
-    ),
-):
-    """
-    Send processed annotations to speaker recognition service for training.
-
-    - Finds annotations that have been applied (processed=True, processed_by="apply")
-    - Sends corrections to speaker service for model fine-tuning
-    - Updates annotations with training metadata (processed_by includes "training")
-
-    Args:
-        annotation_type: Type of annotations to process (default: "diarization")
-
-    Returns:
-        Training job status with count of annotations processed
-    """
-    try:
-        # Only admins can trigger training for now (can expand to per-user later)
-        if not current_user.is_superuser:
-            raise HTTPException(
-                status_code=403, detail="Only administrators can trigger model training"
-            )
-
-        # Find annotations ready for training
-        # Criteria: processed=True (applied to transcript), but not yet sent to training
-        annotations = await Annotation.find(
-            Annotation.annotation_type == AnnotationType.DIARIZATION,
-            Annotation.processed == True,
-        ).to_list()
-
-        # Filter out already trained annotations (processed_by contains "training")
-        ready_for_training = [
-            a
-            for a in annotations
-            if not a.processed_by or "training" not in a.processed_by
-        ]
-
-        if not ready_for_training:
-            return JSONResponse(
-                content={
-                    "message": "No annotations ready for training",
-                    "processed_count": 0,
-                }
-            )
-
-        # Initialize speaker client
-        speaker_client = SpeakerRecognitionClient()
-
-        if not speaker_client.enabled:
-            return JSONResponse(
-                content={
-                    "message": "Speaker recognition service is not enabled",
-                    "processed_count": 0,
-                    "status": "error",
-                },
-                status_code=503,
-            )
-
-        # Track processing statistics
-        enrolled_count = 0
-        appended_count = 0
-        failed_count = 0
-        errors = []
-
-        for annotation in ready_for_training:
-            try:
-                # Noise and placeholder "Unknown Speaker N" labels are not real
-                # people — never enroll them as voiceprints. Mark trained so they
-                # aren't retried, then skip.
-                if is_non_enrollable_speaker(annotation.corrected_speaker):
-                    annotation.processed_by = (
-                        f"{annotation.processed_by},training"
-                        if annotation.processed_by
-                        else "training"
-                    )
-                    annotation.updated_at = datetime.now(timezone.utc)
-                    await annotation.save()
-                    continue
-
-                # 1. Get conversation and segment timing
-                conversation = await Conversation.find_one(
-                    Conversation.conversation_id == annotation.conversation_id
-                )
-
-                if not conversation or not conversation.active_transcript:
-                    failed_count += 1
-                    reason = f"Conversation {annotation.conversation_id[:8]} not found"
-                    errors.append(reason)
-                    await _record_training_failure(annotation, reason)
-                    continue
-
-                # Resolve the segment by start-time when recorded (robust to the
-                # segment list being re-ordered/filtered by a reprocess between
-                # annotation and apply); fall back to the stored index.
-                segment = _resolve_annotated_segment(
-                    conversation.active_transcript.segments,
-                    annotation.segment_index,
-                    annotation.segment_start_time,
-                )
-                if segment is None:
-                    failed_count += 1
-                    reason = f"Invalid segment index {annotation.segment_index}"
-                    errors.append(reason)
-                    await _record_training_failure(annotation, reason)
-                    continue
-
-                # Guard corrupt segment times (e.g. start > end, or start beyond
-                # the audio) — reconstruct_audio_segment would raise. Skip the
-                # voiceprint enrollment for this segment; the relabel already
-                # applied (apply doesn't touch audio). Surface it on the System
-                # Errors page as a data-integrity issue (the transcript itself is
-                # corrupt — usually fixable by reprocessing the conversation).
-                # NOTE: reconstruct_audio_segment clamps end_time to the audio
-                # duration but NOT start_time, so a segment starting beyond the audio
-                # (streaming-reconnect timeline inflation) yields end < start and
-                # raises — catch that here too, not just start > end.
-                audio_dur = conversation.audio_total_duration or 0.0
-                if not (segment.end > segment.start >= 0) or (
-                    audio_dur and segment.start >= audio_dur
-                ):
-                    failed_count += 1
-                    reason = (
-                        f"Segment {annotation.segment_index} has invalid times "
-                        f"({segment.start:.1f}s-{segment.end:.1f}s); skipped enrollment"
-                    )
-                    errors.append(reason)
-                    await _record_training_failure(annotation, reason)
-                    logger.warning(
-                        f"Skipping enrollment for {annotation.conversation_id[:8]} "
-                        f"segment {annotation.segment_index}: invalid times "
-                        f"{segment.start:.1f}-{segment.end:.1f}"
-                    )
-                    await record_event(
-                        severity="warning",
-                        category="data_integrity",
-                        source="speaker_triage_enroll",
-                        title="Transcript segment has invalid times",
-                        detail=(
-                            f"Segment {annotation.segment_index} of conversation "
-                            f"{annotation.conversation_id} has start={segment.start:.2f}s "
-                            f"end={segment.end:.2f}s (start must be < end and within the "
-                            f"audio). Voiceprint enrollment skipped; reprocess the "
-                            f"conversation's transcript to regenerate segment times."
-                        ),
-                        conversation_id=annotation.conversation_id,
-                        metadata={
-                            "segment_index": annotation.segment_index,
-                            "start": segment.start,
-                            "end": segment.end,
-                        },
-                    )
-                    continue
-
-                # 2. Extract audio segment from MongoDB
-                logger.info(
-                    f"Extracting audio for conversation {annotation.conversation_id[:8]}... "
-                    f"segment {annotation.segment_index} ({segment.start:.2f}s - {segment.end:.2f}s)"
-                )
-
-                wav_bytes = await reconstruct_audio_segment(
-                    conversation_id=annotation.conversation_id,
-                    start_time=segment.start,
-                    end_time=segment.end,
-                )
-
-                if not wav_bytes:
-                    logger.warning(f"No audio data for annotation {annotation.id}")
-                    failed_count += 1
-                    reason = f"No audio for segment {annotation.segment_index}"
-                    errors.append(reason)
-                    await _record_training_failure(annotation, reason)
-                    continue
-
-                logger.info(f"Extracted {len(wav_bytes) / 1024:.1f} KB of audio")
-
-                # 3. Check if speaker exists
-                existing_speaker = await speaker_client.get_speaker_by_name(
-                    speaker_name=annotation.corrected_speaker,
-                    user_id=1,  # TODO: Map Chronicle user_id to speaker service user_id
-                )
-
-                if existing_speaker:
-                    # APPEND to existing speaker
-                    logger.info(
-                        f"Appending to existing speaker: {annotation.corrected_speaker}"
-                    )
-                    result = await speaker_client.append_to_speaker(
-                        speaker_id=existing_speaker["id"], audio_data=wav_bytes
-                    )
-
-                    if "error" in result:
-                        logger.error(f"Failed to append to speaker: {result}")
-                        failed_count += 1
-                        reason = f"Append failed: {result.get('error')}"
-                        errors.append(reason)
-                        await _record_training_failure(annotation, reason)
-                        continue
-
-                    appended_count += 1
-                    logger.info(
-                        f"✅ Successfully appended to speaker '{annotation.corrected_speaker}'"
-                    )
-                else:
-                    # ENROLL new speaker
-                    logger.info(
-                        f"Enrolling new speaker: {annotation.corrected_speaker}"
-                    )
-                    result = await speaker_client.enroll_new_speaker(
-                        speaker_name=annotation.corrected_speaker,
-                        audio_data=wav_bytes,
-                        user_id=1,  # TODO: Map Chronicle user_id to speaker service user_id
-                    )
-
-                    if "error" in result:
-                        logger.error(f"Failed to enroll speaker: {result}")
-                        failed_count += 1
-                        reason = f"Enroll failed: {result.get('error')}"
-                        errors.append(reason)
-                        await _record_training_failure(annotation, reason)
-                        continue
-
-                    enrolled_count += 1
-                    logger.info(
-                        f"✅ Successfully enrolled new speaker '{annotation.corrected_speaker}'"
-                    )
-
-                # 4. Mark annotation as trained (clear any prior failure record)
-                if annotation.processed_by:
-                    annotation.processed_by = f"{annotation.processed_by},training"
-                else:
-                    annotation.processed_by = "training"
-                annotation.training_error = None
-                annotation.updated_at = datetime.now(timezone.utc)
-                await annotation.save()
-
-            except Exception as e:
-                logger.error(
-                    f"Error processing annotation {annotation.id}: {e}", exc_info=True
-                )
-                failed_count += 1
-                reason = f"Exception: {str(e)[:50]}"
-                errors.append(reason)
-                try:
-                    await _record_training_failure(annotation, reason)
-                except Exception:
-                    logger.error(
-                        f"Failed to record training failure for {annotation.id}",
-                        exc_info=True,
-                    )
-                continue
-
-        total_processed = enrolled_count + appended_count
-        logger.info(
-            f"Training complete: {total_processed} processed "
-            f"({enrolled_count} new, {appended_count} appended, {failed_count} failed)"
-        )
-
-        return JSONResponse(
-            content={
-                "message": "Training complete",
-                "enrolled_new_speakers": enrolled_count,
-                "appended_to_existing": appended_count,
-                "total_processed": total_processed,
-                "failed_count": failed_count,
-                "errors": errors[:10] if errors else [],
-                "status": "success" if total_processed > 0 else "partial_failure",
-            }
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error processing annotations for training: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to process annotations for training: {str(e)}",
-        )
-
-
 # ---------------------------------------------------------------------------
 # Curated enrollment: build a quality-gated candidate set from the ACTIVE
 # transcript version (not annotation replay), let the user review/promote, then
@@ -389,43 +110,152 @@ def _overlaps_other_person(segments, idx: int) -> bool:
     return False
 
 
+def _resolve_relabeled_segment(segs, ann) -> Optional[int]:
+    """Locate the active-version segment index a user diarization annotation now
+    points at, or None if the relabel no longer survives there.
+
+    Prefer the annotation's recorded index (if it still carries the corrected
+    label at the right time); else match by start time + corrected label. The
+    label must still equal ``corrected_speaker`` so a segment re-diarized away or
+    overwritten by auto-identification is NOT treated as user-labelled.
+    """
+    target = ann.corrected_speaker
+    st = ann.segment_start_time
+    idx = ann.segment_index
+    if idx is not None and 0 <= idx < len(segs):
+        s = segs[idx]
+        if s.speaker == target and (st is None or abs(s.start - st) <= 0.5):
+            return idx
+    if st is not None:
+        best, best_d = None, 0.5
+        for i, s in enumerate(segs):
+            if s.speaker == target:
+                d = abs(s.start - st)
+                if d <= best_d:
+                    best, best_d = i, d
+        return best
+    return None
+
+
+def _resolve_inserted_segment(segs, ann) -> Optional[int]:
+    """Locate the active-version segment created by a speech INSERT annotation.
+
+    Apply may sort segments chronologically, so ``insert_after_index`` is not a
+    stable active-version index. The explicit waveform span, speaker, and text
+    are the durable identity of an inserted speech segment.
+    """
+    if (
+        ann.insert_segment_type != "speech"
+        or not ann.insert_speaker
+        or ann.insert_start is None
+        or ann.insert_end is None
+    ):
+        return None
+    for i, segment in enumerate(segs):
+        if (
+            segment.speaker == ann.insert_speaker
+            and abs(segment.start - ann.insert_start) <= ENROLL_DEDUP_TOLERANCE
+            and abs(segment.end - ann.insert_end) <= ENROLL_DEDUP_TOLERANCE
+            and (segment.text or "") == (ann.insert_text or "")
+        ):
+            return i
+    return None
+
+
 @router.get("/enrollment-candidates")
 async def get_enrollment_candidates(
     current_user: User = Depends(current_active_user),
     min_duration: float = Query(ENROLL_MIN_DURATION, ge=0.0, le=30.0),
+    include_identified: bool = Query(
+        False,
+        description="Also surface segments auto-labelled by speaker "
+        "identification (not relabelled by you). Off by default — enrolling "
+        "auto-matched clips reinforces weak/marginal matches.",
+    ),
 ):
-    """Build a quality-gated, per-speaker list of enrollment candidate clips.
+    """Per-speaker enrollment candidate clips from explicit human speaker labels.
 
-    Source: the CURRENT active transcript version of every conversation that has
-    applied-but-untrained diarization annotations (i.e. conversations the user
-    labelled and hasn't enrolled yet). Each real-person segment becomes a
-    candidate; gates flag short / overlapping / invalid clips so the UI can
-    pre-tick only the clean ones. This is preview-only — nothing is enrolled.
+    A candidate is a segment in a conversation's active transcript whose speaker
+    was set by a processed USER diarization annotation or a processed USER speech
+    INSERT annotation. The annotation must still resolve to the labelled segment
+    in the active transcript.
+    Segments auto-labelled by the identification service are NOT candidates
+    unless ``include_identified`` is set (and even then they are flagged
+    ``auto_identified`` and never pre-ticked). Preview-only — nothing is enrolled.
     """
     if not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Admin only")
 
     annotations = await Annotation.find(
-        Annotation.annotation_type == AnnotationType.DIARIZATION,
+        {
+            "annotation_type": {
+                "$in": [AnnotationType.DIARIZATION.value, AnnotationType.INSERT.value]
+            }
+        },
         Annotation.processed == True,
+        # Human-authored labels only — never enrol a voiceprint from an
+        # unreviewed AI (model_suggestion) label.
+        Annotation.source == AnnotationSource.USER,
     ).to_list()
-    untrained = [
-        a for a in annotations if not a.processed_by or "training" not in a.processed_by
-    ]
-    conv_ids = {a.conversation_id for a in untrained if a.conversation_id}
-    if not conv_ids:
+    # conv_id -> untrained human speaker-label annotations
+    labels_by_conv: dict[str, list] = {}
+    for a in annotations:
+        if a.processed_by and "training" in a.processed_by:
+            continue
+        speaker = (
+            a.corrected_speaker
+            if a.annotation_type == AnnotationType.DIARIZATION
+            else a.insert_speaker
+        )
+        if not a.conversation_id or not speaker:
+            continue
+        if (
+            a.annotation_type == AnnotationType.INSERT
+            and a.insert_segment_type != "speech"
+        ):
+            continue
+        if is_non_enrollable_speaker(speaker):
+            continue
+        labels_by_conv.setdefault(a.conversation_id, []).append(a)
+
+    if not labels_by_conv:
         return JSONResponse(
             content={
                 "candidates": [],
                 "min_duration": min_duration,
                 "default_per_speaker": ENROLL_DEFAULT_PER_SPEAKER,
                 "conversation_count": 0,
+                "include_identified": include_identified,
             }
         )
 
     conversations = await Conversation.find(
-        {"conversation_id": {"$in": list(conv_ids)}}
+        {"conversation_id": {"$in": list(labels_by_conv.keys())}}
     ).to_list()
+
+    def _clip(conv, segs, i, auto):
+        s = segs[i]
+        dur = round(s.end - s.start, 2)
+        audio_dur = conv.audio_total_duration or 0.0
+        reasons = []
+        if not (s.end > s.start >= 0) or (audio_dur and s.start >= audio_dur):
+            reasons.append("invalid times")
+        if dur < min_duration:
+            reasons.append(f"short ({dur:.1f}s < {min_duration:.0f}s)")
+        if _overlaps_other_person(segs, i):
+            reasons.append("overlaps another speaker")
+        return {
+            "conversation_id": conv.conversation_id,
+            "conversation_title": conv.title or "",
+            "segment_index": i,
+            "start": round(s.start, 2),
+            "end": round(s.end, 2),
+            "duration": dur,
+            "text": (s.text or "")[:120],
+            "gated_in": len(reasons) == 0,
+            "reasons": reasons,
+            "auto_identified": auto,
+        }
 
     # speaker -> list of candidate clip dicts
     by_speaker: dict[str, list] = {}
@@ -433,40 +263,35 @@ async def get_enrollment_candidates(
         tr = conv.active_transcript
         if not tr or not tr.segments:
             continue
-        audio_dur = conv.audio_total_duration or 0.0
         segs = tr.segments
-        for i, s in enumerate(segs):
-            if is_non_enrollable_speaker(s.speaker):
-                continue
-            dur = round(s.end - s.start, 2)
-            reasons = []
-            if not (s.end > s.start >= 0) or (audio_dur and s.start >= audio_dur):
-                reasons.append("invalid times")
-            if dur < min_duration:
-                reasons.append(f"short ({dur:.1f}s < {min_duration:.0f}s)")
-            if _overlaps_other_person(segs, i):
-                reasons.append("overlaps another speaker")
-            by_speaker.setdefault(s.speaker, []).append(
-                {
-                    "conversation_id": conv.conversation_id,
-                    "conversation_title": conv.title or "",
-                    "segment_index": i,
-                    "start": round(s.start, 2),
-                    "end": round(s.end, 2),
-                    "duration": dur,
-                    "text": (s.text or "")[:120],
-                    "gated_in": len(reasons) == 0,
-                    "reasons": reasons,
-                }
-            )
+        # Segments the user explicitly labelled (resolved into the active version).
+        resolved: dict[int, str] = {}
+        for a in labels_by_conv.get(conv.conversation_id, []):
+            if a.annotation_type == AnnotationType.DIARIZATION:
+                idx = _resolve_relabeled_segment(segs, a)
+                speaker = a.corrected_speaker
+            else:
+                idx = _resolve_inserted_segment(segs, a)
+                speaker = a.insert_speaker
+            if idx is not None:
+                resolved[idx] = speaker
+        for i, speaker in resolved.items():
+            by_speaker.setdefault(speaker, []).append(_clip(conv, segs, i, False))
+        # Opt-in: segments auto-labelled by identification (never pre-ticked).
+        if include_identified:
+            for i, s in enumerate(segs):
+                if i in resolved or is_non_enrollable_speaker(s.speaker):
+                    continue
+                if getattr(s, "identified_as", None):
+                    by_speaker.setdefault(s.speaker, []).append(
+                        _clip(conv, segs, i, True)
+                    )
 
-    # Per speaker: default-select the longest N clean (gated_in) clips, after
-    # dropping duplicate spans. Everything is returned (the UI shows gated-out
-    # rows greyed so they can be re-added), only `default_selected` differs.
+    # Per speaker: default-select the longest N clean, deduped — but NEVER an
+    # auto-identified clip (those stay unticked for deliberate review).
     candidates = []
     for speaker, clips in sorted(by_speaker.items()):
-        clean = [c for c in clips if c["gated_in"]]
-        # dedupe clean clips by near-identical (start,end)
+        clean = [c for c in clips if c["gated_in"] and not c["auto_identified"]]
         deduped = []
         for c in sorted(clean, key=lambda x: -x["duration"]):
             if any(
@@ -485,7 +310,9 @@ async def get_enrollment_candidates(
                 c["conversation_id"],
                 c["segment_index"],
             ) in chosen
-        clips.sort(key=lambda x: (not x["gated_in"], -x["duration"]))
+        clips.sort(
+            key=lambda x: (x["auto_identified"], not x["gated_in"], -x["duration"])
+        )
         candidates.append(
             {
                 "speaker": speaker,
@@ -500,6 +327,7 @@ async def get_enrollment_candidates(
             "min_duration": min_duration,
             "default_per_speaker": ENROLL_DEFAULT_PER_SPEAKER,
             "conversation_count": len(conversations),
+            "include_identified": include_identified,
         }
     )
 
@@ -523,8 +351,8 @@ async def enroll_selected_clips(
 ):
     """Enroll ONLY the explicitly selected clips, carved from the active version.
 
-    Unlike ``process-annotations`` this takes an explicit list of spans the user
-    promoted — no annotation replay, no start-time/index guessing. Each clip is
+    This takes an explicit list of spans the user promoted — no annotation
+    replay, no start-time/index guessing. Each clip is
     re-validated against the conversation's current active version (guards a
     version change between review and submit), then enrolled/appended by speaker
     name. Conversations we enrolled at least one clip from have their
@@ -616,7 +444,10 @@ async def enroll_selected_clips(
                         f"{clip.speaker}: append failed ({result.get('error')})"
                     )
                     continue
-                appended += 1
+                if result.get("status") == "already_enrolled":
+                    skipped += 1
+                else:
+                    appended += 1
             else:
                 result = await speaker_client.enroll_new_speaker(
                     speaker_name=clip.speaker, audio_data=wav_bytes, user_id=1
@@ -627,7 +458,10 @@ async def enroll_selected_clips(
                         f"{clip.speaker}: enroll failed ({result.get('error')})"
                     )
                     continue
-                enrolled += 1
+                if result.get("status") == "already_enrolled":
+                    skipped += 1
+                else:
+                    enrolled += 1
 
             touched_conv_ids.add(clip.conversation_id)
 
@@ -641,12 +475,19 @@ async def enroll_selected_clips(
                 exc_info=True,
             )
 
-    # Mark applied-but-untrained diarization annotations of enrolled conversations
-    # as trained so they leave the Finetuning queue.
+    # Mark applied-but-untrained human speaker labels from enrolled conversations
+    # as trained so both relabel and inserted-speech candidates leave the queue.
     marked = 0
     if touched_conv_ids:
         anns = await Annotation.find(
-            Annotation.annotation_type == AnnotationType.DIARIZATION,
+            {
+                "annotation_type": {
+                    "$in": [
+                        AnnotationType.DIARIZATION.value,
+                        AnnotationType.INSERT.value,
+                    ]
+                }
+            },
             Annotation.processed == True,
             {"conversation_id": {"$in": list(touched_conv_ids)}},
         ).to_list()

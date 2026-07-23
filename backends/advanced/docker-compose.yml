@@ -255,7 +255,9 @@ services:
       - "6379:6379"  # Avoid conflict with dev on 6379
     volumes:
       - ./data/redis_data:/data
-    command: redis-server --appendonly yes
+    # Redis is the raw-audio WAL. ACK XADD only after the append is fsynced so a
+    # host crash cannot erase the last second of already-accepted audio.
+    command: redis-server --appendonly yes --appendfsync always
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]

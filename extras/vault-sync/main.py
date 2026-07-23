@@ -1,41 +1,39 @@
-"""Chronicle desktop tray — entry point with service-management subcommands."""
+"""Chronicle vault-sync — core library + legacy service management.
+
+The menu bar / tray UI moved into the unified Chronicle tray
+(extras/chronicle-tray), which imports this project's vault_core.py and
+syncthing_manager.py in place. This CLI remains for managing (removing) a
+pre-tray login service install.
+"""
 
 import argparse
-import sys
 
-from service import install, kickstart, logs, status, uninstall
+from service import logs, status, uninstall
 
-_COMMANDS = ("menu", "install", "uninstall", "kickstart", "status", "logs")
+_POINTER = (
+    "The vault-sync tray moved into the unified Chronicle tray.\n"
+    "  cd ../chronicle-tray && uv run chronicle-tray            # run it\n"
+    "  cd ../chronicle-tray && uv run chronicle-tray install    # login service\n"
+    "Your .env and vault pairing here are reused as-is."
+)
 
 
 def cli() -> None:
     parser = argparse.ArgumentParser(description="Chronicle Vault Sync")
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("menu", help="Launch the menu bar app (default)")
-    sub.add_parser("install", help="Install as a desktop login service")
-    sub.add_parser("uninstall", help="Remove the desktop login service")
-    sub.add_parser("kickstart", help="Relaunch the menu bar app")
-    sub.add_parser("status", help="Show service status")
-    sub.add_parser("logs", help="Tail service logs")
+    sub.add_parser("menu", help="(moved) the tray now lives in extras/chronicle-tray")
+    sub.add_parser("install", help="(moved) install the unified tray instead")
+    sub.add_parser("uninstall", help="Remove the legacy vault-sync login service")
+    sub.add_parser("status", help="Show legacy service status")
+    sub.add_parser("logs", help="Tail legacy service logs")
 
     args = parser.parse_args()
     command = args.command or "menu"
 
-    if command == "menu":
-        if sys.platform == "darwin":
-            from menu_vault import main as menu_main
-        elif sys.platform.startswith("linux"):
-            from menu_linux import main as menu_main
-        else:
-            raise SystemExit(f"unsupported desktop platform: {sys.platform}")
-
-        menu_main()
-    elif command == "install":
-        install()
-    elif command == "uninstall":
+    if command in ("menu", "install"):
+        raise SystemExit(_POINTER)
+    if command == "uninstall":
         uninstall()
-    elif command == "kickstart":
-        kickstart()
     elif command == "status":
         status()
     elif command == "logs":

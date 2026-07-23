@@ -143,7 +143,7 @@ class AudioStreamClient:
         Note:
             The mode is inside the "data" dict, matching _handle_audio_session_start
             in websocket_controller.py (line 618).
-            always_persist is a backend-level setting (not per-session).
+            Durable raw-audio persistence is mandatory for streaming mode.
         """
         if not self.ws:
             raise RuntimeError("Not connected. Call connect() first.")

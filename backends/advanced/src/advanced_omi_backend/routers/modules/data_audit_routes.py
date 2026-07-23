@@ -9,7 +9,7 @@ conversation split/merge.
 
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, Response
@@ -22,6 +22,8 @@ from advanced_omi_backend.auth import (
     get_user_from_token_param,
 )
 from advanced_omi_backend.controllers import (
+    background_bucket_controller,
+    background_suppression_controller,
     data_audit_controller,
     guided_enrollment_controller,
 )
@@ -535,6 +537,240 @@ async def apply_triage(current_user: User = Depends(current_active_user)):
     new transcript versions with corrected labels, voiceprint enrollment, and
     chained memory reprocessing (noise decisions skip enrollment)."""
     return await data_audit_controller.apply_triage(current_user)
+
+
+class BackgroundAddRequest(BaseModel):
+    conversation_id: str
+    start: float
+    end: float
+    bucket_type: Literal["noise", "background_speech"]
+    source: str = "manual"
+
+
+class BackgroundClusterDecisionRequest(BaseModel):
+    cluster_id: str
+    member_keys: List[str] = Field(..., min_length=1)
+    review_sample_keys: List[str] = Field(default_factory=list, max_length=5)
+    decision: Literal[
+        "noise", "background_speech", "not_background", "mixed", "dismissed"
+    ]
+    sample_decisions: dict[
+        str, Literal["noise", "background_speech", "not_background"]
+    ] = Field(default_factory=dict)
+
+
+class BackgroundCleanupApplyRequest(BaseModel):
+    report_id: str
+
+
+@router.post("/background/seed")
+async def background_seed(current_user: User = Depends(current_active_user)):
+    """Rebuild both background buckets from accepted Noise and Background Speech
+    annotations. Idempotent; safe to run repeatedly as new ones are labeled."""
+    return await background_bucket_controller.seed_from_annotations(current_user)
+
+
+@router.post("/background/add")
+async def background_add(
+    body: BackgroundAddRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Add one confirmed background clip to the bucket (the accumulation loop)."""
+    doc = await background_bucket_controller.add_background_clip(
+        body.conversation_id,
+        body.start,
+        body.end,
+        bucket_type=body.bucket_type,
+        source=body.source,
+        user=current_user,
+    )
+    if doc is None:
+        return JSONResponse(status_code=422, content={"error": "Could not embed clip"})
+    return {
+        "added": True,
+        "conversation_id": body.conversation_id,
+        "start": doc["segment_start"],
+    }
+
+
+@router.get("/background/suggest")
+async def background_suggest(
+    conversation_id: str = Query(...),
+    limit: int = Query(10, ge=1, le=50),
+    current_user: User = Depends(current_active_user),
+):
+    """Rank a conversation's unknown segments as 'potentially background' by
+    max-similarity to the background bucket plus low SNR (channel condition)."""
+    return await background_bucket_controller.suggest_background_candidates(
+        current_user, conversation_id, limit
+    )
+
+
+@router.get("/background/scan")
+async def background_scan(
+    limit: int = Query(40, ge=1, le=200),
+    max_conversations: int = Query(8, ge=1, le=50),
+    current_user: User = Depends(current_active_user),
+):
+    """Corpus-wide 'potentially background' feed: scans recent unknown-heavy
+    conversations and returns one merged ranked list of candidate clips."""
+    return await background_bucket_controller.scan_background_candidates(
+        current_user, limit, max_conversations
+    )
+
+
+@router.post("/background/index")
+async def background_index(current_user: User = Depends(current_active_user)):
+    """Sample and embed the user's complete corpus as a visible background job."""
+    return await background_bucket_controller.enqueue_background_index(current_user)
+
+
+@router.get("/background/index")
+async def background_index_status(current_user: User = Depends(current_active_user)):
+    """Current full-corpus background index state, including a resumable job id."""
+    return await background_bucket_controller.background_index_state(current_user)
+
+
+@router.get("/background/clusters")
+async def background_clusters(
+    limit: int = Query(6, ge=1, le=20),
+    samples_per_cluster: int = Query(5, ge=3, le=5),
+    lane: Optional[Literal["harvest", "novel", "similar"]] = Query(None),
+    surface: Literal["less", "default", "more"] = Query("default"),
+    current_user: User = Depends(current_active_user),
+):
+    """Large within-conversation clusters represented by 3–5 central clips.
+
+    ``surface`` widens/narrows the review dial (lane thresholds + minimum
+    cluster size); production suppression thresholds are unaffected.
+    """
+    return await background_bucket_controller.get_background_clusters(
+        current_user, limit, samples_per_cluster, lane, surface
+    )
+
+
+@router.post("/background/clusters/decide")
+async def background_cluster_decide(
+    body: BackgroundClusterDecisionRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Classify, individually label, or dismiss a review cluster."""
+    return await background_bucket_controller.decide_background_cluster(
+        current_user, body.model_dump(), body.decision
+    )
+
+
+@router.get("/background/clusters/latest-decision")
+async def background_cluster_latest_decision(
+    current_user: User = Depends(current_active_user),
+):
+    """Latest reversible background review decision for this user."""
+    return await background_bucket_controller.latest_background_decision(current_user)
+
+
+@router.get("/background/clusters/decisions")
+async def background_cluster_decisions(
+    limit: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(current_active_user),
+):
+    """Stored background annotation history, newest first."""
+    return await background_bucket_controller.list_background_decisions(
+        current_user, limit
+    )
+
+
+@router.delete("/background/clusters/decisions/{review_id}")
+async def background_cluster_undo_decision(
+    review_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Undo a review, remove its references, and restore its clips to the queue."""
+    return await background_bucket_controller.undo_background_decision(
+        current_user, review_id
+    )
+
+
+@router.get("/background/cleanup/report")
+async def background_cleanup_report(
+    current_user: User = Depends(current_active_user),
+):
+    """Preview high-confidence and ambiguous changes from reviewed references."""
+    return await background_bucket_controller.background_cleanup_report(current_user)
+
+
+@router.get("/background/accuracy/report")
+async def background_accuracy_report(
+    current_user: User = Depends(current_active_user),
+):
+    """Baseline versus adapted foreground/background F1 over reviewed clusters."""
+    return await background_bucket_controller.background_accuracy_report(current_user)
+
+
+class SuppressionDecisionRequest(BaseModel):
+    conversation_id: str
+    cluster_signature: str
+    decision: Literal["restore", "confirm"]
+
+
+@router.get("/background/suppressions/{conversation_id}")
+async def background_suppressions(
+    conversation_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Suppression ledger for one conversation, grouped by cluster."""
+    return await background_suppression_controller.get_conversation_suppressions(
+        current_user, conversation_id
+    )
+
+
+@router.post("/background/suppressions/decide")
+async def background_suppressions_decide(
+    body: SuppressionDecisionRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Restore ('important speech') or confirm ('yes, background') a cluster."""
+    return await background_suppression_controller.decide_suppression_cluster(
+        current_user, body.conversation_id, body.cluster_signature, body.decision
+    )
+
+
+class EditDecisionRequest(BaseModel):
+    decision: Literal["noise", "background_speech", "not_background", "dismissed"]
+
+
+@router.post("/background/clusters/decisions/{review_id}/edit")
+async def background_cluster_edit_decision(
+    review_id: str,
+    body: EditDecisionRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Change a past review's verdict in place (annotation-history edit)."""
+    return await background_bucket_controller.edit_background_decision(
+        current_user, review_id, body.decision
+    )
+
+
+@router.post("/background/suppressions/backfill")
+async def background_suppressions_backfill(
+    current_user: User = Depends(current_active_user),
+):
+    """Score all corpus-indexed conversations into the ledger (shadow mode)."""
+    from advanced_omi_backend.workers.background_suppression_jobs import (
+        backfill_all_suppressions,
+    )
+
+    return await backfill_all_suppressions(str(current_user.user_id))
+
+
+@router.post("/background/cleanup/apply")
+async def background_cleanup_apply(
+    body: BackgroundCleanupApplyRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Create new transcript versions for high-confidence report changes only."""
+    return await background_bucket_controller.enqueue_background_cleanup(
+        current_user, body.report_id
+    )
 
 
 @router.post("/conversations/{conversation_id}/split")

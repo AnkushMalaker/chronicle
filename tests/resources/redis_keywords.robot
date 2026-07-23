@@ -14,6 +14,7 @@ Documentation    Redis session management and verification keywords
 ...              - API session management (belong in session_resources.robot)
 Library          Process
 Library          Collections
+Library          String
 Variables        ../setup/test_env.py
 
 *** Keywords ***
@@ -97,6 +98,28 @@ Redis Command
     ...    ELSE    Set Variable    ${output}
 
     RETURN    ${return_value}
+
+
+Get Active Session ID For Client
+    [Documentation]    Return the unique active recording session for a client
+    [Arguments]    ${client_id}
+
+    ${result}=    Run Process    ${CONTAINER_ENGINE}    exec    ${REDIS_CONTAINER}
+    ...    redis-cli    --scan    --pattern    audio:session:*
+    Should Be Equal As Integers    ${result.rc}    0
+
+    @{session_keys}=    Split String    ${result.stdout}    \n
+    FOR    ${session_key}    IN    @{session_keys}
+        IF    '${session_key}' == ''    CONTINUE
+        ${stored_client}=    Redis Command    HGET    ${session_key}    client_id
+        ${status}=    Redis Command    HGET    ${session_key}    status
+        IF    '${stored_client}' == '${client_id}' and '${status}' == 'active'
+            ${session_id}=    Replace String    ${session_key}    audio:session:    ${EMPTY}
+            RETURN    ${session_id}
+        END
+    END
+
+    Fail    No active recording session found for client ${client_id}
 
 
 Get Backend Logs

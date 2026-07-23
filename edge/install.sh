@@ -4,9 +4,12 @@
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/.../edge/install.sh | bash -s -- speaker-recognition
 #   curl -sSL ... | bash -s -- asr-services --branch dev
+#   curl -sSL ... | bash -s -- --client [--pendant]      # client node: tray + collectors, no containers
 #
 # Prerequisites: docker (with compose) or podman (with podman-compose), tailscale (connected), uv, git
 #   Engine selected via CONTAINER_ENGINE (default docker); compose via COMPOSE_CMD.
+#   --client needs only git + uv (no container engine, no GPU): it installs the
+#   desktop tray / ScreenPipe collector as user units plus the node agent.
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────
@@ -16,6 +19,9 @@ REPO_URL="https://github.com/SimpleOpenSoftware/chronicle.git"
 # systemd). --advertise-only uses the legacy containerized sidecar instead
 # (advertise only, no control, no host process).
 ADVERTISE_ONLY=0
+# Client node: data capture/streaming only (tray, ScreenPipe collector).
+CLIENT_MODE=0
+PENDANT=0
 
 # Resolve CHRONICLE_HOME: explicit env var > detect existing clone > default
 if [[ -n "${CHRONICLE_HOME:-}" ]]; then
@@ -51,11 +57,16 @@ while [[ $# -gt 0 ]]; do
         --branch) BRANCH="$2"; shift 2 ;;
         --repo)   REPO_URL="$2"; shift 2 ;;
         --advertise-only|--sidecar) ADVERTISE_ONLY=1; shift ;;
+        --client)  CLIENT_MODE=1; shift ;;
+        --pendant) PENDANT=1; shift ;;
         --help|-h)
             echo "Usage: $0 <service-name> [--branch <branch>] [--repo <url>] [--advertise-only]"
+            echo "       $0 --client [--pendant] [--branch <branch>] [--repo <url>]"
             echo ""
             echo "  Default: installs the native node agent (control + advertise, survives reboot)."
             echo "  --advertise-only: legacy containerized sidecar (advertise only, no control)."
+            echo "  --client: client node — desktop tray + ScreenPipe collector as user units,"
+            echo "            no containers/GPU. --pendant adds BLE wearable streaming."
             echo ""
             echo "Available services:"
             for svc in "${!SERVICE_PATHS[@]}"; do echo "  $svc"; done | sort
@@ -66,19 +77,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$SERVICE_NAME" ]]; then
-    err "Service name required. Run with --help for usage."
+if [[ "$CLIENT_MODE" != "1" && -z "$SERVICE_NAME" ]]; then
+    err "Service name required (or --client). Run with --help for usage."
     exit 1
 fi
 
 # ── Validate service name ────────────────────────────────────────────
-if [[ -z "${SERVICE_PATHS[$SERVICE_NAME]+_}" ]]; then
-    err "Unknown service: $SERVICE_NAME"
-    err "Available: ${!SERVICE_PATHS[*]}"
-    exit 1
+if [[ "$CLIENT_MODE" != "1" ]]; then
+    if [[ -z "${SERVICE_PATHS[$SERVICE_NAME]+_}" ]]; then
+        err "Unknown service: $SERVICE_NAME"
+        err "Available: ${!SERVICE_PATHS[*]}"
+        exit 1
+    fi
+    COMPOSE_PATH="${SERVICE_PATHS[$SERVICE_NAME]}"
 fi
-
-COMPOSE_PATH="${SERVICE_PATHS[$SERVICE_NAME]}"
 
 # ── Check prerequisites ──────────────────────────────────────────────
 check_cmd() {
@@ -90,43 +102,51 @@ check_cmd() {
 }
 
 info "Checking prerequisites..."
-# Container engine: docker (default) or podman. Override with CONTAINER_ENGINE.
-ENGINE="${CONTAINER_ENGINE:-docker}"
-check_cmd "$ENGINE"
 check_cmd git
 check_cmd uv
 
-# Resolve the compose command (COMPOSE_CMD wins; else derive from the engine)
-if [ -n "${COMPOSE_CMD:-}" ]; then
-    COMPOSE="$COMPOSE_CMD"
-elif [ "$ENGINE" = "podman" ]; then
-    if command -v podman-compose &>/dev/null; then
-        COMPOSE="podman-compose"
+if [[ "$CLIENT_MODE" != "1" ]]; then
+    # Container engine: docker (default) or podman. Override with CONTAINER_ENGINE.
+    ENGINE="${CONTAINER_ENGINE:-docker}"
+    check_cmd "$ENGINE"
+
+    # Resolve the compose command (COMPOSE_CMD wins; else derive from the engine)
+    if [ -n "${COMPOSE_CMD:-}" ]; then
+        COMPOSE="$COMPOSE_CMD"
+    elif [ "$ENGINE" = "podman" ]; then
+        if command -v podman-compose &>/dev/null; then
+            COMPOSE="podman-compose"
+        else
+            err "podman-compose not found. Install it (e.g. 'uv tool install podman-compose')."
+            exit 1
+        fi
+    elif docker compose version &>/dev/null; then
+        COMPOSE="docker compose"
+    elif command -v docker-compose &>/dev/null; then
+        COMPOSE="docker-compose"
     else
-        err "podman-compose not found. Install it (e.g. 'uv tool install podman-compose')."
+        err "docker compose not found. Install Docker Compose."
         exit 1
     fi
-elif docker compose version &>/dev/null; then
-    COMPOSE="docker compose"
-elif command -v docker-compose &>/dev/null; then
-    COMPOSE="docker-compose"
+fi
+
+# Check Tailscale. Edge services need it (discovery + hub control); a client
+# node works without it (local backend URL), so only warn there.
+if ! command -v tailscale &>/dev/null || ! tailscale status &>/dev/null; then
+    if [[ "$CLIENT_MODE" == "1" ]]; then
+        warn "Tailscale not connected — the hub won't discover/control this client node."
+        warn "Install/connect it later for remote updates: https://tailscale.com/download"
+        TAILSCALE_IP="none"
+    elif ! command -v tailscale &>/dev/null; then
+        err "Tailscale not found. Install from https://tailscale.com/download"
+        exit 1
+    else
+        err "Tailscale is not connected. Run: sudo tailscale up"
+        exit 1
+    fi
 else
-    err "docker compose not found. Install Docker Compose."
-    exit 1
+    TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
 fi
-
-# Check Tailscale
-if ! command -v tailscale &>/dev/null; then
-    err "Tailscale not found. Install from https://tailscale.com/download"
-    exit 1
-fi
-
-if ! tailscale status &>/dev/null; then
-    err "Tailscale is not connected. Run: sudo tailscale up"
-    exit 1
-fi
-
-TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
 ok "Prerequisites OK (Tailscale IP: $TAILSCALE_IP)"
 
 # ── Clone / update repo ──────────────────────────────────────────────
@@ -147,6 +167,27 @@ else
 fi
 cd "$CHRONICLE_HOME"
 ok "Repository ready at $CHRONICLE_HOME"
+
+# ── Client node: tray + collectors as user units, no containers ──────
+if [[ "$CLIENT_MODE" == "1" ]]; then
+    CLIENT_ARGS=""
+    [[ "$PENDANT" == "1" ]] && CLIENT_ARGS="--pendant"
+    info "Installing client components + node agent (no containers, no GPU)..."
+    uv run --with-requirements setup-requirements.txt python3 services.py client install $CLIENT_ARGS
+
+    ok "────────────────────────────────────────"
+    ok "  Client node ready!"
+    ok ""
+    ok "  Tray:     look for the Chronicle icon in your system tray / menu bar"
+    ok "  Status:   uv run --with-requirements setup-requirements.txt python3 services.py client status"
+    ok "  Collector: pair ScreenPipe via the WebUI Timeline → Sources panel, then"
+    ok "             uv run --project extras/screenpipe-collector chronicle-screenpipe pair ..."
+    ok "             uv run --with-requirements setup-requirements.txt python3 services.py client install screenpipe-collector"
+    ok ""
+    ok "  Updates from the hub restart these components automatically."
+    ok "────────────────────────────────────────"
+    exit 0
+fi
 
 # ── Resolve compose path ─────────────────────────────────────────────
 SERVICE_DIR="$CHRONICLE_HOME/$COMPOSE_PATH"

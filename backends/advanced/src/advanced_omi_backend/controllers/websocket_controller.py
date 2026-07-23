@@ -33,6 +33,7 @@ from advanced_omi_backend.constants import (
 )
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
+    ensure_audio_persistence,
     start_post_conversation_jobs,
     start_streaming_jobs,
     transcription_queue,
@@ -41,6 +42,13 @@ from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.models.conversation import create_conversation
 from advanced_omi_backend.plugins.events import BUTTON_STATE_TO_EVENT, ButtonState
 from advanced_omi_backend.redis_factory import create_async_redis
+from advanced_omi_backend.services.audio_stream.conversation_lifecycle import (
+    ensure_active_session_placeholder,
+)
+from advanced_omi_backend.services.audio_stream.durability import (
+    AUDIO_PERSISTENCE_GROUP,
+    inspect_stream_retention,
+)
 from advanced_omi_backend.services.audio_stream.producer import (
     get_audio_stream_producer,
 )
@@ -437,49 +445,37 @@ async def cleanup_client_state(client_id: str):
         f"🔄 Letting speech detection job complete naturally for client {client_id} (if running)"
     )
 
-    # Mark all active sessions for this client as complete AND delete Redis streams
+    client_manager = get_client_manager()
+    client_state = client_manager.get_client(client_id)
+    session_id = client_state.stream_session_id if client_state else None
+
+    # Finalize only the recording owned by this connection. Historical sessions for
+    # the same device are immutable and must never be rewritten on a reconnect.
+    async_redis = create_async_redis(decode_responses=False)
     try:
-        # Get async Redis client
-        async_redis = create_async_redis(decode_responses=False)
-
-        # Get audio stream producer for finalization
-        audio_stream_producer = get_audio_stream_producer()
-
-        # Find all sessions for this client and mark them complete
-        store = SessionStore(async_redis)
-        sessions_closed = 0
-        session_ids: list[str] = []
-
-        async for view in store.iter_views():
-            is_match = view.client_id == client_id
-            if not is_match and view.session_id.startswith(client_id):
-                # Fallback: session hash may have lost client_id (e.g., partial resurrection).
-                # Session IDs are formatted as "{client_id}-{uuid}", so check prefix.
-                is_match = True
-                logger.warning(
-                    f"⚠️ Session {view.session_id[:12]} missing client_id field — "
-                    f"matched via session_id prefix fallback"
+        if session_id:
+            store = SessionStore(async_redis)
+            view = await store.read(session_id)
+            if view is None:
+                raise RuntimeError(
+                    f"Connected client {client_id} references missing session {session_id}"
                 )
-            if not is_match:
-                continue
+            if view.client_id != client_id:
+                raise RuntimeError(
+                    f"Session {session_id} belongs to {view.client_id}, not {client_id}"
+                )
 
-            session_id = view.session_id
-            session_ids.append(session_id)
-
-            # If session is still active, finalize it first (sets status + completion_reason atomically)
-            if view.status in (SessionStatus.ACTIVE, None):
+            if view.status is SessionStatus.ACTIVE:
                 logger.info(
                     f"📊 Finalizing active session {session_id[:12]} due to WebSocket disconnect"
                 )
-                await audio_stream_producer.finalize_session(
+                await get_audio_stream_producer().finalize_session(
                     session_id, completion_reason="websocket_disconnect"
                 )
 
-            # Mark session as complete (WebSocket disconnected)
-            await store.mark_complete(session_id, "websocket_disconnect")
-            sessions_closed += 1
+            if view.status is not SessionStatus.FINISHED:
+                await store.mark_complete(session_id, "websocket_disconnect")
 
-            # Notify frontend that session ended
             if view.user_id:
                 publish_sse_event(
                     view.user_id,
@@ -491,83 +487,29 @@ async def cleanup_client_state(client_id: str):
                     },
                 )
 
-        if sessions_closed > 0:
-            logger.info(
-                f"✅ Closed {sessions_closed} active session(s) for client {client_id}"
-            )
-
-        # Set TTL on Redis Streams for this client (allows consumer groups to finish processing)
-        stream_pattern = f"audio:stream:{client_id}"
-        stream_key = await async_redis.exists(stream_pattern)
-        if stream_key:
-            # Check how many messages are in the stream
-            stream_length = await async_redis.xlen(stream_pattern)
-
-            # Check for pending messages in consumer groups
-            pending_count = 0
-            try:
-                # Check streaming-transcription consumer group for pending messages
-                pending_info = await async_redis.xpending(
-                    stream_pattern, "streaming-transcription"
+            stream_name = view.stream_name
+            if stream_name and await async_redis.exists(stream_name):
+                await async_redis.persist(stream_name)
+                decision = await inspect_stream_retention(
+                    async_redis,
+                    stream_name,
+                    required_groups={AUDIO_PERSISTENCE_GROUP},
                 )
-                if pending_info:
-                    pending_count = pending_info.get("pending", 0)
-            except Exception as e:
-                # Consumer group might not exist yet - that's ok
-                logger.debug(f"No consumer group for {stream_pattern}: {e}")
-
-            if stream_length > 0 or pending_count > 0:
-                logger.warning(
-                    f"⚠️ Closing {stream_pattern} with unprocessed data: "
-                    f"{stream_length} messages in stream, {pending_count} pending in consumer group"
+                logger.info(
+                    f"Retained draining Redis audio log {stream_name}: {decision.reason}"
                 )
 
-            await async_redis.expire(
-                stream_pattern, 60
-            )  # 60 second TTL for consumer group fan-out
-            logger.info(f"⏰ Set 60s TTL on Redis stream: {stream_pattern}")
-        else:
-            logger.debug(f"No Redis stream found for client {client_id}")
+            results_key = f"transcription:results:{session_id}"
+            if await async_redis.exists(results_key):
+                await async_redis.expire(results_key, 300)
+            await store.expire_current_conversation(session_id, 3600)
+            await async_redis.expire(f"speech_detection_job:{session_id}", 3600)
+    finally:
+        await async_redis.aclose()
 
-        # Hygiene: bound per-session keys that otherwise leak when a session ends
-        # without a conversation ever opening (no speech) or via graceless disconnect.
-        # We set TTLs rather than hard-delete so the speech-detection job keeps its
-        # grace window to read final results and open a conversation from buffered audio.
-        for session_id in session_ids:
-            for key, ttl in (
-                (
-                    f"transcription:results:{session_id}",
-                    300,
-                ),  # backstop for no-speech sessions
-                (
-                    f"conversation:current:{session_id}",
-                    3600,
-                ),  # backstop for always_persist
-            ):
-                try:
-                    if await async_redis.exists(key):
-                        await async_redis.expire(key, ttl)
-                except Exception as ttl_error:
-                    logger.debug(f"Could not set TTL on {key}: {ttl_error}")
-
-        # The speech_detection_job pointer is a stale 24h key once the session ends;
-        # shorten it so it can't mislead later lookups (the job itself exits naturally).
-        try:
-            await async_redis.expire(f"speech_detection_job:{client_id}", 3600)
-        except Exception as ttl_error:
-            logger.debug(
-                f"Could not shorten speech_detection_job TTL for {client_id}: {ttl_error}"
-            )
-
-        await async_redis.close()
-
-    except Exception as session_error:
-        logger.warning(
-            f"⚠️ Error marking sessions complete for client {client_id}: {session_error}"
-        )
-
-    # Use ClientManager for atomic client removal with cleanup
-    client_manager = get_client_manager()
+    # Client removal is legal only after its session reached the producer-terminal
+    # state. A failed Redis append raises above and retains both ClientState and the
+    # producer buffer for the next explicit cleanup attempt.
     removed = await client_manager.remove_client_with_cleanup(client_id)
 
     if removed:
@@ -714,13 +656,6 @@ async def _initialize_streaming_session(
         application_logger.debug(f"Session already initialized for {client_id}")
         return None
 
-    # Initialize stream session - use client_id as session_id for predictable lookup
-    # All other session metadata goes to Redis (single source of truth)
-    client_state.stream_session_id = client_state.client_id
-    application_logger.info(
-        f"🆔 Created stream session: {client_state.stream_session_id}"
-    )
-
     # Determine transcription provider from config.yml
     registry = get_models_registry()
     if not registry:
@@ -741,11 +676,17 @@ async def _initialize_streaming_session(
         f"📋 Using STT provider: {provider} (model: {stt_model.name})"
     )
 
+    # Every recording attempt owns a distinct session and raw-audio WAL. Reusing
+    # client_id here lets a reconnect reset the old session hash and interleave new
+    # bytes with a persistence worker that is still draining the prior connection.
+    session_id = f"{client_id}-{uuid.uuid4().hex}"
+    application_logger.info(f"🆔 Creating stream session: {session_id}")
+
     # Initialize session tracking in Redis (SINGLE SOURCE OF TRUTH for session metadata)
     # This includes user_email, connection info, audio format, chunk counters, job IDs, etc.
     connection_id = f"ws_{client_id}_{int(time.time())}"
     await audio_stream_producer.init_session(
-        session_id=client_state.stream_session_id,
+        session_id=session_id,
         user_id=user_id,
         client_id=client_id,
         user_email=user_email,
@@ -753,20 +694,37 @@ async def _initialize_streaming_session(
         mode="streaming",
         provider=provider,
     )
+    # Publish the connection's active-session pointer only after the durable Redis
+    # session and producer buffer both exist. A failed CONNECTING attempt therefore
+    # cannot masquerade as an active capture during cleanup/reconnect.
+    client_state.stream_session_id = session_id
 
     # Store audio format in Redis session (not in ClientState)
-    await audio_stream_producer.store.set_audio_format(
-        client_state.stream_session_id, audio_format
+    await audio_stream_producer.store.set_audio_format(session_id, audio_format)
+
+    # CONNECTED/ACTIVE is not allowed to accept raw audio without a durable Mongo
+    # owner. Create and atomically assign it before the persistence job or producer
+    # can observe the session. Speech detection may reuse/finalize this placeholder;
+    # it no longer controls whether the raw capture exists.
+    assignment = await ensure_active_session_placeholder(
+        audio_stream_producer.store,
+        session_id=session_id,
+        user_id=user_id,
+        client_id=client_id,
     )
+    if assignment is None:
+        raise RuntimeError(
+            f"Could not assign durable audio owner for {client_state.stream_session_id}"
+        )
 
     # Enqueue streaming jobs (speech detection + audio persistence)
     job_ids = start_streaming_jobs(
-        session_id=client_state.stream_session_id, user_id=user_id, client_id=client_id
+        session_id=session_id, user_id=user_id, client_id=client_id
     )
 
     # Store job IDs in Redis session (not in ClientState)
     await audio_stream_producer.update_session_job_ids(
-        session_id=client_state.stream_session_id,
+        session_id=session_id,
         speech_detection_job_id=job_ids["speech_detection"],
         audio_persistence_job_id=job_ids["audio_persistence"],
     )
@@ -776,22 +734,22 @@ async def _initialize_streaming_session(
         user_id,
         "session.started",
         {
-            "session_id": client_state.stream_session_id,
+            "session_id": session_id,
             "client_id": client_id,
         },
     )
 
-    # Note: Placeholder conversation creation is handled by the audio persistence job,
-    # which reads the always_persist_enabled setting from global config.
+    # The durable placeholder was assigned synchronously above; the worker only
+    # consumes that state and never invents an alternate owner.
 
     # Launch interim results subscriber if WebSocket provided
     subscriber_task = None
     if websocket:
         subscriber_task = asyncio.create_task(
-            subscribe_to_interim_results(websocket, client_state.stream_session_id)
+            subscribe_to_interim_results(websocket, session_id)
         )
         application_logger.info(
-            f"📡 Launched interim results subscriber for session {client_state.stream_session_id}"
+            f"📡 Launched interim results subscriber for session {session_id}"
         )
 
     return subscriber_task
@@ -816,58 +774,41 @@ async def _finalize_streaming_session(
 
     session_id = client_state.stream_session_id
 
-    try:
-        # Flush any remaining buffered audio
-        audio_format = client_state.stream_audio_format
-        await audio_stream_producer.flush_session_buffer(
-            session_id=session_id,
-            sample_rate=audio_format.get("rate", 16000),
-            channels=audio_format.get("channels", 1),
-            sample_width=audio_format.get("width", 2),
-        )
+    # AudioStreamProducer owns the ordered durability transition: flush its
+    # process buffer, append the terminal marker, then publish FINALIZING.  Do not
+    # split those steps across this controller and the disconnect path.
+    await audio_stream_producer.finalize_session(
+        session_id, completion_reason="user_stopped"
+    )
 
-        # Send end-of-session signal to workers
-        await audio_stream_producer.send_session_end_signal(session_id)
+    # Store markers in Redis so open_conversation_job can persist them
+    if client_state.markers:
+        await audio_stream_producer.store.set_markers(session_id, client_state.markers)
+        client_state.markers.clear()
 
-        # Mark session as finalizing with user_stopped reason (audio-stop event)
-        await audio_stream_producer.finalize_session(
-            session_id, completion_reason="user_stopped"
-        )
+    # Producer completion is distinct from persistence completion: FINISHED means no
+    # more XADDs are legal, while Redis group lag/pending remains the deletion gate.
+    await audio_stream_producer.store.mark_complete(session_id, "user_stopped")
+    publish_sse_event(
+        user_id,
+        "session.ended",
+        {
+            "session_id": session_id,
+            "client_id": client_id,
+            "reason": "user_stopped",
+        },
+    )
 
-        # Store markers in Redis so open_conversation_job can persist them
-        if client_state.markers:
-            await audio_stream_producer.store.set_markers(
-                session_id, client_state.markers
-            )
-            client_state.markers.clear()
+    application_logger.info(
+        f"✅ Session {session_id[:12]} producer closed; persistence is draining"
+    )
 
-        # NOTE: Finalize job disabled - open_conversation_job now handles everything
-        # The open_conversation_job will:
-        # 1. Detect the "finalizing" status
-        # 2. Enter 5-second grace period
-        # 3. Get audio file path
-        # 4. Mark session complete
-        # 5. Clean up Redis streams
-        # 6. Enqueue batch transcription and memory processing
-        #
-        # If no speech was detected (open_conversation_job never started):
-        # - Audio is discarded (intentional - we only create conversations with speech)
-        # - Redis streams are cleaned up by TTL
-        #
-        # TODO: Consider adding cleanup for no-speech scenarios if needed
-
-        application_logger.info(
-            f"✅ Session {session_id[:12]} marked as finalizing - open_conversation_job will handle cleanup"
-        )
-
-        # Clear session state from ClientState (only stream_session_id is stored there now)
-        # All other session metadata lives in Redis (single source of truth)
-        client_state.stream_session_id = None
-
-    except Exception as finalize_error:
-        application_logger.error(
-            f"❌ Failed to finalize streaming session: {finalize_error}", exc_info=True
-        )
+    # Clear the connection pointer only after the producer completed the durable
+    # transition. On error the caller sees the exception and the same session/buffer
+    # remains available for an explicit retry; silently starting a fresh session
+    # would overwrite the only copy of the final sub-chunk.
+    client_state.stream_session_id = None
+    client_state.last_persistence_healthcheck = 0.0
 
 
 async def _publish_audio_to_stream(
@@ -894,10 +835,9 @@ async def _publish_audio_to_stream(
         sample_width: Bytes per sample
     """
     if client_state.stream_session_id is None:
-        application_logger.warning(
-            f"⚠️ Received audio chunk before session initialized for {client_id}"
+        raise RuntimeError(
+            f"Received audio chunk before streaming session initialization for {client_id}"
         )
-        return
 
     session_id = client_state.stream_session_id
 
@@ -1006,6 +946,20 @@ async def _handle_streaming_mode_audio(
             audio_format,
             websocket=websocket,  # Pass WebSocket to launch interim results subscriber
         )
+
+    # Streaming transcription and Mongo persistence consume the Redis audio stream
+    # independently. Verify persistence periodically so an RQ crash/early exit cannot
+    # leave ASR apparently healthy while durable audio silently disappears. Messages
+    # remain in the Redis stream until the replacement consumer drains them.
+    now = time.monotonic()
+    if now - client_state.last_persistence_healthcheck >= 1.0:
+        session_id = client_state.stream_session_id
+        if session_id is None:
+            raise RuntimeError(
+                "Streaming session initialization did not produce a session id"
+            )
+        ensure_audio_persistence(session_id, user_id, client_id)
+        client_state.last_persistence_healthcheck = now
 
     # Publish to Redis Stream
     await _publish_audio_to_stream(
@@ -2002,14 +1956,11 @@ async def handle_pcm_websocket(
                             f"{type(streaming_error).__name__}: {streaming_error}",
                             exc_info=True,
                         )
-                        error_text = f"{type(streaming_error).__name__} {streaming_error}".lower()
-                        if (
-                            "disconnect" in error_text
-                            or "closed" in error_text
-                            or "receive" in error_text
-                        ):
-                            break
-                        continue
+                        # The protocol has no per-chunk replay ACK. Continuing after
+                        # an ingress/finalization error would skip the failed packet
+                        # and pretend the capture stayed contiguous. Stop accepting
+                        # this connection; cleanup retries the same session transition.
+                        break
 
             except WebSocketDisconnect as e:
                 application_logger.info(

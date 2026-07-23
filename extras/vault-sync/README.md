@@ -1,13 +1,20 @@
-# Chronicle Desktop Tray and Vault Sync
+# Chronicle Vault Sync
 
-A macOS menu bar / Linux system tray app that keeps your Chronicle Obsidian vault
-(`data/conversation_docs/{your_user}` on the server) synced to a folder on your Mac, so
-you can open it in **Obsidian** with full backlinks, graph view, etc.
+Keeps your Chronicle Obsidian vault (`data/conversation_docs/{your_user}` on the
+server) synced to a local folder, so you can open it in **Obsidian** with full
+backlinks, graph view, etc.
 
 Under the hood it runs a private, headless [Syncthing](https://syncthing.net) and pairs
 it with the server automatically through the Chronicle backend — you never touch the
-Syncthing UI. It's a sibling of the other menu bar apps (`havpe-relay`,
-`local-wearable-client`): same `rumps` + `uv` + launchd pattern.
+Syncthing UI.
+
+> **The tray UI moved.** Vault sync now appears as a section in the unified
+> [Chronicle tray](../chronicle-tray/) (`extras/chronicle-tray`), alongside
+> ScreenPipe and pendant streaming. This project keeps the sync engine
+> (`vault_core.py`, `syncthing_manager.py`) and your `.env` config — the tray
+> imports them in place, so an existing setup needs no migration. If you had the
+> old single-purpose app installed as a login item, `uv run python main.py
+> uninstall` removes it (installing the new tray also removes it automatically).
 
 ```
 Server Syncthing  ◀──── sync protocol :22000 (over Tailscale) ────▶  Mac Syncthing
@@ -30,10 +37,6 @@ On Arch/CachyOS:
 sudo pacman -S obsidian syncthing
 ```
 
-The Linux tray also shows local ScreenPipe frame/audio counts and storage use, and
-provides start, stop, and restart controls for `screenpipe.service` and
-`chronicle-screenpipe.service`.
-
 You also need the Chronicle **server** side running with vault sync enabled — see
 [Server setup](#server-setup-once) below.
 
@@ -44,7 +47,7 @@ cd extras/vault-sync
 cp .env.template .env
 #   edit .env: set AUTH_USERNAME (email), AUTH_PASSWORD, and BACKEND_URL
 
-./start.sh                 # run in the foreground (a ◈ icon appears in the menu bar)
+cd ../chronicle-tray && uv run chronicle-tray   # tray with the Vault Sync section
 ```
 
 The Mac needs only three things: `BACKEND_URL`, `AUTH_USERNAME` (your Chronicle email),
@@ -74,15 +77,11 @@ into `~/ChronicleVault` (or `LOCAL_VAULT_DIR`). From the menu:
 ### Run it as a login item (always on)
 
 ```bash
-./start.sh install      # installs a launchd agent + "Chronicle Vault Sync.app"
-./start.sh status
-./start.sh logs
-./start.sh uninstall
+cd ../chronicle-tray && uv run chronicle-tray install
 ```
 
-On macOS this installs a launchd agent. On Linux it installs
-`chronicle-desktop.service` as a systemd user service attached to the graphical
-session.
+On macOS this installs a launchd agent; on Linux a systemd user service attached
+to the graphical session (see `extras/chronicle-tray/README.md`).
 
 ## Server setup (once)
 

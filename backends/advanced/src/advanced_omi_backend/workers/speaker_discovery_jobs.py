@@ -1,6 +1,8 @@
 """Reusable speech-segment embedding index for speaker corpus discovery."""
 
 import asyncio
+import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,6 +17,9 @@ MIN_SECONDS = 3.0
 MAX_SECONDS = 30.0
 EMBED_CONCURRENCY = 4
 SCORE_BATCH_SIZE = 500
+PROGRESS_INTERVAL = 100
+
+logger = logging.getLogger(__name__)
 
 
 def _active_segments(doc: dict) -> list:
@@ -131,6 +136,8 @@ async def discover_speaker_candidates_job(
     include_all_users: bool = False,
     include_deleted: bool = False,
 ) -> dict:
+    started_at = time.perf_counter()
+    timings: dict[str, float] = {}
     db = Conversation.get_pymongo_collection().database
     cache = db["speaker_corpus_embeddings"]
     matches = db["speaker_corpus_matches"]
@@ -144,30 +151,40 @@ async def discover_speaker_candidates_job(
     if not model:
         raise RuntimeError(f"Could not resolve speaker embedding model: {info}")
 
+    phase_started = time.perf_counter()
     clips = await _speech_clips(requested_by, include_all_users, include_deleted)
+    timings["enumerate_corpus_s"] = time.perf_counter() - phase_started
+    clip_keys = [clip["clip_key"] for clip in clips]
+    phase_started = time.perf_counter()
+    cached_embeddings = {
+        row["clip_key"]: row["embedding"]
+        async for row in cache.find(
+            {"clip_key": {"$in": clip_keys}, "embedding_model": model},
+            {"clip_key": 1, "embedding": 1},
+        )
+        if row.get("embedding")
+    }
+    timings["load_cache_s"] = time.perf_counter() - phase_started
     sem = asyncio.Semaphore(EMBED_CONCURRENCY)
-    embedded: list[tuple[dict, list[float]]] = []
+    embedded: list[tuple[dict, list[float]]] = [
+        (clip, cached_embeddings[clip["clip_key"]])
+        for clip in clips
+        if clip["clip_key"] in cached_embeddings
+    ]
+    missing = [clip for clip in clips if clip["clip_key"] not in cached_embeddings]
     failures = 0
-    completed = 0
+    completed = len(embedded)
     progress_lock = asyncio.Lock()
 
-    async def embed(index: int, clip: dict) -> None:
+    _progress(
+        completed,
+        len(clips),
+        f"Loaded {completed}/{len(clips)} cached corpus vectors",
+    )
+
+    async def embed(clip: dict) -> None:
         nonlocal completed, failures
         async with sem:
-            cached = await cache.find_one(
-                {"clip_key": clip["clip_key"], "embedding_model": model},
-                {"embedding": 1},
-            )
-            if cached and cached.get("embedding"):
-                embedded.append((clip, cached["embedding"]))
-                async with progress_lock:
-                    completed += 1
-                    _progress(
-                        completed,
-                        len(clips),
-                        f"Indexing corpus speech {completed}/{len(clips)}",
-                    )
-                return
             try:
                 wav = await reconstruct_audio_segment(
                     clip["conversation_id"], clip["start"], clip["end"]
@@ -192,15 +209,19 @@ async def discover_speaker_candidates_job(
             finally:
                 async with progress_lock:
                     completed += 1
-                    _progress(
-                        completed,
-                        len(clips),
-                        f"Indexing corpus speech {completed}/{len(clips)}",
-                    )
+                    if completed == len(clips) or completed % PROGRESS_INTERVAL == 0:
+                        _progress(
+                            completed,
+                            len(clips),
+                            f"Embedding new corpus speech {completed}/{len(clips)}",
+                        )
 
-    await asyncio.gather(*(embed(index, clip) for index, clip in enumerate(clips)))
+    phase_started = time.perf_counter()
+    await asyncio.gather(*(embed(clip) for clip in missing))
+    timings["embed_missing_s"] = time.perf_counter() - phase_started
     embedded.sort(key=lambda item: item[0]["clip_key"])
 
+    phase_started = time.perf_counter()
     await matches.delete_many({"requested_by": requested_by, "speaker_id": speaker_id})
     scored_count = 0
     for offset in range(0, len(embedded), SCORE_BATCH_SIZE):
@@ -212,10 +233,11 @@ async def discover_speaker_candidates_job(
         if not isinstance(scores, list) or len(scores) != len(batch):
             raise RuntimeError(f"Speaker-service batch scoring failed: {response}")
         now = datetime.now(timezone.utc)
+        documents = []
         for (clip, _embedding), score in zip(batch, scores):
             if score.get("sim_centroid") is None:
                 continue
-            await matches.insert_one(
+            documents.append(
                 {
                     **clip,
                     "requested_by": requested_by,
@@ -226,12 +248,24 @@ async def discover_speaker_candidates_job(
                     "scored_at": now,
                 }
             )
-            scored_count += 1
+        if documents:
+            await matches.insert_many(documents, ordered=False)
+            scored_count += len(documents)
         _progress(
             min(offset + len(batch), len(embedded)),
             len(embedded),
             f"Comparing {speaker_name} with indexed speech",
         )
+    timings["score_and_store_s"] = time.perf_counter() - phase_started
+    timings["total_s"] = time.perf_counter() - started_at
+    timings = {name: round(seconds, 3) for name, seconds in timings.items()}
+    logger.info(
+        "Speaker corpus discovery timings for %s (%d vectors, %d cached): %s",
+        speaker_name,
+        len(clips),
+        len(cached_embeddings),
+        timings,
+    )
 
     return {
         "speaker_name": speaker_name,
@@ -240,4 +274,5 @@ async def discover_speaker_candidates_job(
         "scored": scored_count,
         "failures": failures,
         "embedding_model": model,
+        "timings": timings,
     }

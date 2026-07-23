@@ -64,7 +64,9 @@ def load_speaker_config_from_root() -> dict:
         # Resolve environment variables and convert to dict
         resolved = OmegaConf.to_container(speaker_config, resolve=True)
 
-        log.info(f"Loaded speaker_recognition config: {resolved}")
+        # Never serialize resolved configuration here: it can contain API keys and
+        # Hugging Face tokens expanded from environment variables.
+        log.info("Loaded speaker_recognition config from %s", config_dir)
         return resolved
 
     except Exception as e:

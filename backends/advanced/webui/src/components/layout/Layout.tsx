@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link, useLocation, Outlet } from 'react-router-dom'
-import { Music, MessageSquare, MessageCircle, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network, Sparkles, Target, ScrollText, AlertTriangle, Menu, X, CalendarDays } from 'lucide-react'
+import { Music, MessageSquare, MessageCircle, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network, Sparkles, Target, ScrollText, AlertTriangle, Menu, X, CalendarDays, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useSSE, SSEStatus } from '../../hooks/useSSE'
@@ -16,6 +16,13 @@ export default function Layout() {
 
   // Mobile navigation drawer (below the lg breakpoint the sidebar is hidden)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(() => {
+    return localStorage.getItem('chronicle_desktop_sidebar_open') !== 'false'
+  })
+
+  useEffect(() => {
+    localStorage.setItem('chronicle_desktop_sidebar_open', String(desktopSidebarOpen))
+  }, [desktopSidebarOpen])
 
   // Close the drawer whenever the route changes (e.g. after tapping a link)
   useEffect(() => {
@@ -81,13 +88,24 @@ export default function Layout() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-16 gap-2">
             <div className="flex items-center space-x-2 sm:space-x-4 min-w-0">
-              {/* Hamburger — opens the nav drawer on mobile only */}
+              {/* Mobile drawer control */}
               <IconButton
                 label="Open navigation menu"
                 onClick={() => setMobileNavOpen(true)}
                 className="lg:hidden -ml-2"
               >
                 <Menu className="h-6 w-6" />
+              </IconButton>
+              {/* Wide-screen sidebar control */}
+              <IconButton
+                label={desktopSidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
+                aria-expanded={desktopSidebarOpen}
+                onClick={() => setDesktopSidebarOpen((open) => !open)}
+                className="hidden lg:inline-flex -ml-2"
+              >
+                {desktopSidebarOpen
+                  ? <PanelLeftClose className="h-5 w-5" />
+                  : <PanelLeftOpen className="h-5 w-5" />}
               </IconButton>
               <Music className="h-8 w-8 text-blue-600 flex-shrink-0" />
               <h1 className="text-base sm:text-xl font-semibold text-gray-900 dark:text-gray-100 whitespace-nowrap truncate">
@@ -159,7 +177,10 @@ export default function Layout() {
       <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-4 lg:py-8">
         <div className="flex flex-col lg:flex-row gap-8">
           {/* Sidebar Navigation — desktop only; mobile uses the drawer above */}
-          <nav className="hidden lg:block lg:w-64 flex-shrink-0">
+          <nav
+            aria-label="Primary navigation"
+            className={`${desktopSidebarOpen ? 'hidden lg:block' : 'hidden'} lg:w-64 flex-shrink-0`}
+          >
             <div className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 p-4">
               <ul className="space-y-2">
                 {navLinks}

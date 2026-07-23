@@ -255,18 +255,88 @@ class CodexMemoryAgent:
         from ..vault_lock import VaultLockTimeout
 
         try:
-            # asyncio.to_thread: the Redis run lock is sync; the subprocess itself is
-            # driven inside the thread too so lock lifetime and process lifetime match.
-            return await asyncio.to_thread(
-                self._run_locked,
-                binary,
-                prompt,
-                conversation_id,
-                timeout,
-                sandbox_mode,
-                model,
-                reasoning_effort,
-            )
+            from advanced_omi_backend.observability.otel_setup import get_tracer
+
+            tracer = get_tracer("chronicle.memory.codex")
+            if tracer is None:
+                return await asyncio.to_thread(
+                    self._run_locked,
+                    binary,
+                    prompt,
+                    conversation_id,
+                    timeout,
+                    sandbox_mode,
+                    model,
+                    reasoning_effort,
+                )
+
+            attributes = {
+                "openinference.span.kind": "AGENT",
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.provider.name": "openai_codex_cli",
+                "gen_ai.request.model": model or "codex-default",
+                "gen_ai.conversation.id": conversation_id,
+                "chronicle.memory.executor": "codex",
+                "chronicle.memory.sandbox_mode": sandbox_mode,
+                "chronicle.memory.transcript_chars": len(transcript),
+                "langfuse.observation.input": json.dumps(
+                    {
+                        "conversation_id": conversation_id,
+                        "title": title,
+                        "date": date,
+                        "duration_minutes": duration_minutes,
+                        "transcript_chars": len(transcript),
+                    },
+                    default=str,
+                ),
+            }
+            with tracer.start_as_current_span(
+                "codex_memory_agent", attributes=attributes
+            ) as span:
+                # asyncio.to_thread propagates the active context. The Redis run lock
+                # and subprocess both live in that thread, while this child span remains
+                # nested under the memory_extraction job in Langfuse.
+                result = await asyncio.to_thread(
+                    self._run_locked,
+                    binary,
+                    prompt,
+                    conversation_id,
+                    timeout,
+                    sandbox_mode,
+                    model,
+                    reasoning_effort,
+                )
+                span.set_attribute("chronicle.memory.rounds", result.rounds)
+                span.set_attribute("chronicle.memory.tool_calls", result.tool_calls)
+                span.set_attribute(
+                    "chronicle.memory.touched_count", len(result.touched)
+                )
+                span.set_attribute(
+                    "chronicle.memory.removed_count", len(result.removed)
+                )
+                span.set_attribute("chronicle.memory.error_count", len(result.errors))
+                span.set_attribute("chronicle.memory.truncated", result.truncated)
+                span.set_attribute(
+                    "langfuse.observation.output",
+                    json.dumps(
+                        {
+                            "summary": result.summary,
+                            "touched": result.touched,
+                            "removed_count": len(result.removed),
+                            "rounds": result.rounds,
+                            "tool_calls": result.tool_calls,
+                            "errors": result.errors,
+                            "truncated": result.truncated,
+                        },
+                        default=str,
+                    ),
+                )
+                if result.errors:
+                    span.set_attribute("error.type", "CodexMemoryAgentError")
+                    span.set_attribute(
+                        "error.message", "; ".join(result.errors)[-2000:]
+                    )
+                return result
         except VaultLockTimeout as e:
             return MemoryAgentResult(
                 conversation_id=conversation_id,

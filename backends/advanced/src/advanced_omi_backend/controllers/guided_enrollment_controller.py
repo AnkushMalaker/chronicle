@@ -29,6 +29,7 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
 from advanced_omi_backend.config import get_diarization_settings
+from advanced_omi_backend.constants import is_non_enrollable_speaker
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     default_queue,
@@ -96,6 +97,28 @@ def _active_segments(doc: dict) -> list:
     if active is None and versions:
         active = versions[-1]
     return (active or {}).get("segments") or []
+
+
+def _effective_label(seg: dict) -> Optional[str]:
+    """The segment's speaker attribution, from either labelling path.
+
+    The pipeline writes ``identified_as``; manual annotation apply writes only
+    ``segment.speaker`` (a real name, vs the "Unknown Speaker N" placeholders).
+    Both count as attribution — without this, hand-labelled clips are invisible
+    to the candidate pool.
+    """
+    identified = seg.get("identified_as")
+    if identified is not None:
+        return identified
+    speaker = seg.get("speaker")
+    if speaker and not is_non_enrollable_speaker(speaker):
+        return speaker
+    return None
+
+
+def _is_manual_label(seg: dict) -> bool:
+    """True when the attribution came from a human annotation, not the pipeline."""
+    return seg.get("identified_as") is None and _effective_label(seg) is not None
 
 
 def _overlaps_other_speaker(seg: dict, segments: list) -> bool:
@@ -183,14 +206,16 @@ async def _candidate_pool(user: User, speaker_name: str, reviewed: set) -> list:
         },
     ):
         segments = _active_segments(doc)
-        speaker_present = any(s.get("identified_as") == speaker_name for s in segments)
+        speaker_present = any(
+            _effective_label(s) == speaker_name for s in segments
+        )
         if not speaker_present:
             continue
         audio_duration = doc.get("audio_total_duration") or 0.0
         for index, seg in enumerate(segments):
             if seg.get("segment_type") not in (None, "speech"):
                 continue
-            identified = seg.get("identified_as")
+            identified = _effective_label(seg)
             # Attributed segments are candidates at any confidence; unknown
             # segments only in conversations where the speaker appears (they
             # are the likeliest missed hard positives).
@@ -220,6 +245,7 @@ async def _candidate_pool(user: User, speaker_name: str, reviewed: set) -> list:
                     "duration": round(end - start, 3),
                     "text": (seg.get("text") or "")[:300],
                     "current_label": identified,
+                    "manually_labeled": _is_manual_label(seg),
                     "stored_confidence": seg.get("confidence"),
                 }
             )
@@ -283,10 +309,14 @@ def _information_score(clip: dict, threshold: float) -> Optional[dict]:
     s = clip["scores"]
     sim = s["sim_centroid"]
     best_other = s.get("best_other") or {}
-    if sim < MIN_PLAUSIBLE_SIM:
-        return None
-    if best_other.get("score", 0.0) >= sim + OTHER_SPEAKER_MARGIN:
-        return None  # probably the other speaker — not worth the user's time
+    # Human-annotated clips skip the plausibility gates: the label is attested,
+    # and a LOW similarity is the point — far-field/hard-condition positives are
+    # exactly what the gallery is missing. The review step still guards quality.
+    if not clip.get("manually_labeled"):
+        if sim < MIN_PLAUSIBLE_SIM:
+            return None
+        if best_other.get("score", 0.0) >= sim + OTHER_SPEAKER_MARGIN:
+            return None  # probably the other speaker — not worth the user's time
 
     novelty = 1.0 - (
         s.get("max_clip_sim") if s.get("max_clip_sim") is not None else 0.0
@@ -296,6 +326,8 @@ def _information_score(clip: dict, threshold: float) -> Optional[dict]:
     score = W_NOVELTY * novelty + W_UNCERTAINTY * uncertainty + W_DURATION * dur
 
     reasons = []
+    if clip.get("manually_labeled"):
+        reasons.append("manually annotated — confirms a condition the gallery may lack")
     if novelty >= 0.5:
         reasons.append("new acoustic condition for the gallery")
     if abs(sim - threshold) <= 0.1:
@@ -659,6 +691,8 @@ async def decide_clips(user: User, speaker_name: str, decisions: List[dict]):
                 )
                 if result.get("error"):
                     enroll_error = result["error"]
+                elif result.get("status") == "already_enrolled":
+                    skipped += 1
                 else:
                     enrolled += 1
                     if enrollment_target != speaker_name:

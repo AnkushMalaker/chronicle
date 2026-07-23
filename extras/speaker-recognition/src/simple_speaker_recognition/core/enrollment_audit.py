@@ -24,7 +24,11 @@ from typing import Optional
 
 import numpy as np
 
-from simple_speaker_recognition.database.models import Speaker, SpeakerAudioSegment
+from simple_speaker_recognition.database.models import (
+    EnrollmentAuditDecision,
+    Speaker,
+    SpeakerAudioSegment,
+)
 
 log = logging.getLogger("speaker_service")
 
@@ -72,6 +76,13 @@ def compute_audit(
 ) -> dict:
     """Build the enrollment-health report for a user (or all users)."""
     rows = _load_segments(session, user_id, before)
+    segment_ids = [seg.id for seg, _, _ in rows]
+    decisions = {
+        row.segment_id: row.decision
+        for row in session.query(EnrollmentAuditDecision)
+        .filter(EnrollmentAuditDecision.segment_id.in_(segment_ids))
+        .all()
+    }
 
     by_spk: dict = collections.defaultdict(list)  # speaker_id -> [(seg, vec)]
     name_by_id: dict = {}
@@ -124,6 +135,11 @@ def compute_audit(
             elif self_score is not None and self_score < WEAK_SELF:
                 flags.append("weak")
 
+            heuristic_flags = flags
+            review_state = decisions.get(seg.id)
+            if review_state == "confirmed_correct":
+                flags = []
+
             if flags:
                 n_flag += 1
             if self_score is not None:
@@ -147,6 +163,8 @@ def compute_audit(
                         else None
                     ),
                     "flags": flags,
+                    "heuristic_flags": heuristic_flags,
+                    "review_state": review_state,
                     "suggested": suggested,
                 }
             )

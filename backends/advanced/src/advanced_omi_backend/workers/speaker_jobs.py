@@ -12,7 +12,19 @@ from typing import Any, Dict
 
 from advanced_omi_backend.auth import generate_jwt_for_user
 from advanced_omi_backend.config import get_diarization_settings, get_misc_settings
-from advanced_omi_backend.constants import UNKNOWN_SPEAKER_PREFIX
+from advanced_omi_backend.constants import (
+    BACKGROUND_SPEECH_LABEL,
+    NOISE_LABEL,
+    UNKNOWN_SPEAKER_PREFIX,
+)
+from advanced_omi_backend.controllers import background_bucket_controller
+from advanced_omi_backend.controllers.drift_controller import compute_cluster_centroids
+from advanced_omi_backend.models.annotation import (
+    Annotation,
+    AnnotationSource,
+    AnnotationStatus,
+    AnnotationType,
+)
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
@@ -21,10 +33,252 @@ from advanced_omi_backend.services.forced_alignment import (
 )
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.users import get_user_by_id
+from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
 from advanced_omi_backend.utils.job_utils import update_job_meta
 from advanced_omi_backend.utils.segment_utils import classify_segment_text
+from advanced_omi_backend.workers import background_suppression
 
 logger = logging.getLogger(__name__)
+
+
+PROPAGATION_MIN_VOTES = 2
+HUMAN_LABEL_START_TOLERANCE_SECONDS = 0.75
+
+
+def _apply_human_speaker_overlays(segments: list, annotations: list) -> list[dict]:
+    """Keep accepted human speaker labels authoritative after reprocessing.
+
+    Reprocessing is still allowed to compute a fresh model label. When it disagrees,
+    preserve that attempted result in the returned audit records, then overlay the
+    human label onto the output segment. Matching is deliberately conservative: an
+    annotation must land on a segment start within 750 ms. Provider reprocessing keeps
+    exact boundaries; the tolerance only absorbs small timestamp movement.
+    """
+    failures = []
+    claimed: set[int] = set()
+    for annotation in sorted(
+        annotations,
+        key=lambda item: float(item.segment_start_time or 0.0),
+    ):
+        if annotation.segment_start_time is None or not annotation.corrected_speaker:
+            continue
+        candidates = [
+            (abs(float(segment.start) - float(annotation.segment_start_time)), index)
+            for index, segment in enumerate(segments)
+            if index not in claimed
+            and getattr(segment, "segment_type", "speech") == "speech"
+        ]
+        if not candidates:
+            continue
+        distance, index = min(candidates)
+        if distance > HUMAN_LABEL_START_TOLERANCE_SECONDS:
+            continue
+        segment = segments[index]
+        claimed.add(index)
+        model_speaker = segment.identified_as
+        model_confidence = segment.confidence
+        if model_speaker != annotation.corrected_speaker:
+            failures.append(
+                {
+                    "annotation_id": str(annotation.id),
+                    "segment_start": float(segment.start),
+                    "human_speaker": annotation.corrected_speaker,
+                    "model_speaker": model_speaker,
+                    "model_confidence": model_confidence,
+                }
+            )
+        segment.speaker = annotation.corrected_speaker
+        segment.identified_as = None
+        segment.confidence = 0.0
+    return failures
+
+
+async def _human_speaker_annotations(conversation_id: str) -> list[Annotation]:
+    annotations = (
+        await Annotation.find(
+            Annotation.conversation_id == conversation_id,
+            Annotation.annotation_type == AnnotationType.DIARIZATION,
+            Annotation.source == AnnotationSource.USER,
+            Annotation.status == AnnotationStatus.ACCEPTED,
+            Annotation.processed == True,
+        )
+        .sort("updated_at")
+        .to_list()
+    )
+    # Later corrections at the same source timestamp supersede earlier ones.
+    latest = {}
+    for annotation in annotations:
+        if annotation.segment_start_time is not None:
+            latest[round(float(annotation.segment_start_time), 3)] = annotation
+    return list(latest.values())
+
+
+def _propagate_cluster_identities(
+    segments: list[dict], excluded_starts: set[float]
+) -> int:
+    """Let each diarization cluster inherit its members' confident IDs.
+
+    Per-segment identification names only the clear utterances; short or partly
+    overlapped ones stay unknown even though pyannote already grouped them with
+    a confidently-identified voice. When every confident vote inside a cluster
+    agrees on one person (and there are at least PROPAGATION_MIN_VOTES votes),
+    the remaining unidentified members inherit that name.
+
+    ``excluded_starts``: segments the background scorer put in a non-foreground
+    zone — media that diarization folded into a human's cluster must not inherit
+    the human's name.
+    """
+    votes: dict[str, list[float]] = {}
+    names_by_cluster: dict[str, set[str]] = {}
+    for seg in segments:
+        identified = seg.get("identified_as")
+        if not identified or identified in (NOISE_LABEL, BACKGROUND_SPEECH_LABEL):
+            continue
+        cluster = seg.get("speaker") or ""
+        if not cluster:
+            continue
+        names_by_cluster.setdefault(cluster, set()).add(identified)
+        votes.setdefault(cluster, []).append(float(seg.get("confidence") or 0.0))
+    propagated = 0
+    for seg in segments:
+        if seg.get("identified_as"):
+            continue
+        cluster = seg.get("speaker") or ""
+        names = names_by_cluster.get(cluster)
+        if not names or len(names) != 1:
+            continue
+        if len(votes[cluster]) < PROPAGATION_MIN_VOTES:
+            continue
+        start_key = background_suppression.segment_key(seg.get("start") or 0.0)
+        if start_key in excluded_starts:
+            continue
+        seg["identified_as"] = next(iter(names))
+        seg["confidence"] = round(sum(votes[cluster]) / len(votes[cluster]), 4)
+        propagated += 1
+    return propagated
+
+
+async def _apply_background_references(
+    conversation_id: str,
+    segments: list[dict],
+    user,
+    speaker_client: SpeakerRecognitionClient,
+) -> set[float]:
+    """Mark segments that match a background exemplar, and disclose it.
+
+    Confident zone relabels the segment (existing behaviour); the unsure band is
+    only recorded. Every non-foreground verdict lands in the suppression ledger
+    so the conversation page can show what was marked and let the user restore
+    or confirm it. Segments the user already ruled on are never re-marked, and a
+    conversation-level "media is the subject" override skips marking entirely.
+
+    Returns the start keys of segments in a non-foreground zone (minus ones the
+    user restored as important speech) — the set cluster propagation must not
+    write names onto.
+    """
+    user_id = str(user.user_id)
+    if await background_suppression.get_subject_override(user_id, conversation_id):
+        logger.info(
+            "Background marking skipped for %s: user override says media is the subject",
+            conversation_id[:8],
+        )
+        return set()
+    sticky = await background_suppression.load_sticky_segments(user_id, conversation_id)
+    # Confirmed segments are background by the user's own verdict — relabel them
+    # up front, before scoring, so a fresh score can never un-mark them (and so
+    # cluster propagation never writes a name onto them).
+    for segment in segments:
+        ruling = sticky.get(background_suppression.segment_key(segment["start"]))
+        if ruling and ruling["status"] == "confirmed":
+            segment["identified_as"] = (
+                NOISE_LABEL
+                if ruling.get("bucket_type") == "noise"
+                else BACKGROUND_SPEECH_LABEL
+            )
+            segment["status"] = "background_reference"
+    semaphore = asyncio.Semaphore(3)
+    ledger_records: list[dict] = []
+
+    async def classify(segment: dict) -> None:
+        duration = float(segment.get("end", 0)) - float(segment.get("start", 0))
+        if duration < 1.0 or duration > 15.0:
+            return
+        async with semaphore:
+            wav = await reconstruct_audio_segment(
+                conversation_id, float(segment["start"]), float(segment["end"])
+            )
+            embedded = await speaker_client.extract_speaker_embedding(wav)
+            if embedded.get("error") or "embedding" not in embedded:
+                return
+            scores = {}
+            for bucket_type in background_bucket_controller.BUCKET_TYPES:
+                matched = await background_bucket_controller.match_embeddings(
+                    user,
+                    [embedded["embedding"]],
+                    bucket_type,
+                    embedded.get("embedding_model"),
+                )
+                results = matched.get("results") or []
+                scores[bucket_type] = (
+                    float(results[0]["bucket_similarity"]) if results else 0.0
+                )
+            best_type, best_score = max(scores.items(), key=lambda pair: pair[1])
+            foreground_score = float(segment.get("confidence") or 0.0)
+            zone = background_suppression.zone_for(best_score, foreground_score)
+            if zone == "foreground":
+                return
+            start_key = background_suppression.segment_key(segment["start"])
+            record = {
+                "segment_start": segment["start"],
+                "segment_end": segment["end"],
+                "text": segment.get("text"),
+                "background_similarity": best_score,
+                "foreground_similarity": foreground_score,
+                "bucket_type": best_type,
+                "zone": zone,
+                "embedding": embedded["embedding"],
+                "previous_identified_as": segment.get("identified_as"),
+                "previous_confidence": segment.get("confidence"),
+            }
+            ledger_records.append(record)
+            if zone == "confident_background" and start_key not in sticky:
+                segment["identified_as"] = (
+                    NOISE_LABEL if best_type == "noise" else BACKGROUND_SPEECH_LABEL
+                )
+                segment["confidence"] = best_score
+                segment["status"] = "background_reference"
+                segment["background_scores"] = scores
+
+    results = await asyncio.gather(
+        *(classify(segment) for segment in segments), return_exceptions=True
+    )
+    failures = sum(isinstance(result, Exception) for result in results)
+    if failures:
+        logger.warning(
+            "Background-reference comparison failed for %d segments", failures
+        )
+    try:
+        await background_suppression.record_conversation_suppressions(
+            conversation_id,
+            user_id,
+            ledger_records,
+            source="speaker_job",
+            # A scan with failed segments is incomplete — don't treat missing
+            # records as "no longer in zone".
+            prune=failures == 0,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to write background suppression ledger for %s",
+            conversation_id[:8],
+        )
+    excluded = set()
+    for record in ledger_records:
+        start_key = background_suppression.segment_key(record["segment_start"])
+        ruling = sticky.get(start_key)
+        if not ruling or ruling["status"] != "restored":
+            excluded.add(start_key)
+    return excluded
 
 
 class SpeakerServiceError(Exception):
@@ -174,6 +428,7 @@ async def recognise_speakers_job(
     transcript_text: str = "",
     words: list | None = None,
     source_version_id: str | None = None,
+    diarization_source_override: str | None = None,
     *,
     redis_client=None,
 ) -> Dict[str, Any]:
@@ -208,6 +463,8 @@ async def recognise_speakers_job(
         words: Word-level timing data from transcription job (optional, reads from DB if empty)
         source_version_id: When set (and version_id doesn't exist), read from this
             version and create version_id on success (manual-reprocess create mode)
+        diarization_source_override: Per-job engine choice (provider or pyannote).
+            When omitted, use the configured default.
         redis_client: Redis client (injected by decorator)
 
     Returns:
@@ -302,7 +559,9 @@ async def recognise_speakers_job(
     # - "provider": trust provider diarization when available, fall back to pyannote
     # - "pyannote": always re-diarize with pyannote (when word timestamps allow it)
     diarization_settings = get_diarization_settings()
-    preferred_source = diarization_settings.get("diarization_source", "provider")
+    preferred_source = diarization_source_override or diarization_settings.get(
+        "diarization_source", "provider"
+    )
     use_provider_diarization = provider_diarized and preferred_source == "provider"
 
     if use_provider_diarization:
@@ -603,6 +862,30 @@ async def recognise_speakers_job(
         speaker_segments = speaker_result["segments"]
         logger.info(f"🎤 Speaker recognition returned {len(speaker_segments)} segments")
 
+        background_user = await get_user_by_id(user_id)
+        background_starts: set[float] = set()
+        if background_user:
+            background_starts = await _apply_background_references(
+                conversation_id,
+                speaker_segments,
+                background_user,
+                speaker_client,
+            )
+
+        # Per-segment mode names only the clear utterances; propagate agreeing
+        # confident IDs across each diarization cluster so short clips inherit,
+        # while background-flagged segments stay out of the inheritance.
+        propagated_segments = 0
+        if use_per_segment:
+            propagated_segments = _propagate_cluster_identities(
+                speaker_segments, background_starts
+            )
+            if propagated_segments:
+                logger.info(
+                    "🎤 Cluster propagation named %d unidentified segments",
+                    propagated_segments,
+                )
+
         # Build mapping for unknown speakers: diarization_label -> "Unknown Speaker N"
         unknown_label_map = {}
         unknown_counter = 1
@@ -657,9 +940,12 @@ async def recognise_speakers_job(
                 for w in words_data
             ]
 
-            # Classify segment type from content
-            seg_classification = classify_segment_text(text)
-            seg_type = "event" if seg_classification == "event" else "speech"
+            # Noise is non-speech; background speech remains speech but is not a person.
+            if speaker_name == NOISE_LABEL:
+                seg_type = "event"
+            else:
+                seg_classification = classify_segment_text(text)
+                seg_type = "event" if seg_classification == "event" else "speech"
 
             updated_segments.append(
                 Conversation.SpeakerSegment(
@@ -677,6 +963,16 @@ async def recognise_speakers_job(
         if empty_segment_count > 0:
             logger.info(
                 f"🔇 Filtered out {empty_segment_count} empty segments from speaker recognition"
+            )
+
+        human_label_failures = _apply_human_speaker_overlays(
+            updated_segments,
+            await _human_speaker_annotations(conversation_id),
+        )
+        if human_label_failures:
+            logger.info(
+                "🎤 Preserved %d human speaker labels missed by reprocessing",
+                len(human_label_failures),
             )
 
         # Re-insert non-speech segments (event/note) that were skipped during identification
@@ -714,10 +1010,17 @@ async def recognise_speakers_job(
             "identified_speakers": list(identified_speakers),
             "speaker_count": len(identified_speakers),
             "total_segments": len(speaker_segments),
+            "propagated_segments": propagated_segments,
             "processing_time_seconds": time.time() - start_time,
         }
         if speaker_result.get("partial_errors"):
             sr_metadata["partial_errors"] = speaker_result["partial_errors"]
+        if speaker_result.get("identification_evidence"):
+            sr_metadata["identification_evidence"] = speaker_result[
+                "identification_evidence"
+            ]
+        if human_label_failures:
+            sr_metadata["human_label_recognition_failures"] = human_label_failures
 
         # Which engine produced these segments: pyannote when it actually returned turns,
         # otherwise carry the source's (we identified existing/provider segments).
@@ -729,11 +1032,9 @@ async def recognise_speakers_job(
 
         # Per-diarized-speaker pooled centroids used for identification, so a later
         # "reprocess impact"/drift check can re-identify against the updated gallery with
-        # pure vector math (no GPU, no re-diarization). Only the cluster-then-identify
-        # (pyannote) path returns these; identify_provider_segments does not.
+        # pure vector math (no GPU, no re-diarization).
         # Re-key from raw diar labels (SPEAKER_00) to the FINAL segment labels (name or
         # "Unknown Speaker N") so each centroid maps 1:1 to its segments' `speaker`.
-        centroids_map = {}
         raw_centroids = speaker_result.get("cluster_centroids") or {}
         if raw_centroids:
             diar_to_final = {}
@@ -748,6 +1049,14 @@ async def recognise_speakers_job(
                 diar_to_final.get(diar, diar): centroid
                 for diar, centroid in raw_centroids.items()
             }
+        else:
+            # The provider/segment-identification path (identify_provider_segments)
+            # returns no centroids — compute them here from the final segments (keys are
+            # already display labels) so EVERY new active version carries centroids and
+            # the drift check never goes blind after a reprocess or reingest.
+            centroids_map, _ = await compute_cluster_centroids(
+                conversation_id, updated_segments, speaker_client
+            )
 
         if create_mode:
             # Build the new version only now that we have a usable result. Carry the
@@ -756,6 +1065,7 @@ async def recognise_speakers_job(
                 "reprocessing_type": "speaker_diarization",
                 "source_version_id": source_version.version_id,
                 "trigger": "manual_reprocess",
+                "requested_diarization_source": preferred_source,
                 "provider_capabilities": provider_capabilities,
                 "speaker_recognition": sr_metadata,
             }

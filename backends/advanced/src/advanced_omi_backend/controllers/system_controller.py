@@ -693,7 +693,6 @@ async def save_misc_settings_controller(settings: dict):
     try:
         # Validate settings
         boolean_keys = {
-            "always_persist_enabled",
             "per_segment_speaker_id",
             "always_batch_retranscribe",
         }

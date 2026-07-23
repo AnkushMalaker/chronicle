@@ -11,7 +11,6 @@ import time
 from typing import Any, Dict, Optional
 
 import redis.asyncio as aioredis
-from wyoming.audio import AudioChunk
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
@@ -42,7 +41,6 @@ class AudioStreamService:
         self.memory_events_stream = "memory:events"
 
         # Consumer group names (action verbs - what they DO)
-        self.audio_writer = "audio-file-writer"  # Writes audio chunks to WAV files
         self.memory_enqueuer = "memory-job-enqueuer"  # Enqueues memory extraction jobs
         self.event_listener = "event-listener"  # Listens for completion events
 
@@ -59,92 +57,11 @@ class AudioStreamService:
         )
         logger.info(f"Audio stream service connected to Redis at {self.redis_url}")
 
-        # Create consumer groups if they don't exist
-        await self._ensure_consumer_groups()
-
     async def disconnect(self):
         """Disconnect from Redis."""
         if self.redis:
             await self.redis.close()
             logger.info("Audio stream service disconnected from Redis")
-
-    async def _ensure_consumer_groups(self):
-        """Ensure consumer groups exist for all streams."""
-        try:
-            # Note: Consumer groups are created per stream when first audio arrives
-            # We'll create them dynamically in publish_audio_chunk
-            pass
-        except Exception as e:
-            logger.error(f"Error ensuring consumer groups: {e}")
-
-    async def publish_audio_chunk(
-        self,
-        client_id: str,
-        user_id: str,
-        user_email: str,
-        audio_chunk: AudioChunk,
-        audio_uuid: Optional[str] = None,
-        timestamp: Optional[int] = None,
-    ) -> str:
-        """
-        Publish audio chunk to Redis Stream.
-
-        Args:
-            client_id: Client identifier
-            user_id: User ID
-            user_email: User email
-            audio_chunk: Wyoming AudioChunk object
-            audio_uuid: Optional audio UUID
-            timestamp: Optional timestamp (session start time in ms)
-
-        Returns:
-            Message ID from Redis Stream
-        """
-        if not self.redis:
-            raise RuntimeError("Redis not connected. Call connect() first.")
-
-        stream_name = f"{self.audio_stream_prefix}{client_id}"
-
-        # Use Redis Stream message ID as sequence - it's guaranteed to be unique and ordered
-        # The timestamp parameter is for session start time tracking
-        session_timestamp = timestamp or int(time.time() * 1000)
-
-        # Prepare message data
-        message_data = {
-            b"client_id": client_id.encode(),
-            b"user_id": user_id.encode(),
-            b"user_email": user_email.encode(),
-            b"audio_data": audio_chunk.audio,
-            b"audio_rate": str(audio_chunk.rate).encode(),
-            b"audio_width": str(audio_chunk.width).encode(),
-            b"audio_channels": str(audio_chunk.channels).encode(),
-            b"session_timestamp": str(session_timestamp).encode(),
-        }
-
-        if audio_uuid:
-            message_data[b"audio_uuid"] = audio_uuid.encode()
-
-        # Publish to stream - Redis generates unique message_id automatically
-        message_id = await self.redis.xadd(stream_name, message_data)
-
-        audio_logger.debug(
-            f"Published audio chunk to {stream_name}: {len(audio_chunk.audio)} bytes, "
-            f"message_id={message_id.decode()}"
-        )
-
-        # Ensure consumer group exists for this stream
-        try:
-            await self.redis.xgroup_create(
-                stream_name, self.audio_writer, id="0", mkstream=True
-            )
-            audio_logger.debug(
-                f"Created consumer group {self.audio_writer} for {stream_name}"
-            )
-        except aioredis.ResponseError as e:
-            if "BUSYGROUP" not in str(e):
-                raise
-
-        return message_id.decode()
 
     async def publish_transcript_event(
         self,
@@ -239,70 +156,6 @@ class AudioStreamService:
             if "BUSYGROUP" not in str(e):
                 raise
 
-    async def consume_audio_stream(
-        self, consumer_name: str, callback, block_ms: int = 5000, count: int = 10
-    ):
-        """
-        Consume audio chunks from all client streams.
-
-        This is intended to be run in RQ workers.
-
-        Args:
-            consumer_name: Unique consumer name (e.g., worker ID)
-            callback: Async function to process each audio message
-            block_ms: Block time in milliseconds
-            count: Max messages to read per call
-        """
-        if not self.redis:
-            raise RuntimeError("Redis not connected")
-
-        logger.info(f"Audio stream consumer {consumer_name} starting...")
-
-        # Get all audio streams
-        stream_keys = []
-        cursor = b"0"
-        while cursor:
-            cursor, keys = await self.redis.scan(
-                cursor, match=f"{self.audio_stream_prefix}*"
-            )
-            stream_keys.extend(keys)
-
-        if not stream_keys:
-            logger.debug("No audio streams found")
-            return
-
-        # Read from all streams
-        streams_dict = {key: b">" for key in stream_keys}
-
-        try:
-            messages = await self.redis.xreadgroup(
-                self.audio_writer,
-                consumer_name,
-                streams_dict,
-                count=count,
-                block=block_ms,
-            )
-
-            for stream_name, stream_messages in messages:
-                for message_id, message_data in stream_messages:
-                    try:
-                        # Process message
-                        await callback(stream_name, message_id, message_data)
-
-                        # Acknowledge message
-                        await self.redis.xack(
-                            stream_name, self.audio_writer, message_id
-                        )
-
-                    except Exception as e:
-                        logger.error(
-                            f"Error processing audio message {message_id.decode()}: {e}",
-                            exc_info=True,
-                        )
-
-        except Exception as e:
-            logger.error(f"Error consuming audio stream: {e}", exc_info=True)
-
     async def get_stream_info(self, stream_name: str) -> Dict[str, Any]:
         """Get information about a stream."""
         if not self.redis:
@@ -324,6 +177,11 @@ class AudioStreamService:
         """
         if not self.redis:
             raise RuntimeError("Redis not connected")
+        if stream_name.startswith(self.audio_stream_prefix):
+            raise RuntimeError(
+                "Raw audio streams cannot be trimmed by age; deletion requires "
+                "consumer-group durability proof"
+            )
 
         # Calculate cutoff timestamp
         cutoff_ts = int((time.time() * 1000) - max_age_ms)

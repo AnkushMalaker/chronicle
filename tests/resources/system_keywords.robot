@@ -78,26 +78,3 @@ Stop Mock Transcription Server
     ELSE
         Log    ⚠️ Mock Transcription Server handle not found (may not have been started)
     END
-
-
-Set Always Persist Enabled
-    [Documentation]    Set the always_persist_enabled setting via API.
-    ...                Requires admin session.
-    [Arguments]    ${session}    ${enabled}=${True}
-
-    ${settings}=    Create Dictionary    always_persist_enabled=${enabled}
-    ${response}=    POST On Session    ${session}    /api/misc-settings    json=${settings}
-    Should Be Equal As Integers    ${response.status_code}    200
-    Log    ✅ Set always_persist_enabled=${enabled}
-
-
-Get Always Persist Enabled
-    [Documentation]    Get the current always_persist_enabled setting via API.
-    ...                Requires admin session.
-    [Arguments]    ${session}
-
-    ${response}=    GET On Session    ${session}    /api/misc-settings
-    Should Be Equal As Integers    ${response.status_code}    200
-    ${settings}=    Set Variable    ${response.json()}
-    ${enabled}=    Set Variable    ${settings}[always_persist_enabled]
-    RETURN    ${enabled}

@@ -143,6 +143,9 @@ export interface ExternalService {
   name: string
   description: string
   ports: string[]
+  // Canonical browser-facing UI on the owning node. The node agent resolves
+  // Tailscale host + Caddy/HTTP fallback; clients must not guess from raw ports.
+  ui_url?: string | null
   enabled: boolean
   health: 'healthy' | 'partial' | 'unhealthy' | 'stopped' | 'starting'
   health_detail: string

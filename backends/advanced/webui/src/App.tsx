@@ -23,7 +23,6 @@ const Plugins = lazy(() => import('./pages/Plugins'))
 const Finetuning = lazy(() => import('./pages/Finetuning'))
 const Network = lazy(() => import('./pages/Network'))
 const DataAudit = lazy(() => import('./pages/DataAudit'))
-const SpeakerEnrollment = lazy(() => import('./pages/SpeakerEnrollment'))
 const WakeWordLab = lazy(() => import('./pages/WakeWordLab'))
 const MemoryLedger = lazy(() => import('./pages/MemoryLedger'))
 const SystemEvents = lazy(() => import('./pages/SystemEvents'))
@@ -181,13 +180,6 @@ function App() {
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
                       <DataAudit />
-                    </Suspense>
-                  </PageErrorBoundary>
-                } />
-                <Route path="speaker-enrollment" element={
-                  <PageErrorBoundary>
-                    <Suspense fallback={<PageSkeleton />}>
-                      <SpeakerEnrollment />
                     </Suspense>
                   </PageErrorBoundary>
                 } />

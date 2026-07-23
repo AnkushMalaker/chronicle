@@ -14,13 +14,11 @@ It is intentionally dependency-light — stdlib only, no imports of ``workers``,
 ``speech_detection_job`` family. Other key families (``transcription:*``,
 ``audio:stream:*``, ``sse:*``, …) are still built inline and may migrate here later.
 
-**Invariant:** for WebSocket audio streams ``session_id == client_id``. The
-session-scoped builders below take ``session_id``; a couple of historical call
-sites pass ``client_id`` for the same value — routing both through one builder is
-exactly what keeps them from silently diverging.
+**Invariant:** every WebSocket recording has a unique ``session_id``. A client may
+have many historical sessions, and each session owns an immutable raw-audio WAL.
 """
 
-# --- session-scoped (keyed by session_id == client_id for WebSocket streams) ---
+# --- session-scoped ---
 
 
 def audio_session(session_id: str) -> str:

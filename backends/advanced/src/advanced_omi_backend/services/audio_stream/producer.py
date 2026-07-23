@@ -7,8 +7,10 @@ import time
 from dataclasses import dataclass
 
 import redis.asyncio as redis
+from redis.exceptions import WatchError
 
 from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
+from advanced_omi_backend.redis_keys import audio_session, conversation_current
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,55 @@ class AudioStreamProducer:
         # Per-session audio buffers for sample-aligned chunking: {session_id: SessionBuffer}
         self.session_buffers: dict[str, SessionBuffer] = {}
 
+    async def _append_owned_message(
+        self, session_id: str, stream_name: str, fields: dict[bytes, bytes]
+    ):
+        """Atomically bind one WAL entry to the conversation owning it.
+
+        Conversation rotation and XADD share the watched assignment key. If the
+        owner changes concurrently, the append retries against the new owner. A
+        missing owner is an invalid ingress state: no bytes are removed from the
+        process buffer and no owner is guessed.
+        """
+        owner_key = conversation_current(session_id)
+        session_key = audio_session(session_id)
+        while True:
+            async with self.redis_client.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(session_key, owner_key)
+                    raw_status = await pipe.hget(session_key, "status")
+                    status = (
+                        raw_status.decode()
+                        if isinstance(raw_status, bytes)
+                        else raw_status
+                    )
+                    if status != "active":
+                        await pipe.unwatch()
+                        raise RuntimeError(
+                            f"Audio session {session_id} is not active ({status})"
+                        )
+                    raw_owner = await pipe.get(owner_key)
+                    if raw_owner is None:
+                        await pipe.unwatch()
+                        raise RuntimeError(
+                            f"Audio session {session_id} has no conversation owner"
+                        )
+
+                    owner = (
+                        raw_owner
+                        if isinstance(raw_owner, bytes)
+                        else str(raw_owner).encode()
+                    )
+                    owned_fields = dict(fields)
+                    owned_fields[b"conversation_id"] = owner
+
+                    pipe.multi()
+                    pipe.xadd(stream_name, owned_fields)
+                    result = await pipe.execute()
+                    return result[0]
+                except WatchError:
+                    continue
+
     async def init_session(
         self,
         session_id: str,
@@ -80,13 +131,19 @@ class AudioStreamProducer:
             mode: Processing mode (streaming/batch)
             provider: Transcription provider from config.yml
         """
-        # Client-specific stream naming (one stream per client for isolation)
-        stream_name = f"audio:stream:{client_id}"
+        # One immutable write-ahead log per recording attempt. A reconnect gets a
+        # new session/stream, so it cannot reset or append behind an older worker
+        # that is still draining.
+        stream_name = f"audio:stream:{session_id}"
 
-        # session_id is stable across reconnects (it equals client_id), so a new
-        # WebSocket connection reuses the same Redis namespace as the previous one.
-        # Clear connection-scoped keys that live OUTSIDE the session hash so the new
-        # connection starts a clean transcription attempt:
+        # Raw audio streams are write-ahead logs.  A prior version put a short TTL
+        # on disconnect; remove any inherited TTL before this connection can append
+        # new bytes.  Retention is now owned exclusively by the durability gate
+        # after every persistence consumer has drained.
+        await self.redis_client.persist(stream_name)
+
+        # Clear connection-scoped keys that live OUTSIDE the session hash so the
+        # new connection starts a clean transcription attempt:
         #
         #   transcription:complete  — set (5-min TTL) when the prior provider stream
         #     closed (graceful worker shutdown, stream-idle zombie exit, or end of a
@@ -123,6 +180,9 @@ class AudioStreamProducer:
             provider=provider,
         )
 
+        if session_id in self.session_buffers:
+            raise RuntimeError(f"Audio session {session_id} is already initialized")
+
         # Initialize audio buffer for this session
         self.session_buffers[session_id] = SessionBuffer(
             user_id=user_id, client_id=client_id, stream_name=stream_name
@@ -149,7 +209,7 @@ class AudioStreamProducer:
             session_id: Session identifier
         """
         if session_id not in self.session_buffers:
-            return
+            raise RuntimeError(f"Audio session {session_id} has no producer buffer")
 
         buffer = self.session_buffers[session_id]
         stream_name = buffer.stream_name
@@ -162,6 +222,7 @@ class AudioStreamProducer:
 
         end_signal = {
             b"audio_data": b"",  # Empty audio data
+            b"end_marker": b"true",
             b"session_id": session_id.encode(),
             b"chunk_id": b"END",  # Special marker
             b"user_id": buffer.user_id.encode(),
@@ -172,9 +233,7 @@ class AudioStreamProducer:
             b"sample_width": str(sample_width).encode(),
         }
 
-        await self.redis_client.xadd(
-            stream_name, end_signal, maxlen=25000, approximate=True
-        )
+        await self._append_owned_message(session_id, stream_name, end_signal)
         logger.info(f"📡 Sent end-of-session signal for {session_id} to {stream_name}")
 
     async def update_session_job_ids(
@@ -208,34 +267,34 @@ class AudioStreamProducer:
             completion_reason: Optional reason for session completion (e.g., "websocket_disconnect", "user_stopped")
                               This is set atomically with status to avoid race conditions.
         """
-        # Mark status=finalizing (+reason) atomically and notify the monitoring loop
-        # via pub/sub. The completion_reason is set together with status to avoid the
-        # race where a worker sees a finalizing status without its reason.
+        # Finalization is deliberately ordered:
+        #
+        #   buffered process memory -> Redis audio log -> terminal marker -> status
+        #
+        # A failure leaves the session in its prior ACTIVE state with the bytes still
+        # either in this buffer or in Redis.  We never publish FINALIZING first and
+        # then discover that the last bytes could not be durably accepted.
         if completion_reason:
             logger.info(
                 f"📊 Finalizing session {session_id} with reason: {completion_reason}"
             )
+        if session_id in self.session_buffers:
+            sample_rate, channels, sample_width = await self.store.get_audio_format(
+                session_id
+            )
+            await self.flush_session_buffer(
+                session_id,
+                sample_rate=sample_rate,
+                channels=channels,
+                sample_width=sample_width,
+            )
+            await self.send_session_end_signal(session_id)
+
+        # status + completion reason are one SessionStore write.  At this point all
+        # producer-owned bytes and the marker are already in the Redis WAL.
         await self.store.mark_finalizing(session_id, completion_reason)
 
-        # Send end_marker to Redis stream so streaming consumer can close the connection
         if session_id in self.session_buffers:
-            buffer = self.session_buffers[session_id]
-            stream_name = buffer.stream_name
-
-            # Send end_marker message to signal stream end
-            end_marker_data = {
-                b"end_marker": b"true",
-                b"session_id": session_id.encode(),
-                b"user_id": buffer.user_id.encode(),
-                b"client_id": buffer.client_id.encode(),
-                b"timestamp": str(time.time()).encode(),
-            }
-
-            await self.redis_client.xadd(
-                stream_name, end_marker_data, maxlen=25000, approximate=True
-            )
-            logger.info(f"📡 Sent end_marker to {stream_name} for session {session_id}")
-
             # Clean up session buffer
             del self.session_buffers[session_id]
             logger.debug(f"🧹 Cleaned up buffer for session {session_id}")
@@ -270,20 +329,16 @@ class AudioStreamProducer:
         Returns:
             List of Redis message IDs (may send multiple chunks per call)
         """
-        # Initialize buffer if needed. This is a fallback — init_session() normally
-        # creates it first; reaching here means audio arrived before session init.
         if session_id not in self.session_buffers:
-            logger.warning(
-                f"⚠️ add_audio_chunk before init_session for {session_id}; "
-                f"creating buffer on the fly"
-            )
-            self.session_buffers[session_id] = SessionBuffer(
-                user_id=user_id,
-                client_id=client_id,
-                stream_name=f"audio:stream:{client_id}",  # Client-specific stream
+            raise RuntimeError(
+                f"Audio reached uninitialized session {session_id}; refusing ingress"
             )
 
         session_buffer = self.session_buffers[session_id]
+        if session_buffer.user_id != user_id or session_buffer.client_id != client_id:
+            raise RuntimeError(
+                f"Audio identity mismatch for initialized session {session_id}"
+            )
 
         # Add incoming audio to buffer
         session_buffer.buffer += audio_data
@@ -299,13 +354,12 @@ class AudioStreamProducer:
         stream_name = session_buffer.stream_name
 
         while len(session_buffer.buffer) >= target_chunk_size:
-            # Extract exactly target_chunk_size bytes
+            # Build the next append without mutating process memory.  XADD is the
+            # durability boundary: only after Redis confirms it do we advance the
+            # buffer and sequence number.
             chunk_audio = session_buffer.buffer[:target_chunk_size]
-            session_buffer.buffer = session_buffer.buffer[target_chunk_size:]
-
-            # Increment chunk count
-            session_buffer.chunk_count += 1
-            chunk_id_formatted = f"{session_buffer.chunk_count:05d}"
+            next_chunk_count = session_buffer.chunk_count + 1
+            chunk_id_formatted = f"{next_chunk_count:05d}"
 
             # Prepare chunk data
             chunk_data = {
@@ -320,14 +374,17 @@ class AudioStreamProducer:
                 b"sample_width": str(sample_width).encode(),
             }
 
-            # Add to stream with MAXLEN limit (safety net to prevent unbounded growth)
-            message_id = await self.redis_client.xadd(
-                stream_name,
-                chunk_data,
-                maxlen=25000,  # Keep max 25k chunks (~104 minutes at 250ms/chunk)
-                approximate=True,
+            # Never cap the shared raw-audio WAL. A consumer-independent MAXLEN can
+            # trim unread/pending data out from under Mongo persistence.
+            message_id = await self._append_owned_message(
+                session_id, stream_name, chunk_data
             )
-            message_ids.append(message_id.decode())
+
+            session_buffer.buffer = session_buffer.buffer[target_chunk_size:]
+            session_buffer.chunk_count = next_chunk_count
+            message_ids.append(
+                message_id.decode() if isinstance(message_id, bytes) else message_id
+            )
 
             # Update session tracking
             await self.update_session_chunk_count(session_id)
@@ -379,11 +436,8 @@ class AudioStreamProducer:
         # Send any remaining buffered audio
         if len(session_buffer.buffer) > 0:
             chunk_audio = session_buffer.buffer
-            session_buffer.buffer = b""
-
-            # Increment chunk count
-            session_buffer.chunk_count += 1
-            chunk_id_formatted = f"{session_buffer.chunk_count:05d}"
+            next_chunk_count = session_buffer.chunk_count + 1
+            chunk_id_formatted = f"{next_chunk_count:05d}"
 
             stream_name = session_buffer.stream_name
 
@@ -400,10 +454,12 @@ class AudioStreamProducer:
                 b"sample_width": str(sample_width).encode(),
             }
 
-            # Add to stream with MAXLEN limit
-            message_id = await self.redis_client.xadd(
-                stream_name, chunk_data, maxlen=25000, approximate=True
+            # Keep the process buffer intact if Redis rejects the append.
+            message_id = await self._append_owned_message(
+                session_id, stream_name, chunk_data
             )
+            session_buffer.buffer = b""
+            session_buffer.chunk_count = next_chunk_count
 
             # Update session tracking
             await self.update_session_chunk_count(session_id)
@@ -414,7 +470,7 @@ class AudioStreamProducer:
                 f"({len(chunk_audio)} bytes = {len(chunk_audio)/bytes_per_second:.3f}s)"
             )
 
-            return message_id.decode()
+            return message_id.decode() if isinstance(message_id, bytes) else message_id
 
         return None
 

@@ -291,12 +291,6 @@ def get_misc_settings() -> dict:
     Returns:
         Dict with miscellaneous settings (persistence, timeouts, segmentation mode)
     """
-    # Get audio settings for always_persist_enabled
-    audio_cfg = get_backend_config("audio")
-    audio_settings = (
-        OmegaConf.to_container(audio_cfg, resolve=True) if audio_cfg else {}
-    )
-
     # Get transcription settings for timeouts and batch re-transcription
     transcription_cfg = get_backend_config("transcription")
     transcription_settings = (
@@ -321,7 +315,6 @@ def get_misc_settings() -> dict:
     ) or {}
 
     return {
-        "always_persist_enabled": audio_settings.get("always_persist_enabled", False),
         "per_segment_speaker_id": speaker_settings.get("per_segment_speaker_id", False),
         "streaming_fallback_timeout_seconds": int(
             transcription_settings.get(
@@ -349,12 +342,6 @@ def save_misc_settings(settings: dict) -> bool:
         True if saved successfully, False otherwise
     """
     success = True
-
-    # Save audio settings if always_persist_enabled is provided
-    if "always_persist_enabled" in settings:
-        audio_settings = {"always_persist_enabled": settings["always_persist_enabled"]}
-        if not save_config_section("backend.audio", audio_settings):
-            success = False
 
     # Save speaker recognition settings if per_segment_speaker_id is provided
     if "per_segment_speaker_id" in settings:

@@ -95,8 +95,6 @@ memory:
     prompt: ''
 
 backend:
-  audio:
-    always_persist_enabled: true
   diarization:
     # Trust provider segments (VibeVoice provides pre-diarized segments)
     diarization_source: provider

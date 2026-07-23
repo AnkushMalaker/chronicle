@@ -84,8 +84,15 @@ export function useReprocessMemory() {
 export function useReprocessSpeakers() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: ({ conversationId, transcriptVersionId }: { conversationId: string; transcriptVersionId?: string }) =>
-      conversationsApi.reprocessSpeakers(conversationId, transcriptVersionId || 'active'),
+    mutationFn: ({ conversationId, transcriptVersionId, diarizationSource }: {
+      conversationId: string
+      transcriptVersionId?: string
+      diarizationSource?: 'provider' | 'pyannote'
+    }) => conversationsApi.reprocessSpeakers(
+      conversationId,
+      transcriptVersionId || 'active',
+      diarizationSource
+    ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['conversations'] })
     },

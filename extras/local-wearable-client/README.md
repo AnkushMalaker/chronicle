@@ -2,6 +2,12 @@
 
 macOS client that scans for BLE wearable devices (OMI, Neo1, Friend), connects, and streams audio to the Chronicle backend. Runs as a **menu bar app** with device selection, or headless for background use.
 
+> **Unified tray:** device scan/connect/stream now also lives as the *Pendant*
+> section of the [Chronicle tray](../chronicle-tray/) (`chronicle-tray install
+> --pendant`), which reuses this project's `ble_manager.py` and config in place.
+> The rumps menu bar app below still works and remains the home of the macOS
+> screen-capture settings UI.
+
 ## Prerequisites
 
 - macOS (menu bar and launchd features are macOS-only)

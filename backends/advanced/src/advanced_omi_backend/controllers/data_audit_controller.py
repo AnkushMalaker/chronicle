@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Tuple
 from fastapi.responses import FileResponse, JSONResponse
 
 from advanced_omi_backend.config import get_diarization_settings
+from advanced_omi_backend.constants import is_non_enrollable_speaker
 from advanced_omi_backend.controllers.conversation_controller import (
     archive_conversation_audio,
 )
@@ -501,6 +502,13 @@ async def speaker_confidence_overview(user: User):
                 conf = seg.get("confidence")
                 if not name or conf is None:
                     continue
+                # Reserved category labels ("Background Speech", "Noise") are
+                # written into identified_as but are NOT speaker identities — their
+                # stored confidence is a background-bucket similarity, not an
+                # identification score. Exclude them so they don't appear as bogus
+                # "speaker" rows (and skew the global histogram/marginal stats).
+                if is_non_enrollable_speaker(name):
+                    continue
                 had = True
                 all_conf.append(conf)
                 per_speaker.setdefault(name, []).append(conf)
@@ -552,6 +560,33 @@ async def speaker_confidence_overview(user: User):
                 }
             )
         speakers.sort(key=lambda s: (-s["marginal_pct"], -s["nseg"]))
+
+        # Enrolled speakers with NO stored identifications yet (e.g. just enrolled)
+        # would otherwise be invisible here — list them explicitly so a fresh
+        # enrollment shows up immediately instead of silently missing until some
+        # conversation is (re)processed and matches them.
+        try:
+            enrolled = await SpeakerRecognitionClient().get_enrolled_speakers()
+            for sp in enrolled.get("speakers", []):
+                sp_name = sp.get("name")
+                if not sp_name or sp_name in per_speaker:
+                    continue
+                speakers.append(
+                    {
+                        "name": sp_name,
+                        "nseg": 0,
+                        "nconv": 0,
+                        "mean": None,
+                        "median": None,
+                        "min": None,
+                        "max": None,
+                        "marginal_pct": None,
+                        "keep_pct": None,
+                        "never_identified": True,
+                    }
+                )
+        except Exception:
+            logger.warning("Could not list enrolled speakers for confidence overview")
 
         return {
             "threshold": threshold,

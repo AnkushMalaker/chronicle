@@ -12,7 +12,7 @@ services:
       clickhouse:
         condition: service_healthy
     environment: &langfuse-worker-env
-      NEXTAUTH_URL: http://0.0.0.0:3000
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3002}
       DATABASE_URL: postgresql://postgres:postgres@langfuse-postgres:5432/postgres
       SALT: ${LANGFUSE_SALT}
       ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}

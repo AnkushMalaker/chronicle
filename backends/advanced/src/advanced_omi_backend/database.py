@@ -18,6 +18,8 @@ MONGODB_DATABASE = os.getenv("MONGODB_DATABASE", "chronicle")
 
 mongo_client = AsyncIOMotorClient(
     MONGODB_URI,
+    w="majority",
+    journal=True,
     maxPoolSize=50,  # Increased pool size for concurrent operations
     minPoolSize=10,  # Keep minimum connections ready
     maxIdleTimeMS=45000,  # Keep idle connections for 45 seconds

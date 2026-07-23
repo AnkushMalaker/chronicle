@@ -1,5 +1,5 @@
 import React, { useRef, useCallback, useEffect, useState } from 'react';
-import { Text, View, SafeAreaView, ScrollView, Platform, FlatList, ActivityIndicator, Alert, Switch, TouchableOpacity, KeyboardAvoidingView, StyleSheet } from 'react-native';
+import { Text, View, SafeAreaView, ScrollView, Platform, FlatList, ActivityIndicator, Alert, Switch, TouchableOpacity, KeyboardAvoidingView, StyleSheet, RefreshControl } from 'react-native';
 import { OmiConnection } from 'friend-lite-react-native';
 import { State as BluetoothState } from 'react-native-ble-plx';
 import { Link } from 'expo-router';
@@ -18,6 +18,7 @@ import { useAudioStreamer } from '@/hooks/useAudioStreamer';
 import { usePhoneAudioRecorder } from '@/hooks/usePhoneAudioRecorder';
 import { usePhoneAudioDevices } from '@/hooks/usePhoneAudioDevices';
 import { useBatteryMonitor } from '@/hooks/useBatteryMonitor';
+import { useBackendHealth, isNotConfigured } from '@/hooks/useBackendHealth';
 import { saveLastConnectedDeviceId } from '@/utils/storage';
 
 // Components
@@ -27,21 +28,6 @@ import DeviceListItem from '@/components/DeviceListItem';
 import DeviceDetails from '@/components/DeviceDetails';
 import PhoneAudioButton from '@/components/PhoneAudioButton';
 import PhoneAudioMicPicker from '@/components/PhoneAudioMicPicker';
-
-// True once the app is pointed at a real backend (not empty and not the
-// localhost placeholder a fresh install ships with). Mirrors the
-// "not configured" logic in BackendStatus.
-function isBackendConfigured(url: string | undefined): boolean {
-  const trimmed = (url || '').trim();
-  if (!trimmed) return false;
-  try {
-    const base = trimmed.replace('ws://', 'http://').replace('wss://', 'https://').split('/ws')[0];
-    const host = new URL(base).hostname;
-    return host !== 'localhost' && host !== '127.0.0.1' && host !== '::1';
-  } catch {
-    return true;
-  }
-}
 
 export default function App() {
   const { colors } = useTheme();
@@ -55,6 +41,10 @@ export default function App() {
 
   // Settings (must be before audioStreamer so the token refresh callback can reference it)
   const settings = useSharedAppSettings();
+
+  // Live backend reachability (Connection Doctor), re-probed on pull-to-refresh.
+  const { healthStatus, checkBackendHealth } = useBackendHealth(settings.webSocketUrl, settings.jwtToken);
+  const [refreshing, setRefreshing] = useState(false);
 
   // Audio
   const audioStreamer = useAudioStreamer({
@@ -194,14 +184,34 @@ export default function App() {
     });
   }, [scannedDevices, showOnlyOmi]);
 
+  // Pull-to-refresh: re-probe backend reachability and refresh live device state.
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([
+        checkBackendHealth(false),
+        deviceConnection.connectedDeviceId ? batteryMonitor.refreshBattery() : Promise.resolve(),
+        phoneAudioDevices.refresh().then(() => {}, () => {}),
+      ]);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [checkBackendHealth, deviceConnection.connectedDeviceId, batteryMonitor.refreshBattery, phoneAudioDevices.refresh]);
+
   const bluetoothReady = bluetoothState === BluetoothState.PoweredOn && permissionGranted;
   // A fresh install points at localhost (the phone itself), which can never be a
   // real backend — treat that (and empty) as "not paired yet" so the setup card
   // and health pill reflect reality.
-  const backendConfigured = isBackendConfigured(settings.webSocketUrl);
-  const isOperational = bluetoothReady && backendConfigured;
-  const healthLabel = isOperational ? 'System Operational' : 'Action Needed';
-  const healthTone = isOperational ? colors.success : colors.warning;
+  const backendConfigured = !isNotConfigured(settings.webSocketUrl);
+  // The pill reflects the live probe, not just config: a confirmed-bad probe
+  // (offline / unreachable / down / unhealthy) turns it red; pending or healthy
+  // probes fall back to the config+bluetooth view.
+  const backendDown = ['offline', 'backend_down', 'unreachable', 'unhealthy'].includes(healthStatus.status);
+  const isOperational = bluetoothReady && backendConfigured && !backendDown;
+  const healthLabel = backendDown
+    ? (healthStatus.status === 'offline' ? "You're Offline" : 'Backend Unreachable')
+    : isOperational ? 'System Operational' : 'Action Needed';
+  const healthTone = backendDown ? colors.danger : isOperational ? colors.success : colors.warning;
   const batteryDisplay = deviceConnection.connectedDeviceId
     ? batteryMonitor.batteryLevel >= 0 ? `${batteryMonitor.batteryLevel}%` : '...'
     : '--';
@@ -229,7 +239,19 @@ export default function App() {
     <SafeAreaView style={s.container}>
       <View style={s.pulseBackground} />
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={Platform.OS === 'ios' ? 100 : 0}>
-        <ScrollView contentContainerStyle={s.content} keyboardShouldPersistTaps="handled">
+        <ScrollView
+          contentContainerStyle={s.content}
+          keyboardShouldPersistTaps="handled"
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+              progressBackgroundColor={colors.card}
+            />
+          }
+        >
           <View style={s.headerCard}>
             <View style={s.titleRow}>
               <View style={s.brandRow}>
