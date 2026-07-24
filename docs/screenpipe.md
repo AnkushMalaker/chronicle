@@ -104,6 +104,5 @@ recorder and Chronicle collector remain independently managed background service
 - `extras/screenpipe-collector/`: collector CLI, observation state machine, checkpoints, and service installation
 - `backends/advanced/src/advanced_omi_backend/routers/modules/device_input_routes.py`: capture-node ingestion API
 - `backends/advanced/src/advanced_omi_backend/services/observation_curation.py`: sparse preview and vault curation
-- `extras/vault-sync/main.py`: cross-platform desktop entry point
-- `extras/vault-sync/desktop_core.py`: shared desktop state, logs, and vault sync
-- `extras/vault-sync/menu_linux.py` and `menu_vault.py`: platform-specific UI adapters
+- `extras/vault-sync/vault_core.py` and `syncthing_manager.py`: vault sync core and Syncthing pairing/control
+- `extras/chronicle-tray/chronicle_tray/sections/vault.py`: unified tray UI adapter (imports the vault-sync core in place)

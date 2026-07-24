@@ -6,6 +6,7 @@ Handles service selection and delegation only - no configuration duplication
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import discovery
@@ -1595,11 +1596,13 @@ JOINABLE_SERVICES = {
 
 
 def select_setup_type():
-    """Ask whether this machine is the main hub or is joining an existing cluster.
+    """Ask whether this machine is the main hub, joins a cluster, or is a companion.
 
     Returns ``"join"`` for a service-only node that contributes a service to an
-    existing backend, else ``"main"`` (the normal full single-machine / hub setup).
-    Defaults to ``"main"`` so re-running the wizard on the hub is unchanged.
+    existing backend, ``"companion"`` for a laptop/desktop that only views data from
+    an existing server (vault sync client — no backend, no containers), else
+    ``"main"`` (the normal full single-machine / hub setup). Defaults to ``"main"``
+    so re-running the wizard on the hub is unchanged.
     """
     console.print("\n🏗️  [bold cyan]Setup type[/bold cyan]")
     console.print(
@@ -1614,13 +1617,16 @@ def select_setup_type():
     console.print(
         "  3) Capture node — run ScreenPipe + the Chronicle companion (no containers)"
     )
+    console.print(
+        "  4) Companion device — this laptop/desktop just views your Chronicle data:"
+    )
+    console.print(
+        "     syncs your memory vault locally for Obsidian (macOS menu bar app;"
+    )
+    console.print("     no backend, no containers, no Tailscale required)")
     console.print()
     choice = Prompt.ask("Enter choice", default="1")
-    if choice.strip() == "2":
-        return "join"
-    if choice.strip() == "3":
-        return "capture"
-    return "main"
+    return {"2": "join", "3": "capture", "4": "companion"}.get(choice.strip(), "main")
 
 
 def setup_capture_node():
@@ -1648,6 +1654,36 @@ def setup_capture_node():
     except (OSError, subprocess.CalledProcessError) as exc:
         console.print(f"[red]✗ Capture-node setup failed: {exc}[/red]")
         return False
+
+
+def setup_companion():
+    """Configure THIS machine as a companion device (vault viewer, no backend).
+
+    Delegates to extras/vault-sync/init.py: a macOS menu bar app that keeps this
+    user's memory vault synced from an existing Chronicle server so it can be
+    browsed locally (e.g. in Obsidian). Needs only the server's URL + the user's
+    login; the server address can be a Tailnet name, LAN IP, or public domain.
+    """
+    console.print("\n💻 [bold cyan]Companion device setup[/bold cyan]")
+    if sys.platform != "darwin":
+        console.print(
+            "[red]✗ The companion (vault sync) app is macOS-only for now.[/red] "
+            "Linux/Windows\n  support is planned. You can still pair a plain Syncthing "
+            "manually against the\n  backend's /api/vault-sync broker — see "
+            "extras/vault-sync/README.md."
+        )
+        return
+    subprocess.run(
+        [
+            "uv",
+            "run",
+            "--with-requirements",
+            "../../setup-requirements.txt",
+            "python",
+            "init.py",
+        ],
+        cwd="extras/vault-sync",
+    )
 
 
 def join_cluster():
@@ -1896,16 +1932,22 @@ def main():
     # Read existing config.yml once — used as defaults for ALL wizard questions below
     config_yml = config_mgr.get_full_config()
 
-    # Capture nodes are host-native and intentionally do not require containers.
+    # Capture nodes and companion devices are host-native and intentionally do not
+    # require containers, so both fork off before the container-engine prereq.
     setup_type = select_setup_type()
     if setup_type == "capture":
         setup_capture_node()
+        return
+    if setup_type == "companion":
+        setup_companion()
         return
 
     # All hub and compute-node services below run in containers.
     if not check_container_engine():
         return
 
+    # Fork: a service-only node joining an existing cluster takes a separate, much
+    # shorter path (no backend / LLM / memory setup here) and returns.
     if setup_type == "join":
         join_cluster()
         return

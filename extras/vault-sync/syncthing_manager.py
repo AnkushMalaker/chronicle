@@ -165,6 +165,27 @@ class SyncthingManager:
             resp = c.put(f"/rest/config/devices/{device_id}", json=device)
             resp.raise_for_status()
 
+    def set_lan_only(self, lan_only: bool) -> None:
+        """Keep the local instance off external infrastructure when the server's
+        address is known. With explicit addresses to dial, relays, global discovery
+        and NAT traversal are dead weight — and unwelcome traffic on managed or
+        corporate networks. Falling back to "dynamic" (no address from the broker)
+        re-enables them, as they're then the only way to find the server. Usage and
+        crash reporting stay off either way; this instance is app-owned.
+        """
+        with self._client() as c:
+            resp = c.patch(
+                "/rest/config/options",
+                json={
+                    "relaysEnabled": not lan_only,
+                    "globalAnnounceEnabled": not lan_only,
+                    "natEnabled": not lan_only,
+                    "urAccepted": -1,
+                    "crashReportingEnabled": False,
+                },
+            )
+            resp.raise_for_status()
+
     def ensure_folder(
         self,
         folder_id: str,

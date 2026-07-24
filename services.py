@@ -1828,6 +1828,271 @@ def uninstall_remote_control() -> bool:
     return True
 
 
+# --- Windows Firewall (WSL2 hosts) -------------------------------------------
+#
+# On Windows the server runs inside WSL2 (mirrored networking): containers bind
+# inside WSL, Windows exposes the ports, and Windows Defender Firewall blocks
+# inbound LAN traffic unless an allow rule exists — so phones, companion Macs
+# and other LAN clients silently can't connect. Docker Desktop's proxy used to
+# get allowed implicitly; rootless podman gets nothing, and poking ad-hoc netsh
+# rules by hand doesn't scale. These helpers own the rules in a contained way:
+#
+#   - every managed rule is named "Chronicle: <service> <label> <port>/<proto>"
+#     — one prefix to list them all, one prefix to remove them all;
+#   - rules are scoped to the local subnet + Tailscale CGNAT range, so nothing
+#     is exposed to the public internet (see _FIREWALL_REMOTE_SCOPE);
+#   - `sync` converges against the enabled-service set: missing rules are
+#     added, stale "Chronicle: " rules (service disabled, port changed) are
+#     removed. Rules without the prefix are never touched.
+#
+# `start` calls firewall_sync() automatically; on native Linux/macOS every
+# entry point is a no-op. Adding rules needs elevation — WSL interop processes
+# usually run unelevated (though Windows sshd sessions are elevated), so on
+# failure the exact commands are printed for an admin PowerShell.
+
+_FIREWALL_NETSH = "/mnt/c/Windows/System32/netsh.exe"
+_FIREWALL_POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+_FIREWALL_PREFIX = "Chronicle: "
+# Ad-hoc rule names that predate the managed prefix scheme; sync removes them
+# (their ports get prefixed rules instead). Only these exact names — anything
+# else merely starting with "Chronicle" is not ours to touch.
+_FIREWALL_LEGACY_RULES = ("Chronicle HTTPS", "Chronicle WebUI", "Chronicle Vault Sync")
+
+
+def is_wsl2_host() -> bool:
+    """True when running inside WSL2 with Windows interop available."""
+    try:
+        osrelease = Path("/proc/sys/kernel/osrelease").read_text().lower()
+    except OSError:
+        return False
+    return "microsoft" in osrelease and Path(_FIREWALL_NETSH).exists()
+
+
+def _service_env_values(service_name: str) -> dict:
+    env_path = Path(SERVICES[service_name]["path"]) / ".env"
+    return dotenv_values(env_path) if env_path.exists() else {}
+
+
+def _firewall_specs(service_names) -> dict[str, tuple[int, str]]:
+    """Desired rules for the given services: {rule_name: (port, proto)}.
+
+    Ports are resolved from each service's .env (same overrides the health
+    checks honour), so a custom port gets a matching rule and the default-port
+    rule goes stale and is removed on the next sync.
+    """
+    specs: dict[str, tuple[int, str]] = {}
+
+    def add(svc: str, label: str, port, proto: str = "TCP") -> None:
+        try:
+            port = int(str(port or "").strip("'\""))
+        except ValueError:
+            return
+        specs[f"{_FIREWALL_PREFIX}{svc} {label} {port}/{proto}"] = (port, proto)
+
+    for name in service_names:
+        if name not in SERVICES:
+            continue
+        env = _service_env_values(name)
+        if name == "backend":
+            add(name, "api", env.get("BACKEND_PUBLIC_PORT") or 8000)
+            add(name, "webui", env.get("WEBUI_PORT") or 5173)
+            if (env.get("HTTPS_ENABLED") or "").strip("'\"").lower() == "true":
+                add(name, "https", 443)
+                add(name, "http-redirect", 80)
+            if env.get("VAULT_SYNC_API_KEY"):
+                # Sync protocol (TCP + QUIC) and local-discovery broadcasts, so
+                # vault clients and the server can find and dial each other.
+                add(name, "vault-sync", 22000, "TCP")
+                add(name, "vault-sync", 22000, "UDP")
+                add(name, "vault-sync-discovery", 21027, "UDP")
+        elif name == "langfuse":
+            add(name, "web", 3002)
+        elif name == "speaker-recognition":
+            add(name, "api", env.get("SPEAKER_SERVICE_PORT") or 8085)
+            add(name, "webui", env.get("REACT_UI_PORT") or 5175)
+            if (env.get("HTTPS_ENABLED") or "").strip("'\"").lower() == "true":
+                add(name, "https", 8444)
+        elif name == "asr-services":
+            add(name, "api", _asr_health_port(env, "8767"))
+        elif name == "llm-services":
+            add(name, "chat", env.get("LLM_PORT") or 8083)
+            add(name, "embeddings", env.get("EMBED_PORT") or 8082)
+        elif name == "wakeword-service":
+            add(name, "api", env.get("WAKEWORD_PORT") or 8771)
+        elif name == "tts":
+            add(name, "api", env.get("TTS_PORT") or 8770)
+
+    if service_names:
+        # The node agent runs on any start (WebUI control + Tailnet advertising).
+        add("node-agent", "api", os.environ.get("SERVICE_MANAGER_PORT") or _SERVICE_MANAGER_PORT)
+    return specs
+
+
+def _firewall_existing_rules() -> tuple[list[str], list[str]] | None:
+    """Existing (managed, legacy) Chronicle rule names, or None if listing failed.
+
+    Uses PowerShell rather than parsing `netsh show rule` output, which is
+    localized and unstable across Windows display languages.
+    """
+    try:
+        result = subprocess.run(
+            [
+                _FIREWALL_POWERSHELL,
+                "-NoProfile",
+                "-Command",
+                "Get-NetFirewallRule -DisplayName 'Chronicle*' -ErrorAction SilentlyContinue"
+                " | Select-Object -ExpandProperty DisplayName",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    managed = [n for n in names if n.startswith(_FIREWALL_PREFIX)]
+    legacy = [n for n in names if n in _FIREWALL_LEGACY_RULES]
+    return managed, legacy
+
+
+def _netsh(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [_FIREWALL_NETSH, "advfirewall", "firewall", *args],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+# LAN plus the Tailscale CGNAT range: tailscaled-in-WSL traffic never hits these
+# inbound rules (it rides the tunnel), but Tailscale-on-Windows arrives with a
+# 100.x source address and would be blocked by localsubnet alone. The public
+# internet stays excluded either way.
+_FIREWALL_REMOTE_SCOPE = "localsubnet,100.64.0.0/10"
+
+
+def _firewall_add_cmd(name: str, port: int, proto: str) -> list[str]:
+    # argv is passed to netsh.exe directly (no shell), so the space-containing
+    # rule name needs no quoting here — only in the printed fallback commands.
+    return [
+        "add",
+        "rule",
+        f"name={name}",
+        "dir=in",
+        "action=allow",
+        f"protocol={proto}",
+        f"localport={port}",
+        f"remoteip={_FIREWALL_REMOTE_SCOPE}",
+    ]
+
+
+def firewall_sync(quiet: bool = False) -> bool:
+    """Converge Windows Firewall rules with the enabled-service set (WSL2 only).
+
+    Always computes against ALL enabled services — never a subset — so starting
+    one service can't remove another's rules. Returns True when nothing is left
+    to do (including the non-WSL2 no-op case).
+    """
+    if not is_wsl2_host():
+        return True
+
+    enabled = [s for s in SERVICES if check_service_enabled(s)]
+    desired = _firewall_specs(enabled)
+    existing = _firewall_existing_rules()
+    if existing is None:
+        console.print(
+            "[yellow]⚠️  Could not query Windows Firewall — skipping rule sync[/yellow]"
+        )
+        return False
+    managed, legacy = existing
+
+    to_add = {n: pp for n, pp in desired.items() if n not in managed}
+    stale = [n for n in managed if n not in desired] + legacy
+    if not to_add and not stale:
+        if not quiet:
+            console.print(
+                f"[green]🧱 Windows Firewall: {len(desired)} Chronicle rules in sync[/green]"
+            )
+        return True
+
+    failed: list[str] = []
+    for name, (port, proto) in sorted(to_add.items()):
+        result = _netsh(*_firewall_add_cmd(name, port, proto))
+        if result.returncode == 0:
+            console.print(f"[green]🧱 Firewall rule added: {name}[/green]")
+        else:
+            failed.append(
+                f'netsh advfirewall firewall add rule name="{name}" dir=in '
+                f"action=allow protocol={proto} localport={port} "
+                f"remoteip={_FIREWALL_REMOTE_SCOPE}"
+            )
+    for name in stale:
+        result = _netsh("delete", "rule", f"name={name}")
+        if result.returncode == 0:
+            console.print(f"[dim]🧱 Stale firewall rule removed: {name}[/dim]")
+        else:
+            failed.append(f'netsh advfirewall firewall delete rule name="{name}"')
+
+    if failed:
+        console.print(
+            "[yellow]⚠️  Some firewall changes need elevation. Run in an admin "
+            "PowerShell on the Windows host:[/yellow]"
+        )
+        for cmd in failed:
+            console.print(f"   [cyan]{cmd}[/cyan]")
+        return False
+    return True
+
+
+def firewall_list() -> None:
+    """Show Chronicle-managed rules next to what the enabled services need."""
+    if not is_wsl2_host():
+        console.print("Not a WSL2 host — Chronicle manages no Windows Firewall rules here.")
+        return
+    existing = _firewall_existing_rules()
+    if existing is None:
+        console.print("[red]❌ Could not query Windows Firewall[/red]")
+        return
+    managed, legacy = existing
+    enabled = [s for s in SERVICES if check_service_enabled(s)]
+    desired = _firewall_specs(enabled)
+    console.print(f"[bold]Chronicle firewall rules[/bold] (prefix {_FIREWALL_PREFIX!r}):")
+    for name in sorted(set(managed) | set(desired)):
+        if name in managed and name in desired:
+            console.print(f"  [green]✅ {name}[/green]")
+        elif name in desired:
+            console.print(f"  [yellow]✚ {name} (missing — run 'firewall sync')[/yellow]")
+        else:
+            console.print(f"  [dim]✗ {name} (stale — removed on next sync)[/dim]")
+    for name in legacy:
+        console.print(f"  [dim]✗ {name} (legacy ad-hoc rule — removed on next sync)[/dim]")
+
+
+def firewall_clear() -> bool:
+    """Remove every Chronicle-managed rule (and only those)."""
+    if not is_wsl2_host():
+        return True
+    existing = _firewall_existing_rules()
+    if existing is None:
+        console.print("[red]❌ Could not query Windows Firewall[/red]")
+        return False
+    managed, legacy = existing
+    if not managed and not legacy:
+        console.print("No Chronicle firewall rules found.")
+        return True
+    ok = True
+    for name in managed + legacy:
+        result = _netsh("delete", "rule", f"name={name}")
+        if result.returncode == 0:
+            console.print(f"[green]🧱 Removed: {name}[/green]")
+        else:
+            console.print(f"[red]❌ Could not remove {name} (needs elevation?)[/red]")
+            ok = False
+    return ok
+
+
 def start_services(services, build=False, force_recreate=False):
     """Start specified services"""
     console.print(f"🚀 [bold]Starting {len(services)} services...[/bold]")
@@ -1868,6 +2133,10 @@ def start_services(services, build=False, force_recreate=False):
     # It advertises this node's enabled services regardless of whether the
     # backend runs here, so service-only nodes (e.g. a GPU/RPi box) advertise too.
     _start_service_manager()
+
+    # WSL2 hosts: converge Windows Firewall rules so LAN clients (phones,
+    # companion Macs) can actually reach what just started. No-op elsewhere.
+    firewall_sync(quiet=True)
 
     # Show access URLs if backend was started
     if "backend" in services and check_service_enabled("backend"):
@@ -2164,6 +2433,20 @@ def main():
         help="Skip installing the node agent (no WebUI control / remote updates)",
     )
 
+    # Windows Firewall command (WSL2 hosts; no-op elsewhere)
+    fw_parser = subparsers.add_parser(
+        "firewall",
+        help="Manage Windows Firewall rules for LAN access (WSL2 hosts only)",
+    )
+    fw_parser.add_argument(
+        "firewall_action",
+        nargs="?",
+        choices=["sync", "list", "clear"],
+        default="sync",
+        help="sync (default): converge rules with enabled services; "
+        "list: show managed rules; clear: remove all Chronicle rules",
+    )
+
     # Claude remote-control session command
     rc_parser = subparsers.add_parser(
         "remote-control",
@@ -2312,6 +2595,14 @@ def main():
 
     elif args.command == "client":
         handle_client_command(args)
+
+    elif args.command == "firewall":
+        if args.firewall_action == "sync":
+            firewall_sync()
+        elif args.firewall_action == "list":
+            firewall_list()
+        elif args.firewall_action == "clear":
+            firewall_clear()
 
     elif args.command == "remote-control":
         if args.remote_control_action == "start":

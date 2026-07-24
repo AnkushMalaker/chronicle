@@ -17,12 +17,18 @@ Syncthing UI.
 > uninstall` removes it (installing the new tray also removes it automatically).
 
 ```
-Server Syncthing  ◀──── sync protocol :22000 (over Tailscale) ────▶  Mac Syncthing
+Server Syncthing  ◀── sync protocol :22000 (Tailscale, LAN, …) ──▶  Mac Syncthing
   (data/conversation_docs/{user})                                    (~/ChronicleVault)
         ▲                                                                   │
         │  pairing brokered by backend  /api/vault-sync                     ▼
         └───────────────  Mac authenticates with its JWT  ───────────  Obsidian
 ```
+
+Tailscale is **not required** — the Mac only needs *some* route to the backend and to
+port 22000 on the server: a Tailnet name, a plain LAN IP when you're on the same wifi
+(e.g. a work laptop that can't run Tailscale), or a public domain all work. With an
+explicit server address configured, the local Syncthing never touches relays or global
+discovery, so nothing leaves your network.
 
 ## Prerequisites
 
@@ -42,13 +48,32 @@ You also need the Chronicle **server** side running with vault sync enabled — 
 
 ## Setup
 
+The easiest path is the root wizard — pick **Setup type → 4) Companion device**:
+
 ```bash
+./wizard.sh    # from the repo root
+```
+
+It checks prerequisites (offers to `brew install syncthing`), asks for the backend URL
+and your login, verifies the pairing broker end-to-end, and can install the app as a
+login item. Or run the same setup directly / configure by hand:
+
+```bash
+cd extras/vault-sync
+uv run --with-requirements ../../setup-requirements.txt python init.py
+
+# manual alternative — client config lives in the repository-root .env:
 cd ../..
 cp .env.template .env  # if the repository-root .env does not exist yet
-# edit .env: set AUTH_USERNAME (email), AUTH_PASSWORD, and BACKEND_URL
+#   edit .env: set AUTH_USERNAME (email), AUTH_PASSWORD, and BACKEND_URL
 
 cd extras/chronicle-tray && uv run chronicle-tray
 ```
+
+> **Self-signed HTTPS (LAN servers):** this app is not a browser — it doesn't need
+> HTTPS. If your server's cert is self-signed (Caddy internal CA on an IP address),
+> point `BACKEND_URL` at the plain-HTTP backend port instead:
+> `BACKEND_URL=http://<server-ip>:8000`.
 
 The Mac needs only three things: `BACKEND_URL`, `AUTH_USERNAME` (your Chronicle email),
 and `AUTH_PASSWORD`. The pairing broker hands back everything else (server device id,
@@ -87,10 +112,12 @@ to the graphical session (see `extras/chronicle-tray/README.md`).
 
 On the machine running the advanced backend:
 
-1. Add a strong key and your Tailscale sync address to `backends/advanced/.env`:
+1. Add a strong key and the sync address(es) the Mac should dial to
+   `backends/advanced/.env` — comma-separate several and the client tries each, e.g.
+   your Tailnet name for remote devices plus the LAN IP for devices without Tailscale:
    ```bash
    VAULT_SYNC_API_KEY=<any long random string>
-   VAULT_SYNC_ADDRESS=tcp://<your-host>.ts.net:22000   # what the Mac dials; port 22000
+   VAULT_SYNC_ADDRESS=tcp://<your-host>.ts.net:22000,tcp://192.168.1.20:22000
    ```
 2. Start the Syncthing service (it's behind a compose profile) and (re)create the
    backend so it picks up the new env + the broker route:
@@ -99,7 +126,10 @@ On the machine running the advanced backend:
    docker compose --profile vault-sync up -d vault-syncthing
    docker compose up -d --force-recreate chronicle-backend
    ```
-   Make sure port **22000** is reachable from your Mac (it is over Tailscale).
+   Make sure port **22000** is reachable from your Mac (it is over Tailscale; on a
+   Windows/WSL2 host run `uv run --with-requirements setup-requirements.txt python
+   services.py firewall sync` from the repo root — it manages the Windows Firewall
+   rules for all enabled services, vault sync included).
 3. Verify the broker chain (should return a `server_device_id` + your `sync_address`):
    ```bash
    TOKEN=$(curl -s -X POST -d "username=<email>&password=<pass>" \

@@ -127,21 +127,26 @@ def mask_value(value: str, show_chars: int = 5) -> str:
         show_chars: Number of characters to show at start/end (default: 5)
 
     Returns:
-        Masked string in format: "first5***********last5"
+        Masked string in format: "first5***********last5". Values too short to
+        safely show partial characters (e.g. human-length passwords) are fully
+        masked — every caller passes secrets, so leaking a short one verbatim
+        is worse than showing nothing.
 
     Examples:
         >>> mask_value('sk-proj-abc123def456ghi789')
         'sk-pr***************i789'
         >>> mask_value('short')
-        'short'
+        '*****'
         >>> mask_value('smtp_password_12345')
         'smtp_***********2345'
     """
     # Strip whitespace before processing
     value_clean = value.strip() if value else value
 
-    if not value_clean or len(value_clean) <= show_chars * 2:
+    if not value_clean:
         return value
+    if len(value_clean) <= show_chars * 2:
+        return "*" * len(value_clean)
 
     return f"{value_clean[:show_chars]}{'*' * min(15, len(value_clean) - show_chars * 2)}{value_clean[-show_chars:]}"
 

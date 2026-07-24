@@ -141,6 +141,18 @@ internally by querying `podman ps` scoped to the compose project label.
   WSL relay, blocking Podman. Uninstall it (or disable login-start + `compose down`
   the old stack) — note its `/usr/bin/docker{,-compose}` symlinks then dangle
   harmlessly.
+- **Windows Firewall (WSL2).** Windows Defender Firewall blocks inbound LAN traffic
+  to WSL2-hosted ports by default, so phones / companion Macs silently can't reach
+  the backend (Docker Desktop's proxy used to get allowed implicitly; rootless
+  podman gets nothing). Chronicle manages the rules itself: `services.py start`
+  converges them automatically on WSL2 hosts, and `services.py firewall sync|list|clear`
+  drives them manually. Every managed rule is named `Chronicle: <service> <label>
+  <port>/<proto>` and scoped to `localsubnet` + the Tailscale CGNAT range
+  (`100.64.0.0/10`) — nothing is exposed to the public internet, and `clear` removes
+  exactly the rules Chronicle created. Adding rules needs elevation: WSL interop from
+  an interactive shell is usually unelevated (the exact `netsh` commands are printed
+  for an admin PowerShell), while sessions over Windows sshd are elevated and apply
+  directly. Non-WSL2 hosts: everything is a no-op.
 
 ## Toward seamless setup (TODO)
 
