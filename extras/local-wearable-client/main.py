@@ -21,6 +21,7 @@ import os
 import shutil
 import socket
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 import yaml
@@ -48,29 +49,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+# Unified config lives in the repository-root .env (shared with the tray and
+# vault sync), same as backend_sender.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(_REPO_ROOT / ".env")
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "devices.yml")
 CONFIG_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "devices.yml.template")
-ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+ENV_PATH = str(_REPO_ROOT / ".env")
 
 
 def check_config() -> bool:
     """Check that required configuration is present. Returns True if backend streaming is possible."""
     if not os.path.exists(ENV_PATH):
         logger.warning(
-            "No .env file found — copy .env.template to .env and fill in your settings"
+            "No repository-root .env found — copy .env.template to .env and fill in your settings"
         )
         logger.warning("Audio will be saved locally but NOT streamed to the backend")
         return False
 
+    # AUTH_*/BACKEND_URL are the unified keys; ADMIN_*/BACKEND_HOST are accepted
+    # as legacy fallbacks.
     missing = []
-    if not os.getenv("ADMIN_EMAIL"):
-        missing.append("ADMIN_EMAIL")
-    if not os.getenv("ADMIN_PASSWORD"):
-        missing.append("ADMIN_PASSWORD")
-    if not os.getenv("BACKEND_HOST"):
-        missing.append("BACKEND_HOST")
+    if not (os.getenv("AUTH_USERNAME") or os.getenv("ADMIN_EMAIL")):
+        missing.append("AUTH_USERNAME")
+    if not (os.getenv("AUTH_PASSWORD") or os.getenv("ADMIN_PASSWORD")):
+        missing.append("AUTH_PASSWORD")
+    if not (os.getenv("BACKEND_URL") or os.getenv("BACKEND_HOST")):
+        missing.append("BACKEND_URL")
 
     if missing:
         logger.warning("Missing environment variables: %s", ", ".join(missing))

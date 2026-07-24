@@ -229,6 +229,14 @@ def _install_macos(name: str, extras=()) -> None:
     env = {} if name == "tray" else _dotenv_values(project / ".env")
     env["PATH"] = _unit_path_env(_find_uv()) + ":" + os.environ.get("PATH", "")
 
+    # The pendant (BLE) extra decodes Opus audio via opuslib, which loads the
+    # native libopus through ctypes.util.find_library("opus"). That search does
+    # not include Homebrew's lib dir, and launchd hands the agent a bare
+    # environment, so point dyld's fallback search at the Homebrew prefixes
+    # (Apple Silicon + Intel). Harmless when the dirs are absent.
+    if "pendant" in extras:
+        env["DYLD_FALLBACK_LIBRARY_PATH"] = "/opt/homebrew/lib:/usr/local/lib"
+
     plist = {
         "Label": label,
         "ProgramArguments": _exec_argv(name, extras),

@@ -16,7 +16,10 @@ import httpx
 import websockets
 from dotenv import load_dotenv
 
-load_dotenv()
+# Unified config: read the repository-root .env shared with the tray and vault
+# sync (BACKEND_URL / AUTH_USERNAME / AUTH_PASSWORD). Mirrors vault_core.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(_REPO_ROOT / ".env")
 
 logger = logging.getLogger(__name__)
 
@@ -75,16 +78,17 @@ def _resolve_backend_url() -> str:
         logger.info("Backend URL from BACKEND_HOST: %s", url)
         return url
 
-    _repo_root = str(Path(__file__).resolve().parent.parent.parent)
-    if _repo_root not in sys.path:
-        sys.path.insert(0, _repo_root)
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
     try:
         # Lazy import: sys.path-dependent (repo-root discovery.py, inserted above)
         from discovery import resolve_backend_url
 
-        return resolve_backend_url(None, logger=logger)
+        # BACKEND_URL is the unified key (same one the tray/vault sync reads);
+        # an explicit value wins over discovery.
+        return resolve_backend_url(os.getenv("BACKEND_URL"), logger=logger)
     except ImportError:
-        logger.warning("discovery module unavailable; set BACKEND_HOST in .env")
+        logger.warning("discovery module unavailable; set BACKEND_URL in .env")
         return "http://localhost:8000"
 
 
@@ -94,8 +98,9 @@ _host_part = backend_url.split("://", 1)[-1]
 websocket_uri = f"{'wss' if USE_HTTPS else 'ws'}://{_host_part}/ws?codec=opus"
 logger.info("Wearable backend resolved: %s (ws: %s)", backend_url, websocket_uri)
 
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
+# Unified auth keys (AUTH_*), with the legacy ADMIN_* names as fallbacks.
+ADMIN_PASSWORD = os.getenv("AUTH_PASSWORD") or os.getenv("ADMIN_PASSWORD")
+ADMIN_EMAIL = os.getenv("AUTH_USERNAME") or os.getenv("ADMIN_EMAIL")
 
 # Module-level websocket reference for sending control messages (e.g., button events)
 _active_websocket = None
