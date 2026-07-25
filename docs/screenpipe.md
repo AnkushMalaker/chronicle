@@ -38,6 +38,9 @@ browser URL and sends only these lifecycle events:
 - Material OCR/accessibility changes append a sample no more often than every two minutes
   inside the same unchanged observation. App/window switches are not subject to that
   cooldown.
+- Accessibility and hybrid text are preferred for observation text and app identity.
+  Contextless OCR remains available for visual-only applications, but does not override
+  structured text or create a false app/window switch while structured context is active.
 - An active unchanged observation receives a lightweight liveness sample after 15
   minutes. A six-hour editor session is still one observation with incremental samples.
 - Meaningful switches, capture shutdown, and service shutdown close the observation.

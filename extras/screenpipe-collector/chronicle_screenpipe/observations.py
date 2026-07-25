@@ -23,6 +23,7 @@ _MEANINGFUL_TRIGGERS = {
     "manual",
 }
 _INACTIVE_TRIGGERS = {"idle", "locked", "blank", "drm_paused"}
+_STRUCTURED_TEXT_SOURCES = {"accessibility", "hybrid"}
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 
@@ -76,6 +77,18 @@ def context_key(row: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def text_source(row: Mapping[str, Any]) -> str:
+    return str(_row_value(row, "text_source") or "").strip().lower()
+
+
+def _has_context(key: list[str]) -> bool:
+    return any(key)
+
+
+def _is_contextless_ocr(row: Mapping[str, Any]) -> bool:
+    return text_source(row) == "ocr" and not _has_context(context_key(row))
+
+
 def _row_value(row: Mapping[str, Any], name: str) -> Any:
     try:
         return row[name]
@@ -96,6 +109,7 @@ def _sample(
         ),
         "capture_trigger": trigger,
         "text": text,
+        "text_source": observation.get("text_source", ""),
         "content_fingerprint": content_fingerprint(text),
         "previous_fingerprint": observation.get("last_sent_fingerprint"),
         "frame_id": observation["representative_frame_id"],
@@ -109,7 +123,9 @@ def _candidate_score(row: Mapping[str, Any], text: str, frame_count: int) -> flo
     return (
         min(len(text), 1000) / 1000
         + (0.75 if trigger in _MEANINGFUL_TRIGGERS else 0)
+        + (0.5 if text_source(row) in _STRUCTURED_TEXT_SOURCES else 0)
         + (0.25 if frame_count > 1 else 0)
+        - (0.75 if _is_contextless_ocr(row) else 0)
         - (1.0 if trigger in _INACTIVE_TRIGGERS else 0)
     )
 
@@ -130,6 +146,7 @@ def _add_frame_candidate(
             "score": round(_candidate_score(row, text, observation["frame_count"]), 4),
             "capture_trigger": str(_row_value(row, "capture_trigger") or ""),
             "has_text": bool(text),
+            "text_source": text_source(row),
         }
     )
     observation["frame_candidates"] = sorted(
@@ -140,6 +157,7 @@ def _add_frame_candidate(
 def new_observation(row: Mapping[str, Any]) -> dict[str, Any]:
     captured_at = iso_timestamp(row["timestamp"])
     text = normalize_text(_row_value(row, "full_text"))
+    source = text_source(row)
     trigger = str(_row_value(row, "capture_trigger") or "")
     observation = {
         "key": context_key(row),
@@ -155,11 +173,15 @@ def new_observation(row: Mapping[str, Any]) -> dict[str, Any]:
         "browser_url": context_key(row)[2],
         "capture_trigger": trigger,
         "text": text,
+        "text_source": source,
         "initial_text": text,
         "last_sent_text": "",
         "last_sent_fingerprint": None,
         "last_sample_at": None,
-        "meaningful": trigger in _MEANINGFUL_TRIGGERS,
+        # Contextless OCR is ScreenPipe's visual fallback. Give a nearby
+        # accessibility/hybrid frame time to provide app identity before opening
+        # a standalone observation.
+        "meaningful": trigger in _MEANINGFUL_TRIGGERS and not _is_contextless_ocr(row),
         "inactive": trigger in _INACTIVE_TRIGGERS,
         "frame_candidates": [],
     }
@@ -169,18 +191,25 @@ def new_observation(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def update_observation(observation: dict[str, Any], row: Mapping[str, Any]) -> None:
     text = normalize_text(_row_value(row, "full_text"))
+    source = text_source(row)
     trigger = str(_row_value(row, "capture_trigger") or "")
     observation["ended_at"] = iso_timestamp(row["timestamp"])
     observation["last_frame_id"] = int(row["id"])
     observation["frame_count"] += 1
     observation["capture_trigger"] = trigger or observation.get("capture_trigger", "")
     observation["inactive"] = trigger in _INACTIVE_TRIGGERS
-    if trigger in _MEANINGFUL_TRIGGERS or text_is_novel(
-        observation["initial_text"], text
+    # OCR remains useful when it is the only available text, but a noisy
+    # full-screen OCR fallback must not replace structured app text.
+    accept_text = bool(text) and not (
+        source == "ocr" and observation.get("text_source") in _STRUCTURED_TEXT_SOURCES
+    )
+    if trigger in _MEANINGFUL_TRIGGERS or (
+        accept_text and text_is_novel(observation["initial_text"], text)
     ):
         observation["meaningful"] = True
-    if text:
+    if accept_text:
         observation["text"] = text
+        observation["text_source"] = source
         observation["representative_frame_id"] = int(row["id"])
     _add_frame_candidate(observation, row, text)
 
@@ -198,6 +227,7 @@ def _metadata(observation: dict[str, Any]) -> dict[str, Any]:
             "frame_count",
             "capture_trigger",
             "inactive",
+            "text_source",
         )
     }
 
@@ -326,12 +356,21 @@ class ObservationTracker:
             >= self.stability_seconds
         )
 
+    def _effective_context_key(self, row: Mapping[str, Any]) -> list[str]:
+        key = context_key(row)
+        if _has_context(key) or not _is_contextless_ocr(row):
+            return key
+        for observation in (self.active, self.candidate):
+            if observation is not None and _has_context(observation.get("key", [])):
+                return observation["key"]
+        return key
+
     def process_rows(
         self, rows: Iterable[Mapping[str, Any]], now: str
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         for row in rows:
-            key = context_key(row)
+            key = self._effective_context_key(row)
             captured_at = iso_timestamp(row["timestamp"])
             if self.candidate is not None:
                 if self.candidate["key"] == key:

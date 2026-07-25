@@ -203,7 +203,7 @@ export interface DeviceInputItem {
   state: 'received' | 'linked' | 'promoted' | 'rejected'
   lifecycle?: 'open' | 'closed' | null
   curation?: 'pending' | 'curating' | 'discarded' | 'duplicate' | 'linked' | 'promoted' | 'failed' | null
-  samples?: Array<Record<string, any>>
+  samples?: Array<Record<string, any> & { text?: string; text_source?: string | null }>
   frame_candidates?: Array<Record<string, any>>
   related_conversation_ids?: string[]
   duplicate_of?: string | null

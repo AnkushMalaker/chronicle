@@ -120,6 +120,30 @@ function formatDuration(item: DeviceInputItem) {
   return `${minutes}m ${seconds % 60}s`
 }
 
+function sourceStatusLabel(status: string) {
+  return status.charAt(0).toUpperCase() + status.slice(1)
+}
+
+function observationReviewLabel(curation: DeviceInputItem['curation']) {
+  if (curation === 'pending') return 'Waiting for memory review'
+  if (curation === 'curating') return 'Reviewing for memory'
+  if (curation === 'linked') return 'Added to memory'
+  if (curation === 'promoted') return 'Saved to memory with image'
+  if (curation === 'duplicate') return 'Already captured'
+  if (curation === 'discarded') return 'Not saved to memory'
+  if (curation === 'failed') return 'Memory review failed'
+  return null
+}
+
+function observationTextSource(item: DeviceInputItem) {
+  const sample = item.samples?.[item.samples.length - 1]
+  const source = sample?.text_source || item.metadata.text_source
+  if (source === 'accessibility') return 'App text'
+  if (source === 'hybrid') return 'App + OCR'
+  if (source === 'ocr') return 'OCR fallback'
+  return null
+}
+
 export default function Timeline() {
   const [day, setDay] = useState(() => new Date().toISOString().slice(0, 10))
   const [order, setOrder] = useState<TimelineOrder>(() => {
@@ -197,7 +221,7 @@ export default function Timeline() {
               <div className="min-w-0">
                 <div className="truncate font-medium text-gray-900 dark:text-gray-100">{source.name}</div>
                 <div className="text-xs text-gray-500 dark:text-gray-400">{source.provider} · {source.platform}</div>
-                <div className={`mt-1 text-xs ${source.status === 'online' ? 'text-green-600 dark:text-green-400' : source.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'}`}>{source.status}{source.last_seen_at ? ` · ${timeAgo(source.last_seen_at)}` : ''}</div>
+                <div className={`mt-1 text-xs ${source.status === 'online' ? 'text-green-600 dark:text-green-400' : source.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'}`}>{sourceStatusLabel(source.status)}{source.last_seen_at ? ` · seen ${timeAgo(source.last_seen_at)}` : ''}</div>
               </div>
             </Card>
           ))}
@@ -238,10 +262,10 @@ export default function Timeline() {
               </div>
               <h3 className="mt-1 font-medium text-gray-900 dark:text-gray-100">{item.kind === 'audio' ? 'Audio capture' : item.metadata.app_name || item.metadata.window_name || (item.kind === 'activity' ? 'Screen change' : item.kind === 'observation' ? 'Screen observation' : item.kind)}</h3>
               {item.kind === 'audio' && <p className="text-sm text-gray-500 dark:text-gray-400">{formatDuration(item)} · {item.metadata.chunk_count} chunks{item.metadata.directions?.length ? ` · ${item.metadata.directions.join(' + ')}` : ''}</p>}
-              {item.kind === 'observation' && <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{item.lifecycle === 'open' ? 'Open' : formatDuration(item)} · {item.samples?.length || 0} context sample{item.samples?.length === 1 ? '' : 's'}{item.curation ? ` · ${item.curation}` : ''}{item.related_conversation_ids?.length ? ` · ${item.related_conversation_ids.length} audio link${item.related_conversation_ids.length === 1 ? '' : 's'}` : ''}</p>}
+              {item.kind === 'observation' && <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{item.lifecycle === 'open' ? 'Active' : formatDuration(item)} · {item.samples?.length || 0} text snapshot{item.samples?.length === 1 ? '' : 's'}{observationReviewLabel(item.curation) ? ` · ${observationReviewLabel(item.curation)}` : ''}{item.related_conversation_ids?.length ? ` · ${item.related_conversation_ids.length} audio link${item.related_conversation_ids.length === 1 ? '' : 's'}` : ''}</p>}
               {item.metadata.window_name && item.metadata.window_name !== item.metadata.app_name && <p className="truncate text-sm text-gray-500 dark:text-gray-400">{item.metadata.window_name}</p>}
               {item.kind === 'activity' && item.metadata.text && <p className="text-sm text-gray-600 dark:text-gray-300 mt-2 line-clamp-3">{item.metadata.text}</p>}
-              {item.kind === 'observation' && item.samples?.length ? <p className="mt-2 line-clamp-3 text-sm text-gray-600 dark:text-gray-300">{item.samples[item.samples.length - 1].text}</p> : null}
+              {item.kind === 'observation' && item.samples?.length ? <p className="mt-2 line-clamp-3 text-sm text-gray-600 dark:text-gray-300">{observationTextSource(item) && <span className="mr-1.5 text-xs text-gray-400 dark:text-gray-500">{observationTextSource(item)}:</span>}{item.samples[item.samples.length - 1].text}</p> : null}
               {item.kind === 'observation' && item.vault_paths?.length ? <p className="mt-2 text-xs text-green-600 dark:text-green-400">Vault: {item.vault_paths.join(', ')}</p> : null}
               <TimelineThumbnail item={item} />
             </article>

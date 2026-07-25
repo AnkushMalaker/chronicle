@@ -1,6 +1,9 @@
-from chronicle_screenpipe.observations import (ObservationTracker,
-                                               content_fingerprint,
-                                               normalize_text, text_is_novel)
+from chronicle_screenpipe.observations import (
+    ObservationTracker,
+    content_fingerprint,
+    normalize_text,
+    text_is_novel,
+)
 
 
 def frame(
@@ -11,6 +14,7 @@ def frame(
     *,
     trigger: str = "app_switch",
     text: str = "",
+    text_source: str = "accessibility",
 ):
     return {
         "id": identifier,
@@ -20,6 +24,7 @@ def frame(
         "browser_url": "",
         "capture_trigger": trigger,
         "full_text": text,
+        "text_source": text_source,
     }
 
 
@@ -139,3 +144,66 @@ def test_long_activity_stays_one_observation_with_novel_and_liveness_samples():
     assert liveness[0]["event"] == "sample"
     assert liveness[0]["sample"]["liveness"] is True
     assert tracker.active["source_item_id"] == "observation:1"
+
+
+def test_contextless_ocr_enriches_context_without_replacing_accessibility_text():
+    tracker = ObservationTracker()
+    opened = tracker.process_rows(
+        [
+            frame(
+                1,
+                0,
+                "Zen",
+                "Chronicle — Zen Browser",
+                text="Structured Chronicle page text",
+            )
+        ],
+        "2026-07-23T10:00:11Z",
+    )
+    assert opened[0]["sample"]["text_source"] == "accessibility"
+
+    events = tracker.process_rows(
+        [
+            frame(
+                2,
+                15,
+                "",
+                "",
+                trigger="visual_change",
+                text="N01sy full-screen OCR g1bb3rish",
+                text_source="ocr",
+            )
+        ],
+        "2026-07-23T10:00:15Z",
+    )
+
+    assert events == []
+    assert tracker.active["source_item_id"] == "observation:1"
+    assert tracker.active["key"] == ["Zen", "Chronicle — Zen Browser", ""]
+    assert tracker.active["text"] == "Structured Chronicle page text"
+    assert tracker.active["text_source"] == "accessibility"
+
+
+def test_contextless_ocr_opens_after_stability_when_it_is_the_only_source():
+    tracker = ObservationTracker()
+
+    buffered = tracker.process_rows(
+        [
+            frame(
+                1,
+                0,
+                "",
+                "",
+                trigger="visual_change",
+                text="Visual-only application text",
+                text_source="ocr",
+            )
+        ],
+        "2026-07-23T10:00:05Z",
+    )
+    opened = tracker.process_rows([], "2026-07-23T10:00:11Z")
+
+    assert buffered == []
+    assert [event["event"] for event in opened] == ["open"]
+    assert opened[0]["sample"]["text"] == "Visual-only application text"
+    assert opened[0]["sample"]["text_source"] == "ocr"

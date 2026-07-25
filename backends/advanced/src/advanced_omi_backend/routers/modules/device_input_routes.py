@@ -38,6 +38,7 @@ from advanced_omi_backend.services.memory.vault_manager import ConvDocVaultManag
 
 router = APIRouter(prefix="/device-input", tags=["device-input"])
 _PAIRING_TTL = timedelta(minutes=10)
+_SOURCE_ONLINE_TTL = timedelta(minutes=2)
 # Device input is staged in a MongoDB document before it is assembled into a
 # Chronicle conversation. Stay below MongoDB's 16 MiB BSON document limit.
 _MAX_AUDIO_BYTES = 12 * 1024 * 1024
@@ -64,6 +65,23 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _utc_iso(value: Optional[datetime]) -> Optional[str]:
+    if value is None:
+        return None
+    return _as_utc(value).isoformat().replace("+00:00", "Z")
+
+
+def _effective_source_status(source: CaptureSource, now: Optional[datetime] = None) -> str:
+    if source.status != "online":
+        return source.status
+    checked_at = _as_utc(now or utcnow())
+    if source.last_seen_at is None:
+        return "offline"
+    if checked_at - _as_utc(source.last_seen_at) > _SOURCE_ONLINE_TTL:
+        return "offline"
+    return "online"
 
 
 async def _device_source(authorization: str = Header(default="")) -> CaptureSource:
@@ -105,6 +123,7 @@ class ObservationSample(BaseModel):
     elapsed_seconds: float = Field(ge=0)
     capture_trigger: str = Field(default="", max_length=100)
     text: str = Field(default="", max_length=2000)
+    text_source: Optional[str] = Field(default=None, max_length=50)
     content_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     previous_fingerprint: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     frame_id: int
@@ -148,7 +167,7 @@ async def create_pairing_code(user: User = Depends(current_active_user)):
     await PairingCode(
         user_id=_user_id(user), code_hash=_digest(raw), expires_at=expires_at
     ).insert()
-    return {"code": raw, "expires_at": expires_at}
+    return {"code": raw, "expires_at": _utc_iso(expires_at)}
 
 
 @router.post("/pair")
@@ -572,9 +591,9 @@ async def list_sources(user: User = Depends(current_active_user)):
                 "name": row.name,
                 "provider": row.provider,
                 "platform": row.platform,
-                "status": row.status,
+                "status": _effective_source_status(row),
                 "health": row.health,
-                "last_seen_at": row.last_seen_at,
+                "last_seen_at": _utc_iso(row.last_seen_at),
                 "capabilities": row.capabilities,
             }
             for row in rows
@@ -623,8 +642,8 @@ async def timeline(
                 "source_id": row.source_id,
                 "kind": row.kind,
                 "source_item_id": row.source_item_id,
-                "captured_at": row.captured_at,
-                "ended_at": row.ended_at,
+                "captured_at": _utc_iso(row.captured_at),
+                "ended_at": _utc_iso(row.ended_at),
                 "metadata": row.metadata,
                 "state": row.state,
                 "lifecycle": row.lifecycle,
@@ -659,8 +678,8 @@ async def conversation_context(
                 "id": str(row.id),
                 "source_id": row.source_id,
                 "kind": row.kind,
-                "captured_at": row.captured_at,
-                "ended_at": row.ended_at,
+                "captured_at": _utc_iso(row.captured_at),
+                "ended_at": _utc_iso(row.ended_at),
                 "metadata": row.metadata,
                 "state": row.state,
             }
