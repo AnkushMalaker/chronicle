@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link, useLocation, Outlet } from 'react-router-dom'
-import { Music, MessageSquare, MessageCircle, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network, Sparkles, Target, ScrollText, AlertTriangle, Menu, X, CalendarDays, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
+import { Music, MessageSquare, MessageCircle, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network, Sparkles, ScrollText, AlertTriangle, Menu, X, CalendarDays, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useSSE, SSEStatus } from '../../hooks/useSSE'
@@ -47,8 +47,9 @@ export default function Layout() {
 
     ...(isAdmin ? [
       { path: '/upload', label: 'Upload Audio', icon: Upload },
+      // Wake-Word Lab is not its own row — it's a Data Audit sub-view, entered
+      // from that page's task hub (and kept highlighted under it while open).
       { path: '/data-audit', label: 'Data Audit', icon: Sparkles },
-      { path: '/wakeword-lab', label: 'Wake-Word Lab', icon: Target },
       { path: '/queue', label: 'Queue & Events', icon: Layers },
       { path: '/plugins', label: 'Plugins', icon: Puzzle },
       { path: '/finetuning', label: 'Training', icon: Zap },
@@ -65,7 +66,8 @@ export default function Layout() {
       <Link
         to={path}
         className={`flex items-center space-x-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-          location.pathname === path
+          location.pathname === path ||
+          (path === '/data-audit' && location.pathname === '/wakeword-lab')
             ? 'bg-blue-100 text-blue-900 dark:bg-blue-900 dark:text-blue-100'
             : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
         }`}

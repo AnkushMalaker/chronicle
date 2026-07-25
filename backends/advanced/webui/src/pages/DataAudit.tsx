@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Sparkles, Archive as ArchiveIcon, AlertTriangle, Mic, Radio, ArrowRight } from 'lucide-react'
-import { useSearchParams } from 'react-router-dom'
+import { Sparkles, Archive as ArchiveIcon, AlertTriangle, Mic, Radio, Target, ArrowRight } from 'lucide-react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { dataAuditApi, AuditConversation } from '../services/api'
 import { useJobPolling } from '../hooks/useJobPolling'
 import AuditFilterBar from '../components/dataAudit/AuditFilterBar'
@@ -23,8 +23,15 @@ import { Alert, Button, Label, Modal, Select, Tabs } from '../components/ui'
 
 // Data Audit is the single home for curation. A task hub picks the active flow:
 // audit conversations, enroll speakers (queue + guided enhance), or classify
-// background/role. Each flow reuses its existing panel(s).
+// background/role. Each flow reuses its existing panel(s). The Wake-Word Lab is
+// the one hub tile that leaves the page — it's a full sub-view at /wakeword-lab
+// rather than an inline flow, so it links out instead of switching curationView.
 type CurationView = 'conversations' | 'enroll' | 'background'
+
+const HUB_TILE_CLASS =
+  'text-left rounded-xl border p-4 transition-colors border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 hover:border-blue-300'
+const HUB_TILE_ACTIVE_CLASS =
+  'text-left rounded-xl border p-4 transition-colors border-blue-400 bg-blue-50/60 dark:bg-blue-900/15 dark:border-blue-700'
 
 type ArchiveReason = 'near_silent' | 'bad_speaker' | 'manual_cleanup'
 
@@ -383,14 +390,14 @@ export default function DataAudit() {
         <div className="flex-1 min-w-[240px]">
           <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Data Audit</h2>
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            Decide what the audio is — audit conversations, enroll speakers, and classify
-            background &amp; role. One home for all curation.
+            Decide what the audio is — audit conversations, enroll speakers, classify
+            background &amp; role, and tune wake words. One home for all curation.
           </p>
         </div>
       </div>
 
       {/* Task hub — pick a curation flow */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {([
           { key: 'conversations', icon: Sparkles, title: 'Audit conversations', metric: total ? `${total}` : '', blurb: 'Find speech-free or mis-attributed audio; split, merge, archive.' },
           { key: 'enroll', icon: Mic, title: 'Enroll speakers', metric: triagePending.pending_count ? `${triagePending.pending_count}` : '', blurb: 'Review the relabel queue and strengthen voiceprints — deliberate, gated.' },
@@ -402,7 +409,7 @@ export default function DataAudit() {
             <button
               key={t.key}
               onClick={() => setCurationView(t.key)}
-              className={`text-left rounded-xl border p-4 transition-colors ${active ? 'border-blue-400 bg-blue-50/60 dark:bg-blue-900/15 dark:border-blue-700' : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 hover:border-blue-300'}`}
+              className={active ? HUB_TILE_ACTIVE_CLASS : HUB_TILE_CLASS}
             >
               <div className="flex items-center justify-between">
                 <Icon className={`h-5 w-5 ${active ? 'text-blue-600' : 'text-gray-400'}`} />
@@ -414,6 +421,19 @@ export default function DataAudit() {
             </button>
           )
         })}
+        {/* Leaves the page: the lab is its own route, reached only from here. */}
+        <Link to="/wakeword-lab" className={`block ${HUB_TILE_CLASS}`}>
+          <div className="flex items-center justify-between">
+            <Target className="h-5 w-5 text-gray-400" />
+          </div>
+          <div className="mt-2 font-semibold text-gray-900 dark:text-gray-100">Wake-Word Lab</div>
+          <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+            Review false positives &amp; capture wake clips; per-word retrain loop.
+          </div>
+          <div className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-blue-600">
+            Open lab <ArrowRight className="h-3.5 w-3.5" />
+          </div>
+        </Link>
       </div>
 
       {/* Messages (shared across flows) */}

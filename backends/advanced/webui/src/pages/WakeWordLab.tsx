@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Mic, Radio, Trash2, Check, X, RefreshCw, Target, AlertTriangle, Square, Volume2, ShieldCheck, Eye, HelpCircle, CopyX, ArrowRightLeft } from 'lucide-react'
+import { Mic, Radio, Trash2, Check, X, RefreshCw, Target, AlertTriangle, Square, Volume2, ShieldCheck, Eye, HelpCircle, CopyX, ArrowRightLeft, ChevronLeft } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { wakewordApi, WakeStream, WakeSample, WakeWordConfig, WakeStats } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
 import { Alert, Button, Card, IconButton, StatCard, Tabs } from '../components/ui'
@@ -107,6 +108,14 @@ export default function WakeWordLab() {
 
   return (
     <div>
+      {/* Breadcrumb — the lab has no nav row; Data Audit's hub is the way in and back */}
+      <Link
+        to="/data-audit"
+        className="mb-3 inline-flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400"
+      >
+        <ChevronLeft className="h-4 w-4" /> Data Audit
+      </Link>
+
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center space-x-2">
