@@ -83,7 +83,9 @@ gh run watch <run-id> --repo "${REPOSITORY}" --exit-status
 
 This uses the EAS `testflight` profile and submits the build to App Store Connect.
 Success means the build and submit command completed; App Store Connect may still
-show Apple processing afterward.
+show Apple processing afterward. The workflow uses the App Store Connect API key
+stored in EAS; configure or rotate it with `eas credentials --platform ios`
+before releasing.
 
 If the EAS build succeeded but only the Apple submission failed, retry that build
 without incrementing the build number or paying for another build:

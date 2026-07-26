@@ -42,15 +42,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Write ASC API Key
-        env:
-          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
-        run: |
-          set -euo pipefail
-          key="${ASC_API_KEY_P8//\\n/$'\n'}"
-          printf '%s\n' "$key" | tr -d '\r' > asc-api-key.p8
-          openssl pkey -in asc-api-key.p8 -noout -check
-
       - name: Build and submit to TestFlight
         if: inputs.build_id == ''
         run: eas build --platform ios --profile testflight --auto-submit --non-interactive
