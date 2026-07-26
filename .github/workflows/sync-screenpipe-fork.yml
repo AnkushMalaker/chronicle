@@ -1,0 +1,120 @@
+name: Sync screenpipe fork
+
+# Keeps AnkushMalaker/screenpipe's custom branch rebased on upstream
+# screenpipe/screenpipe main.
+#
+# This lives in chronicle rather than in the fork itself for two reasons:
+# `schedule` only fires from a repo's default branch, so hosting it in the fork
+# would permanently diverge that fork's main from upstream; and GitHub disables
+# scheduled workflows in forked repositories, which would stop the sync
+# silently.
+
+on:
+  schedule:
+    # 04:00 UTC daily — well clear of the local build window.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      push:
+        # Compared against the string 'false' as well as boolean false at the
+        # use site: `gh workflow run -f push=false` sends the *string* "false",
+        # and a non-empty string is truthy in GitHub expressions, so a naive
+        # `if: inputs.push` would force-push when asked not to. Use -F (capital)
+        # to send a real boolean, but the guard does not rely on that.
+        description: "Push the rebased branch to the fork"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  FORK: AnkushMalaker/screenpipe
+  UPSTREAM: https://github.com/screenpipe/screenpipe
+  BRANCH: custom/linux-timeline-stability
+
+jobs:
+  rebase:
+    name: Rebase fork onto upstream main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the fork's custom branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FORK }}
+          ref: ${{ env.BRANCH }}
+          # Full history: a rebase needs the merge base with upstream, which a
+          # shallow clone does not have.
+          fetch-depth: 0
+          token: ${{ secrets.SCREENPIPE_FORK_TOKEN }}
+          persist-credentials: true
+
+      - name: Fetch upstream main
+        run: |
+          git remote add upstream "$UPSTREAM"
+          # Only main: upstream carries hundreds of agent/* branches.
+          git fetch --no-tags upstream main
+
+      - name: Report divergence
+        id: diverge
+        run: |
+          base=$(git merge-base HEAD upstream/main)
+          behind=$(git rev-list --count "$base"..upstream/main)
+          ours=$(git rev-list --count "$base"..HEAD)
+          echo "behind=$behind" >>"$GITHUB_OUTPUT"
+          echo "ours=$ours" >>"$GITHUB_OUTPUT"
+          echo "$behind new upstream commit(s); $ours local commit(s) on top"
+
+      - name: Rebase
+        id: rebase
+        if: steps.diverge.outputs.behind != '0'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rebase upstream/main; then
+            echo "clean=true" >>"$GITHUB_OUTPUT"
+          else
+            git rebase --abort || true
+            echo "clean=false" >>"$GITHUB_OUTPUT"
+            echo "::warning::rebase hit conflicts; leaving the fork untouched"
+          fi
+
+      - name: Push rebased branch
+        if: |
+          steps.rebase.outputs.clean == 'true' &&
+          (github.event_name == 'schedule' ||
+           (inputs.push && inputs.push != 'false'))
+        run: |
+          # --force-with-lease, never plain --force: the rebase rewrote history,
+          # but this still refuses if the branch moved since checkout (e.g. a
+          # local push landed while this job was running).
+          git push --force-with-lease origin "HEAD:$BRANCH"
+
+      - name: Open an issue on conflict
+        if: steps.rebase.outputs.clean == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEHIND: ${{ steps.diverge.outputs.behind }}
+        run: |
+          title="screenpipe fork: upstream rebase needs manual conflict resolution"
+          # Reuse one open issue rather than filing a new one every night.
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --state open --search "$title in:title" --json number --jq '.[0].number')
+          body=$(printf '%s\n' \
+            "\`$BRANCH\` no longer rebases cleanly onto upstream main ($BEHIND commits behind)." \
+            "" \
+            "The fork was left untouched. Resolve it locally:" \
+            "" \
+            '```' \
+            "cd untracked/screenpipe && ./sync-fork.sh" \
+            "# fix conflicts, then: git add <files> && git rebase --continue" \
+            "./sync-fork.sh --push" \
+            '```' \
+            "" \
+            "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
