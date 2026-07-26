@@ -2,6 +2,10 @@
 
 Documentation for CI/CD workflows and test automation.
 
+For the end-to-end version release checklist, including TestFlight, GitHub
+release publication, container images, and post-release verification, see
+[`docs/releasing.md`](../../docs/releasing.md).
+
 ## Test Workflows Overview
 
 Chronicle uses **three separate test workflows** to balance fast PR feedback with comprehensive testing:

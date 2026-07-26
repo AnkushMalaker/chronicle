@@ -8,6 +8,7 @@ day-to-day operation, and use [AGENTS.md](../AGENTS.md) for development conventi
 
 - [Project overview](overview.md): components, deployment topology, and repository layout
 - [Testing and coverage](testing.md): fast Python lanes, coverage reports, and integration tests
+- [Release process](releasing.md): candidate validation, TestFlight, publication, and verification
 - [Audio pipeline](audio-pipeline-architecture.md): session, transcription, and memory flow
 - [Multimodal memory](multimodal-memory.md): observations, event discovery, evidence retrieval, and durable memory
 - [Initialization system](init-system.md): setup wizard and service orchestration
