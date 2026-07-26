@@ -38,7 +38,10 @@
     "production": {},
     "testflight": {
       "ios": {
-        "ascAppId": "6761143188"
+        "ascAppId": "6761143188",
+        "ascApiKeyIssuerId": "70f6a927-18f2-46a8-be51-d72a6bef8e45",
+        "ascApiKeyId": "NZBJ66ADDC",
+        "ascApiKeyPath": "./asc-api-key.p8"
       }
     }
   }
