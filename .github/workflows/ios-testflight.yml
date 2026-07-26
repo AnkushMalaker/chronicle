@@ -8,6 +8,11 @@ on:
     branches: [main]
     paths: ['app/**']
   workflow_dispatch:
+    inputs:
+      build_id:
+        description: 'Existing EAS build ID to submit without rebuilding'
+        required: false
+        type: string
 
 jobs:
   build-and-submit:
@@ -38,7 +43,26 @@ jobs:
         run: npm ci
 
       - name: Write ASC API Key
-        run: echo "${{ secrets.ASC_API_KEY_P8 }}" > asc-api-key.p8
+        env:
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          key="${ASC_API_KEY_P8//\\n/$'\n'}"
+          printf '%s\n' "$key" | tr -d '\r' > asc-api-key.p8
+          openssl pkey -in asc-api-key.p8 -noout -check
 
       - name: Build and submit to TestFlight
+        if: inputs.build_id == ''
         run: eas build --platform ios --profile testflight --auto-submit --non-interactive
+
+      - name: Submit existing build to TestFlight
+        if: inputs.build_id != ''
+        env:
+          EAS_BUILD_ID: ${{ inputs.build_id }}
+        run: >-
+          eas build:submit
+          --platform ios
+          --profile testflight
+          --id "$EAS_BUILD_ID"
+          --non-interactive
+          --wait

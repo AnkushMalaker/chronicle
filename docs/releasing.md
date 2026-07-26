@@ -85,6 +85,16 @@ This uses the EAS `testflight` profile and submits the build to App Store Connec
 Success means the build and submit command completed; App Store Connect may still
 show Apple processing afterward.
 
+If the EAS build succeeded but only the Apple submission failed, retry that build
+without incrementing the build number or paying for another build:
+
+```bash
+gh workflow run ios-testflight.yml \
+  --repo "${REPOSITORY}" \
+  --ref "${RELEASE_BRANCH}" \
+  -f build_id="<EAS-build-id>"
+```
+
 Do not use `ios-ipa-build.yml` as release evidence until its internal-distribution
 credentials are configured. It currently requests an ad hoc/internal IPA, which is
 different from the store-distributed TestFlight build.
