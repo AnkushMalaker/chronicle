@@ -1,7 +1,18 @@
 name: Sync screenpipe fork
 
-# Keeps AnkushMalaker/screenpipe's custom branch rebased on upstream
-# screenpipe/screenpipe main.
+# Keeps AnkushMalaker/screenpipe's two custom branches rebased, in order:
+#
+#   custom/linux-timeline-stability  ->  upstream screenpipe/screenpipe main
+#   chronicle                        ->  custom/linux-timeline-stability
+#
+# `chronicle` is the branch Chronicle actually consumes (it adds
+# /search?dedupe and /app-runs on top of the base branch's capture fixes), so
+# syncing only the base would leave the consumed branch to rot behind upstream.
+#
+# The two run as one matrix with max-parallel 1 so the stacked branch rebases
+# onto a base that was already pushed. If that ordering ever slipped, the
+# stacked rebase would simply find nothing to do and the next run would catch
+# up — it self-heals rather than corrupting anything.
 #
 # This lives in chronicle rather than in the fork itself for two reasons:
 # `schedule` only fires from a repo's default branch, so hosting it in the fork
@@ -32,47 +43,66 @@ permissions:
 env:
   FORK: AnkushMalaker/screenpipe
   UPSTREAM: https://github.com/screenpipe/screenpipe
-  BRANCH: custom/linux-timeline-stability
 
 jobs:
   rebase:
-    name: Rebase fork onto upstream main
+    name: Rebase ${{ matrix.branch }} onto ${{ matrix.onto }}
     runs-on: ubuntu-latest
+    strategy:
+      # Sequential, base first: `chronicle` is stacked on the base branch and
+      # must rebase onto the version this run just pushed.
+      max-parallel: 1
+      # The stacked branch is still worth attempting if the base conflicted —
+      # it just rebases onto the unchanged base and no-ops.
+      fail-fast: false
+      matrix:
+        include:
+          - branch: custom/linux-timeline-stability
+            onto: upstream/main
+          - branch: chronicle
+            onto: origin/custom/linux-timeline-stability
     steps:
       - name: Check out the fork's custom branch
         uses: actions/checkout@v4
         with:
           repository: ${{ env.FORK }}
-          ref: ${{ env.BRANCH }}
-          # Full history: a rebase needs the merge base with upstream, which a
+          ref: ${{ matrix.branch }}
+          # Full history: a rebase needs the merge base with its target, which a
           # shallow clone does not have.
           fetch-depth: 0
           token: ${{ secrets.SCREENPIPE_FORK_TOKEN }}
           persist-credentials: true
 
-      - name: Fetch upstream main
+      - name: Fetch the rebase target
         run: |
           git remote add upstream "$UPSTREAM"
           # Only main: upstream carries hundreds of agent/* branches.
           git fetch --no-tags upstream main
+          # The stacked branch rebases onto a sibling branch of the fork, which
+          # a single-ref checkout does not bring down.
+          git fetch --no-tags origin custom/linux-timeline-stability
 
       - name: Report divergence
         id: diverge
+        env:
+          ONTO: ${{ matrix.onto }}
         run: |
-          base=$(git merge-base HEAD upstream/main)
-          behind=$(git rev-list --count "$base"..upstream/main)
+          base=$(git merge-base HEAD "$ONTO")
+          behind=$(git rev-list --count "$base".."$ONTO")
           ours=$(git rev-list --count "$base"..HEAD)
           echo "behind=$behind" >>"$GITHUB_OUTPUT"
           echo "ours=$ours" >>"$GITHUB_OUTPUT"
-          echo "$behind new upstream commit(s); $ours local commit(s) on top"
+          echo "$behind new commit(s) on $ONTO; $ours local commit(s) on top"
 
       - name: Rebase
         id: rebase
         if: steps.diverge.outputs.behind != '0'
+        env:
+          ONTO: ${{ matrix.onto }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git rebase upstream/main; then
+          if git rebase "$ONTO"; then
             echo "clean=true" >>"$GITHUB_OUTPUT"
           else
             git rebase --abort || true
@@ -85,6 +115,8 @@ jobs:
           steps.rebase.outputs.clean == 'true' &&
           (github.event_name == 'schedule' ||
            (inputs.push && inputs.push != 'false'))
+        env:
+          BRANCH: ${{ matrix.branch }}
         run: |
           # --force-with-lease, never plain --force: the rebase rewrote history,
           # but this still refuses if the branch moved since checkout (e.g. a
@@ -96,20 +128,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BEHIND: ${{ steps.diverge.outputs.behind }}
+          BRANCH: ${{ matrix.branch }}
+          ONTO: ${{ matrix.onto }}
         run: |
-          title="screenpipe fork: upstream rebase needs manual conflict resolution"
+          title="screenpipe fork: $BRANCH needs manual conflict resolution"
           # Reuse one open issue rather than filing a new one every night.
           existing=$(gh issue list --repo "$GITHUB_REPOSITORY" \
             --state open --search "$title in:title" --json number --jq '.[0].number')
           body=$(printf '%s\n' \
-            "\`$BRANCH\` no longer rebases cleanly onto upstream main ($BEHIND commits behind)." \
+            "\`$BRANCH\` no longer rebases cleanly onto \`$ONTO\` ($BEHIND commits behind)." \
             "" \
             "The fork was left untouched. Resolve it locally:" \
             "" \
             '```' \
-            "cd untracked/screenpipe && ./sync-fork.sh" \
+            "cd untracked/screenpipe && SYNC_BRANCH=$BRANCH ./sync-fork.sh" \
             "# fix conflicts, then: git add <files> && git rebase --continue" \
-            "./sync-fork.sh --push" \
+            "SYNC_BRANCH=$BRANCH ./sync-fork.sh --push" \
             '```' \
             "" \
             "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID")
