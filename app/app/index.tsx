@@ -685,19 +685,19 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     elevation: 2,
   },
   sectionHeaderWithFilter: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
     marginBottom: 15,
   },
   filterContainer: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 8,
   },
   filterText: {
     marginRight: 8,
     fontSize: 14,
     color: colors.text,
+    flexShrink: 1,
   },
   sectionTitle: {
     fontSize: 18,
