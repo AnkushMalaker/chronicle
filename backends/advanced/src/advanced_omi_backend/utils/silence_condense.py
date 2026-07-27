@@ -18,6 +18,7 @@ import logging
 from typing import List, Optional, Tuple
 
 from advanced_omi_backend.utils.vad_analysis import (
+    VadScoringError,
     frame_speech_intervals,
     merge_speech_regions,
     score_pcm_frames,
@@ -58,12 +59,23 @@ def condense_silence(
         return pcm_data, None, None
 
     try:
-        scores, hop_seconds = score_pcm_frames(pcm_data, sample_rate, channels)
+        frame_scores = score_pcm_frames(pcm_data, sample_rate, channels)
+    except VadScoringError as error:
+        logger.warning(
+            "silence_condense_unscored reason=%s detail=%s",
+            error.reason.value,
+            error,
+        )
+        return pcm_data, None, None
     except Exception as e:
         logger.warning("Silence condensing skipped (VAD failed): %s", e)
         return pcm_data, None, None
 
-    raw_intervals = frame_speech_intervals(scores, hop_seconds, 0.0)
+    raw_intervals = frame_speech_intervals(
+        frame_scores.scores,
+        frame_scores.hop_seconds,
+        0.0,
+    )
     regions = merge_speech_regions(
         raw_intervals,
         duration,

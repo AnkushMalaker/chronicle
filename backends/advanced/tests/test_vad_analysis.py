@@ -166,7 +166,7 @@ class TestSpeechRegions:
 
 
 class TestDetectSpeechPcm:
-    """detect_speech_pcm gates transcription: True/False verdicts, None = fail open."""
+    """Structured speech verdicts distinguish rejection from fail-open reasons."""
 
     class FakeProvider:
         frame_hop_ms = 16
@@ -189,41 +189,139 @@ class TestDetectSpeechPcm:
         )
 
     def test_sustained_speech_detected(self, monkeypatch):
-        from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
+        from advanced_omi_backend.utils.vad_analysis import (
+            SpeechDetectionReason,
+            detect_speech_pcm,
+        )
 
         # 40 frames * 16ms = 0.64s of speech, above REGION_MIN_SECONDS
         self.patch_provider(monkeypatch, [0.9] * 40 + [0.1] * 20)
-        assert detect_speech_pcm(self.pcm(), 16000, 1, 2) is True
+        result = detect_speech_pcm(self.pcm(), 16000, 1, 2)
+
+        assert result.has_speech is True
+        assert result.scored is True
+        assert result.should_reject is False
+        assert result.reason is SpeechDetectionReason.SPEECH_DETECTED
 
     def test_silence_rejected(self, monkeypatch):
-        from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
+        from advanced_omi_backend.utils.vad_analysis import (
+            SpeechDetectionReason,
+            detect_speech_pcm,
+        )
 
         self.patch_provider(monkeypatch, [0.1] * 60)
-        assert detect_speech_pcm(self.pcm(), 16000, 1, 2) is False
+        result = detect_speech_pcm(self.pcm(), 16000, 1, 2)
+
+        assert result.has_speech is False
+        assert result.scored is True
+        assert result.should_reject is True
+        assert result.reason is SpeechDetectionReason.NO_SPEECH
 
     def test_isolated_blip_rejected(self, monkeypatch):
         from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
 
         # 10 frames * 16ms = 0.16s, below REGION_MIN_SECONDS (0.4s)
         self.patch_provider(monkeypatch, [0.1] * 20 + [0.9] * 10 + [0.1] * 30)
-        assert detect_speech_pcm(self.pcm(), 16000, 1, 2) is False
+        assert detect_speech_pcm(self.pcm(), 16000, 1, 2).should_reject is True
 
-    def test_vad_failure_fails_open(self, monkeypatch):
+    def test_provider_unavailable_fails_open_with_reason(self, monkeypatch):
         import advanced_omi_backend.utils.vad_analysis as vad_analysis
-        from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
+        from advanced_omi_backend.utils.vad_analysis import (
+            SpeechDetectionReason,
+            detect_speech_pcm,
+        )
 
         def boom():
             raise RuntimeError("no native lib")
 
         monkeypatch.setattr(vad_analysis, "get_vad_provider", boom)
-        assert detect_speech_pcm(self.pcm(), 16000, 1, 2) is None
+        result = detect_speech_pcm(self.pcm(), 16000, 1, 2)
+
+        assert result.has_speech is None
+        assert result.scored is False
+        assert result.should_reject is False
+        assert result.reason is SpeechDetectionReason.PROVIDER_UNAVAILABLE
+        assert result.detail == "RuntimeError: no native lib"
+
+    def test_provider_scoring_failure_fails_open_with_reason(self, monkeypatch):
+        import advanced_omi_backend.utils.vad_analysis as vad_analysis
+        from advanced_omi_backend.utils.vad_analysis import (
+            SpeechDetectionReason,
+            detect_speech_pcm,
+        )
+
+        class BrokenProvider:
+            frame_hop_ms = 16
+
+            def score(self, mono, sample_rate):
+                raise RuntimeError("native process failed")
+
+        monkeypatch.setattr(
+            vad_analysis,
+            "get_vad_provider",
+            lambda: BrokenProvider(),
+        )
+        result = detect_speech_pcm(self.pcm(), 16000, 1, 2)
+
+        assert result.has_speech is None
+        assert result.reason is SpeechDetectionReason.PROVIDER_ERROR
+        assert result.detail == "RuntimeError: native process failed"
 
     def test_unsupported_sample_width_fails_open(self):
+        from advanced_omi_backend.utils.vad_analysis import (
+            SpeechDetectionReason,
+            detect_speech_pcm,
+        )
+
+        result = detect_speech_pcm(self.pcm(), 16000, 1, 3)
+
+        assert result.has_speech is None
+        assert result.scored is False
+        assert result.should_reject is False
+        assert result.reason is SpeechDetectionReason.UNSUPPORTED_SAMPLE_WIDTH
+
+    def test_invalid_audio_metadata_has_specific_fail_open_reasons(self):
+        from advanced_omi_backend.utils.vad_analysis import (
+            SpeechDetectionReason,
+            detect_speech_pcm,
+        )
+
+        invalid_channels = detect_speech_pcm(self.pcm(), 16000, 0, 2)
+        invalid_sample_rate = detect_speech_pcm(self.pcm(), 0, 1, 2)
+
+        assert invalid_channels.has_speech is None
+        assert invalid_channels.reason is SpeechDetectionReason.INVALID_CHANNELS
+        assert invalid_sample_rate.has_speech is None
+        assert invalid_sample_rate.reason is SpeechDetectionReason.INVALID_SAMPLE_RATE
+
+    def test_fail_open_log_contains_stable_reason(self, caplog):
         from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
 
-        assert detect_speech_pcm(self.pcm(), 16000, 1, 3) is None
+        detect_speech_pcm(self.pcm(), 16000, 1, 3)
+
+        assert "speech_gate_unscored reason=unsupported_sample_width" in caplog.text
 
     def test_empty_audio_is_not_speech(self):
-        from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
+        from advanced_omi_backend.utils.vad_analysis import (
+            SpeechDetectionReason,
+            detect_speech_pcm,
+        )
 
-        assert detect_speech_pcm(b"", 16000, 1, 2) is False
+        result = detect_speech_pcm(b"", 16000, 1, 2)
+
+        assert result.has_speech is False
+        assert result.scored is False
+        assert result.should_reject is True
+        assert result.reason is SpeechDetectionReason.EMPTY_AUDIO
+
+    def test_malformed_pcm_fails_open_with_preparation_reason(self):
+        from advanced_omi_backend.utils.vad_analysis import (
+            SpeechDetectionReason,
+            detect_speech_pcm,
+        )
+
+        result = detect_speech_pcm(b"\x00\x00\x00", 16000, 1, 2)
+
+        assert result.has_speech is None
+        assert result.should_reject is False
+        assert result.reason is SpeechDetectionReason.PCM_PREPARATION_FAILED

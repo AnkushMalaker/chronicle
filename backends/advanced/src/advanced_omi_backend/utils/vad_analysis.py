@@ -13,6 +13,8 @@ archival and to locate long silence gaps for splitting.
 
 import logging
 import time
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -51,46 +53,182 @@ def _pcm_to_mono_int16(pcm: bytes, channels: int) -> np.ndarray:
 VAD_SAMPLE_RATE = 16000
 
 
-def score_pcm_frames(pcm_data: bytes, sample_rate: int, channels: int):
+class SpeechDetectionReason(str, Enum):
+    """Stable reason codes for speech-gate decisions and fail-open events."""
+
+    SPEECH_DETECTED = "speech_detected"
+    NO_SPEECH = "no_speech"
+    EMPTY_AUDIO = "empty_audio"
+    UNSUPPORTED_SAMPLE_WIDTH = "unsupported_sample_width"
+    INVALID_CHANNELS = "invalid_channels"
+    INVALID_SAMPLE_RATE = "invalid_sample_rate"
+    PCM_PREPARATION_FAILED = "pcm_preparation_failed"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    PROVIDER_ERROR = "provider_error"
+    WAV_DECODE_FAILED = "wav_decode_failed"
+
+
+@dataclass(frozen=True)
+class SpeechDetectionResult:
+    """A conclusive speech verdict or an explicit fail-open reason.
+
+    ``has_speech=None`` means no trustworthy verdict was produced. Callers
+    should use ``should_reject`` rather than interpreting the fields themselves.
+    Empty audio is conclusively rejectable without running the VAD, so it has
+    ``has_speech=False`` and ``scored=False``.
+    """
+
+    has_speech: Optional[bool]
+    scored: bool
+    reason: SpeechDetectionReason
+    detail: Optional[str] = None
+
+    @property
+    def should_reject(self) -> bool:
+        """Only definitive silence or empty audio may be rejected."""
+        return self.has_speech is False
+
+    @classmethod
+    def speech(cls) -> "SpeechDetectionResult":
+        return cls(True, True, SpeechDetectionReason.SPEECH_DETECTED)
+
+    @classmethod
+    def no_speech(cls) -> "SpeechDetectionResult":
+        return cls(False, True, SpeechDetectionReason.NO_SPEECH)
+
+    @classmethod
+    def empty_audio(cls) -> "SpeechDetectionResult":
+        return cls(False, False, SpeechDetectionReason.EMPTY_AUDIO)
+
+    @classmethod
+    def unscored(
+        cls, reason: SpeechDetectionReason, detail: str
+    ) -> "SpeechDetectionResult":
+        return cls(None, False, reason, detail)
+
+
+@dataclass(frozen=True)
+class VadFrameScores:
+    """Frame-level VAD output with its time base."""
+
+    scores: np.ndarray
+    hop_seconds: float
+
+
+class VadScoringError(RuntimeError):
+    """VAD scoring failure with a stable observability reason."""
+
+    def __init__(self, reason: SpeechDetectionReason, detail: str):
+        super().__init__(detail)
+        self.reason = reason
+
+
+def _exception_detail(error: Exception) -> str:
+    detail = str(error).strip()
+    return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+
+
+def _log_unscored(result: SpeechDetectionResult) -> None:
+    logger.warning(
+        "speech_gate_unscored reason=%s detail=%s",
+        result.reason.value,
+        result.detail,
+    )
+
+
+def score_pcm_frames(
+    pcm_data: bytes, sample_rate: int, channels: int
+) -> VadFrameScores:
     """Run the configured VAD over raw 16-bit PCM.
 
-    Returns ``(frame_scores, hop_seconds)``. Audio is resampled to
-    ``VAD_SAMPLE_RATE`` for scoring only. Raises when the VAD is unavailable.
+    Audio is resampled to ``VAD_SAMPLE_RATE`` for scoring only. Raises a
+    ``VadScoringError`` whose reason distinguishes PCM preparation, provider
+    initialization, and provider execution failures.
     """
-    mono = _pcm_to_mono_int16(pcm_data, channels)
-    if sample_rate != VAD_SAMPLE_RATE:
-        n16 = int(mono.size * VAD_SAMPLE_RATE / sample_rate)
-        positions = np.linspace(0, mono.size - 1, n16)
-        mono = np.interp(
-            positions, np.arange(mono.size), mono.astype(np.float32)
-        ).astype(np.int16)
-    provider = get_vad_provider()
-    scores = provider.score(mono, VAD_SAMPLE_RATE)
-    return scores, provider.frame_hop_ms / 1000.0
+    try:
+        mono = _pcm_to_mono_int16(pcm_data, channels)
+        if sample_rate != VAD_SAMPLE_RATE:
+            n16 = int(mono.size * VAD_SAMPLE_RATE / sample_rate)
+            positions = np.linspace(0, mono.size - 1, n16)
+            mono = np.interp(
+                positions, np.arange(mono.size), mono.astype(np.float32)
+            ).astype(np.int16)
+    except Exception as error:
+        raise VadScoringError(
+            SpeechDetectionReason.PCM_PREPARATION_FAILED,
+            _exception_detail(error),
+        ) from error
+
+    try:
+        provider = get_vad_provider()
+    except Exception as error:
+        raise VadScoringError(
+            SpeechDetectionReason.PROVIDER_UNAVAILABLE,
+            _exception_detail(error),
+        ) from error
+
+    try:
+        scores = provider.score(mono, VAD_SAMPLE_RATE)
+    except Exception as error:
+        raise VadScoringError(
+            SpeechDetectionReason.PROVIDER_ERROR,
+            _exception_detail(error),
+        ) from error
+
+    return VadFrameScores(
+        scores=scores,
+        hop_seconds=provider.frame_hop_ms / 1000.0,
+    )
 
 
 def detect_speech_pcm(
     pcm_data: bytes, sample_rate: int, channels: int, sample_width: int
-) -> Optional[bool]:
+) -> SpeechDetectionResult:
     """Whether raw PCM contains speech, for gating transcription.
 
     Speech means at least one frame run of ``REGION_MIN_SECONDS`` at the
-    default probability threshold — the same criterion as the zero-speech
-    decision in silence condensing. Returns ``None`` when the audio can't be
-    scored (unsupported format or VAD failure); callers must fail open and
-    treat that as possibly-speech.
+    default probability threshold—the same criterion as the zero-speech
+    decision in silence condensing. Unsupported inputs and VAD failures return
+    an unscored result with a stable reason; callers fail open via
+    ``result.should_reject``.
     """
-    if sample_width != 2 or channels <= 0 or not sample_rate:
-        return None
+    if sample_width != 2:
+        result = SpeechDetectionResult.unscored(
+            SpeechDetectionReason.UNSUPPORTED_SAMPLE_WIDTH,
+            f"expected 2-byte PCM, got {sample_width}",
+        )
+        _log_unscored(result)
+        return result
+    if channels <= 0:
+        result = SpeechDetectionResult.unscored(
+            SpeechDetectionReason.INVALID_CHANNELS,
+            f"expected positive channel count, got {channels}",
+        )
+        _log_unscored(result)
+        return result
+    if sample_rate <= 0:
+        result = SpeechDetectionResult.unscored(
+            SpeechDetectionReason.INVALID_SAMPLE_RATE,
+            f"expected positive sample rate, got {sample_rate}",
+        )
+        _log_unscored(result)
+        return result
     if len(pcm_data) < sample_width * channels:
-        return False
+        return SpeechDetectionResult.empty_audio()
     try:
-        scores, hop_seconds = score_pcm_frames(pcm_data, sample_rate, channels)
-    except Exception as e:
-        logger.warning("Speech gate skipped (VAD failed): %s", e)
-        return None
-    intervals = frame_speech_intervals(scores, hop_seconds, 0.0)
-    return any(end - start >= REGION_MIN_SECONDS for start, end in intervals)
+        frame_scores = score_pcm_frames(pcm_data, sample_rate, channels)
+    except VadScoringError as error:
+        result = SpeechDetectionResult.unscored(error.reason, str(error))
+        _log_unscored(result)
+        return result
+    intervals = frame_speech_intervals(
+        frame_scores.scores,
+        frame_scores.hop_seconds,
+        0.0,
+    )
+    if any(end - start >= REGION_MIN_SECONDS for start, end in intervals):
+        return SpeechDetectionResult.speech()
+    return SpeechDetectionResult.no_speech()
 
 
 async def analyze_conversation_audio(conversation_id: str) -> dict:

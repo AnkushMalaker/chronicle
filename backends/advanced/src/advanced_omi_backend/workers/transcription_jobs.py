@@ -288,13 +288,16 @@ async def transcribe_audio_range(
     if not no_speech and mapping is None and speech_seconds is None:
         # condense_silence never scored the audio (clip under MIN_AUDIO_SECONDS
         # or VAD failure). With the audio-filtering gate on, still require
-        # speech before paying for transcription; detect_speech_pcm returns
-        # None when it can't score, which fails open.
+        # speech before paying for transcription. Only a conclusive silent/empty
+        # result rejects; unscored audio fails open.
         if require_speech_for_transcription():
-            no_speech = (
-                detect_speech_pcm(pcm_data, actual_sample_rate, channels, sample_width)
-                is False
+            speech_detection = detect_speech_pcm(
+                pcm_data,
+                actual_sample_rate,
+                channels,
+                sample_width,
             )
+            no_speech = speech_detection.should_reject
     if no_speech:
         logger.info(
             f"🔇 No speech detected in [{start_time:.1f}s - {end_time or 'end'}] "

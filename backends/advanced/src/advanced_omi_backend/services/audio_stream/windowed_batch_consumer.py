@@ -58,16 +58,18 @@ class WindowedBatchConsumer(BaseAudioStreamConsumer):
         gemma4 multipart file upload) receives well-formed audio.
         """
         # Audio-filtering gate: a silent window otherwise costs a full provider
-        # call. detect_speech_pcm returns None when it can't score — fail open.
-        if (
-            require_speech_for_transcription()
-            and detect_speech_pcm(audio_data, sample_rate, 1, 2) is False
-        ):
-            logger.debug(
-                "🔇 No speech in %.0fs window — skipping batch call",
-                self.window_seconds,
-            )
-            return {"text": "", "words": [], "segments": [], "confidence": 0.0}
+        # call. Only a definitive no-speech result rejects; unscored audio fails open.
+        if require_speech_for_transcription():
+            speech_detection = detect_speech_pcm(audio_data, sample_rate, 1, 2)
+            if speech_detection.should_reject:
+                logger.debug(
+                    "🔇 No speech in %.0fs window — skipping batch call "
+                    "(reason=%s, scored=%s)",
+                    self.window_seconds,
+                    speech_detection.reason.value,
+                    speech_detection.scored,
+                )
+                return {"text": "", "words": [], "segments": [], "confidence": 0.0}
         wav_bytes = pcm_to_wav_bytes(audio_data, sample_rate=sample_rate)
         result = await self._provider.transcribe(
             audio_data=wav_bytes, sample_rate=sample_rate, diarize=False

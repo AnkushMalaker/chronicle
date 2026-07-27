@@ -18,7 +18,11 @@ from advanced_omi_backend.controllers.audio_controller import (
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import DeviceInputItem, utcnow
 from advanced_omi_backend.models.user import User
-from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
+from advanced_omi_backend.utils.vad_analysis import (
+    SpeechDetectionReason,
+    SpeechDetectionResult,
+    detect_speech_pcm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -115,16 +119,27 @@ async def _mix_session(
         )
 
 
-def _wav_has_speech(path: Path) -> bool | None:
-    """Local VAD verdict for an assembled session WAV; None = couldn't score."""
+def _detect_wav_speech(path: Path) -> SpeechDetectionResult:
+    """Return a structured VAD verdict for an assembled session WAV."""
     try:
         with wave.open(str(path), "rb") as handle:
             sample_rate = handle.getframerate()
             channels = handle.getnchannels()
             sample_width = handle.getsampwidth()
             pcm = handle.readframes(handle.getnframes())
-    except Exception:
-        return None
+    except Exception as error:
+        detail = str(error).strip()
+        detail = f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+        logger.warning(
+            "speech_gate_unscored reason=%s detail=%s path=%s",
+            SpeechDetectionReason.WAV_DECODE_FAILED.value,
+            detail,
+            path,
+        )
+        return SpeechDetectionResult.unscored(
+            SpeechDetectionReason.WAV_DECODE_FAILED,
+            detail,
+        )
     return detect_speech_pcm(pcm, sample_rate, channels, sample_width)
 
 
@@ -142,6 +157,8 @@ async def process_device_audio() -> dict[str, Any]:
         by_source.setdefault(audio_stream_key(item), []).append(item)
     processed = 0
     rejected_no_speech = 0
+    unscored_sessions = 0
+    unscored_reasons: dict[str, int] = {}
     require_speech = require_speech_for_transcription()
     for (user_id, source_id, direction), source_items in by_source.items():
         try:
@@ -164,20 +181,28 @@ async def process_device_audio() -> dict[str, Any]:
                     / f"screenpipe-{source_id}-{session[0].source_item_id}.wav"
                 )
                 await _mix_session(session, Path(temp_dir), output)
-                if require_speech and _wav_has_speech(output) is False:
+                speech_detection = (
+                    _detect_wav_speech(output) if require_speech else None
+                )
+                if speech_detection is not None and speech_detection.has_speech is None:
+                    reason = speech_detection.reason.value
+                    unscored_sessions += 1
+                    unscored_reasons[reason] = unscored_reasons.get(reason, 0) + 1
+                if speech_detection is not None and speech_detection.should_reject:
                     # Silent session: never enters the conversation pipeline.
-                    # A None verdict (VAD unavailable) fails open — the batch
-                    # transcription choke point gates it again downstream.
                     logger.info(
                         "🔇 ScreenPipe session %s-%s (%d chunks) has no speech "
-                        "— rejecting without transcription",
+                        "— rejecting without transcription (reason=%s, scored=%s)",
                         source_id,
                         direction,
                         len(session),
+                        speech_detection.reason.value,
+                        speech_detection.scored,
                     )
                     for item in session:
                         item.state = "rejected"
                         item.metadata["rejection_reason"] = "no_speech"
+                        item.metadata["vad_reason"] = speech_detection.reason.value
                         await item.save()
                         item.media_data = None
                         await item.save()
@@ -235,4 +260,6 @@ async def process_device_audio() -> dict[str, Any]:
         "pending_chunks": len(pending),
         "processed_sessions": processed,
         "rejected_no_speech": rejected_no_speech,
+        "vad_unscored_sessions": unscored_sessions,
+        "vad_unscored_reasons": unscored_reasons,
     }

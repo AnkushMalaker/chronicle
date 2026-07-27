@@ -74,11 +74,12 @@ def test_mongo_naive_and_aware_timestamps_group_together():
     ]
 
 
-def test_wav_has_speech_reads_wav_and_reports_vad_verdict(tmp_path, monkeypatch):
+def test_detect_wav_speech_reads_wav_and_reports_vad_verdict(tmp_path, monkeypatch):
     import wave
 
     import advanced_omi_backend.utils.vad_analysis as vad_analysis
-    from advanced_omi_backend.services.device_audio_ingest import _wav_has_speech
+    from advanced_omi_backend.services.device_audio_ingest import _detect_wav_speech
+    from advanced_omi_backend.utils.vad_analysis import SpeechDetectionReason
 
     path = tmp_path / "session.wav"
     with wave.open(str(path), "wb") as handle:
@@ -99,16 +100,28 @@ def test_wav_has_speech_reads_wav_and_reports_vad_verdict(tmp_path, monkeypatch)
     monkeypatch.setattr(
         vad_analysis, "get_vad_provider", lambda: FakeProvider([0.9] * 40)
     )
-    assert _wav_has_speech(path) is True
+    speech = _detect_wav_speech(path)
+    assert speech.has_speech is True
+    assert speech.scored is True
+    assert speech.reason is SpeechDetectionReason.SPEECH_DETECTED
 
     monkeypatch.setattr(
         vad_analysis, "get_vad_provider", lambda: FakeProvider([0.1] * 40)
     )
-    assert _wav_has_speech(path) is False
+    silence = _detect_wav_speech(path)
+    assert silence.should_reject is True
+    assert silence.reason is SpeechDetectionReason.NO_SPEECH
 
 
-def test_wav_has_speech_fails_open_on_unreadable_file(tmp_path):
-    from advanced_omi_backend.services.device_audio_ingest import _wav_has_speech
+def test_detect_wav_speech_reports_decode_failure(tmp_path):
+    from advanced_omi_backend.services.device_audio_ingest import _detect_wav_speech
+    from advanced_omi_backend.utils.vad_analysis import SpeechDetectionReason
 
     missing = tmp_path / "missing.wav"
-    assert _wav_has_speech(missing) is None
+    result = _detect_wav_speech(missing)
+
+    assert result.has_speech is None
+    assert result.scored is False
+    assert result.should_reject is False
+    assert result.reason is SpeechDetectionReason.WAV_DECODE_FAILED
+    assert result.detail.startswith("FileNotFoundError:")
