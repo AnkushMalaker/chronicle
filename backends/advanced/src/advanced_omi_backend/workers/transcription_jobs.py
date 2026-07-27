@@ -23,6 +23,7 @@ from rq.job import Dependency, Job
 from advanced_omi_backend.config import (
     get_live_segmentation,
     get_streaming_fallback_timeout,
+    require_speech_for_transcription,
 )
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
@@ -76,6 +77,7 @@ from advanced_omi_backend.utils.silence_condense import (
     condense_silence,
     remap_condensed_result,
 )
+from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
 
 logger = logging.getLogger(__name__)
 
@@ -282,7 +284,18 @@ async def transcribe_audio_range(
     condensed_pcm, mapping, speech_seconds = condense_silence(
         pcm_data, actual_sample_rate, channels, sample_width
     )
-    if mapping is not None and not mapping:
+    no_speech = mapping is not None and not mapping
+    if not no_speech and mapping is None and speech_seconds is None:
+        # condense_silence never scored the audio (clip under MIN_AUDIO_SECONDS
+        # or VAD failure). With the audio-filtering gate on, still require
+        # speech before paying for transcription; detect_speech_pcm returns
+        # None when it can't score, which fails open.
+        if require_speech_for_transcription():
+            no_speech = (
+                detect_speech_pcm(pcm_data, actual_sample_rate, channels, sample_width)
+                is False
+            )
+    if no_speech:
         logger.info(
             f"🔇 No speech detected in [{start_time:.1f}s - {end_time or 'end'}] "
             f"of {conversation_id[:8]} — skipping paid transcription entirely"

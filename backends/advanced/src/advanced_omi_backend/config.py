@@ -104,6 +104,26 @@ def save_diarization_settings(settings: dict) -> bool:
 
 
 # ============================================================================
+# Audio Filtering Settings (OmegaConf-based)
+# ============================================================================
+
+
+def require_speech_for_transcription() -> bool:
+    """Audio-filtering gate: skip transcription when local VAD finds no speech.
+
+    Read from ``backend.audio_filtering.require_speech``. Consumed at the batch
+    transcription choke point, the windowed-batch live preview, and ScreenPipe
+    device-audio ingest. The first two run in the workers container, which only
+    reloads config on restart — saving this setting signals a worker restart.
+    """
+    cfg = get_backend_config("audio_filtering")
+    settings = OmegaConf.to_container(cfg, resolve=True) if cfg else {}
+    if not isinstance(settings, dict):
+        return True
+    return bool(settings.get("require_speech", True))
+
+
+# ============================================================================
 # Cleanup Settings (OmegaConf-based)
 # ============================================================================
 
@@ -315,6 +335,7 @@ def get_misc_settings() -> dict:
     ) or {}
 
     return {
+        "audio_filtering_require_speech": require_speech_for_transcription(),
         "per_segment_speaker_id": speaker_settings.get("per_segment_speaker_id", False),
         "streaming_fallback_timeout_seconds": int(
             transcription_settings.get(
@@ -359,6 +380,14 @@ def save_misc_settings(settings: dict) -> bool:
             ]
         }
         if not save_config_section("backend.transcription", timeout_settings):
+            success = False
+
+    # Save the audio-filtering speech gate if provided
+    if "audio_filtering_require_speech" in settings:
+        if not save_config_section(
+            "backend.audio_filtering",
+            {"require_speech": settings["audio_filtering_require_speech"]},
+        ):
             success = False
 
     # Save always_batch_retranscribe if provided

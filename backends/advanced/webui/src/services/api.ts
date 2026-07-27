@@ -474,6 +474,7 @@ export const systemApi = {
     per_segment_speaker_id?: boolean;
     streaming_fallback_timeout_seconds?: number;
     always_batch_retranscribe?: boolean;
+    audio_filtering_require_speech?: boolean;
     live_segmentation?: 'streaming_stt' | 'windowed_batch' | 'off';
   }) => api.post('/api/misc-settings', settings),
 

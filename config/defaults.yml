@@ -745,6 +745,15 @@ backend:
     min_confidence: ${oc.decode:${oc.env:SPEECH_DETECTION_MIN_CONFIDENCE,0.7}}        # Word confidence threshold
     min_duration: ${oc.decode:${oc.env:SPEECH_DETECTION_MIN_DURATION,10.0}}         # Minimum speech duration in seconds
 
+  # Audio filtering — local VAD gate ahead of (paid) transcription. When
+  # require_speech is on, audio in which the local VAD finds no speech is never
+  # transcribed: ScreenPipe sessions are rejected at ingest, batch jobs skip the
+  # provider call (including clips too short for silence condensing), and
+  # windowed-batch live preview windows are skipped. Streaming ASR
+  # (defaults.stt_stream) is not gated.
+  audio_filtering:
+    require_speech: true
+
   # Conversation stop conditions
   conversation_stop:
     speech_inactivity_threshold: 60      # Speech gap threshold for closure (1 minute)

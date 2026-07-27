@@ -14,9 +14,11 @@ import logging
 
 import redis.asyncio as redis
 
+from advanced_omi_backend.config import require_speech_for_transcription
 from advanced_omi_backend.services.audio_stream.consumer import BaseAudioStreamConsumer
 from advanced_omi_backend.services.transcription import get_transcription_provider
 from advanced_omi_backend.utils.audio_utils import pcm_to_wav_bytes
+from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,17 @@ class WindowedBatchConsumer(BaseAudioStreamConsumer):
         Wraps raw PCM as WAV so every batch provider (Deepgram raw-audio, Parakeet /
         gemma4 multipart file upload) receives well-formed audio.
         """
+        # Audio-filtering gate: a silent window otherwise costs a full provider
+        # call. detect_speech_pcm returns None when it can't score — fail open.
+        if (
+            require_speech_for_transcription()
+            and detect_speech_pcm(audio_data, sample_rate, 1, 2) is False
+        ):
+            logger.debug(
+                "🔇 No speech in %.0fs window — skipping batch call",
+                self.window_seconds,
+            )
+            return {"text": "", "words": [], "segments": [], "confidence": 0.0}
         wav_bytes = pcm_to_wav_bytes(audio_data, sample_rate=sample_rate)
         result = await self._provider.transcribe(
             audio_data=wav_bytes, sample_rate=sample_rate, diarize=False

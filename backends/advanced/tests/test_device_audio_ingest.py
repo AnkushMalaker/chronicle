@@ -72,3 +72,43 @@ def test_mongo_naive_and_aware_timestamps_group_together():
     assert [[row.source_item_id for row in session] for session in sessions] == [
         ["mongo-naive", "api-aware"]
     ]
+
+
+def test_wav_has_speech_reads_wav_and_reports_vad_verdict(tmp_path, monkeypatch):
+    import wave
+
+    import advanced_omi_backend.utils.vad_analysis as vad_analysis
+    from advanced_omi_backend.services.device_audio_ingest import _wav_has_speech
+
+    path = tmp_path / "session.wav"
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(16000)
+        handle.writeframes(b"\x00\x00" * 16000)
+
+    class FakeProvider:
+        frame_hop_ms = 16
+
+        def __init__(self, scores):
+            self._scores = scores
+
+        def score(self, mono, sample_rate):
+            return self._scores
+
+    monkeypatch.setattr(
+        vad_analysis, "get_vad_provider", lambda: FakeProvider([0.9] * 40)
+    )
+    assert _wav_has_speech(path) is True
+
+    monkeypatch.setattr(
+        vad_analysis, "get_vad_provider", lambda: FakeProvider([0.1] * 40)
+    )
+    assert _wav_has_speech(path) is False
+
+
+def test_wav_has_speech_fails_open_on_unreadable_file(tmp_path):
+    from advanced_omi_backend.services.device_audio_ingest import _wav_has_speech
+
+    missing = tmp_path / "missing.wav"
+    assert _wav_has_speech(missing) is None

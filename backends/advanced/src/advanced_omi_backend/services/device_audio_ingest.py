@@ -1,7 +1,9 @@
 """Assemble timestamped ScreenPipe chunks into Chronicle conversation sessions."""
 
 import asyncio
+import logging
 import tempfile
+import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -9,12 +11,16 @@ from typing import Any
 from beanie import PydanticObjectId
 from starlette.datastructures import UploadFile
 
+from advanced_omi_backend.config import require_speech_for_transcription
 from advanced_omi_backend.controllers.audio_controller import (
     upload_and_process_audio_files,
 )
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import DeviceInputItem, utcnow
 from advanced_omi_backend.models.user import User
+from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
+
+logger = logging.getLogger(__name__)
 
 _SESSION_GAP = timedelta(seconds=60)
 _CLOSE_DELAY = timedelta(seconds=90)
@@ -109,6 +115,19 @@ async def _mix_session(
         )
 
 
+def _wav_has_speech(path: Path) -> bool | None:
+    """Local VAD verdict for an assembled session WAV; None = couldn't score."""
+    try:
+        with wave.open(str(path), "rb") as handle:
+            sample_rate = handle.getframerate()
+            channels = handle.getnchannels()
+            sample_width = handle.getsampwidth()
+            pcm = handle.readframes(handle.getnframes())
+    except Exception:
+        return None
+    return detect_speech_pcm(pcm, sample_rate, channels, sample_width)
+
+
 async def process_device_audio() -> dict[str, Any]:
     pending = (
         await DeviceInputItem.find(
@@ -122,6 +141,8 @@ async def process_device_audio() -> dict[str, Any]:
     for item in pending:
         by_source.setdefault(audio_stream_key(item), []).append(item)
     processed = 0
+    rejected_no_speech = 0
+    require_speech = require_speech_for_transcription()
     for (user_id, source_id, direction), source_items in by_source.items():
         try:
             user = await User.get(PydanticObjectId(user_id))
@@ -143,6 +164,25 @@ async def process_device_audio() -> dict[str, Any]:
                     / f"screenpipe-{source_id}-{session[0].source_item_id}.wav"
                 )
                 await _mix_session(session, Path(temp_dir), output)
+                if require_speech and _wav_has_speech(output) is False:
+                    # Silent session: never enters the conversation pipeline.
+                    # A None verdict (VAD unavailable) fails open — the batch
+                    # transcription choke point gates it again downstream.
+                    logger.info(
+                        "🔇 ScreenPipe session %s-%s (%d chunks) has no speech "
+                        "— rejecting without transcription",
+                        source_id,
+                        direction,
+                        len(session),
+                    )
+                    for item in session:
+                        item.state = "rejected"
+                        item.metadata["rejection_reason"] = "no_speech"
+                        await item.save()
+                        item.media_data = None
+                        await item.save()
+                    rejected_no_speech += 1
+                    continue
                 with output.open("rb") as handle:
                     result = await upload_and_process_audio_files(
                         user,
@@ -191,4 +231,8 @@ async def process_device_audio() -> dict[str, Any]:
                 item.media_data = None
                 await item.save()
             processed += 1
-    return {"pending_chunks": len(pending), "processed_sessions": processed}
+    return {
+        "pending_chunks": len(pending),
+        "processed_sessions": processed,
+        "rejected_no_speech": rejected_no_speech,
+    }

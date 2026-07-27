@@ -43,10 +43,13 @@ export default function Settings() {
     per_segment_speaker_id: false,
     streaming_fallback_timeout_seconds: 120,
     always_batch_retranscribe: false,
+    audio_filtering_require_speech: true,
     live_segmentation: 'streaming_stt' as 'streaming_stt' | 'windowed_batch' | 'off',
   })
   const [miscLoading, setMiscLoading] = useState(false)
   const [miscMessage, setMiscMessage] = useState('')
+  const [audioFilterLoading, setAudioFilterLoading] = useState(false)
+  const [audioFilterMessage, setAudioFilterMessage] = useState('')
 
   // Identity settings (how the user/assistant are labeled when extracting chat memories)
   const [displayName, setDisplayName] = useState('')
@@ -108,6 +111,30 @@ export default function Settings() {
       setMiscMessage('Error: ' + (err.response?.data?.detail || err.message))
     } finally {
       setMiscLoading(false)
+    }
+  }
+
+  const saveAudioFiltering = async () => {
+    try {
+      setAudioFilterLoading(true)
+      setAudioFilterMessage('')
+      const response = await systemApi.saveMiscSettings({
+        audio_filtering_require_speech: miscSettings.audio_filtering_require_speech,
+      })
+      if (response.data.status === 'success') {
+        setAudioFilterMessage(
+          response.data.requires_worker_restart
+            ? 'Saved — workers are restarting to apply the change'
+            : 'Audio filtering settings saved successfully'
+        )
+        setTimeout(() => setAudioFilterMessage(''), 4000)
+      } else {
+        setAudioFilterMessage('Failed to save settings')
+      }
+    } catch (err: any) {
+      setAudioFilterMessage('Error: ' + (err.response?.data?.detail || err.message))
+    } finally {
+      setAudioFilterLoading(false)
     }
   }
 
@@ -532,6 +559,62 @@ export default function Settings() {
                 disabled={miscLoading}
               >
                 {miscLoading ? 'Saving...' : 'Save Processing Settings'}
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        {/* Audio Filtering */}
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
+            <Volume2 className="h-5 w-5 mr-2 text-blue-600" />
+            Audio Filtering
+          </h3>
+
+          <div className="space-y-4">
+            {/* Require Speech Toggle */}
+            <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
+              <div className="flex-1">
+                <div className="font-medium text-gray-900 dark:text-gray-100">
+                  Require Speech Before Transcription
+                </div>
+                <div className="text-sm text-gray-600 dark:text-gray-400">
+                  Run local voice activity detection on incoming audio and skip transcription entirely when no speech is found. Applies to ScreenPipe sessions (rejected at ingest), file uploads, batch and fallback transcription, and windowed live previews. Saves provider cost on silent recordings; live streaming ASR is not affected. Saving restarts the workers.
+                </div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer ml-4">
+                <input
+                  type="checkbox"
+                  checked={miscSettings.audio_filtering_require_speech}
+                  onChange={(e) => setMiscSettings(prev => ({
+                    ...prev,
+                    audio_filtering_require_speech: e.target.checked
+                  }))}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+
+            {/* Status Message */}
+            {audioFilterMessage && (
+              <Alert
+                tone={audioFilterMessage.includes('Error') || audioFilterMessage.includes('Failed') ? 'danger' : 'success'}
+              >
+                {audioFilterMessage}
+              </Alert>
+            )}
+
+            {/* Save Button */}
+            <div className="pt-4 border-t border-gray-200 dark:border-gray-600">
+              <Button
+                variant="primary"
+                size="md"
+                className="w-full"
+                onClick={saveAudioFiltering}
+                disabled={audioFilterLoading}
+              >
+                {audioFilterLoading ? 'Saving...' : 'Save Audio Filtering'}
               </Button>
             </div>
           </div>

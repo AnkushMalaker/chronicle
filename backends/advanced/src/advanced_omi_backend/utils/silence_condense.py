@@ -17,13 +17,10 @@ audio contains no speech at all.
 import logging
 from typing import List, Optional, Tuple
 
-import numpy as np
-
-from advanced_omi_backend.services.vad import get_vad_provider
 from advanced_omi_backend.utils.vad_analysis import (
-    _pcm_to_mono_int16,
     frame_speech_intervals,
     merge_speech_regions,
+    score_pcm_frames,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,7 +29,6 @@ MIN_AUDIO_SECONDS = 10.0  # below this, condensing overhead isn't worth it
 MIN_SAVINGS_FRACTION = 0.15  # send original unless we cut at least this much
 CUT_GAP_SECONDS = 3.0  # only cut silences longer than this
 PAD_SECONDS = 0.5  # context kept around each speech region
-VAD_SAMPLE_RATE = 16000
 
 # (condensed_start_seconds, original_start_seconds, length_seconds) per region
 CondenseMap = List[Tuple[float, float, float]]
@@ -62,17 +58,7 @@ def condense_silence(
         return pcm_data, None, None
 
     try:
-        mono = _pcm_to_mono_int16(pcm_data, channels)
-        if sample_rate != VAD_SAMPLE_RATE:
-            # Resample for VAD scoring only — the audio we send is untouched.
-            n16 = int(mono.size * VAD_SAMPLE_RATE / sample_rate)
-            positions = np.linspace(0, mono.size - 1, n16)
-            mono = np.interp(
-                positions, np.arange(mono.size), mono.astype(np.float32)
-            ).astype(np.int16)
-        provider = get_vad_provider()
-        scores = provider.score(mono, VAD_SAMPLE_RATE)
-        hop_seconds = provider.frame_hop_ms / 1000.0
+        scores, hop_seconds = score_pcm_frames(pcm_data, sample_rate, channels)
     except Exception as e:
         logger.warning("Silence condensing skipped (VAD failed): %s", e)
         return pcm_data, None, None

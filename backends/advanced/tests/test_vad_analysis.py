@@ -163,3 +163,67 @@ class TestSpeechRegions:
         from advanced_omi_backend.utils.vad_analysis import merge_speech_regions
 
         assert merge_speech_regions([], 100.0) == []
+
+
+class TestDetectSpeechPcm:
+    """detect_speech_pcm gates transcription: True/False verdicts, None = fail open."""
+
+    class FakeProvider:
+        frame_hop_ms = 16
+
+        def __init__(self, scores):
+            self._scores = scores
+
+        def score(self, mono, sample_rate):
+            return self._scores
+
+    @staticmethod
+    def pcm(seconds=1.0, sample_rate=16000):
+        return b"\x00\x00" * int(seconds * sample_rate)
+
+    def patch_provider(self, monkeypatch, scores):
+        import advanced_omi_backend.utils.vad_analysis as vad_analysis
+
+        monkeypatch.setattr(
+            vad_analysis, "get_vad_provider", lambda: self.FakeProvider(scores)
+        )
+
+    def test_sustained_speech_detected(self, monkeypatch):
+        from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
+
+        # 40 frames * 16ms = 0.64s of speech, above REGION_MIN_SECONDS
+        self.patch_provider(monkeypatch, [0.9] * 40 + [0.1] * 20)
+        assert detect_speech_pcm(self.pcm(), 16000, 1, 2) is True
+
+    def test_silence_rejected(self, monkeypatch):
+        from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
+
+        self.patch_provider(monkeypatch, [0.1] * 60)
+        assert detect_speech_pcm(self.pcm(), 16000, 1, 2) is False
+
+    def test_isolated_blip_rejected(self, monkeypatch):
+        from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
+
+        # 10 frames * 16ms = 0.16s, below REGION_MIN_SECONDS (0.4s)
+        self.patch_provider(monkeypatch, [0.1] * 20 + [0.9] * 10 + [0.1] * 30)
+        assert detect_speech_pcm(self.pcm(), 16000, 1, 2) is False
+
+    def test_vad_failure_fails_open(self, monkeypatch):
+        import advanced_omi_backend.utils.vad_analysis as vad_analysis
+        from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
+
+        def boom():
+            raise RuntimeError("no native lib")
+
+        monkeypatch.setattr(vad_analysis, "get_vad_provider", boom)
+        assert detect_speech_pcm(self.pcm(), 16000, 1, 2) is None
+
+    def test_unsupported_sample_width_fails_open(self):
+        from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
+
+        assert detect_speech_pcm(self.pcm(), 16000, 1, 3) is None
+
+    def test_empty_audio_is_not_speech(self):
+        from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
+
+        assert detect_speech_pcm(b"", 16000, 1, 2) is False

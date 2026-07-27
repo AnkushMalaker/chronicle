@@ -48,6 +48,51 @@ def _pcm_to_mono_int16(pcm: bytes, channels: int) -> np.ndarray:
     return samples
 
 
+VAD_SAMPLE_RATE = 16000
+
+
+def score_pcm_frames(pcm_data: bytes, sample_rate: int, channels: int):
+    """Run the configured VAD over raw 16-bit PCM.
+
+    Returns ``(frame_scores, hop_seconds)``. Audio is resampled to
+    ``VAD_SAMPLE_RATE`` for scoring only. Raises when the VAD is unavailable.
+    """
+    mono = _pcm_to_mono_int16(pcm_data, channels)
+    if sample_rate != VAD_SAMPLE_RATE:
+        n16 = int(mono.size * VAD_SAMPLE_RATE / sample_rate)
+        positions = np.linspace(0, mono.size - 1, n16)
+        mono = np.interp(
+            positions, np.arange(mono.size), mono.astype(np.float32)
+        ).astype(np.int16)
+    provider = get_vad_provider()
+    scores = provider.score(mono, VAD_SAMPLE_RATE)
+    return scores, provider.frame_hop_ms / 1000.0
+
+
+def detect_speech_pcm(
+    pcm_data: bytes, sample_rate: int, channels: int, sample_width: int
+) -> Optional[bool]:
+    """Whether raw PCM contains speech, for gating transcription.
+
+    Speech means at least one frame run of ``REGION_MIN_SECONDS`` at the
+    default probability threshold — the same criterion as the zero-speech
+    decision in silence condensing. Returns ``None`` when the audio can't be
+    scored (unsupported format or VAD failure); callers must fail open and
+    treat that as possibly-speech.
+    """
+    if sample_width != 2 or channels <= 0 or not sample_rate:
+        return None
+    if len(pcm_data) < sample_width * channels:
+        return False
+    try:
+        scores, hop_seconds = score_pcm_frames(pcm_data, sample_rate, channels)
+    except Exception as e:
+        logger.warning("Speech gate skipped (VAD failed): %s", e)
+        return None
+    intervals = frame_speech_intervals(scores, hop_seconds, 0.0)
+    return any(end - start >= REGION_MIN_SECONDS for start, end in intervals)
+
+
 async def analyze_conversation_audio(conversation_id: str) -> dict:
     """Run VAD over a conversation's audio.
 

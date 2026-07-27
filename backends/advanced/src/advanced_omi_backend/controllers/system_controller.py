@@ -695,6 +695,7 @@ async def save_misc_settings_controller(settings: dict):
         boolean_keys = {
             "per_segment_speaker_id",
             "always_batch_retranscribe",
+            "audio_filtering_require_speech",
         }
         integer_keys = {
             "streaming_fallback_timeout_seconds",
@@ -751,6 +752,15 @@ async def save_misc_settings_controller(settings: dict):
 
         # Save using OmegaConf
         if save_misc_settings(filtered_settings):
+            # The batch-transcription speech gate and the windowed-batch
+            # consumer read this toggle in the workers container, which only
+            # reloads config on restart.
+            requires_worker_restart = (
+                "audio_filtering_require_speech" in filtered_settings
+            )
+            if requires_worker_restart:
+                signal_worker_restart()
+
             # Get updated settings
             updated_settings = load_misc_settings()
             logger.info(f"Updated and saved misc settings: {filtered_settings}")
@@ -759,6 +769,7 @@ async def save_misc_settings_controller(settings: dict):
                 "message": "Miscellaneous settings saved successfully",
                 "settings": updated_settings,
                 "status": "success",
+                "requires_worker_restart": requires_worker_restart,
             }
         else:
             logger.warning("Settings save failed")
