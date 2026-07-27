@@ -18,15 +18,15 @@ from fastapi_users.authentication import (
     JWTStrategy,
 )
 
-from advanced_omi_backend.users import User, UserCreate, get_user_db
+from advanced_omi_backend.models.api_key import resolve_api_key, touch_api_key
+from advanced_omi_backend.users import User, UserCreate, get_user_by_id, get_user_db
 
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-JWT_LIFETIME_SECONDS = int(os.getenv("JWT_LIFETIME_SECONDS", "86400"))
-
-# JWT configuration
-JWT_LIFETIME_SECONDS = 86400  # 24 hours
+# Lifetime of browser/session JWTs. Long-lived non-browser clients should use an
+# API key (see models/api_key.py) rather than raising this.
+JWT_LIFETIME_SECONDS = int(os.getenv("JWT_LIFETIME_SECONDS", "86400"))  # 24 hours
 
 
 @overload
@@ -106,9 +106,37 @@ cookie_transport = CookieTransport(
 bearer_transport = BearerTransport(tokenUrl="auth/jwt/login")
 
 
-def get_jwt_strategy() -> JWTStrategy:
-    """Get JWT strategy for token generation and validation."""
-    return JWTStrategy(
+class ApiKeyOrJWTStrategy(JWTStrategy):
+    """JWT strategy that also accepts long-lived API keys.
+
+    Bearer credentials arrive on the same header regardless of type, so the
+    token itself discriminates: anything shaped like ``chrn_<prefix>_<secret>``
+    is looked up in the api_keys collection, everything else is verified as a
+    JWT. Subclassing JWTStrategy (rather than adding a second authentication
+    backend) means every existing entry point — ``current_active_user``,
+    ``websocket_auth``, ``get_user_from_token_param`` — accepts API keys
+    without further change, and token *issuance* on login stays pure JWT.
+    """
+
+    async def read_token(self, token: Optional[str], user_manager) -> Optional[User]:
+        if token:
+            api_key = await resolve_api_key(token)
+            if api_key is not None:
+                user = await get_user_by_id(str(api_key.user_id))
+                if user is not None and user.is_active:
+                    await touch_api_key(api_key)
+                    return user
+                logger.warning(
+                    f"API key {api_key.key_prefix} resolves to a missing or "
+                    f"inactive user {api_key.user_id}"
+                )
+                return None
+        return await super().read_token(token, user_manager)
+
+
+def get_jwt_strategy() -> ApiKeyOrJWTStrategy:
+    """Get the token strategy for validation (API keys + JWTs) and JWT issuance."""
+    return ApiKeyOrJWTStrategy(
         secret=SECRET_KEY,
         lifetime_seconds=JWT_LIFETIME_SECONDS,
         token_audience=["fastapi-users:auth"] + ACCEPTED_ISSUERS,

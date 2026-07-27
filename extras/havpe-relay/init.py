@@ -22,7 +22,12 @@ from rich.text import Text
 
 # Add repo root to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from setup_utils import mask_value, prompt_with_existing_masked, read_env_value
+from setup_utils import (
+    mask_value,
+    mint_chronicle_api_key,
+    prompt_with_existing_masked,
+    read_env_value,
+)
 
 
 class HavpeRelaySetup:
@@ -153,52 +158,69 @@ class HavpeRelaySetup:
         self.config["BACKEND_WS_URL"] = ws_url
 
     def setup_auth_credentials(self):
-        """Configure authentication credentials"""
+        """Mint a long-lived API key for the relay.
+
+        The relay reconnects to the backend WebSocket for as long as the device
+        stays powered on, so it needs a credential that never expires. The login
+        password is used once, here, and is not written to the relay's .env.
+        """
         self.print_section("Authentication")
-        self.console.print("Credentials for authenticating with the Chronicle backend")
+        self.console.print(
+            "Your Chronicle login (same account as the web dashboard).\n"
+            "\n"
+            "The password is used once, right now, to mint a long-lived API key.\n"
+            "Only that key is written to .env — the password is never stored here."
+        )
         self.console.print()
+
+        existing_key = self.read_existing_env_value("CHRONICLE_API_KEY")
+        if existing_key and not getattr(self.args, "password", None):
+            if not Confirm.ask(
+                "An API key is already configured. Mint a new one?", default=False
+            ):
+                self.config["CHRONICLE_API_KEY"] = existing_key
+                return
 
         # Try to read defaults from backend .env
         backend_email = self.read_backend_env_value("ADMIN_EMAIL")
         backend_password = self.read_backend_env_value("ADMIN_PASSWORD")
 
-        # Username
         if hasattr(self.args, "username") and self.args.username:
             username = self.args.username
             self.console.print(
-                f"[green][SUCCESS][/green] Username configured from command line"
+                "[green][SUCCESS][/green] Username configured from command line"
             )
         else:
-            existing = self.read_existing_env_value("AUTH_USERNAME")
-            default_user = existing or backend_email or ""
-            if default_user:
-                username = self.prompt_value("Auth username (email)", default_user)
-            else:
-                username = self.prompt_value("Auth username (email)")
+            username = self.prompt_value("Auth username (email)", backend_email or "")
 
-        self.config["AUTH_USERNAME"] = username
-
-        # Password
         if hasattr(self.args, "password") and self.args.password:
             password = self.args.password
             self.console.print(
-                f"[green][SUCCESS][/green] Password configured from command line"
+                "[green][SUCCESS][/green] Password configured from command line"
             )
         else:
-            existing_pw = self.read_existing_env_value("AUTH_PASSWORD")
-            # Fall back to backend admin password if no local password set
-            if not existing_pw and backend_password:
-                existing_pw = backend_password
+            if backend_password:
                 self.console.print(
                     "[blue][INFO][/blue] Using admin password from backend .env"
                 )
             password = prompt_with_existing_masked(
                 prompt_text="Auth password",
-                existing_value=existing_pw,
+                existing_value=backend_password,
                 is_password=True,
             )
 
-        self.config["AUTH_PASSWORD"] = password
+        api_key, error = mint_chronicle_api_key(
+            backend_url=self.config["BACKEND_URL"],
+            username=username,
+            password=password,
+            key_name=f"havpe-relay ({self.config.get('DEVICE_NAME') or 'havpe'})",
+        )
+        if error:
+            self.console.print(f"[red][ERROR][/red] {error}")
+            self.config["CHRONICLE_API_KEY"] = existing_key or ""
+            return
+        self.console.print("[green][SUCCESS][/green] Minted a long-lived API key")
+        self.config["CHRONICLE_API_KEY"] = api_key
 
     def setup_device_config(self):
         """Configure device name and TCP port"""
@@ -366,10 +388,8 @@ class HavpeRelaySetup:
 
         self.console.print(f"  Backend URL:    {self.config.get('BACKEND_URL', '')}")
         self.console.print(f"  Backend WS URL: {self.config.get('BACKEND_WS_URL', '')}")
-        self.console.print(f"  Auth Username:  {self.config.get('AUTH_USERNAME', '')}")
-        self.console.print(
-            f"  Auth Password:  {'Configured' if self.config.get('AUTH_PASSWORD') else 'Not set'}"
-        )
+        key = self.config.get("CHRONICLE_API_KEY", "")
+        self.console.print(f"  API key:        {mask_value(key) if key else 'Not set'}")
         self.console.print(f"  Device Name:    {self.config.get('DEVICE_NAME', '')}")
         self.console.print(f"  TCP Port:       {self.config.get('TCP_PORT', '')}")
         esphome_ip = self.config.get("ESPHOME_DEVICE_IP", "")
@@ -401,8 +421,9 @@ class HavpeRelaySetup:
 
         try:
             self.setup_backend_urls()
-            self.setup_auth_credentials()
+            # Device config first: the device name becomes the API key's label.
             self.setup_device_config()
+            self.setup_auth_credentials()
             self.setup_esphome_config()
             self.setup_firmware_secrets()
 

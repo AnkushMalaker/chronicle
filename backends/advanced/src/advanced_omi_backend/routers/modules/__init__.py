@@ -3,6 +3,7 @@ Router modules for Chronicle API.
 
 This package contains organized router modules for different functional areas:
 - user_routes: User management and authentication
+- api_key_routes: Long-lived API keys for non-browser clients
 - chat_routes: Chat interface with memory integration
 - client_routes: Active client monitoring and management
 - conversation_routes: Conversation CRUD and audio processing
@@ -20,6 +21,7 @@ This package contains organized router modules for different functional areas:
 
 from .admin_routes import router as admin_router
 from .annotation_routes import router as annotation_router
+from .api_key_routes import router as api_key_router
 from .audio_routes import router as audio_router
 from .chat_routes import router as chat_router
 from .client_routes import router as client_router
@@ -42,6 +44,7 @@ from .websocket_routes import router as websocket_router
 __all__ = [
     "admin_router",
     "annotation_router",
+    "api_key_router",
     "audio_router",
     "chat_router",
     "client_router",

@@ -66,27 +66,26 @@ class VaultSyncManager:
         threading.Thread(target=self._pair, daemon=True).start()
 
     def _pair(self) -> None:
-        from vault_core import broker_pair, get_jwt_token
+        from vault_core import broker_pair
 
         if not self._lock.acquire(blocking=False):
             return
         try:
             cfg = self.config
-            if not cfg.auth_username or not cfg.auth_password:
+            if not cfg.api_key:
                 self.state.update(
                     status="error",
-                    error="set Chronicle login in the repository-root .env",
+                    error="set CHRONICLE_API_KEY in the repository-root .env",
                 )
                 return
             self.state.update(status="starting", error=None)
             self.syncthing.start()
             self.state.update(status="pairing")
-            token = get_jwt_token(cfg.auth_username, cfg.auth_password, cfg.backend_url)
-            if not token:
-                self.state.update(status="error", error="backend authentication failed")
-                return
             info = broker_pair(
-                cfg.backend_url, token, self.syncthing.device_id(), cfg.device_name
+                cfg.backend_url,
+                cfg.api_key,
+                self.syncthing.device_id(),
+                cfg.device_name,
             )
             self.syncthing.ensure_server_device(
                 info["server_device_id"],

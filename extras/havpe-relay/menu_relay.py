@@ -16,7 +16,7 @@ from typing import Optional
 
 import rumps
 from dotenv import load_dotenv
-from relay_core import RelayConfig, get_jwt_token, run_device_session
+from relay_core import RelayConfig, check_credentials, run_device_session
 
 logger = logging.getLogger(__name__)
 
@@ -166,18 +166,11 @@ class RelayManager:
         if self._server is not None:
             return
 
-        if not self.config.auth_username or not self.config.auth_password:
-            self.state.update(
-                status="error", error="AUTH_USERNAME/AUTH_PASSWORD not set in .env"
-            )
+        if not self.config.api_key:
+            self.state.update(status="error", error="CHRONICLE_API_KEY not set in .env")
             return
 
-        token = await get_jwt_token(
-            self.config.auth_username,
-            self.config.auth_password,
-            self.config.backend_url,
-        )
-        if not token:
+        if not await check_credentials(self.config.api_key, self.config.backend_url):
             self.state.update(status="error", error="Backend auth failed")
             return
 

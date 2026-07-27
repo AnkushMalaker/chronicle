@@ -125,8 +125,7 @@ You should see `TCP client connected` followed by chunk processing messages.
 |----------|---------|-------------|
 | `BACKEND_URL` | `http://host.docker.internal:8000` | Backend HTTP URL (for auth) |
 | `BACKEND_WS_URL` | `ws://host.docker.internal:8000` | Backend WebSocket URL |
-| `AUTH_USERNAME` | — | Email address for Chronicle login |
-| `AUTH_PASSWORD` | — | Password for Chronicle login |
+| `CHRONICLE_API_KEY` | — | Long-lived Chronicle API key (webui → Settings → API Keys, or minted by `init.py`) |
 | `DEVICE_NAME` | `havpe` | Device identifier (becomes part of client ID) |
 | `TCP_PORT` | `8989` | TCP port to listen on for ESP32 |
 

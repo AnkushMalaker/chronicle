@@ -4,6 +4,7 @@ import { Settings as SettingsIcon, CheckCircle, AlertCircle, RefreshCw, Volume2,
 import { systemApi, speakerApi, authApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
 import { useDiarizationSettings, useLLMOperations, useMiscSettings, useModels, ModelView, ModelType } from '../hooks/useSystem'
+import ApiKeysCard from '../components/ApiKeysCard'
 import ExternalServices from '../components/ExternalServices'
 import AsrContextSettings from '../components/AsrContextSettings'
 import AutomationSettings from '../components/AutomationSettings'
@@ -649,6 +650,9 @@ export default function Settings() {
 
         {/* Model Registry — add/edit/delete model definitions and API keys */}
         <ModelRegistryCard isAdmin={isAdmin} />
+
+        {/* API keys — long-lived credentials for clients that can't re-login */}
+        <ApiKeysCard />
       </div>
     </div>
   )

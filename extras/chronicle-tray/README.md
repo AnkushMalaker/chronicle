@@ -7,7 +7,7 @@ with a single icon whose menu shows only what this machine can do:
 | Section | What it does | Shown when |
 |---------|--------------|------------|
 | **Vault Sync** | Syncs your Obsidian vault with the server via a private Syncthing (config in the repository-root `.env`) | `syncthing` binary installed |
-| **ScreenPipe** | Local capture stats + start/stop/restart for `screenpipe.service` and the Chronicle collector | `screenpipe` installed or a local DB exists |
+| **ScreenPipe** | Local capture stats, start/stop/restart for `screenpipe.service` and the Chronicle collector, a **Capture** submenu (audio/video master switches) and a **Capture settings…** dialog for per-source record/forward choices | `screenpipe` installed or a local DB exists |
 | **Pendant** | Scan/connect/stream from BLE wearables (OMI, Neo1, Friend; config in `extras/local-wearable-client/`) | installed with `--pendant` |
 
 Unavailable sections show a disabled hint line with the install command instead
@@ -25,8 +25,8 @@ uv run chronicle-tray status|restart|logs|uninstall
 
 Installing the tray removes the superseded `chronicle-desktop.service` /
 `com.chronicle.vault-sync` units (two trays would fight over the same private
-Syncthing). Vault sync reads `BACKEND_URL`, `AUTH_USERNAME`, and `AUTH_PASSWORD`
-from the repository-root `.env`.
+Syncthing). Vault sync reads `BACKEND_URL` and `CHRONICLE_API_KEY` from the
+repository-root `.env`.
 
 The service unit is defined in the repo-root `clients.py` (shared with
 `services.py client` and the node agent), and runs `uv run` from this checkout,

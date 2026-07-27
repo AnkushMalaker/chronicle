@@ -68,13 +68,11 @@ def check_config() -> bool:
         logger.warning("Audio will be saved locally but NOT streamed to the backend")
         return False
 
-    # AUTH_*/BACKEND_URL are the unified keys; ADMIN_*/BACKEND_HOST are accepted
-    # as legacy fallbacks.
+    # CHRONICLE_API_KEY/BACKEND_URL are the unified keys; BACKEND_HOST is
+    # accepted as a legacy fallback.
     missing = []
-    if not (os.getenv("AUTH_USERNAME") or os.getenv("ADMIN_EMAIL")):
-        missing.append("AUTH_USERNAME")
-    if not (os.getenv("AUTH_PASSWORD") or os.getenv("ADMIN_PASSWORD")):
-        missing.append("AUTH_PASSWORD")
+    if not os.getenv("CHRONICLE_API_KEY"):
+        missing.append("CHRONICLE_API_KEY")
     if not (os.getenv("BACKEND_URL") or os.getenv("BACKEND_HOST")):
         missing.append("BACKEND_URL")
 

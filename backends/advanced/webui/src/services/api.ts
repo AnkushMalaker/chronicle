@@ -446,6 +446,13 @@ export const usersApi = {
   delete: (id: string) => api.delete(`/api/users/${id}`),
 }
 
+export const apiKeysApi = {
+  list: () => api.get('/api/api-keys'),
+  create: (name: string, expiresInDays?: number) =>
+    api.post('/api/api-keys', { name, expires_in_days: expiresInDays ?? null }),
+  revoke: (id: string) => api.delete(`/api/api-keys/${id}`),
+}
+
 export const clientsApi = {
   list: () => api.get('/api/clients'),
   rename: (clientId: string, name: string) => api.patch(`/api/clients/${clientId}`, { name }),

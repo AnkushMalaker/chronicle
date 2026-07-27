@@ -66,6 +66,46 @@ class UserManager(BaseUserManager[User, PydanticObjectId]):
 - **Lifetime**: 1 hour
 - **Usage**: Web dashboard, browser-based clients
 
+#### API Keys (long-lived)
+- **Endpoint**: `/api/api-keys` (create/list/revoke)
+- **Transport**: Authorization header (`Bearer chrn_<prefix>_<secret>`) — the same
+  header a JWT uses, so any client with only an "API key" field works unchanged
+- **Lifetime**: never expires unless given an explicit expiry or revoked
+- **Usage**: clients that store one credential and cannot re-login — dictation
+  apps (Handy), relays, sync daemons, scripts
+
+A JWT dies after `JWT_LIFETIME_SECONDS` (24h), which forces such clients either
+to break daily or to store the account password so they can re-login. An API key
+removes both. It authenticates as its owning user with the same access that
+user's JWT would grant.
+
+`ApiKeyOrJWTStrategy` (in `auth.py`) discriminates on the token itself: anything
+shaped like `chrn_<prefix>_<secret>` is resolved against the `api_keys`
+collection, everything else is verified as a JWT. Because it subclasses
+`JWTStrategy`, every entry point — `current_active_user`, `websocket_auth`,
+`get_user_from_token_param` — accepts API keys, including the `?token=` query
+parameter used by WebSocket and audio URLs.
+
+Only `sha256(secret)` is stored. The plaintext is returned once by
+`POST /api/api-keys` and is unrecoverable afterwards; a lost key is revoked and
+replaced, not retrieved.
+
+```bash
+# Mint a key (using an existing session token)
+curl -X POST "http://localhost:8000/api/api-keys" \
+  -H "Authorization: Bearer $JWT" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Handy dictation (laptop)"}'
+# → {"token": "chrn_ab12cd34ef56_...", "key_prefix": "ab12cd34ef56", ...}
+
+# Use it anywhere a JWT works
+curl "http://localhost:8000/api/v1/models" -H "Authorization: Bearer chrn_..."
+```
+
+**Handy setup**: Settings → Models → Remote Transcription. URL
+`https://<host>/api/v1`, API key = the minted `chrn_…` token, model = a
+configured STT model name (or leave the default).
+
 
 ## Authentication Flow
 

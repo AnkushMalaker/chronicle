@@ -12,8 +12,10 @@ Chronicle's configured providers:
   Streaming (SSE) passes through.
 - GET /api/v1/models — list configured llm/stt models.
 
-Clients use base URL `https://<host>/api/v1` with a Chronicle JWT as the
-API key (standard `Authorization: Bearer` header).
+Clients use base URL `https://<host>/api/v1` with a Chronicle credential as the
+API key (standard `Authorization: Bearer` header). Prefer a long-lived API key
+minted at Settings → API Keys — a JWT expires after 24h, which breaks any client
+that has no way to log in again.
 """
 
 import io

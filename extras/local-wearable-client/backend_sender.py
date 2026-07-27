@@ -17,7 +17,7 @@ import websockets
 from dotenv import load_dotenv
 
 # Unified config: read the repository-root .env shared with the tray and vault
-# sync (BACKEND_URL / AUTH_USERNAME / AUTH_PASSWORD). Mirrors vault_core.
+# sync (BACKEND_URL / CHRONICLE_API_KEY). Mirrors vault_core.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_REPO_ROOT / ".env")
 
@@ -98,9 +98,10 @@ _host_part = backend_url.split("://", 1)[-1]
 websocket_uri = f"{'wss' if USE_HTTPS else 'ws'}://{_host_part}/ws?codec=opus"
 logger.info("Wearable backend resolved: %s (ws: %s)", backend_url, websocket_uri)
 
-# Unified auth keys (AUTH_*), with the legacy ADMIN_* names as fallbacks.
-ADMIN_PASSWORD = os.getenv("AUTH_PASSWORD") or os.getenv("ADMIN_PASSWORD")
-ADMIN_EMAIL = os.getenv("AUTH_USERNAME") or os.getenv("ADMIN_EMAIL")
+# Long-lived Chronicle API key (Settings → API Keys). The client re-dials the
+# backend for as long as the wearable stays paired, so it needs a credential
+# that does not expire mid-session.
+CHRONICLE_API_KEY = os.getenv("CHRONICLE_API_KEY")
 
 # Module-level websocket reference for sending control messages (e.g., button events)
 _active_websocket = None
@@ -119,48 +120,6 @@ async def send_button_event(button_state: str) -> None:
     }
     await _active_websocket.send(json.dumps(event) + "\n")
     logger.info("Sent button event to backend: %s", button_state)
-
-
-async def get_jwt_token(username: str, password: str) -> Optional[str]:
-    """Get JWT token from backend using username and password."""
-    try:
-        logger.info("Authenticating with backend as: %s", username)
-
-        async with httpx.AsyncClient(timeout=10.0, verify=VERIFY_SSL) as client:
-            response = await client.post(
-                f"{backend_url}/auth/jwt/login",
-                data={"username": username, "password": password},
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-
-        if response.status_code == 200:
-            auth_data = response.json()
-            token = auth_data.get("access_token")
-            if token:
-                logger.info("JWT authentication successful")
-                return token
-            else:
-                logger.error("No access token in response")
-                return None
-        else:
-            error_msg = "Invalid credentials"
-            try:
-                error_data = response.json()
-                error_msg = error_data.get("detail", error_msg)
-            except Exception:
-                pass
-            logger.error("Authentication failed: %s", error_msg)
-            return None
-
-    except httpx.TimeoutException:
-        logger.error("Authentication request timed out")
-        return None
-    except httpx.RequestError as e:
-        logger.error("Authentication request failed: %s", e)
-        return None
-    except Exception as e:
-        logger.error("Unexpected authentication error: %s", e)
-        return None
 
 
 async def receive_handler(websocket, logger, speaker=None) -> None:
@@ -278,18 +237,10 @@ async def stream_to_backend(
     chunk_count = 0
 
     while not session_ended:
-        # Re-fetch the JWT on every (re)dial. This is the mid-session refresh:
-        # a long session can outlive the 1h token lifetime, so each reconnect
-        # picks up a fresh token without cycling the BLE session.
-        token = await get_jwt_token(ADMIN_EMAIL, ADMIN_PASSWORD)
-        if not token:
-            logger.error("Failed to get JWT token; retrying in %.0fs", backoff)
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * _BACKOFF_FACTOR, _BACKOFF_MAX)
-            continue
-
+        # The API key does not expire, so a re-dial needs no token refresh.
         uri_with_token = (
-            f"{websocket_uri}&token={token}&device_name={quote(device_name)}"
+            f"{websocket_uri}&token={CHRONICLE_API_KEY}"
+            f"&device_name={quote(device_name)}"
         )
 
         connected_at = None

@@ -19,7 +19,7 @@ import time
 import wave
 
 from dotenv import load_dotenv
-from relay_core import RelayConfig, get_jwt_token, run_device_session
+from relay_core import RelayConfig, check_credentials, run_device_session
 from service import install, kickstart, logs, status, uninstall
 
 load_dotenv()
@@ -132,8 +132,7 @@ async def main():
         type=str,
         default=os.getenv("BACKEND_WS_URL", "ws://localhost:8000"),
     )
-    parser.add_argument("--username", type=str, default=os.getenv("AUTH_USERNAME"))
-    parser.add_argument("--password", type=str, default=os.getenv("AUTH_PASSWORD"))
+    parser.add_argument("--api-key", type=str, default=os.getenv("CHRONICLE_API_KEY"))
     parser.add_argument(
         "--device-name", type=str, default=os.getenv("DEVICE_NAME", "havpe")
     )
@@ -155,8 +154,7 @@ async def main():
     config = RelayConfig(
         backend_url=args.backend_url,
         backend_ws_url=args.backend_ws_url,
-        auth_username=args.username or "",
-        auth_password=args.password or "",
+        api_key=args.api_key or "",
         device_name=args.device_name,
         esphome_device_ip=args.esphome_device_ip or "",
     )
@@ -167,16 +165,11 @@ async def main():
     logging.getLogger("websockets").setLevel(logging.WARNING)
     logging.getLogger("aioesphomeapi").setLevel(logging.WARNING)
 
-    if not config.auth_username or not config.auth_password:
-        logger.error(
-            "Set AUTH_USERNAME and AUTH_PASSWORD (env or --username/--password)"
-        )
+    if not config.api_key:
+        logger.error("Set CHRONICLE_API_KEY (env or --api-key)")
         return
 
-    token = await get_jwt_token(
-        config.auth_username, config.auth_password, config.backend_url
-    )
-    if not token:
+    if not await check_credentials(config.api_key, config.backend_url):
         logger.error("Startup auth check failed")
         return
 

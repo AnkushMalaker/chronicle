@@ -50,8 +50,7 @@ def save_vault_dir(path: str) -> None:
 @dataclass
 class VaultSyncConfig:
     backend_url: str
-    auth_username: str
-    auth_password: str
+    api_key: str
     local_vault_dir: str
     device_name: str
 
@@ -68,28 +67,10 @@ class VaultSyncConfig:
 
         return cls(
             backend_url=backend_url,
-            auth_username=os.getenv("AUTH_USERNAME") or os.getenv("ADMIN_EMAIL", ""),
-            auth_password=os.getenv("AUTH_PASSWORD") or os.getenv("ADMIN_PASSWORD", ""),
+            api_key=os.getenv("CHRONICLE_API_KEY", ""),
             local_vault_dir=os.path.expanduser(vault_dir),
             device_name=os.getenv("DEVICE_NAME") or socket.gethostname(),
         )
-
-
-def get_jwt_token(username: str, password: str, backend_url: str) -> Optional[str]:
-    """Exchange email+password for a JWT, or return None on failure."""
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            resp = client.post(
-                f"{backend_url}/auth/jwt/login",
-                data={"username": username, "password": password},
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-        if resp.status_code == 200:
-            return resp.json().get("access_token")
-        logger.error("Backend auth failed: HTTP %s", resp.status_code)
-    except httpx.HTTPError as e:
-        logger.error("Backend auth error: %s", e)
-    return None
 
 
 def broker_pair(backend_url: str, token: str, device_id: str, device_name: str) -> dict:

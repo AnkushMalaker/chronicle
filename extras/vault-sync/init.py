@@ -28,7 +28,12 @@ from rich.text import Text
 
 # Add repo root to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from setup_utils import prompt_with_existing_masked, read_env_value
+from setup_utils import (
+    mask_value,
+    mint_chronicle_api_key,
+    prompt_with_existing_masked,
+    read_env_value,
+)
 
 PROJECT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PROJECT_DIR.parent.parent
@@ -160,9 +165,20 @@ class VaultSyncSetup:
         self.print_section("Authentication")
         self.console.print(
             "Your Chronicle login (same account as the web dashboard). The vault that\n"
-            "syncs here is this account's vault."
+            "syncs here is this account's vault.\n"
+            "\n"
+            "The password is used once, right now, to mint a long-lived API key. Only\n"
+            "that key is written to .env — the password is never stored here."
         )
         self.console.print()
+
+        existing_key = self.read_existing_env_value("CHRONICLE_API_KEY")
+        if existing_key and not getattr(self.args, "password", None):
+            if not Confirm.ask(
+                "An API key is already configured. Mint a new one?", default=False
+            ):
+                self.config["CHRONICLE_API_KEY"] = existing_key
+                return
 
         backend_email = self.read_backend_env_value("ADMIN_EMAIL")
         backend_password = self.read_backend_env_value("ADMIN_PASSWORD")
@@ -171,27 +187,30 @@ class VaultSyncSetup:
             username = self.args.username
             self.console.print("[green][SUCCESS][/green] Username from command line")
         else:
-            existing = self.read_existing_env_value("AUTH_USERNAME")
-            default_user = existing or backend_email or ""
-            username = self.prompt_value("Auth username (email)", default_user)
-        self.config["AUTH_USERNAME"] = username
+            username = self.prompt_value("Auth username (email)", backend_email or "")
 
         if getattr(self.args, "password", None):
             password = self.args.password
             self.console.print("[green][SUCCESS][/green] Password from command line")
         else:
-            existing_pw = self.read_existing_env_value("AUTH_PASSWORD")
-            if not existing_pw and backend_password:
-                existing_pw = backend_password
-                self.console.print(
-                    "[blue][INFO][/blue] Using admin password from backend .env"
-                )
             password = prompt_with_existing_masked(
                 prompt_text="Auth password",
-                existing_value=existing_pw,
+                existing_value=backend_password,
                 is_password=True,
             )
-        self.config["AUTH_PASSWORD"] = password
+
+        api_key, error = mint_chronicle_api_key(
+            backend_url=self.config["BACKEND_URL"],
+            username=username,
+            password=password,
+            key_name=f"vault-sync ({self.config.get('DEVICE_NAME') or socket.gethostname()})",
+        )
+        if error:
+            self.console.print(f"[red][ERROR][/red] {error}")
+            self.config["CHRONICLE_API_KEY"] = existing_key or ""
+            return
+        self.console.print("[green][SUCCESS][/green] Minted a long-lived API key")
+        self.config["CHRONICLE_API_KEY"] = api_key
 
     def setup_local_config(self):
         self.print_section("Local Vault")
@@ -217,8 +236,9 @@ class VaultSyncSetup:
     # --- verification ---------------------------------------------------------
 
     def verify_backend(self) -> bool:
-        """Log in and hit the pairing broker so misconfiguration surfaces now,
-        with an actionable message, instead of as a menu-bar error icon later."""
+        """Hit the pairing broker with the minted API key so misconfiguration
+        surfaces now, with an actionable message, instead of as a menu-bar error
+        icon later. This exercises the exact credential the app will use."""
         self.print_section("Verifying backend")
         url = self.config["BACKEND_URL"]
         if not url:
@@ -226,14 +246,17 @@ class VaultSyncSetup:
                 "[yellow][WARNING][/yellow] No backend URL set — skipping verification"
             )
             return False
+        token = self.config.get("CHRONICLE_API_KEY")
+        if not token:
+            self.console.print(
+                "[red][ERROR][/red] No API key was minted — cannot verify"
+            )
+            return False
 
         try:
-            resp = requests.post(
-                f"{url}/auth/jwt/login",
-                data={
-                    "username": self.config["AUTH_USERNAME"],
-                    "password": self.config["AUTH_PASSWORD"],
-                },
+            info_resp = requests.get(
+                f"{url}/api/vault-sync/info",
+                headers={"Authorization": f"Bearer {token}"},
                 timeout=10,
             )
         except requests.exceptions.SSLError:
@@ -250,20 +273,12 @@ class VaultSyncSetup:
             )
             return False
 
-        if resp.status_code != 200:
+        if info_resp.status_code == 401:
             self.console.print(
-                f"[red][ERROR][/red] Login failed (HTTP {resp.status_code}) — check "
-                "AUTH_USERNAME/AUTH_PASSWORD"
+                "[red][ERROR][/red] The API key was rejected — re-run setup to mint "
+                "a new one"
             )
             return False
-        token = resp.json().get("access_token")
-        self.console.print("[green][SUCCESS][/green] Logged in to backend")
-
-        info_resp = requests.get(
-            f"{url}/api/vault-sync/info",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
-        )
         if info_resp.status_code == 503:
             self.console.print(
                 "[red][ERROR][/red] The server doesn't have vault sync enabled yet. "
@@ -363,7 +378,8 @@ class VaultSyncSetup:
         self.print_section("Configuration Summary")
         self.console.print()
         self.console.print(f"  Backend URL:  {self.config.get('BACKEND_URL', '')}")
-        self.console.print(f"  Account:      {self.config.get('AUTH_USERNAME', '')}")
+        key = self.config.get("CHRONICLE_API_KEY", "")
+        self.console.print(f"  API key:      {mask_value(key) if key else 'Not set'}")
         self.console.print(f"  Local vault:  {self.config.get('LOCAL_VAULT_DIR', '')}")
         self.console.print(f"  Device name:  {self.config.get('DEVICE_NAME', '')}")
 
@@ -382,8 +398,9 @@ class VaultSyncSetup:
             self.ensure_uv()
 
             self.setup_backend_url()
-            self.setup_auth_credentials()
+            # Local config first: the device name becomes the API key's label.
             self.setup_local_config()
+            self.setup_auth_credentials()
 
             self.print_header("Configuration Complete!")
             self.generate_env_file()

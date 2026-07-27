@@ -35,8 +35,9 @@ class RelayConfig:
 
     backend_url: str
     backend_ws_url: str
-    auth_username: str
-    auth_password: str
+    # Long-lived Chronicle API key (Settings → API Keys). A JWT would expire
+    # mid-session and the relay has no way to log in again.
+    api_key: str
     device_name: str
     esphome_device_ip: str = ""
     # If the device sends nothing for this long, treat it as gone and close the
@@ -70,31 +71,32 @@ class RelayConfig:
         return cls(
             backend_url=backend_url,
             backend_ws_url=backend_ws_url,
-            auth_username=os.getenv("AUTH_USERNAME", ""),
-            auth_password=os.getenv("AUTH_PASSWORD", ""),
+            api_key=os.getenv("CHRONICLE_API_KEY", ""),
             device_name=os.getenv("DEVICE_NAME", "havpe"),
             esphome_device_ip=os.getenv("ESPHOME_DEVICE_IP", ""),
             device_idle_timeout=float(os.getenv("DEVICE_IDLE_TIMEOUT", "300")),
         )
 
 
-async def get_jwt_token(username: str, password: str, backend_url: str) -> str | None:
+async def check_credentials(api_key: str, backend_url: str) -> bool:
+    """Confirm the API key is accepted, so a bad credential is reported once at
+    startup rather than as an opaque WebSocket close on every reconnect."""
+    if not api_key:
+        logger.error("CHRONICLE_API_KEY is not set")
+        return False
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{backend_url}/auth/jwt/login",
-                data={"username": username, "password": password},
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            resp = await client.get(
+                f"{backend_url}/users/me",
+                headers={"Authorization": f"Bearer {api_key}"},
             )
         if resp.status_code == 200:
-            token = resp.json().get("access_token")
-            if token:
-                logger.info("Auth OK")
-                return token
+            logger.info("Auth OK")
+            return True
         logger.error("Auth failed: %d", resp.status_code)
     except Exception as e:
         logger.error("Auth error: %s", e)
-    return None
+    return False
 
 
 async def forward_tcp_to_ws(
@@ -330,10 +332,7 @@ async def run_device_session(
     if on_session_start:
         on_session_start(addr_str)
 
-    token = await get_jwt_token(
-        config.auth_username, config.auth_password, config.backend_url
-    )
-    if not token:
+    if not await check_credentials(config.api_key, config.backend_url):
         logger.error("Auth failed, dropping connection")
         if on_auth_failure:
             on_auth_failure()
@@ -371,9 +370,9 @@ async def run_device_session(
 
     # Backend-WS reconnect backoff. A WS blip must NOT end the device session:
     # we keep reader/writer (and the ESPHome API) alive and re-dial the backend
-    # with capped exponential backoff, re-fetching the JWT each time. The loop
-    # ends only on true device disconnect (reader EOF / IncompleteReadError) or
-    # idle timeout — both surface as forward_tcp_to_ws returning normally.
+    # with capped exponential backoff. The loop ends only on true device
+    # disconnect (reader EOF / IncompleteReadError) or idle timeout — both
+    # surface as forward_tcp_to_ws returning normally.
     _BACKOFF_INITIAL = 1.0
     _BACKOFF_FACTOR = 2.0
     _BACKOFF_MAX = 30.0
@@ -383,19 +382,9 @@ async def run_device_session(
 
     try:
         while not session_ended:
-            # Re-fetch the JWT on each re-dial (mid-session refresh for long
-            # sessions that can outlive the token lifetime).
-            token = await get_jwt_token(
-                config.auth_username, config.auth_password, config.backend_url
-            )
-            if not token:
-                logger.error("Auth failed on reconnect; retrying in %.0fs", backoff)
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * _BACKOFF_FACTOR, _BACKOFF_MAX)
-                continue
-
+            # The API key does not expire, so re-dialing needs no token refresh.
             backend_uri = (
-                f"{config.backend_ws_url}/ws?codec=pcm&token={token}"
+                f"{config.backend_ws_url}/ws?codec=pcm&token={config.api_key}"
                 f"&device_name={config.device_name}"
             )
 

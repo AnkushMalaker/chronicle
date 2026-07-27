@@ -26,6 +26,7 @@ from advanced_omi_backend.auth import (
 from advanced_omi_backend.client_manager import get_client_manager
 from advanced_omi_backend.middleware.app_middleware import setup_middleware
 from advanced_omi_backend.models.annotation import Annotation
+from advanced_omi_backend.models.api_key import ApiKey
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import (
@@ -78,6 +79,7 @@ async def lifespan(app: FastAPI):
             database=config.db,
             document_models=[
                 User,
+                ApiKey,
                 Conversation,
                 AudioChunkDocument,
                 WaveformData,

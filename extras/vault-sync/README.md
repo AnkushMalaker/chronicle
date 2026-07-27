@@ -65,7 +65,8 @@ uv run --with-requirements ../../setup-requirements.txt python init.py
 # manual alternative — client config lives in the repository-root .env:
 cd ../..
 cp .env.template .env  # if the repository-root .env does not exist yet
-#   edit .env: set AUTH_USERNAME (email), AUTH_PASSWORD, and BACKEND_URL
+#   edit .env: set CHRONICLE_API_KEY and BACKEND_URL
+#   (mint the key in the webui: Settings → API Keys)
 
 cd extras/chronicle-tray && uv run chronicle-tray
 ```
@@ -75,9 +76,11 @@ cd extras/chronicle-tray && uv run chronicle-tray
 > point `BACKEND_URL` at the plain-HTTP backend port instead:
 > `BACKEND_URL=http://<server-ip>:8000`.
 
-The Mac needs only three things: `BACKEND_URL`, `AUTH_USERNAME` (your Chronicle email),
-and `AUTH_PASSWORD`. The pairing broker hands back everything else (server device id,
-sync address) — you never set `VAULT_SYNC_*` on the Mac; those are server-only.
+The Mac needs only two things: `BACKEND_URL` and `CHRONICLE_API_KEY`. Running
+`init.py` mints the key for you — it asks for your Chronicle password once and
+stores only the resulting key, never the password. The pairing broker hands back
+everything else (server device id, sync address) — you never set `VAULT_SYNC_*` on
+the Mac; those are server-only.
 
 > **macOS + Tailscale: set `BACKEND_URL` explicitly.** Auto-discovery (minidisc) needs
 > the `tailscaled` unix socket at `/var/run/tailscale/tailscaled.sock`, which the **macOS
@@ -132,9 +135,8 @@ On the machine running the advanced backend:
    rules for all enabled services, vault sync included).
 3. Verify the broker chain (should return a `server_device_id` + your `sync_address`):
    ```bash
-   TOKEN=$(curl -s -X POST -d "username=<email>&password=<pass>" \
-     http://localhost:8000/auth/jwt/login | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
-   curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/vault-sync/info
+   curl -s -H "Authorization: Bearer $CHRONICLE_API_KEY" \
+     http://localhost:8000/api/vault-sync/info
    ```
 
 The backend's `/api/vault-sync` broker configures the server Syncthing for you when the
