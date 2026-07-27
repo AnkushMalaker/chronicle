@@ -18,7 +18,7 @@ Modeled on :class:`advanced_omi_backend.models.memory_audit.MemoryAuditEntry`.
 """
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from beanie import Document
 from pydantic import Field
@@ -67,8 +67,19 @@ class SystemEvent(Document):
     fingerprint: str = Field(
         description="Stable hash of severity+category+source+title"
     )
+    incident_key: Optional[str] = Field(
+        None,
+        description="Stable identity for an outage spanning processes and time",
+    )
+    resolved_at: Optional[datetime] = Field(
+        None, description="When a durable incident was recovered"
+    )
     occurrences: int = Field(
         default=1, description="How many times this event has recurred (dedup count)"
+    )
+    occurrence_times: List[datetime] = Field(
+        default_factory=list,
+        description="Timestamp of every observation collapsed into this event",
     )
     last_seen_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
@@ -87,6 +98,7 @@ class SystemEvent(Document):
         name = "system_events"
         indexes = [
             "fingerprint",
+            "incident_key",
             "client_id",
             # Facet filters with newest-first sort.
             IndexModel(

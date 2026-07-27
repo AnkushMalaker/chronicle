@@ -625,6 +625,7 @@ export interface SystemEvent {
   metadata: Record<string, unknown>
   created_at: string | null
   last_seen_at: string | null
+  occurrence_times: string[]
 }
 
 export interface SystemEventsList {

@@ -250,6 +250,7 @@ class PluginRouter:
                 title=f"Plugin '{plugin_id}' degraded: dependency unreachable",
                 detail=error,
                 metadata={"plugin_id": plugin_id},
+                incident_key=f"plugin-dependency:{plugin_id}",
             )
 
     def get_health_summary(self) -> Dict[str, Any]:

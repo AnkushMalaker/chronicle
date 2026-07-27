@@ -69,6 +69,8 @@ def _build(
     client_id: Optional[str],
     conversation_id: Optional[str],
     metadata: Optional[dict],
+    incident_key: Optional[str],
+    resolves_incident: bool,
 ) -> dict:
     return {
         "severity": severity,
@@ -81,6 +83,8 @@ def _build(
         "client_id": client_id,
         "conversation_id": conversation_id,
         "metadata": metadata or {},
+        "incident_key": incident_key,
+        "resolves_incident": resolves_incident,
         "fingerprint": _fingerprint(
             severity, category, source or "unknown", title or ""
         ),
@@ -99,6 +103,8 @@ async def record_event(
     client_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
     metadata: Optional[dict] = None,
+    incident_key: Optional[str] = None,
+    resolves_incident: bool = False,
 ) -> None:
     """Record an event from async (FastAPI-process) code: persist + publish inline."""
     event = _build(
@@ -112,6 +118,8 @@ async def record_event(
         client_id=client_id,
         conversation_id=conversation_id,
         metadata=metadata,
+        incident_key=incident_key,
+        resolves_incident=resolves_incident,
     )
     await _persist_and_publish(event)
 
@@ -128,6 +136,8 @@ def record_event_sync(
     client_id: Optional[str] = None,
     conversation_id: Optional[str] = None,
     metadata: Optional[dict] = None,
+    incident_key: Optional[str] = None,
+    resolves_incident: bool = False,
 ) -> None:
     """Record an event from sync code (workers, logging handler, taps): enqueue only."""
     try:
@@ -142,6 +152,8 @@ def record_event_sync(
             client_id=client_id,
             conversation_id=conversation_id,
             metadata=metadata,
+            incident_key=incident_key,
+            resolves_incident=resolves_incident,
         )
         r = _get_sync_redis()
         r.lpush(INGEST_KEY, json.dumps(event))
@@ -160,15 +172,47 @@ async def _persist_and_publish(event: dict) -> None:
 
 
 async def _upsert(event: dict):
-    """Insert a new event, or collapse onto a recent identical one (dedup window)."""
+    """Insert an event, deduplicating durable incidents until recovery."""
     now = datetime.now(timezone.utc)
+    incident_key = event.get("incident_key")
+
+    if incident_key:
+        open_incident = await SystemEvent.find_one(
+            {"incident_key": incident_key, "resolved_at": None}
+        )
+        if event.get("resolves_incident"):
+            # Only the process that closes the shared incident emits recovery.
+            # Later process-local recoveries are duplicate observations.
+            if open_incident is None:
+                return None
+            open_incident.resolved_at = now
+            await open_incident.save()
+        elif open_incident is not None:
+            # Multiple worker processes observe the same dependency. Keep the
+            # incident current without publishing another alarm, while retaining
+            # the count and timestamp of every process observation.
+            if not open_incident.occurrence_times:
+                open_incident.occurrence_times = [open_incident.created_at]
+            open_incident.occurrences += 1
+            open_incident.occurrence_times.append(now)
+            open_incident.last_seen_at = now
+            if event.get("detail"):
+                open_incident.detail = event["detail"]
+            await open_incident.save()
+            return None
+
     window_start = now - timedelta(seconds=_DEDUP_WINDOW_SECS)
     existing = await SystemEvent.find_one(
-        SystemEvent.fingerprint == event["fingerprint"],
-        SystemEvent.last_seen_at >= window_start,
+        {
+            "fingerprint": event["fingerprint"],
+            "last_seen_at": {"$gte": window_start},
+        }
     )
     if existing is not None:
+        if not existing.occurrence_times:
+            existing.occurrence_times = [existing.created_at]
         existing.occurrences += 1
+        existing.occurrence_times.append(now)
         existing.last_seen_at = now
         if event.get("detail"):
             existing.detail = event["detail"]
@@ -188,6 +232,9 @@ async def _upsert(event: dict):
         client_id=event.get("client_id"),
         conversation_id=event.get("conversation_id"),
         fingerprint=event["fingerprint"],
+        incident_key=incident_key,
+        resolved_at=now if event.get("resolves_incident") else None,
+        occurrence_times=[now],
         metadata=event.get("metadata") or {},
         created_at=now,
         last_seen_at=now,
