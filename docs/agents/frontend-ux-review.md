@@ -52,4 +52,3 @@ Use these Chronicle-specific lessons together with the installed
   detect event bubbling, navigation conflicts, empty expanders, or unusable menus.
 - Treat login redirects, blank pages, unresolved loading, and development-server
   reload loops as failed verification—not successful screenshots.
-

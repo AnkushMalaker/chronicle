@@ -243,7 +243,7 @@ def render_stats_table(stats: Stats, title: str = "Current State") -> Table:
         str(stats.langfuse_prompts),
         "yellow" if stats.langfuse_prompts else "dim",
     )
-    """table.add_section()       #then 
+    """table.add_section()       #then
     row("Redis Jobs", str(stats.redis_jobs), "dim")
     row("Legacy WAV Files", str(stats.legacy_wav), "dim")
     row("Vault Files", str(stats.vault_files), "green" if stats.vault_files else "dim")
@@ -251,13 +251,13 @@ def render_stats_table(stats: Stats, title: str = "Current State") -> Table:
     row("Users", str(stats.users), "cyan")
 
     return table"""
-    #now
+    # now
     table.add_section()
     row("Redis Jobs", str(stats.redis_jobs), "dim")
     row("Legacy WAV Files", str(stats.legacy_wav), "dim")
     row("Vault Files", str(stats.vault_files), "green" if stats.vault_files else "dim")
     table.add_section()
-    
+
     # ----------------------------------------------------
     # Custom Extension: Disk Storage Metric
     # Added by Omer Said Bayhan (https://github.com/omer-said-bayhan)

@@ -34,7 +34,11 @@ def test_placeholder_labels_are_not_attribution():
 
 def _clip(sim, manually_labeled):
     return {
-        "scores": {"sim_centroid": sim, "max_clip_sim": 0.4, "best_other": {"score": 0.1}},
+        "scores": {
+            "sim_centroid": sim,
+            "max_clip_sim": 0.4,
+            "best_other": {"score": 0.1},
+        },
         "duration": 6.0,
         "current_label": "daksh",
         "manually_labeled": manually_labeled,

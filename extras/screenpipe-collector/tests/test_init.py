@@ -1,7 +1,6 @@
 import importlib.util
 from pathlib import Path
 
-
 INIT_PATH = Path(__file__).parents[1] / "init.py"
 SPEC = importlib.util.spec_from_file_location("screenpipe_collector_init", INIT_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)

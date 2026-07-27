@@ -206,9 +206,7 @@ async def _candidate_pool(user: User, speaker_name: str, reviewed: set) -> list:
         },
     ):
         segments = _active_segments(doc)
-        speaker_present = any(
-            _effective_label(s) == speaker_name for s in segments
-        )
+        speaker_present = any(_effective_label(s) == speaker_name for s in segments)
         if not speaker_present:
             continue
         audio_duration = doc.get("audio_total_duration") or 0.0

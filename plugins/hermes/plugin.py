@@ -20,6 +20,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 import httpx
+
 from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
 
 logger = logging.getLogger(__name__)

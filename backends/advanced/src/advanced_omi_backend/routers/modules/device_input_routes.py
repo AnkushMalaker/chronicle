@@ -73,7 +73,9 @@ def _utc_iso(value: Optional[datetime]) -> Optional[str]:
     return _as_utc(value).isoformat().replace("+00:00", "Z")
 
 
-def _effective_source_status(source: CaptureSource, now: Optional[datetime] = None) -> str:
+def _effective_source_status(
+    source: CaptureSource, now: Optional[datetime] = None
+) -> str:
     if source.status != "online":
         return source.status
     checked_at = _as_utc(now or utcnow())
@@ -242,7 +244,11 @@ async def ingest_activity(
                     start_at=incoming.captured_at,
                     end_at=incoming.ended_at,
                     purpose="timeline_thumbnail",
-                    payload={"item_id": str(item.id), "frame_id": frame_id, "width": 960},
+                    payload={
+                        "item_id": str(item.id),
+                        "frame_id": frame_id,
+                        "width": 960,
+                    },
                 ).insert()
         except DuplicateKeyError:
             duplicates += 1

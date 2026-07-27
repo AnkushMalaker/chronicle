@@ -339,9 +339,17 @@ def component_action(name: str, action: str) -> bool:
     if IS_MACOS:
         domain = f"gui/{os.getuid()}"
         if action == "stop":
-            return _launchctl("bootout", domain, str(_plist_path(cfg["label"]))).returncode == 0
+            return (
+                _launchctl("bootout", domain, str(_plist_path(cfg["label"]))).returncode
+                == 0
+            )
         if action == "start":
-            return _launchctl("bootstrap", domain, str(_plist_path(cfg["label"]))).returncode == 0
+            return (
+                _launchctl(
+                    "bootstrap", domain, str(_plist_path(cfg["label"]))
+                ).returncode
+                == 0
+            )
         return _launchctl("kickstart", "-k", f"{domain}/{cfg['label']}").returncode == 0
     if action not in ("start", "stop", "restart"):
         raise RuntimeError(f"Unknown action: {action}")

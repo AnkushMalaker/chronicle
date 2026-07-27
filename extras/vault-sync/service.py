@@ -96,9 +96,7 @@ def _linux_unit_path() -> Path:
 
 def _linux_uninstall() -> None:
     unit = _linux_unit_path()
-    subprocess.run(
-        ["systemctl", "--user", "disable", "--now", unit.name], check=False
-    )
+    subprocess.run(["systemctl", "--user", "disable", "--now", unit.name], check=False)
     unit.unlink(missing_ok=True)
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
     print(f"Removed {unit}")

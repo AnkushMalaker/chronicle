@@ -15,7 +15,6 @@ from pathlib import Path
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
-
 console = Console()
 PROJECT = Path(__file__).resolve().parent
 SYSTEMD_USER_DIR = Path.home() / ".config/systemd/user"
@@ -48,26 +47,36 @@ def audio_arguments(mode: str, devices: list[str]) -> list[str]:
 
 
 def write_screenpipe_unit(
-    binary: str, api_key: str, audio_mode: str = "both", devices: list[str] | None = None
+    binary: str,
+    api_key: str,
+    audio_mode: str = "both",
+    devices: list[str] | None = None,
 ) -> Path:
     SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
     path = SYSTEMD_USER_DIR / "screenpipe.service"
     args = [
         binary,
         "record",
-        "--audio-transcription-engine", "disabled",
-        "--use-all-monitors", "true",
-        "--use-pii-removal", "true",
+        "--audio-transcription-engine",
+        "disabled",
+        "--use-all-monitors",
+        "true",
+        "--use-pii-removal",
+        "true",
         "--disable-keyboard-capture",
         "--disable-clipboard-capture",
         "--prioritize-input-latency",
         "--pause-on-drm-content",
         "--disable-meeting-detector",
         "--disable-telemetry",
-        "--video-quality", "balanced",
-        "--retention-days", "90",
-        "--retention-mode", "media",
-        "--api-auth", "true",
+        "--video-quality",
+        "balanced",
+        "--retention-days",
+        "90",
+        "--retention-mode",
+        "media",
+        "--api-auth",
+        "true",
     ]
     args.extend(audio_arguments(audio_mode, devices or []))
     path.write_text(
@@ -101,7 +110,9 @@ def main() -> None:
         raise SystemExit(1)
     console.print(f"[green]✅[/green] ScreenPipe detected: [cyan]{binary}[/cyan]")
 
-    backend = Prompt.ask("Chronicle backend URL", default=args.backend or "http://127.0.0.1:8000")
+    backend = Prompt.ask(
+        "Chronicle backend URL", default=args.backend or "http://127.0.0.1:8000"
+    )
     devices = list_audio_devices(binary)
     audio_mode = Prompt.ask(
         "Local audio capture",
@@ -111,9 +122,7 @@ def main() -> None:
     forward_default = (
         "none"
         if audio_mode == "off"
-        else "output"
-        if audio_mode == "system"
-        else audio_mode.replace("mic", "input")
+        else "output" if audio_mode == "system" else audio_mode.replace("mic", "input")
     )
     forward_audio = Prompt.ask(
         "Audio sent to Chronicle",
@@ -130,24 +139,47 @@ def main() -> None:
 
     api_key = secrets.token_urlsafe(32)
     run(
-        "uv", "run", "--project", str(PROJECT), "chronicle-screenpipe", "pair",
-        "--backend", backend,
-        "--code", code,
-        "--screenpipe-dir", str(Path.home() / ".screenpipe"),
-        "--screenpipe-url", "http://127.0.0.1:3030",
-        "--screenpipe-token", api_key,
-        "--forward-audio", forward_audio,
+        "uv",
+        "run",
+        "--project",
+        str(PROJECT),
+        "chronicle-screenpipe",
+        "pair",
+        "--backend",
+        backend,
+        "--code",
+        code,
+        "--screenpipe-dir",
+        str(Path.home() / ".screenpipe"),
+        "--screenpipe-url",
+        "http://127.0.0.1:3030",
+        "--screenpipe-token",
+        api_key,
+        "--forward-audio",
+        forward_audio,
     )
     write_screenpipe_unit(binary, api_key, audio_mode, devices)
-    run("uv", "run", "--project", str(PROJECT), "chronicle-screenpipe", "install-service")
+    run(
+        "uv",
+        "run",
+        "--project",
+        str(PROJECT),
+        "chronicle-screenpipe",
+        "install-service",
+    )
     run("systemctl", "--user", "daemon-reload")
     run("systemctl", "--user", "enable", "--now", "screenpipe.service")
     run("systemctl", "--user", "restart", "chronicle-screenpipe.service")
 
     if Confirm.ask("Check service status now?", default=True):
         run(
-            "systemctl", "--user", "--no-pager", "--full", "status",
-            "screenpipe.service", "chronicle-screenpipe.service",
+            "systemctl",
+            "--user",
+            "--no-pager",
+            "--full",
+            "status",
+            "screenpipe.service",
+            "chronicle-screenpipe.service",
         )
     console.print(
         "\n[green]✅ Capture node connected.[/green] Activity should appear in "

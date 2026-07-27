@@ -1,9 +1,6 @@
 import json
 
 import numpy as np
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
 from simple_speaker_recognition.core.enrollment_audit import compute_audit
 from simple_speaker_recognition.database import Base
 from simple_speaker_recognition.database.models import (
@@ -12,6 +9,8 @@ from simple_speaker_recognition.database.models import (
     SpeakerAudioSegment,
     User,
 )
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 
 def test_confirmed_correct_clip_no_longer_counts_as_flagged():

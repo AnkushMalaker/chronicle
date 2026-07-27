@@ -973,8 +973,8 @@ async def identify(
         original_threshold = db.similarity_thr
         db.similarity_thr = threshold
         try:
-            found, speaker_info, confidence, candidates = await db.identify_with_candidates(
-                emb, user_id=user_id
+            found, speaker_info, confidence, candidates = (
+                await db.identify_with_candidates(emb, user_id=user_id)
             )
             confidence = validate_confidence(confidence, "speaker_identification")
         finally:

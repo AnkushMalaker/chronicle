@@ -52,7 +52,9 @@ def main() -> None:
         print("Tray installed and started (login service).")
         for check in clients.binary_checks():
             if not check["found"]:
-                print(f"note: {check['name']} not found ({check['needed_by']}) — {check['suggest']}")
+                print(
+                    f"note: {check['name']} not found ({check['needed_by']}) — {check['suggest']}"
+                )
     elif command == "uninstall":
         clients.uninstall_component("tray")
         print("Tray login service removed.")

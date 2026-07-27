@@ -2,12 +2,15 @@ import asyncio
 import json
 from types import SimpleNamespace
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
 from simple_speaker_recognition.api.routers import enrollment_audit
 from simple_speaker_recognition.database import Base
-from simple_speaker_recognition.database.models import Speaker, SpeakerAudioSegment, User
+from simple_speaker_recognition.database.models import (
+    Speaker,
+    SpeakerAudioSegment,
+    User,
+)
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 
 def test_delete_segment_removes_audio_from_enrollment_manifest(tmp_path, monkeypatch):

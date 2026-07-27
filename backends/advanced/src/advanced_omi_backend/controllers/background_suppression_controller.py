@@ -59,7 +59,9 @@ async def get_conversation_suppressions(user: User, conversation_id: str) -> dic
             },
         )
         cluster["segments"].append(doc)
-        cluster["statuses"][doc["status"]] = cluster["statuses"].get(doc["status"], 0) + 1
+        cluster["statuses"][doc["status"]] = (
+            cluster["statuses"].get(doc["status"], 0) + 1
+        )
         cluster["zones"][doc["zone"]] = cluster["zones"].get(doc["zone"], 0) + 1
         cluster["max_background_similarity"] = max(
             cluster["max_background_similarity"],

@@ -8,11 +8,10 @@ extra (BLE/audio deps) — data-only client nodes skip that weight.
 import importlib.util
 import logging
 
-from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QMenu
-
 from chronicle_tray.paths import WEARABLE_DIR, add_wearable_path
 from chronicle_tray.sections import Section
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QMenu
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +83,7 @@ class PendantSection(Section):
         for device in snap["nearby_devices"]:
             mac = device["mac"]
             mark = " ✓" if mac == connected_mac else ""
-            action = QAction(
-                f"{device['name']} [{mac[-8:]}]{mark}", self.devices_menu
-            )
+            action = QAction(f"{device['name']} [{mac[-8:]}]{mark}", self.devices_menu)
             action.triggered.connect(
                 lambda _checked=False, m=mac: self._toggle_device(m)
             )

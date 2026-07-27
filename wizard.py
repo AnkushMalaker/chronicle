@@ -1646,7 +1646,9 @@ def setup_capture_node():
         "init.py",
     ]
     if backend_url:
-        console.print(f"[green]✅[/green] Found Chronicle at [cyan]{backend_url}[/cyan]")
+        console.print(
+            f"[green]✅[/green] Found Chronicle at [cyan]{backend_url}[/cyan]"
+        )
         cmd.extend(["--backend", backend_url])
     try:
         subprocess.run(cmd, cwd=init_script.parent, check=True)

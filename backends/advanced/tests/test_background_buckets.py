@@ -3,6 +3,7 @@ import pytest
 
 from advanced_omi_backend.constants import is_non_enrollable_speaker
 from advanced_omi_backend.controllers.background_bucket_controller import (
+    SURFACE_PROFILES,
     _background_likelihood,
     _cluster_rows,
     _content_signature,
@@ -12,20 +13,18 @@ from advanced_omi_backend.controllers.background_bucket_controller import (
     _is_known_foreground,
     _max_similarity,
     _novelty_groups,
-    _representatives,
-    _reference_scores,
-    _review_samples,
     _queue_summary,
-    SURFACE_PROFILES,
+    _reference_scores,
+    _representatives,
+    _review_samples,
 )
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.routers.modules.annotation_routes import (
     _apply_diarization_label,
 )
-from advanced_omi_backend.workers import speaker_jobs
-from advanced_omi_backend.workers import background_index_jobs
-from advanced_omi_backend.workers.background_cleanup_jobs import _score_rows
+from advanced_omi_backend.workers import background_index_jobs, speaker_jobs
 from advanced_omi_backend.workers.background_benchmark import evaluate_reviews
+from advanced_omi_backend.workers.background_cleanup_jobs import _score_rows
 
 
 def test_gap_windows_sample_audio_without_transcript_segments():
@@ -172,9 +171,21 @@ def test_not_background_examples_suppress_similar_speech_but_not_noise():
 
 def test_confirmed_background_mines_similar_clips_for_batch_harvest():
     rows = [
-        {"clip_key": "a", "conversation_id": "one", "candidate_type": "background_speech"},
-        {"clip_key": "b", "conversation_id": "one", "candidate_type": "background_speech"},
-        {"clip_key": "c", "conversation_id": "two", "candidate_type": "background_speech"},
+        {
+            "clip_key": "a",
+            "conversation_id": "one",
+            "candidate_type": "background_speech",
+        },
+        {
+            "clip_key": "b",
+            "conversation_id": "one",
+            "candidate_type": "background_speech",
+        },
+        {
+            "clip_key": "c",
+            "conversation_id": "two",
+            "candidate_type": "background_speech",
+        },
         {"clip_key": "d", "conversation_id": "one", "candidate_type": "noise"},
     ]
     background = {"a": 0.9, "b": 0.6, "c": 0.4, "d": 0.9}
@@ -188,7 +199,11 @@ def test_confirmed_background_mines_similar_clips_for_batch_harvest():
 
 def test_harvest_requires_background_to_beat_foreground_by_margin():
     rows = [
-        {"clip_key": "a", "conversation_id": "one", "candidate_type": "background_speech"},
+        {
+            "clip_key": "a",
+            "conversation_id": "one",
+            "candidate_type": "background_speech",
+        },
     ]
 
     # familiar foreground voice that also happens to resemble the bucket
@@ -198,13 +213,29 @@ def test_harvest_requires_background_to_beat_foreground_by_margin():
 def test_queue_summary_splits_sign_offs_from_genuine_unknowns():
     clusters = [
         # harvest lane: quick confirm regardless of mean scores
-        {"mined": "harvest", "mean_background_similarity": 0.5, "mean_foreground_similarity": 0.4},
+        {
+            "mined": "harvest",
+            "mean_background_similarity": 0.5,
+            "mean_foreground_similarity": 0.4,
+        },
         # confident zone (>=0.45 and margin >=0.20): quick confirm
-        {"mined": None, "mean_background_similarity": 0.6, "mean_foreground_similarity": 0.3},
+        {
+            "mined": None,
+            "mean_background_similarity": 0.6,
+            "mean_foreground_similarity": 0.3,
+        },
         # unsure band: genuinely uncertain
-        {"mined": None, "mean_background_similarity": 0.45, "mean_foreground_similarity": 0.35},
+        {
+            "mined": None,
+            "mean_background_similarity": 0.45,
+            "mean_foreground_similarity": 0.35,
+        },
         # novelty (low similarity to everything): genuinely uncertain
-        {"mined": "novel", "mean_background_similarity": 0.1, "mean_foreground_similarity": 0.1},
+        {
+            "mined": "novel",
+            "mean_background_similarity": 0.1,
+            "mean_foreground_similarity": 0.1,
+        },
     ]
 
     assert _queue_summary(clusters) == {
@@ -216,31 +247,49 @@ def test_queue_summary_splits_sign_offs_from_genuine_unknowns():
 
 def test_surface_dial_widens_and_narrows_the_harvest_lane():
     rows = [
-        {"clip_key": "a", "conversation_id": "one", "candidate_type": "background_speech"},
+        {
+            "clip_key": "a",
+            "conversation_id": "one",
+            "candidate_type": "background_speech",
+        },
     ]
     # borderline clip: below the default 0.55 floor, above the "more" 0.45 one
     background = {"a": 0.50}
     foreground = {"a": 0.30}
 
     assert _harvest_groups(rows, background, foreground) == []
-    assert _harvest_groups(
-        rows, background, foreground, SURFACE_PROFILES["more"]
-    ) == [[rows[0]]]
+    assert _harvest_groups(rows, background, foreground, SURFACE_PROFILES["more"]) == [
+        [rows[0]]
+    ]
     # "less" tightens past a clip the default would accept
-    assert _harvest_groups(
-        rows, {"a": 0.58}, {"a": 0.30}, SURFACE_PROFILES["less"]
-    ) == []
+    assert (
+        _harvest_groups(rows, {"a": 0.58}, {"a": 0.30}, SURFACE_PROFILES["less"]) == []
+    )
 
 
 def test_novelty_lane_surfaces_clips_unlike_any_labelled_reference():
     rows = [
-        {"clip_key": f"tv{i}", "conversation_id": "tv-conv", "candidate_type": "background_speech"}
+        {
+            "clip_key": f"tv{i}",
+            "conversation_id": "tv-conv",
+            "candidate_type": "background_speech",
+        }
         for i in range(5)
     ] + [
-        {"clip_key": "familiar", "conversation_id": "tv-conv", "candidate_type": "background_speech"},
-        {"clip_key": "lone", "conversation_id": "small-conv", "candidate_type": "background_speech"},
+        {
+            "clip_key": "familiar",
+            "conversation_id": "tv-conv",
+            "candidate_type": "background_speech",
+        },
+        {
+            "clip_key": "lone",
+            "conversation_id": "small-conv",
+            "candidate_type": "background_speech",
+        },
     ]
-    background = {key: 0.1 for key in ("tv0", "tv1", "tv2", "tv3", "tv4", "familiar", "lone")}
+    background = {
+        key: 0.1 for key in ("tv0", "tv1", "tv2", "tv3", "tv4", "familiar", "lone")
+    }
     foreground = {key: 0.1 for key in background} | {"familiar": 0.8}
 
     groups = _novelty_groups(rows, background, foreground, consumed={"tv4"})

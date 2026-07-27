@@ -1924,7 +1924,11 @@ def _firewall_specs(service_names) -> dict[str, tuple[int, str]]:
 
     if service_names:
         # The node agent runs on any start (WebUI control + Tailnet advertising).
-        add("node-agent", "api", os.environ.get("SERVICE_MANAGER_PORT") or _SERVICE_MANAGER_PORT)
+        add(
+            "node-agent",
+            "api",
+            os.environ.get("SERVICE_MANAGER_PORT") or _SERVICE_MANAGER_PORT,
+        )
     return specs
 
 
@@ -2049,7 +2053,9 @@ def firewall_sync(quiet: bool = False) -> bool:
 def firewall_list() -> None:
     """Show Chronicle-managed rules next to what the enabled services need."""
     if not is_wsl2_host():
-        console.print("Not a WSL2 host — Chronicle manages no Windows Firewall rules here.")
+        console.print(
+            "Not a WSL2 host — Chronicle manages no Windows Firewall rules here."
+        )
         return
     existing = _firewall_existing_rules()
     if existing is None:
@@ -2058,16 +2064,22 @@ def firewall_list() -> None:
     managed, legacy = existing
     enabled = [s for s in SERVICES if check_service_enabled(s)]
     desired = _firewall_specs(enabled)
-    console.print(f"[bold]Chronicle firewall rules[/bold] (prefix {_FIREWALL_PREFIX!r}):")
+    console.print(
+        f"[bold]Chronicle firewall rules[/bold] (prefix {_FIREWALL_PREFIX!r}):"
+    )
     for name in sorted(set(managed) | set(desired)):
         if name in managed and name in desired:
             console.print(f"  [green]✅ {name}[/green]")
         elif name in desired:
-            console.print(f"  [yellow]✚ {name} (missing — run 'firewall sync')[/yellow]")
+            console.print(
+                f"  [yellow]✚ {name} (missing — run 'firewall sync')[/yellow]"
+            )
         else:
             console.print(f"  [dim]✗ {name} (stale — removed on next sync)[/dim]")
     for name in legacy:
-        console.print(f"  [dim]✗ {name} (legacy ad-hoc rule — removed on next sync)[/dim]")
+        console.print(
+            f"  [dim]✗ {name} (legacy ad-hoc rule — removed on next sync)[/dim]"
+        )
 
 
 def firewall_clear() -> bool:

@@ -31,22 +31,22 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
 from advanced_omi_backend.constants import BACKGROUND_SPEECH_LABEL, NOISE_LABEL
-from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     default_queue,
 )
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.users import User
 from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
-from advanced_omi_backend.workers.background_index_jobs import (
-    index_background_corpus_job,
-)
+from advanced_omi_backend.workers.background_benchmark import build_background_benchmark
 from advanced_omi_backend.workers.background_cleanup_jobs import (
     apply_background_cleanup_job,
     build_background_cleanup_report,
 )
-from advanced_omi_backend.workers.background_benchmark import build_background_benchmark
+from advanced_omi_backend.workers.background_index_jobs import (
+    index_background_corpus_job,
+)
 from advanced_omi_backend.workers.background_suppression import zone_for
 
 logger = logging.getLogger(__name__)
@@ -887,9 +887,7 @@ def _novelty_groups(
         ):
             groups.setdefault(row["conversation_id"], []).append(row)
     return [
-        group
-        for group in groups.values()
-        if len(group) >= profile["novelty_min_clips"]
+        group for group in groups.values() if len(group) >= profile["novelty_min_clips"]
     ]
 
 

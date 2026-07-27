@@ -1,9 +1,13 @@
 import sqlite3
 from pathlib import Path
 
-from chronicle_screenpipe.collector import (Checkpoints, Collector, Config,
-                                            audio_duration,
-                                            infer_audio_direction)
+from chronicle_screenpipe.collector import (
+    Checkpoints,
+    Collector,
+    Config,
+    audio_duration,
+    infer_audio_direction,
+)
 
 
 def test_checkpoints_are_atomic(tmp_path: Path):

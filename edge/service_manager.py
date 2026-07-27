@@ -820,7 +820,10 @@ def client_action(name: str, action: str, body: ActionBody | None = None):
     body = body or ActionBody()
     if body.node and body.node != _self_host():
         return _remote_request(
-            body.node, "POST", f"/clients/{name}/{action}", {**body.dict(), "node": None}
+            body.node,
+            "POST",
+            f"/clients/{name}/{action}",
+            {**body.dict(), "node": None},
         )
     if name not in clients.CLIENT_COMPONENTS:
         raise HTTPException(status_code=404, detail=f"Unknown client component: {name}")

@@ -136,9 +136,8 @@ async def backfill_conversation_suppressions(
 
 async def backfill_all_suppressions(user_id: str, limit: int = 500) -> dict:
     """Backfill every conversation present in the corpus index."""
-    conversation_ids = await (
-        _database()["background_corpus_embeddings"]
-        .distinct("conversation_id", {"requested_by": user_id})
+    conversation_ids = await _database()["background_corpus_embeddings"].distinct(
+        "conversation_id", {"requested_by": user_id}
     )
     results = {"conversations": 0, "written": 0, "skipped": 0}
     for conversation_id in conversation_ids[:limit]:

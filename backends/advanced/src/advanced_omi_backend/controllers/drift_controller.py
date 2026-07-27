@@ -89,7 +89,12 @@ async def drift_fingerprint() -> str:
                             "id": "$$v.version_id",
                             "cent": {
                                 "$cond": [
-                                    {"$ifNull": ["$$v.metadata.cluster_centroids", False]},
+                                    {
+                                        "$ifNull": [
+                                            "$$v.metadata.cluster_centroids",
+                                            False,
+                                        ]
+                                    },
                                     1,
                                     0,
                                 ]
@@ -116,7 +121,11 @@ async def drift_fingerprint() -> str:
     convs = []
     async for doc in Conversation.get_pymongo_collection().aggregate(pipeline):
         active = next(
-            (v for v in doc["versions"] if v["id"] == doc.get("active_transcript_version")),
+            (
+                v
+                for v in doc["versions"]
+                if v["id"] == doc.get("active_transcript_version")
+            ),
             None,
         )
         convs.append(

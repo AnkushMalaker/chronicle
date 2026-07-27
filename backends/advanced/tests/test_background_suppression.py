@@ -47,8 +47,14 @@ def test_same_source_segments_share_a_cluster_signature():
 
 def test_cluster_signatures_are_stable_across_rescoring():
     embeddings = [[1.0, 0.0], [0.98, 0.02]]
-    first = [_record(10.0, "line one", embeddings[0]), _record(20.0, "line two", embeddings[1])]
-    second = [_record(10.0, "line one", embeddings[0]), _record(20.0, "line two", embeddings[1])]
+    first = [
+        _record(10.0, "line one", embeddings[0]),
+        _record(20.0, "line two", embeddings[1]),
+    ]
+    second = [
+        _record(10.0, "line one", embeddings[0]),
+        _record(20.0, "line two", embeddings[1]),
+    ]
     assign_cluster_signatures(first)
     assign_cluster_signatures(second)
     assert first[0]["cluster_signature"] == second[0]["cluster_signature"]

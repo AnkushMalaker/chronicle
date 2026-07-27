@@ -17,10 +17,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QMenu
-
 from chronicle_tray.paths import add_repo_root
 from chronicle_tray.screenpipe_settings import (
     _audio_sources,
@@ -31,6 +27,9 @@ from chronicle_tray.screenpipe_settings import (
     _updated_audio_modes,
 )
 from chronicle_tray.sections import Section
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QMenu
 
 logger = logging.getLogger(__name__)
 SCREENPIPE_DB = Path.home() / ".screenpipe/db.sqlite"
@@ -114,7 +113,11 @@ class ScreenPipeSection(Section):
     def _unit_actions(self, menu: QMenu, label: str, unit: str) -> QMenu:
         submenu = menu.addMenu(label)
         actions = {}
-        for title, verb in (("Start", "start"), ("Stop", "stop"), ("Restart", "restart")):
+        for title, verb in (
+            ("Start", "start"),
+            ("Stop", "stop"),
+            ("Restart", "restart"),
+        ):
             action = QAction(title, submenu)
             action.triggered.connect(
                 lambda _checked=False, v=verb, u=unit: self._unit(v, u)
@@ -245,7 +248,11 @@ class ScreenPipeSection(Section):
 
     def _collector_actions_macos(self, menu: QMenu) -> None:
         submenu = menu.addMenu("Collector")
-        for title, verb in (("Start", "start"), ("Stop", "stop"), ("Restart", "restart")):
+        for title, verb in (
+            ("Start", "start"),
+            ("Stop", "stop"),
+            ("Restart", "restart"),
+        ):
             action = QAction(title, submenu)
             action.triggered.connect(
                 lambda _checked=False, v=verb: self._collector_macos(v)

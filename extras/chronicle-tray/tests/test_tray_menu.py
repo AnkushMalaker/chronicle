@@ -39,7 +39,9 @@ def test_log_buffer_is_bounded():
     handler.setFormatter(logging.Formatter("%(message)s"))
     for index in range(5):
         handler.emit(
-            logging.LogRecord("t", logging.INFO, __file__, index, str(index), None, None)
+            logging.LogRecord(
+                "t", logging.INFO, __file__, index, str(index), None, None
+            )
         )
 
     assert list(handler.lines) == ["2", "3", "4"]

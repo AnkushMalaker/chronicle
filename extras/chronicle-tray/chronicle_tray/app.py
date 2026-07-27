@@ -9,6 +9,10 @@ so the tray doubles as a "what could this client node do" checklist.
 import logging
 import sys
 
+from chronicle_tray.logs import configure_logging, log_buffer
+from chronicle_tray.sections.pendant import PendantSection
+from chronicle_tray.sections.screenpipe import ScreenPipeSection
+from chronicle_tray.sections.vault import VaultSection
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
@@ -21,11 +25,6 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QVBoxLayout,
 )
-
-from chronicle_tray.logs import configure_logging, log_buffer
-from chronicle_tray.sections.pendant import PendantSection
-from chronicle_tray.sections.screenpipe import ScreenPipeSection
-from chronicle_tray.sections.vault import VaultSection
 
 logger = logging.getLogger(__name__)
 

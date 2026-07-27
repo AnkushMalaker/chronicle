@@ -23,7 +23,6 @@ from datetime import datetime
 from typing import Optional
 
 import numpy as np
-
 from simple_speaker_recognition.database.models import (
     EnrollmentAuditDecision,
     Speaker,

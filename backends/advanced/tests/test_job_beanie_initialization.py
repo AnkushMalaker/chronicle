@@ -4,8 +4,7 @@ from pathlib import Path
 def test_rq_beanie_initialization_registers_annotations():
     """Speaker reprocessing queries annotations from an RQ worker process."""
     source = (
-        Path(__file__).parents[1]
-        / "src/advanced_omi_backend/models/job.py"
+        Path(__file__).parents[1] / "src/advanced_omi_backend/models/job.py"
     ).read_text()
 
     assert "from advanced_omi_backend.models.annotation import Annotation" in source

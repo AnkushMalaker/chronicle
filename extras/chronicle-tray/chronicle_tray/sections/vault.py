@@ -15,13 +15,12 @@ from typing import Optional
 from urllib.parse import quote
 
 import httpx
+from chronicle_tray.paths import REPO_ROOT, VAULT_SYNC_DIR, add_vault_path
+from chronicle_tray.sections import Section
 from dotenv import load_dotenv
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMenu
-
-from chronicle_tray.paths import REPO_ROOT, VAULT_SYNC_DIR, add_vault_path
-from chronicle_tray.sections import Section
 
 logger = logging.getLogger(__name__)
 
