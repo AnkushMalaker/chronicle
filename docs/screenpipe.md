@@ -54,6 +54,46 @@ requests zero or one 640px preview; the curator may request one different previe
 selected ScreenPipe image is then fetched at a bounded 1280px size. ScreenPipe remains
 the high-resolution source and Chronicle never uploads a frame sequence.
 
+## Screen context and the `chronicle` fork branch
+
+A completed conversation opens a bounded OCR job over its interval, and the collector
+answers with the frames in that window. Consecutive frames of an unchanged window
+repeat nearly all of their text, so that answer is mostly redundant: measured across
+one workstation's conversation windows, 35.7 MB of OCR carried 10.9 MB of distinct
+screens.
+
+The reduction belongs where the data is. `untracked/screenpipe` branch `chronicle`
+(= `custom/linux-timeline-stability` plus the additions below) carries:
+
+- **`GET /search?dedupe=0.85`** collapses consecutive near-duplicates server-side.
+  Measured on one day: 500 rows scanned returned 245 rows and 5.42 MB → 0.82 MB.
+  `limit` bounds rows *scanned*, so a deduplicated page is short of the limit while
+  data remains — page on `len(data) + deduped`, which the collector does. A recorder
+  without the parameter ignores it and reports no `deduped`, so this degrades to the
+  old behaviour and Chronicle's own filter still runs.
+- **`GET /app-runs`** serves the timeline's segmented view instead of making every
+  consumer re-derive it. Runs are **display-grade** — a run says these consecutive
+  frames carried this app name, not that an activity began or ended.
+- **KWin focused-window tracking**, which is what makes the other two worth having.
+
+Only frames whose text came from the accessibility tree are ever compared. `ocr` is
+the fallback for windows exposing no tree, where the text is a few HUD fragments that
+read alike whether or not the moment is the same. On this KDE Wayland box that split
+is absolute: 100% of `accessibility`/`hybrid` frames carry a SimHash and an app name,
+and 0% of `ocr`-only frames carry either. Those frames are ~45% of frames but ~4% of
+bytes, so collapsing them buys nothing and risks discarding the only record that a
+fullscreen session happened.
+
+Beware `app_name` carry-forward: the timeline UI copies the previous app name onto
+frames that recorded none, so a fullscreen session is attributed to whatever was
+focused before it. On one measured day that relabelled 2,728 of 6,452 frames, turning
+212 raw stretches into a tidy-looking 54. `/app-runs` keeps the default but reports
+`unnamed_frames` per run, and `carry_forward=false` turns it off.
+
+Chronicle keeps its own filter in `services/device_context.py` as a fallback, because
+`init.py` resolves the recorder with `which()` and usually finds the npm build rather
+than this fork.
+
 The backend correlates observations with overlapping input/output audio conversations
 and nearby Immich candidates. A separate Codex curation pass may discard routine context,
 link a duplicate, append a Daily note, update a durable topic/project/event/media note, or

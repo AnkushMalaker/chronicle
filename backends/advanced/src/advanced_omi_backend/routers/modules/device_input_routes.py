@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,7 @@ from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
 from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.config import get_screen_context_settings
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import (
     CaptureSource,
@@ -33,8 +35,11 @@ from advanced_omi_backend.models.device_input import (
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services.device_context import (
     request_conversation_context_jobs,
+    select_context_items,
 )
 from advanced_omi_backend.services.memory.vault_manager import ConvDocVaultManager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/device-input", tags=["device-input"])
 _PAIRING_TTL = timedelta(minutes=10)
@@ -513,7 +518,14 @@ async def complete_job(
     job = await DeviceInputJob.get(job_id)
     if job is None or job.source_id != source.source_id:
         raise HTTPException(status_code=404, detail="Job not found")
-    for incoming in body.items:
+    settings = get_screen_context_settings()
+    kept, report = select_context_items(
+        body.items,
+        max_bytes=settings["max_bytes_per_conversation"],
+        similarity_threshold=settings["similarity_threshold"],
+    )
+    conversation_id = job.payload.get("conversation_id")
+    for incoming in kept:
         try:
             await DeviceInputItem(
                 user_id=source.user_id,
@@ -527,15 +539,29 @@ async def complete_job(
                     "job_id": job_id,
                     "purpose": job.purpose,
                 },
-                conversation_id=job.payload.get("conversation_id"),
+                conversation_id=conversation_id,
+                state="linked" if conversation_id else "received",
             ).insert()
         except DuplicateKeyError:
             pass
+    if report["over_budget"]:
+        logger.warning(
+            "Screen-context job %s hit the %d-byte budget; %d frames not stored",
+            job_id,
+            settings["max_bytes_per_conversation"],
+            report["over_budget"],
+        )
     job.status = "complete" if body.success else "failed"
     job.error = body.error
     job.completed_at = utcnow()
+    job.payload = {
+        **job.payload,
+        "items_received": len(body.items),
+        "items_stored": len(kept),
+        "items_filtered": report,
+    }
     await job.save()
-    return {"ok": True}
+    return {"ok": True, "stored": len(kept), "filtered": report}
 
 
 @router.post("/jobs/{job_id}/thumbnail")

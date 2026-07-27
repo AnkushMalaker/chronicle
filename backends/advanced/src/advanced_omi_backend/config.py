@@ -124,6 +124,33 @@ def require_speech_for_transcription() -> bool:
 
 
 # ============================================================================
+# Screen Context Settings (OmegaConf-based)
+# ============================================================================
+
+
+def get_screen_context_settings() -> dict:
+    """Ingestion and retention policy for conversation screen context.
+
+    Read from ``backend.screen_context``. Unlike observations, screen context is
+    raw per-frame OCR pulled for one conversation window, so it needs both an
+    ingest filter (near-identical frames collapse) and an expiry (the rows are
+    only reachable through their conversation).
+    """
+    cfg = get_backend_config("screen_context")
+    settings = OmegaConf.to_container(cfg, resolve=True) if cfg else {}
+    if not isinstance(settings, dict):
+        settings = {}
+    return {
+        "max_bytes_per_conversation": int(
+            settings.get("max_bytes_per_conversation") or 4_000_000
+        ),
+        # ScreenPipe's own DEDUP_SIMILARITY_THRESHOLD (screenpipe-db/src/db/mod.rs).
+        "similarity_threshold": float(settings.get("similarity_threshold") or 0.85),
+        "retention_days": int(settings.get("retention_days") or 30),
+    }
+
+
+# ============================================================================
 # Cleanup Settings (OmegaConf-based)
 # ============================================================================
 

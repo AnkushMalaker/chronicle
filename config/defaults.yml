@@ -754,6 +754,22 @@ backend:
   audio_filtering:
     require_speech: true
 
+  # Screen context pulled from a capture node for one completed conversation.
+  # This is raw per-frame OCR, not the collector's already-reduced observation
+  # stream, so it is filtered on arrival and expired by the
+  # screen_context_retention cron once its conversation is unreachable.
+  screen_context:
+    # Bound on OCR text kept per conversation. A byte budget rather than a frame
+    # count: sparse fullscreen frames are ~45% of frames but ~4% of bytes, and a
+    # frame count would evict those first — they are often the only record that a
+    # fullscreen session happened at all.
+    max_bytes_per_conversation: 4000000
+    # Token overlap at/above this collapses one frame into the previous kept one.
+    # Applied ONLY to text-dense frames in a known window; sparse/contextless
+    # frames are exempt because overlap is not evidence there.
+    similarity_threshold: 0.88
+    retention_days: 30               # grace after hard delete / soft-delete expiry
+
   # Conversation stop conditions
   conversation_stop:
     speech_inactivity_threshold: 60      # Speech gap threshold for closure (1 minute)
@@ -814,6 +830,10 @@ cron_jobs:
     description: "Curate novel ScreenPipe observations into durable vault context"
     enabled: true
     schedule: "*/5 * * * *"
+  screen_context_retention:
+    description: "Expire conversation screen context whose conversation is gone"
+    enabled: true
+    schedule: "0 4 * * *"
 
 # Data Audit / auto-clean "level" (thresholds for the auto_clean cron job).
 # Kept separate from cron_jobs.auto_clean so toggling the schedule in the UI

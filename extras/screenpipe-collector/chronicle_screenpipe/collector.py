@@ -18,6 +18,9 @@ from .observations import ObservationTracker
 
 logger = logging.getLogger(__name__)
 
+# SQLite's default compiled limit on host parameters in one statement is 999.
+_SQLITE_PARAMETER_LIMIT = 500
+
 
 @dataclass(frozen=True)
 class Config:
@@ -28,6 +31,12 @@ class Config:
     screenpipe_url: str = "http://127.0.0.1:3030"
     screenpipe_token: str | None = None
     forward_audio: str = "both"
+    # Word-overlap threshold handed to ScreenPipe's `/search?dedupe=`, which
+    # collapses consecutive near-identical frames before they cross the wire.
+    # Matches the backend's own default so a recorder that predates the
+    # parameter — it is ignored there — filters to the same result later.
+    # Set to None to receive every frame.
+    search_dedupe: float | None = 0.85
     poll_seconds: float = 5.0
     activity_debounce_seconds: float = 10.0
     sample_cooldown_seconds: float = 120.0
@@ -295,6 +304,40 @@ class Collector:
         self._save_observation_tracker(tracker)
         return sent
 
+    def _attach_capture_triggers(self, items: list[dict[str, Any]]) -> None:
+        """Add ScreenPipe's own reason for capturing each frame.
+
+        `/search` does not expose `capture_trigger`, so it comes from the local
+        database instead. It tells Chronicle which frames were explicit capture
+        events — a manual grab or a window focus — rather than incidental
+        samples, so those are never folded into a neighbouring frame. Best
+        effort: a frame with no trigger is simply left unlabelled.
+        """
+        by_frame = {
+            item["metadata"]["frame_id"]: item
+            for item in items
+            if item["metadata"].get("frame_id") is not None
+        }
+        if not by_frame:
+            return
+        frame_ids = list(by_frame)
+        try:
+            with open_screenpipe_db(self.database_path) as connection:
+                for start in range(0, len(frame_ids), _SQLITE_PARAMETER_LIMIT):
+                    batch = frame_ids[start : start + _SQLITE_PARAMETER_LIMIT]
+                    placeholders = ",".join("?" * len(batch))
+                    rows = connection.execute(
+                        f"SELECT id, capture_trigger FROM frames WHERE id IN ({placeholders})",
+                        batch,
+                    ).fetchall()
+                    for row in rows:
+                        if row["capture_trigger"]:
+                            by_frame[row["id"]]["metadata"]["capture_trigger"] = row[
+                                "capture_trigger"
+                            ]
+        except sqlite3.Error:
+            logger.warning("could not read capture triggers", exc_info=True)
+
     def process_job(self) -> bool:
         response = self.client.get("/api/device-input/jobs/next")
         response.raise_for_status()
@@ -335,6 +378,7 @@ class Collector:
             raw_items = []
             offset = 0
             page_size = 500
+            collapsed = 0
             while True:
                 params = {
                     "content_type": "ocr",
@@ -347,6 +391,8 @@ class Collector:
                     "limit": page_size,
                     "offset": offset,
                 }
+                if self.config.search_dedupe:
+                    params["dedupe"] = self.config.search_dedupe
                 headers = (
                     {"Authorization": f"Bearer {self.config.screenpipe_token}"}
                     if self.config.screenpipe_token
@@ -359,11 +405,26 @@ class Collector:
                     timeout=60,
                 )
                 local.raise_for_status()
-                page = local.json().get("data", [])
+                body = local.json()
+                page = body.get("data", [])
+                # `limit` bounds rows scanned, not returned, so a deduplicated
+                # page is short of `page_size` while more data remains. Page on
+                # rows *scanned* instead. A recorder without the parameter
+                # reports no `deduped`, which reduces this to the plain
+                # short-page test.
+                deduped = int(body.get("deduped") or 0)
+                collapsed += deduped
+                scanned = len(page) + deduped
                 raw_items.extend(page)
-                if len(page) < page_size:
+                if scanned < page_size:
                     break
-                offset += len(page)
+                offset += scanned
+            if collapsed:
+                logger.info(
+                    "screenpipe collapsed %d near-duplicate frames for job %s",
+                    collapsed,
+                    job["id"],
+                )
             items = []
             for raw in raw_items:
                 content = raw.get("content", raw)
@@ -380,9 +441,14 @@ class Collector:
                             "window_name": content.get("window_name"),
                             "browser_url": content.get("browser_url"),
                             "text": content.get("text"),
+                            # How ScreenPipe read this frame. Chronicle needs it to
+                            # tell a dense accessibility-tree read from the OCR
+                            # fallback used where a window exposes no tree.
+                            "text_source": content.get("text_source"),
                         },
                     }
                 )
+            self._attach_capture_triggers(items)
             result = {"success": True, "items": items}
         except Exception as exc:
             result = {"success": False, "items": [], "error": str(exc)}
