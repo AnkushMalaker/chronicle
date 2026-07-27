@@ -22,6 +22,86 @@ the timeline and memory curator.
 Do not scan or upload the complete frame stream, and do not copy ScreenPipe's SQLite
 database into Chronicle as a second source of truth.
 
+## Services on a node
+
+Four user units exist on a Linux node and they are easy to confuse, because two of
+them have "screenpipe" in the name and neither is the one Chronicle ships:
+
+| Unit | What it is | Owned by |
+| --- | --- | --- |
+| `screenpipe.service` | the recorder — `screenpipe record`, writes `~/.screenpipe/db.sqlite` | upstream ScreenPipe binary; unit file written by Chronicle |
+| `chronicle-screenpipe.service` | the collector — reads that DB, forwards observations | `extras/screenpipe-collector/` |
+| `chronicle-tray.service` | desktop tray; starts/stops the two above | `extras/chronicle-tray/` |
+| `app-screenpipe*@autostart.service` | ScreenPipe's own desktop UI | upstream; **should stay disabled** (see above) |
+
+**Chronicle does not install ScreenPipe.** `init.py` resolves the recorder with
+`shutil.which("screenpipe")` and exits with instructions if it is absent; it only
+writes the unit around whatever is already on `PATH`. So the recording binary is
+whatever was installed by hand — typically the npm `@screenpipe/cli-linux-x64`
+package symlinked from `~/.local/bin/screenpipe`, which is **not** a local build.
+Check with `readlink -f "$(command -v screenpipe)"` and `screenpipe --version`
+before assuming a source change is live.
+
+To run a locally built recorder, repoint that symlink at a copy outside the build
+tree; the wizard re-resolves through `which`, and the tray rewrites only the flags
+in `ExecStart` (preserving `argv[0]`), so both survive the change.
+
+Reading failures:
+
+- A collector stopped on purpose looks like a crash. Its shutdown handler raises
+  `KeyboardInterrupt`, so `systemctl stop` leaves a Python traceback and
+  `status=130/n/a` in the journal. A traceback ending in `_shutdown_signal` is a
+  clean stop, not a fault.
+- `Restart=on-failure` does not resurrect a unit that was explicitly stopped, so a
+  collector can stay down for hours while the recorder keeps filling the local DB.
+  The two fail independently; check both.
+
+### Focused-window identity on KDE Wayland — fixed 2026-07-26
+
+Frames whose window exposed no accessibility tree used to be stored with `app_name`
+and `window_name` NULL. Identity fell back to the AT-SPI tree, so a window with no
+tree lost its *name* as well as its text, and since the collector keys context on
+application and window title those frames identified nothing.
+
+`get_active_window_info_fresh()` tries Hyprland → Sway → **KWin** → X11. The KWin
+step did not exist, and the other three cannot work here: the Hyprland and Sway IPC
+sockets are absent, and xdotool sees only XWayland clients.
+
+The fix inverts the lookup, because KWin cannot be *asked* for the focused window —
+`getWindowInfo` needs a UUID and reports no active field, `queryWindowInfo` is
+interactive, and `plasma_window_management`/`foreign_toplevel` are not advertised to
+unprivileged clients. So the recorder serves a D-Bus interface and loads a script
+into KWin, and KWin **pushes** focus changes in. Pushing also removes polling and any
+staleness window. Verify it live:
+
+```bash
+busctl --user call org.kde.KWin /Scripting org.kde.kwin.Scripting \
+  isScriptLoaded s "screenpipe-active-window"          # -> b true
+busctl --user introspect com.screenpipe.KWinWatcher /com/screenpipe/KWinWatcher
+```
+
+Measured on `text_source='ocr'` frames, the only population affected — NULL `app_name`
+went **8,053/8,794 (91%) → 0/2,474 (0%)**, holding at 0% since, including 910
+fullscreen Age of Empires IV frames that all resolve a name.
+
+Two cautions for whoever revisits this:
+
+- **Do not "fix" it with xdotool.** On a Wayland-focused window `xdotool getwindowname`
+  on the XWayland stub *exits 0 with empty output*. Linux prefers this lightweight
+  source over the accessibility tree, so the synthesised `"Unknown"` overwrites correct
+  AT-SPI names on every frame. `x11_window_result()` now returns `None` when a lookup
+  produced neither a title nor a pid, but the real point is not to install xdotool.
+- **The old "fullscreen games above all" framing was too narrow.** Thumbnails of
+  pre-fix NULL frames show an ordinary YouTube tab and a Claude Desktop + terminal
+  desktop. Any window whose AT-SPI query returned no nodes was affected.
+
+To confirm the fix is live, plot the NULL rate **by hour**
+(`GROUP BY substr(timestamp,1,13)`). A sample of recent frames proves nothing: after a
+restart they are overwhelmingly `text_source=accessibility`, which carried app names
+before the fix too.
+
+Ships on `untracked/screenpipe` branch `chronicle`.
+
 ## Observation lifecycle
 
 The companion polls the local ScreenPipe database on its short polling loop, but polling
@@ -75,6 +155,28 @@ The reduction belongs where the data is. `untracked/screenpipe` branch `chronicl
   consumer re-derive it. Runs are **display-grade** — a run says these consecutive
   frames carried this app name, not that an activity began or ended.
 - **KWin focused-window tracking**, which is what makes the other two worth having.
+
+### What reliable identity unlocks
+
+Everything that separates one context from another keys on `app_name` + window title:
+the collector's observation state machine, `/app-runs`, and the screen-context filter
+below. While 91% of tree-less frames were anonymous, none of it could work — those
+frames either collapsed into one contextless bucket or borrowed the neighbouring
+window's label.
+
+The timeline UI papers over this by copying the previous app name onto unnamed frames
+(see `carry_forward` above). The effect of the fix is visible in whether that crutch
+still does anything:
+
+| day | `carry_forward=true` | `carry_forward=false` | unnamed frames |
+| --- | --- | --- | --- |
+| 2026-07-26 (pre-fix) | 54 runs | 212 runs | 2,728 |
+| 2026-07-27 (post-fix) | **152 runs** | **152 runs** | **0** |
+
+Before, the choice was between 54 runs carrying fabricated labels and 212 shattered
+ones. After, the crutch is a no-op and the two agree exactly — 152 runs that are all
+real. Boundaries from app identity are now worth building on; boundaries inferred from
+screen *content* still are not (see the segmentation note above).
 
 Only frames whose text came from the accessibility tree are ever compared. `ocr` is
 the fallback for windows exposing no tree, where the text is a few HUD fragments that
