@@ -35,6 +35,9 @@ def _system_event_to_dict(doc) -> dict[str, Any]:
         "metadata": doc.metadata,
         "created_at": doc.created_at.isoformat() if doc.created_at else None,
         "last_seen_at": doc.last_seen_at.isoformat() if doc.last_seen_at else None,
+        "occurrence_times": [
+            occurred_at.isoformat() for occurred_at in doc.occurrence_times
+        ],
     }
 
 

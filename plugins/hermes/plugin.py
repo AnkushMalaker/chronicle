@@ -21,7 +21,12 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
+from advanced_omi_backend.plugins.base import (
+    BasePlugin,
+    PluginConnectivityError,
+    PluginContext,
+    PluginResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +148,7 @@ class HermesPlugin(BasePlugin):
         return headers
 
     async def initialize(self):
-        """Create the shared HTTP client. Raises if no api_url is configured."""
+        """Create the shared HTTP client and verify that Hermes is reachable."""
         if not self.enabled:
             logger.info("Hermes plugin is disabled, skipping initialization")
             return
@@ -156,24 +161,29 @@ class HermesPlugin(BasePlugin):
         logger.info(
             f"Initializing Hermes plugin (URL: {self.api_url}, model: {self.model})"
         )
+        # Background recovery calls initialize() repeatedly. Replace the prior
+        # client instead of leaking a connection pool on every retry.
+        if self._client is not None:
+            await self._client.aclose()
+
         # Short connect, generous read/write/pool: a dead host fails in
         # ~connect_timeout s instead of hanging for the full response budget.
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout)
         )
 
-        # Best-effort connectivity check against the unauthenticated /health endpoint.
+        # Connectivity failures must propagate as retryable. Suppressing them
+        # makes the generic recovery loop mark an offline plugin as "recovered",
+        # then demote it again on the next health probe.
         try:
             resp = await self._client.get(f"{self.api_url}/health")
             resp.raise_for_status()
             logger.info("Hermes plugin initialized successfully")
-        except Exception as e:
-            # Don't hard-fail init: the RPi server may be momentarily down. Log
-            # loudly so the failure is visible, but let the plugin load so it can
-            # recover on the next utterance.
-            logger.warning(
-                f"Hermes health check failed during init ({self.api_url}): {e}"
-            )
+        except httpx.HTTPError as e:
+            detail = str(e).strip() or type(e).__name__
+            raise PluginConnectivityError(
+                f"Hermes unreachable at {self.api_url}: {detail}"
+            ) from e
 
     async def cleanup(self):
         """Close the shared HTTP client."""

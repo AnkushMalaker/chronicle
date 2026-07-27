@@ -14,6 +14,11 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _exception_detail(error: Exception) -> str:
+    """Return useful transport detail even when an exception string is empty."""
+    return str(error).strip() or type(error).__name__
+
+
 class MCPError(Exception):
     """MCP protocol error"""
 
@@ -275,8 +280,11 @@ class HAMCPClient:
             logger.error(f"HTTP error rendering template: {e.response.status_code}")
             raise MCPError(f"HTTP {e.response.status_code}: {e.response.text}")
         except httpx.RequestError as e:
-            logger.error(f"Request error rendering template: {e}")
-            raise MCPError(f"Request failed: {e}")
+            detail = _exception_detail(e)
+            # Initialization/recovery owns the user-visible degraded transition.
+            # Logging here at ERROR would create a second alarm on every probe.
+            logger.debug(f"Request error rendering template: {detail}")
+            raise MCPError(f"Request failed: {detail}")
 
     async def fetch_areas(self) -> List[str]:
         """

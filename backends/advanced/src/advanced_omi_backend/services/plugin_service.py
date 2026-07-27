@@ -902,6 +902,8 @@ async def run_plugin_recovery(
                         title=f"Plugin '{plugin_id}' recovered",
                         detail="initialize() succeeded on background retry",
                         metadata={"plugin_id": plugin_id},
+                        incident_key=f"plugin-dependency:{plugin_id}",
+                        resolves_incident=True,
                     )
                 except PluginConnectivityError as e:
                     # Still unreachable — quiet debug log, back off further
