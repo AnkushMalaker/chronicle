@@ -5,19 +5,24 @@ Interactive configuration for all services and API keys
 """
 
 import argparse
+import json
 import os
 import platform
 import secrets
 import shutil
 import sys
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
 from chronicle_setup import (
     ConfigManager,
     decide_cert_mode,
     detect_tailscale_info,
+    list_tailnet_peers,
     mask_value,
 )
 from chronicle_setup import prompt_password as util_prompt_password
@@ -31,6 +36,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.text import Text
+from ruamel.yaml import YAML
 
 # Anchored to this file, not the working directory: setup runs from the
 # repository root so that setup-requirements.txt resolves, but every path this
@@ -1402,6 +1408,308 @@ class ChronicleSetup:
                 f"[green][SUCCESS][/green] Tailscale auth key configured (Docker integration enabled)"
             )
 
+    def _discover_tailnet_http(
+        self, port: int, probe: Callable[[str], Optional[str]]
+    ) -> list:
+        """Probe online Tailnet nodes (this one included) for an HTTP service.
+
+        ``probe(base_url)`` returns a display string when the service answers,
+        None otherwise. Returns [{host, url, detail}], preferring MagicDNS names
+        over 100.x IPs (which can change over time).
+        """
+        nodes = [
+            node
+            for node in list_tailnet_peers()
+            if node["online"] and (node["dns_name"] or node["ip"])
+        ]
+        if not nodes:
+            return []
+
+        def check(node):
+            address = node["dns_name"] or node["ip"]
+            url = f"http://{address}:{port}"
+            try:
+                detail = probe(url)
+            except (urllib.error.URLError, OSError, ValueError):
+                return None
+            return (
+                {"host": node["host"], "url": url, "detail": detail} if detail else None
+            )
+
+        with self.console.status(
+            f"Scanning {len(nodes)} Tailnet node(s) on port {port}..."
+        ):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(check, nodes))
+        return [result for result in results if result]
+
+    def _select_tailnet_service_url(
+        self,
+        label: str,
+        port: int,
+        probe: Callable[[str], Optional[str]],
+        existing: str,
+    ) -> str:
+        """Pick a service URL by scanning the Tailnet, or enter one manually.
+
+        Returns "" when nothing was chosen. A re-run defaults to keeping the
+        existing URL (press-Enter-through); a fresh run defaults to scanning.
+        """
+        self.console.print(f"Where does {label} run?")
+        self.console.print(f"  1) Scan the Tailnet for it (port {port})")
+        self.console.print("  2) Enter the URL manually")
+        default_choice = "2" if existing else "1"
+        try:
+            choice = Prompt.ask("Enter choice", default=default_choice)
+        except EOFError:
+            choice = default_choice
+
+        if choice == "1":
+            found = self._discover_tailnet_http(port, probe)
+            if found:
+                self.console.print(f"[green]Found {len(found)} on the Tailnet:[/green]")
+                for index, entry in enumerate(found, 1):
+                    self.console.print(
+                        f"  {index}) {entry['host']} — {entry['url']} ({entry['detail']})"
+                    )
+                default_pick = "1"
+                for index, entry in enumerate(found, 1):
+                    if existing and entry["url"].rstrip("/") == existing.rstrip("/"):
+                        default_pick = str(index)
+                        break
+                try:
+                    pick = int(Prompt.ask("Pick one", default=default_pick)) - 1
+                except (EOFError, ValueError):
+                    pick = int(default_pick) - 1
+                if 0 <= pick < len(found):
+                    return found[pick]["url"]
+            else:
+                self.console.print(
+                    f"[yellow]No {label} found on the Tailnet — enter the URL manually.[/yellow]"
+                )
+        return self.prompt_value(f"{label} URL (e.g. http://host:{port})", existing)
+
+    def _probe_immich(self, base_url: str) -> str | None:
+        """Immich version string when ``base_url`` answers the Immich ping."""
+        with urllib.request.urlopen(f"{base_url}/api/server/ping", timeout=3) as res:
+            if json.load(res).get("res") != "pong":
+                return None
+        with urllib.request.urlopen(f"{base_url}/api/server/version", timeout=3) as res:
+            version = json.load(res)
+            return f"Immich v{version['major']}.{version['minor']}.{version['patch']}"
+
+    def _check_immich(self, url: str, key: str) -> str | None:
+        """Probe an Immich server; return an error message or None if healthy."""
+        base = url.rstrip("/")
+        try:
+            with urllib.request.urlopen(f"{base}/api/server/ping", timeout=5) as res:
+                if json.load(res).get("res") != "pong":
+                    return "server did not answer the Immich ping"
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return f"server unreachable: {exc}"
+        request = urllib.request.Request(
+            f"{base}/api/people?size=1", headers={"x-api-key": key}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5):
+                return None
+        except urllib.error.HTTPError as exc:
+            return f"API key rejected (HTTP {exc.code})"
+        except (urllib.error.URLError, OSError) as exc:
+            return f"people API unreachable: {exc}"
+
+    def _enable_immich_cron_jobs(self):
+        """Enable the Immich cron jobs in config.yml (schedules from defaults.yml)."""
+        jobs = {
+            "immich_memories": (
+                "Discover a bounded set of salient Immich photo candidates",
+                "30 4 * * *",
+            ),
+            "person_photos": (
+                "Embed Immich face photos into the vault's People notes",
+                "45 4 * * *",
+            ),
+        }
+        config = self.config_manager.get_full_config()
+        cron_jobs = config.setdefault("cron_jobs", {})
+        for job_id, (description, schedule) in jobs.items():
+            entry = cron_jobs.setdefault(
+                job_id, {"description": description, "schedule": schedule}
+            )
+            entry["enabled"] = True
+        self.config_manager.save_full_config(config)
+
+    def setup_immich(self):
+        """Configure the Immich photo library integration"""
+        self.print_section("Immich Photo Library (Optional)")
+        self.console.print(
+            "Connect a self-hosted Immich server to discover salient photos for the"
+        )
+        self.console.print(
+            "timeline and to embed each known person's face photo in their vault note."
+        )
+        self.console.print()
+
+        existing_url = self.read_existing_env_value("IMMICH_URL")
+        try:
+            enable = Confirm.ask(
+                "Configure Immich integration?", default=bool(existing_url)
+            )
+        except EOFError:
+            self.console.print("Using default: No")
+            enable = False
+        if not enable:
+            return
+
+        url = self._select_tailnet_service_url(
+            "Immich", 2283, self._probe_immich, existing_url
+        )
+        if not url:
+            self.console.print(
+                "[yellow][WARNING][/yellow] No Immich URL — skipping Immich setup"
+            )
+            return
+        key = self.prompt_with_existing_masked(
+            "Immich API key (Immich → Account Settings → API Keys)",
+            "IMMICH_API_KEY",
+            placeholders=[],
+            is_password=True,
+        )
+        self.config["IMMICH_URL"] = url
+        self.config["IMMICH_API_KEY"] = key
+
+        error = self._check_immich(url, key)
+        if error is None:
+            self.console.print("[green][SUCCESS][/green] Immich server verified")
+        else:
+            self.console.print(
+                f"[yellow][WARNING][/yellow] Immich check failed — {error}"
+            )
+            self.console.print(
+                "[yellow][WARNING][/yellow] Saved anyway; fix the URL/key before "
+                "enabling the cron jobs does anything useful"
+            )
+
+        # Photos are imported for one Chronicle account; the backend defaults to
+        # the admin account, so a fresh install needs no ObjectId here.
+        existing_user = self.read_existing_env_value("IMMICH_USER_ID")
+        user_id = self.prompt_value(
+            "Chronicle user ObjectId owning the photos (Enter = admin account)",
+            existing_user,
+        )
+        self.config["IMMICH_USER_ID"] = user_id
+
+        try:
+            enable_crons = Confirm.ask(
+                "Enable the daily Immich cron jobs (photo discovery + person photos)?",
+                default=True,
+            )
+        except EOFError:
+            self.console.print("Using default: Yes")
+            enable_crons = True
+        if enable_crons:
+            self._enable_immich_cron_jobs()
+            self.console.print(
+                "[green][SUCCESS][/green] Cron jobs enabled (manage them under "
+                "Queue & Events in the dashboard)"
+            )
+        self.console.print("[green][SUCCESS][/green] Immich integration configured")
+
+    def _probe_homeassistant(self, base_url: str) -> str | None:
+        """Instance name when ``base_url`` serves the Home Assistant frontend."""
+        with urllib.request.urlopen(f"{base_url}/manifest.json", timeout=3) as res:
+            name = str(json.load(res).get("name") or "")
+        return name if "home assistant" in name.lower() else None
+
+    def _check_homeassistant(self, url: str, token: str) -> str | None:
+        """Probe the HA REST API with the token; error message or None if healthy."""
+        request = urllib.request.Request(
+            f"{url.rstrip('/')}/api/",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5):
+                return None
+        except urllib.error.HTTPError as exc:
+            return f"token rejected (HTTP {exc.code})"
+        except (urllib.error.URLError, OSError) as exc:
+            return f"server unreachable: {exc}"
+
+    def _enable_homeassistant_plugin(self):
+        """Flip the homeassistant plugin to enabled in config/plugins.yml."""
+        plugins_yml = REPO_ROOT / "config" / "plugins.yml"
+        yaml = YAML()
+        yaml.preserve_quotes = True
+        data = yaml.load(plugins_yml.read_text(encoding="utf-8")) or {}
+        entry = data.setdefault("plugins", {}).setdefault("homeassistant", {})
+        if entry.get("enabled") is True:
+            return
+        entry["enabled"] = True
+        with plugins_yml.open("w", encoding="utf-8") as handle:
+            yaml.dump(data, handle)
+
+    def setup_homeassistant(self):
+        """Configure the Home Assistant smart-home plugin"""
+        self.print_section("Home Assistant (Optional)")
+        self.console.print(
+            "Voice-command smart home control through the Home Assistant plugin."
+        )
+        self.console.print()
+
+        existing_url = self.read_existing_env_value("HA_URL")
+        try:
+            enable = Confirm.ask(
+                "Configure Home Assistant integration?", default=bool(existing_url)
+            )
+        except EOFError:
+            self.console.print("Using default: No")
+            enable = False
+        if not enable:
+            return
+
+        url = self._select_tailnet_service_url(
+            "Home Assistant", 8123, self._probe_homeassistant, existing_url
+        )
+        if not url:
+            self.console.print(
+                "[yellow][WARNING][/yellow] No Home Assistant URL — skipping setup"
+            )
+            return
+        token = self.prompt_with_existing_masked(
+            "Long-lived access token (HA → Profile → Security → Long-lived tokens)",
+            "HA_TOKEN",
+            placeholders=[],
+            is_password=True,
+        )
+        self.config["HA_URL"] = url
+        self.config["HA_TOKEN"] = token
+
+        error = self._check_homeassistant(url, token)
+        if error is None:
+            self.console.print("[green][SUCCESS][/green] Home Assistant API verified")
+        else:
+            self.console.print(
+                f"[yellow][WARNING][/yellow] Home Assistant check failed — {error}"
+            )
+            self.console.print(
+                "[yellow][WARNING][/yellow] Saved anyway; fix the URL/token in "
+                "backends/advanced/.env"
+            )
+
+        try:
+            enable_plugin = Confirm.ask(
+                "Enable the Home Assistant plugin in config/plugins.yml?", default=True
+            )
+        except EOFError:
+            self.console.print("Using default: Yes")
+            enable_plugin = True
+        if enable_plugin:
+            self._enable_homeassistant_plugin()
+            self.console.print(
+                "[green][SUCCESS][/green] Plugin enabled (trigger keywords and "
+                "events stay as configured in config/plugins.yml)"
+            )
+
     def setup_langfuse(self):
         """Configure LangFuse observability and prompt management"""
         self.console.print()
@@ -1808,6 +2116,11 @@ class ChronicleSetup:
         memory_provider = config_yml.get("memory", {}).get("provider", "chronicle")
         self.console.print(f"✅ Memory Provider: {memory_provider} (config.yml)")
 
+        if self.config.get("IMMICH_URL"):
+            self.console.print(f"✅ Immich: {self.config['IMMICH_URL']}")
+        if self.config.get("HA_URL"):
+            self.console.print(f"✅ Home Assistant: {self.config['HA_URL']}")
+
         # Auto-determine URLs based on HTTPS configuration
         if self.config.get("HTTPS_ENABLED") == "true":
             server_ip = self.config.get("SERVER_IP", "localhost")
@@ -1885,6 +2198,8 @@ class ChronicleSetup:
             self.setup_fallback_llm()
             self.setup_memory()
             self.setup_optional_services()
+            self.setup_immich()
+            self.setup_homeassistant()
             self.setup_langfuse()
             self.setup_network()
             self.setup_https()
