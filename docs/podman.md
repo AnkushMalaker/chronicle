@@ -136,6 +136,23 @@ internally by querying `podman ps` scoped to the compose project label.
   `chronicle-network`) is present. Fix: declare `default: {}` in that compose file's
   top-level `networks:` (a no-op under docker). Only `extras/langfuse` needed this;
   all compose files now parse under both engines.
+- **Missing bind-mount sources.** Docker silently creates a bind-mount source
+  directory that doesn't exist; crun refuses to start the container instead
+  (`cannot stat '<path>': No such file or directory: OCI runtime attempted to
+  invoke a command that was not found` — the message names a *command*, but the
+  problem is the mount). Git cannot store an empty directory, so any runtime dir
+  a compose file mounts is missing on a fresh checkout. The failure is quiet:
+  the container is left in `created`, not `exited`, so nothing is listening and
+  `./start.sh` reports success for the rest of the stack. Seen on kraken, where
+  `extras/asr-services`' `./debug` and `./lora_adapters` left the ASR service
+  unstarted for days and dictation 503'd with "Cannot reach transcription
+  service". Fix: commit a `.gitkeep` in each mounted runtime dir (done for those
+  two). Diagnose with `podman inspect <container> --format '{{.State.Error}}'`,
+  and audit a compose file with:
+  ```bash
+  grep -oE '^\s+- \./[^:]+:' docker-compose.yml | sed -E 's|.*\./||; s|:$||' \
+    | sort -u | while read d; do [ -e "$d" ] || echo "MISSING $d"; done
+  ```
 - **Docker Desktop auto-start.** On Windows, Docker Desktop relaunches on login and
   its `restart: unless-stopped` containers reclaim host ports (27017/6379/…) via the
   WSL relay, blocking Podman. Uninstall it (or disable login-start + `compose down`
