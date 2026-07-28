@@ -446,10 +446,16 @@ export const usersApi = {
   delete: (id: string) => api.delete(`/api/users/${id}`),
 }
 
+// userId targets another user's keys (admin only); omit for your own.
 export const apiKeysApi = {
-  list: () => api.get('/api/api-keys'),
-  create: (name: string, expiresInDays?: number) =>
-    api.post('/api/api-keys', { name, expires_in_days: expiresInDays ?? null }),
+  list: (userId?: string) =>
+    api.get('/api/api-keys', { params: userId ? { user_id: userId } : undefined }),
+  create: (name: string, expiresInDays?: number, userId?: string) =>
+    api.post(
+      '/api/api-keys',
+      { name, expires_in_days: expiresInDays ?? null },
+      { params: userId ? { user_id: userId } : undefined },
+    ),
   revoke: (id: string) => api.delete(`/api/api-keys/${id}`),
 }
 

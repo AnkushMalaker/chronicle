@@ -3,6 +3,8 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from beanie import PydanticObjectId
+from fastapi import HTTPException
 
 from advanced_omi_backend import auth
 from advanced_omi_backend.models import api_key as api_key_model
@@ -154,3 +156,81 @@ async def test_resolve_rejects_a_key_with_the_wrong_secret(monkeypatch):
 
 async def _async(value):
     return value
+
+
+class _FakeOwner:
+    """Minimal stand-in for User in _resolve_owner authorization checks."""
+
+    def __init__(self, user_id, is_superuser=False):
+        self.id = user_id
+        self.is_superuser = is_superuser
+
+
+def test_resolve_owner_defaults_to_the_caller():
+    from advanced_omi_backend.routers.modules.api_key_routes import _resolve_owner
+
+    me = _FakeOwner(PydanticObjectId())
+    assert _resolve_owner(None, me) == me.id
+
+
+def test_resolve_owner_lets_a_user_name_themselves():
+    from advanced_omi_backend.routers.modules.api_key_routes import _resolve_owner
+
+    me = _FakeOwner(PydanticObjectId())
+    assert _resolve_owner(str(me.id), me) == me.id
+
+
+def test_resolve_owner_blocks_a_non_admin_targeting_someone_else():
+    """A key grants its owner's full access, so minting one for another user
+    is an impersonation primitive — admins only."""
+    from advanced_omi_backend.routers.modules.api_key_routes import _resolve_owner
+
+    me = _FakeOwner(PydanticObjectId())
+    victim = PydanticObjectId()
+    with pytest.raises(HTTPException) as exc:
+        _resolve_owner(str(victim), me)
+    assert exc.value.status_code == 403
+
+
+def test_resolve_owner_allows_an_admin_targeting_someone_else():
+    from advanced_omi_backend.routers.modules.api_key_routes import _resolve_owner
+
+    admin = _FakeOwner(PydanticObjectId(), is_superuser=True)
+    other = PydanticObjectId()
+    assert _resolve_owner(str(other), admin) == other
+
+
+def test_resolve_owner_rejects_a_malformed_user_id():
+    from advanced_omi_backend.routers.modules.api_key_routes import _resolve_owner
+
+    admin = _FakeOwner(PydanticObjectId(), is_superuser=True)
+    with pytest.raises(HTTPException) as exc:
+        _resolve_owner("not-an-object-id", admin)
+    assert exc.value.status_code == 404
+
+
+def test_admin_user_listing_never_serialises_the_password_hash():
+    """/api/users previously returned the Beanie document, shipping
+    hashed_password to the browser."""
+    from advanced_omi_backend.routers.modules.user_routes import UserAdminRead
+
+    fields = set(UserAdminRead.model_fields)
+    assert "hashed_password" not in fields
+    assert {"email", "is_superuser", "is_active", "device_count"} <= fields
+
+
+def test_admin_user_listing_keeps_the_underscore_id_alias():
+    """The WebUI reads user._id; a bare `id` would silently break every row."""
+    from advanced_omi_backend.routers.modules.user_routes import UserAdminRead
+
+    row = UserAdminRead(
+        id="507f1f77bcf86cd799439011",
+        email="a@b.com",
+        is_superuser=False,
+        is_active=True,
+        is_verified=True,
+        device_count=2,
+    )
+    dumped = row.model_dump(by_alias=True)
+    assert dumped["_id"] == "507f1f77bcf86cd799439011"
+    assert "hashed_password" not in dumped

@@ -5,8 +5,10 @@ Handles user CRUD operations and admin user management.
 """
 
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel, EmailStr, Field
 
 from advanced_omi_backend.auth import current_superuser
 from advanced_omi_backend.controllers import user_controller
@@ -17,10 +19,40 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/users", tags=["users"])
 
 
-@router.get("", response_model=list[User])
+class UserAdminRead(BaseModel):
+    """A user as the admin Users page sees them.
+
+    Serialising the Beanie ``User`` document directly would ship
+    ``hashed_password`` to the browser, so this lists the fields explicitly.
+    The id keeps its ``_id`` alias to match what the WebUI already reads.
+    """
+
+    id: str = Field(serialization_alias="_id")
+    email: EmailStr
+    display_name: Optional[str] = None
+    is_superuser: bool
+    is_active: bool
+    is_verified: bool
+    device_count: int
+
+    @classmethod
+    def from_doc(cls, user: User) -> "UserAdminRead":
+        return cls(
+            id=str(user.id),
+            email=user.email,
+            display_name=user.display_name,
+            is_superuser=user.is_superuser,
+            is_active=user.is_active,
+            is_verified=user.is_verified,
+            device_count=len(user.registered_clients),
+        )
+
+
+@router.get("", response_model=list[UserAdminRead], response_model_by_alias=True)
 async def get_users(current_user: User = Depends(current_superuser)):
     """Get all users. Admin only."""
-    return await user_controller.get_users()
+    users = await user_controller.get_users()
+    return [UserAdminRead.from_doc(u) for u in users]
 
 
 @router.post("")

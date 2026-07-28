@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
-import { Users as UsersIcon, Plus, Edit, Trash2, RefreshCw, Shield, User, Mail } from 'lucide-react'
+import { Users as UsersIcon, Plus, Edit, Trash2, RefreshCw, Shield, User, Mail, ChevronRight, ChevronDown, Key, Smartphone } from 'lucide-react'
+import ApiKeysPanel from '../components/ApiKeysPanel'
 import { useAuth } from '../contexts/AuthContext'
 import { useUsers, useCreateUser, useUpdateUser, useDeleteUser } from '../hooks/useUsers'
 import { Button, IconButton, Input, Label, Checkbox, StateBadge } from '../components/ui'
@@ -10,6 +11,8 @@ interface User {
   email: string
   is_superuser: boolean
   is_active: boolean
+  is_verified: boolean
+  device_count: number
 }
 
 interface UserFormData {
@@ -23,6 +26,9 @@ interface UserFormData {
 export default function Users() {
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [editingUser, setEditingUser] = useState<User | null>(null)
+  // Which users' API-key panels are expanded. Keys load lazily per user, so
+  // an admin with many users doesn't fan out a request per row on page load.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [actionError, setActionError] = useState<string | null>(null)
 
   const { isAdmin } = useAuth()
@@ -87,6 +93,14 @@ export default function Users() {
     } catch (err: any) {
       setActionError(err.message || 'Failed to delete user')
     }
+  }
+
+  const toggleExpanded = (userId: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      next.has(userId) ? next.delete(userId) : next.add(userId)
+      return next
+    })
   }
 
   const handleEditUser = (user: User) => {
@@ -225,6 +239,7 @@ export default function Users() {
           <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
             <thead className="bg-gray-50 dark:bg-gray-700">
               <tr>
+                <th className="w-10 px-2 py-3"></th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                   User
                 </th>
@@ -237,6 +252,9 @@ export default function Users() {
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                   Status
                 </th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                  Devices
+                </th>
                 <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                   Actions
                 </th>
@@ -244,7 +262,18 @@ export default function Users() {
             </thead>
             <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
               {users.map((user) => (
-                <tr key={user._id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                <React.Fragment key={user._id}>
+                <tr className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                  <td className="px-2 py-4">
+                    <IconButton
+                      label={expanded.has(user._id) ? 'Hide API keys' : 'Show API keys'}
+                      onClick={() => toggleExpanded(user._id)}
+                    >
+                      {expanded.has(user._id)
+                        ? <ChevronDown className="h-4 w-4" />
+                        : <ChevronRight className="h-4 w-4" />}
+                    </IconButton>
+                  </td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="flex items-center">
                       <User className="h-8 w-8 text-gray-400" />
@@ -252,6 +281,9 @@ export default function Users() {
                         <div className="text-sm font-medium text-gray-900 dark:text-gray-100">
                           {user.display_name || 'No name set'}
                         </div>
+                        {!user.is_verified && (
+                          <div className="text-xs text-gray-500 dark:text-gray-400">Unverified</div>
+                        )}
                       </div>
                     </div>
                   </td>
@@ -274,6 +306,12 @@ export default function Users() {
                       {user.is_active ? 'Active' : 'Inactive'}
                     </StateBadge>
                   </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <div className="flex items-center text-sm text-gray-600 dark:text-gray-400">
+                      <Smartphone className="h-4 w-4 text-gray-400 mr-2" />
+                      {user.device_count}
+                    </div>
+                  </td>
                   <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                     <div className="flex justify-end space-x-2">
                       <IconButton label="Edit user" onClick={() => handleEditUser(user)}>
@@ -285,6 +323,28 @@ export default function Users() {
                     </div>
                   </td>
                 </tr>
+                {expanded.has(user._id) && (
+                  <tr className="bg-gray-50 dark:bg-gray-900/40">
+                    <td colSpan={7} className="px-6 py-4">
+                      <div className="flex items-center mb-3">
+                        <Key className="h-4 w-4 text-blue-600 mr-2" />
+                        <h4 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+                          API Keys
+                        </h4>
+                      </div>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+                        Long-lived credentials that authenticate as {user.display_name || user.email}.
+                        Only the public prefix is shown — the secret is stored hashed and is
+                        displayed once, when the key is created.
+                      </p>
+                      <ApiKeysPanel
+                        userId={user._id}
+                        emptyHint={`${user.display_name || user.email} has no API keys.`}
+                      />
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>
