@@ -328,7 +328,13 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
             **kwargs,
         )
 
-        if cache is not None and cache_key is not None and result:
+        # Don't cache an empty transcript: the key doesn't cover the ASR
+        # service's gate settings, so a cached "" would outlive a threshold change.
+        if (
+            cache is not None
+            and cache_key is not None
+            and (result or {}).get("text", "").strip()
+        ):
             try:
                 # Mongo documents cap at 16MB; skip pathological payloads.
                 if len(json.dumps(result, default=str)) < 12_000_000:

@@ -18,10 +18,8 @@ minted at Settings → API Keys — a JWT expires after 24h, which breaks any cl
 that has no way to log in again.
 """
 
-import io
 import logging
 import time
-import wave
 from typing import Optional
 
 import httpx
@@ -36,6 +34,7 @@ from advanced_omi_backend.services.transcription import (
     RegistryBatchTranscriptionProvider,
     get_transcription_provider,
 )
+from advanced_omi_backend.utils.audio_utils import normalize_wav, wav_params
 
 logger = logging.getLogger(__name__)
 
@@ -45,17 +44,6 @@ router = APIRouter(prefix="/v1", tags=["openai-compat"])
 # This process-local breaker resets quickly so a recovered local service is retried.
 _UPSTREAM_FAILURE_COOLDOWN_SECONDS = 60.0
 _unavailable_models: dict[str, float] = {}
-
-
-def _wav_sample_rate(audio_data: bytes) -> int:
-    """Read the sample rate from a WAV header, defaulting to 16 kHz."""
-    if audio_data[:4] == b"RIFF":
-        try:
-            with wave.open(io.BytesIO(audio_data)) as wf:
-                return wf.getframerate()
-        except wave.Error:
-            pass
-    return 16000
 
 
 @router.post("/audio/transcriptions")
@@ -88,7 +76,7 @@ async def create_transcription(
             status_code=503, detail="No STT provider configured in config.yml"
         )
 
-    sample_rate = _wav_sample_rate(audio_data)
+    sample_rate, duration = wav_params(audio_data)
     try:
         # priority=True: dictation is latency-sensitive — use the ASR
         # service's priority GPU lane so it never queues behind long batches.
@@ -103,6 +91,34 @@ async def create_transcription(
         raise HTTPException(status_code=503, detail=str(e))
 
     text = (result or {}).get("text", "")
+
+    # Empty text may just mean the clip was too quiet for the provider's silence
+    # gate. Retry once, normalised, before calling it silence.
+    if not text.strip():
+        boosted = normalize_wav(audio_data)
+        if boosted is not None:
+            logger.info(
+                f"Dictation: empty transcript, retrying normalised "
+                f"({len(audio_data)} bytes)"
+            )
+            try:
+                result = await provider.transcribe(
+                    boosted,
+                    sample_rate,
+                    diarize=False,
+                    context_info=prompt or None,
+                    priority=True,
+                )
+            except ConnectionError as e:
+                raise HTTPException(status_code=503, detail=str(e))
+            text = (result or {}).get("text", "")
+
+    if not text.strip():
+        clip = f"{duration:.1f}s" if duration else f"{len(audio_data)} bytes"
+        raise HTTPException(
+            status_code=422, detail=f"No speech detected in {clip} of audio."
+        )
+
     logger.info(
         f"Dictation transcription for {current_user.email} via "
         f"{provider.name}: {len(audio_data)} bytes -> {len(text)} chars"

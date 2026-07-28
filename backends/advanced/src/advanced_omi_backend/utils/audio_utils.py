@@ -369,6 +369,62 @@ async def write_audio_file(
     return relative_audio_path, str(file_path), duration
 
 
+def wav_params(wav_data: bytes) -> tuple[int, Optional[float]]:
+    """
+    Read the sample rate and duration from a WAV header.
+
+    Args:
+        wav_data: WAV file data as bytes
+
+    Returns:
+        (sample_rate, duration_seconds). Falls back to (16000, None) when the
+        payload is not a parseable WAV.
+    """
+    if wav_data[:4] == b"RIFF":
+        try:
+            with wave.open(io.BytesIO(wav_data)) as wav_file:
+                rate = wav_file.getframerate()
+                if rate:
+                    return rate, wav_file.getnframes() / rate
+        except wave.Error:
+            pass
+    return 16000, None
+
+
+def normalize_wav(wav_data: bytes, target_peak: float = 0.25) -> Optional[bytes]:
+    """
+    Rescale a 16-bit mono WAV so its loudest sample sits at ``target_peak``.
+
+    Args:
+        wav_data: WAV file data as bytes
+        target_peak: Desired peak amplitude on a [0, 1] scale (default: 0.25)
+
+    Returns:
+        The rescaled WAV, or None when the payload is not 16-bit mono WAV, is
+        all zeros, or already peaks at/above ``target_peak``.
+    """
+    try:
+        with wave.open(io.BytesIO(wav_data)) as wav_file:
+            if wav_file.getsampwidth() != 2 or wav_file.getnchannels() != 1:
+                return None
+            sample_rate = wav_file.getframerate()
+            frames = wav_file.readframes(wav_file.getnframes())
+    except (wave.Error, EOFError):
+        return None
+
+    samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32767.0
+    peak = float(np.abs(samples).max()) if samples.size else 0.0
+    # Tolerance: int16 rounding leaves a normalized clip a hair under the target.
+    if peak <= 0.0 or peak >= target_peak - 1e-3:
+        return None
+
+    logger.debug(f"Normalizing WAV: peak {peak:.4f} -> {target_peak}")
+    scaled = np.clip(samples * (target_peak / peak), -1.0, 1.0)
+    return pcm_to_wav_bytes(
+        (scaled * 32767.0).astype(np.int16).tobytes(), sample_rate=sample_rate
+    )
+
+
 def pcm_to_wav_bytes(
     pcm_data: bytes, sample_rate: int = 16000, channels: int = 1, sample_width: int = 2
 ) -> bytes:
