@@ -73,7 +73,7 @@ Audio/Images/Data  →  Ingestion  →  Processing  →  Memories
 | **ASR Services** | `extras/asr-services/` | Local speech-to-text (Parakeet) |
 | **TTS Services** | `extras/tts/` | Text-to-speech (TADA, Fish Speech, KittenTTS) |
 | **HAVPE Relay** | `extras/havpe-relay/` | ESP32 audio bridge |
-| **Vault Sync** | `extras/vault-sync/` | macOS menu bar app — syncs your conversation_docs vault to Obsidian via Syncthing |
+| **Desktop tray** | `extras/chronicle-tray/` | Cross-platform tray/menu-bar app (Linux + macOS): vault sync, ScreenPipe controls, pendant |
 
 ### Pluggable Providers
 
@@ -99,7 +99,8 @@ chronicle/
 │   ├── asr-services/        # Local ASR (Parakeet)
 │   ├── tts/                 # Text-to-speech (TADA, Fish Speech, KittenTTS)
 │   ├── havpe-relay/         # ESP32 audio bridge
-│   └── vault-sync/          # macOS menu bar app: vault ⇄ Obsidian via Syncthing
+│   ├── chronicle-tray/      # cross-platform desktop tray (Linux + macOS)
+│   └── vault-sync/          # vault ⇄ Obsidian sync core used by the tray
 ├── config/                  # Central configuration
 ├── docs/                    # Documentation
 ├── tests/                   # Integration tests (Robot Framework)

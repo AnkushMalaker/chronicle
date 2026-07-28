@@ -13,9 +13,12 @@ the timeline and memory curator.
   observation lifecycle, checkpoints progress, and answers bounded media requests.
 - Chronicle's backend stores timeline activity and only the media selected for a
   durable Chronicle view or memory.
-- `extras/vault-sync/` is the single Chronicle desktop entry point. `main.py` selects
-  the macOS menu bar or Linux system tray adapter; `desktop_core.py` contains their
-  shared state, logging, and vault synchronization.
+- `extras/chronicle-tray/` is the single Chronicle desktop entry point, on every
+  platform. `app.py` is one `QSystemTrayIcon` that renders in the Linux system tray
+  and the macOS menu bar alike; the menu is assembled from `sections/`. It imports
+  the vault-sync core (`extras/vault-sync/chronicle_vault_sync/core.py`) in place —
+  that package is now a library plus its legacy pre-tray service management, not a
+  desktop app of its own.
 - ScreenPipe's own desktop UI is an optional, on-demand local timeline viewer. It is
   not the recorder and should not autostart or launch a second recording process.
 
@@ -240,7 +243,10 @@ systemctl --user status screenpipe.service chronicle-screenpipe.service chronicl
 journalctl --user -u screenpipe.service -u chronicle-screenpipe.service -u chronicle-desktop.service
 ```
 
-On macOS, use `extras/vault-sync/start.sh logs` for the installed desktop service.
+On macOS the same services are launchd agents rather than systemd units, so use
+`launchctl print gui/$(id -u)/<label>` and the logs under `~/Library/Logs/Chronicle/`
+(labels are in `clients.py`). `extras/vault-sync/start.sh logs` only covers a legacy
+pre-tray install.
 
 The Linux ScreenPipe UI launcher may set rendering/onboarding environment required by
 the locally installed build, but its desktop autostart entry should remain disabled.

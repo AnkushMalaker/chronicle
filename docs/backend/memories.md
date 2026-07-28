@@ -98,7 +98,7 @@ Chat is always **agentic / tool-calling**. The chat LLM is given a `search_memor
 
 ## Vault sync to Obsidian (separate feature)
 
-The vault is designed to be edited and viewed directly. The optional **vault-sync** feature (`extras/vault-sync/`, macOS menu bar app) syncs `data/conversation_docs/` to an Obsidian vault via Syncthing, so you can browse and hand-edit your memory notes in Obsidian. Human edits made in Obsidian sync back into the vault. This sync is independent of the memory provider itself — the vault on the backend remains the source of truth.
+The vault is designed to be edited and viewed directly. The optional **vault sync** feature (in the cross-platform desktop tray, `extras/chronicle-tray/`) syncs `data/conversation_docs/` to an Obsidian vault via Syncthing, so you can browse and hand-edit your memory notes in Obsidian. Human edits made in Obsidian sync back into the vault. This sync is independent of the memory provider itself — the vault on the backend remains the source of truth.
 
 ## What was removed
 

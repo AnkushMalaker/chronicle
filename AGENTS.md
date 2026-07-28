@@ -15,8 +15,10 @@ This supports a comprehensive web dashboard for management.
 
 ## Live Deployment Location
 
-The normal live Chronicle deployment is hosted on the Tailnet machine **`kraken`**, not
-on the machine containing this workspace. A stopped or unconfigured local stack does
+The normal live Chronicle deployment is hosted on the Tailnet machine **`kraken`**. Run
+`hostname` before acting on this section — this file is checked in and reads the same on
+every machine, including Kraken itself, where the deployment is *local* and there is no
+remote host to reach. On any other machine a stopped or unconfigured local stack does
 not mean Chronicle is unavailable.
 
 For read-only checks of the running application (health checks, API inspection, or
@@ -24,7 +26,9 @@ browser/screenshot verification):
 
 1. Try `https://kraken.parrot-census.ts.net` first. Use HTTPS; plain HTTP redirects.
 2. If that name is unavailable, inspect the current Tailscale mesh with
-   `tailscale status --json` and resolve the online peer whose `HostName` is `Kraken`.
+   `tailscale status --json` and resolve the online peer whose `HostName` is `Kraken`
+   **and whose `OS` is `linux`** — Kraken runs under WSL2, so the Windows host
+   advertises the same hostname and answers pings while serving no Chronicle.
    Prefer its returned `DNSName`; use its current Tailscale IP only as a temporary
    fallback. Do not persist a `100.x` address because it may change.
 3. If the host is reachable but the Chronicle endpoint is unclear, use the repository's
