@@ -267,7 +267,7 @@ chronicle/
 1. **Clone Repository**
    ```bash
    # Clone Chronicle repository with submodules
-   git clone --recursive https://github.com/chronicle-ai/chronicle.git
+   git clone --recursive https://github.com/SimpleOpenSoftware/chronicle.git
    cd chronicle
 
    # If you already cloned without --recursive, initialize submodules:

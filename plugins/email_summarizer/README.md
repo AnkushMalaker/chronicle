@@ -268,9 +268,9 @@ plugins/email_summarizer/
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/chronicle-ai/chronicle/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/chronicle-ai/chronicle/discussions)
-- **Documentation**: [Chronicle Docs](https://github.com/chronicle-ai/chronicle)
+- **Issues**: [GitHub Issues](https://github.com/SimpleOpenSoftware/chronicle/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/SimpleOpenSoftware/chronicle/discussions)
+- **Documentation**: [Chronicle Docs](https://github.com/SimpleOpenSoftware/chronicle)
 
 ## License
 

@@ -11,9 +11,6 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from bson import ObjectId
-from email_summarizer.email_service import SMTPEmailService
-
 from advanced_omi_backend.database import get_database
 from advanced_omi_backend.llm_client import async_generate
 from advanced_omi_backend.models.conversation import Conversation
@@ -21,6 +18,8 @@ from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginR
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.utils.logging_utils import mask_dict
+from bson import ObjectId
+from email_summarizer.email_service import SMTPEmailService
 
 logger = logging.getLogger(__name__)
 
@@ -413,7 +412,7 @@ class HourlyRecapPlugin(BasePlugin):
 
     <div class="footer">
         <p>
-            Sent by <a href="https://github.com/chronicle-ai/chronicle" style="color:#f5576c;text-decoration:none;">Chronicle AI</a><br>
+            Sent by <a href="https://github.com/SimpleOpenSoftware/chronicle" style="color:#f5576c;text-decoration:none;">Chronicle AI</a><br>
             Your personal AI memory system
         </p>
     </div>
@@ -461,7 +460,7 @@ CONVERSATIONS
 
 Sent by Chronicle AI
 Your personal AI memory system
-https://github.com/chronicle-ai/chronicle
+https://github.com/SimpleOpenSoftware/chronicle
 """
 
     @staticmethod

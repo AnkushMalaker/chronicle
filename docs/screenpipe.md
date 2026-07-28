@@ -227,8 +227,11 @@ in the [companion README](../extras/screenpipe-collector/README.md).
 ## Desktop controls and logs
 
 On Linux the Chronicle tray controls `screenpipe.service` and
-`chronicle-screenpipe.service`, shows local frame/storage statistics, toggles capture
-modes, and offers timed pauses. Both Linux and macOS expose **View Logs** for the
+`chronicle-screenpipe.service`, shows local frame/storage statistics, and offers timed
+pauses. **Capture** holds master switches for audio and video; **Capture settings…**
+opens a dialog for the per-source choice of what is recorded locally and what is sent
+to Chronicle (audio can only be sent from a recorded source; recorded screen frames are
+always sent). Both Linux and macOS expose **View Logs** for the
 current Chronicle desktop process. System-service history remains in the native
 service manager:
 

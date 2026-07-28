@@ -31,10 +31,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # The memory agent uses `notesmd-cli move` to rename a person note and rewrite every
 # [[wikilink]] to it across the vault in one shot (verified non-destructive), and the
 # fork adds `create --template` (seed a note from a Templates/ note + {{date}}/{{title}}).
-# Pinned to the commit vendored in untracked/; vendor/ in the repo means the build is hermetic.
+# Pinned to a specific commit so image builds are reproducible; bump NOTESMD_REF to update.
+# Note this clones from GitHub at build time, so the fork must stay reachable.
 FROM golang:1.25-bookworm AS notesmd-builder
 ARG NOTESMD_REPO=https://github.com/AnkushMalaker/notesmd-cli
-ARG NOTESMD_REF=2566ac2
+ARG NOTESMD_REF=c906cc10
 RUN git clone ${NOTESMD_REPO} /src \
     && cd /src \
     && git checkout ${NOTESMD_REF} \

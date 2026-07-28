@@ -843,8 +843,8 @@ Want to share your plugin with the community?
 
 ## Support
 
-- **GitHub Issues**: [chronicle-ai/chronicle/issues](https://github.com/chronicle-ai/chronicle/issues)
-- **Discussions**: [chronicle-ai/chronicle/discussions](https://github.com/chronicle-ai/chronicle/discussions)
-- **Documentation**: [Chronicle Docs](https://github.com/chronicle-ai/chronicle)
+- **GitHub Issues**: [SimpleOpenSoftware/chronicle/issues](https://github.com/SimpleOpenSoftware/chronicle/issues)
+- **Discussions**: [SimpleOpenSoftware/chronicle/discussions](https://github.com/SimpleOpenSoftware/chronicle/discussions)
+- **Documentation**: [Chronicle Docs](https://github.com/SimpleOpenSoftware/chronicle)
 
 Happy plugin development! 🚀

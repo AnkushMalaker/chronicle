@@ -458,6 +458,6 @@ reuse property names, link profusely, don't over-create).
 **`notesmd-cli` fork** — `create --template <name>` added (resolves a template from the
 `.obsidian/templates.json` folder, substitutes `{{title}}/{{date}}/{{time}}`). Lives on
 `AnkushMalaker/notesmd-cli` branch `feat/create-template`; the backend Dockerfile is repinned
-to `NOTESMD_REPO=AnkushMalaker/notesmd-cli` `NOTESMD_REF=2566ac2`. The official Obsidian CLI
+to `NOTESMD_REPO=AnkushMalaker/notesmd-cli` `NOTESMD_REF=c906cc10`. The official Obsidian CLI
 has this but is closed-source, so the feature was replicated. The agent write path stays
 Python (`write_note`/`edit_note`); `--template` is the standalone CLI capability.

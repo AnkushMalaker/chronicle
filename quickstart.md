@@ -111,7 +111,7 @@ The setup wizard will automatically download and configure:
 
 **Download the code:**
 ```bash
-git clone https://github.com/chronicle-ai/chronicle.git
+git clone https://github.com/SimpleOpenSoftware/chronicle.git
 cd chronicle
 ```
 
@@ -198,14 +198,14 @@ Before connecting your phone, make sure everything works:
 **No development setup needed - just download and install!**
 
 ### Android Users
-1. Go to [GitHub Releases](https://github.com/AnkushMalaker/chronicle/releases)
+1. Go to [GitHub Releases](https://github.com/SimpleOpenSoftware/chronicle/releases)
 2. Find the latest release and download `chronicle-android.apk`
 3. Install APK on your phone:
    - Enable "Install from unknown sources" in Android settings
    - Tap the downloaded APK file to install
 
 ### iPhone Users
-1. Go to [GitHub Releases](https://github.com/AnkushMalaker/chronicle/releases)
+1. Go to [GitHub Releases](https://github.com/SimpleOpenSoftware/chronicle/releases)
 2. Find the latest release and download `chronicle-ios.ipa`
 3. Install using sideloading tool:
    - **AltStore** (recommended): [altstore.io](https://altstore.io)

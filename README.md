@@ -26,21 +26,20 @@ For step-by-step instructions, see the [setup guide](quickstart.md).
 
 ![Menu Bar Client](.assets/menu-bar-client.png)
 
-*[Mobile App - Screenshot coming soon]*
-
 ## What's Included
 
 - **Mobile app** for OMI devices via Bluetooth
 - **Backend services** (simple → advanced with full AI features)
 - **Web dashboard** for conversation and memory management
-- **Optional services**: Speaker recognition, offline ASR, distributed deployment
+- **Optional services**: Speaker recognition, offline ASR, wake word, TTS, screen capture
 
 ## Links
 
 - **📚 [Setup Guide](quickstart.md)** - Start here
-- **🔧 [Full Documentation](AGENTS.md)** - Comprehensive reference
+- **📖 [Documentation index](docs/README.md)** - All technical docs
 - **🏗️ [Project Overview](docs/overview.md)** - Architecture and vision
 - **🐳 [Docker/K8s](README-K8S.md)** - Container deployment
+- **🔧 [AGENTS.md](AGENTS.md)** - Development conventions
 
 ## Project Structure
 
@@ -56,10 +55,14 @@ chronicle/
 │   │   └── docker-compose.yml
 │   ├── simple/            # Basic backend implementation
 │   └── other-backends/    # Example implementations
-├── extras/
+├── extras/                  # Optional services (see extras/ for the full set)
 │   ├── speaker-recognition/  # Voice identification service
 │   ├── asr-services/        # Offline speech-to-text (Parakeet)
-│   └── openmemory-mcp/      # External memory server
+│   ├── wakeword-service/    # Wake-word detection
+│   ├── intent-router/       # Voice command routing
+│   ├── tts/                 # Text-to-speech
+│   └── vault-sync/          # Markdown vault sync
+├── plugins/                # Action plugins (e.g. Home Assistant)
 ├── docs/                   # Technical documentation
 ├── config/                 # Central configuration files
 ├── tests/                  # Integration & unit tests
@@ -85,9 +88,9 @@ chronicle/
 │       ┌────────────────────┴────────────────┐          │
 │       │                                     │          │
 │  ┌────▼─────┐  ┌───────────┐  ┌──────────▼──┐        │
-│  │ Deepgram │  │  OpenAI   │  │  FalkorDB   │        │
-│  │   STT    │  │   LLM     │  │  (Graph +   │        │
-│  │          │  │           │  │   Vector)   │        │
+│  │ Deepgram │  │  OpenAI   │  │  Markdown   │        │
+│  │   STT    │  │   LLM     │  │   Vault     │        │
+│  │          │  │           │  │  (memory)   │        │
 │  └──────────┘  └───────────┘  └─────────────┘        │
 │                                                         │
 │  Optional Services:                                     │
@@ -143,15 +146,17 @@ uv run --with-requirements setup-requirements.txt python services.py stop --all
 ```bash
 # Backend development
 cd backends/advanced
-uv run python src/main.py
+uv run python src/advanced_omi_backend/main.py
 
-# Run tests
-./run-test.sh
+# Integration tests (needs a .env with API keys)
+./backends/advanced/run-test.sh
 
 # Mobile app
 cd app
 npm start
 ```
+
+See [docs/testing.md](docs/testing.md) for the unit-test lanes and coverage.
 
 ### Health Checks
 ```bash
@@ -164,18 +169,15 @@ open http://localhost:5173
 
 ## Vision
 
-This fits as a small part of the larger idea of "Have various sensors feeding the state of YOUR world to computers/AI and get some use out of it"
+Have various sensors feed the state of *your* world to computers and AI, and get
+something useful out of it. Wearable audio devices capture personal spoken context
+best, so Chronicle starts there: multiple OMI-like devices feeding audio, and from it
+memories, action items, and home automation. Devices with a camera — or smart
+glasses — extend the same idea to visual context.
 
-Usecases are numerous - OMI Mentor is one of them. Friend/Omi/pendants are a small but important part of this, since they record personal spoken context the best. OMI-like devices with a camera can also capture visual context - or smart glasses - which also double as a display.
+## Roadmap
 
-Regardless - this repo will try to do the minimal of this - multiple OMI-like audio devices feeding audio data - and from it:
-- Memories
-- Action items
-- Home automation
-
-## Golden Goals (Not Yet Achieved)
-
-- **Action items detection** (partial implementation)
-- **Home automation integration** (planned)
-- **Multi-device coordination** (planned)
-- **Visual context capture** (smart glasses integration planned)
+- **Visual context capture** — screen capture ships today; wearable camera and smart
+  glasses are not yet supported
+- **Multi-device coordination** — single-device capture works; coordinating overlapping
+  captures across devices is not implemented

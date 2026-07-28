@@ -89,6 +89,20 @@ certs/*.crt
 certs/*.key
 certs/*.pem
 
+# Private keys, anywhere in the tree. app/.gitignore already covers *.p8 for
+# the App Store Connect key, but only inside app/ — a copy left at the repo
+# root or in a scratch directory would be committed. This repo is public, so
+# the pattern is repo-wide and unanchored on purpose.
+*.p8
+*.p12
+*.mobileprovision
+
+# Design plans and point-in-time research. Kept locally, not published: they are
+# working notes whose conclusions move faster than the code, and the screen-memory
+# reports alone are ~430KB of transcript-heavy evidence.
+docs/plans/
+docs/research/
+
 # Legacy per-service SSL (kept for cleanup)
 extras/speaker-recognition/ssl/*
 backends/advanced/ssl/*

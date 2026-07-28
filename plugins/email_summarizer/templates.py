@@ -196,7 +196,7 @@ def format_html_email(
 
     <div class="footer">
         <p>
-            Sent by <a href="https://github.com/chronicle-ai/chronicle">Chronicle AI</a><br>
+            Sent by <a href="https://github.com/SimpleOpenSoftware/chronicle">Chronicle AI</a><br>
             Your personal AI memory system
         </p>
     </div>
@@ -255,5 +255,5 @@ Conversation ID: {conversation_id}
 
 Sent by Chronicle AI
 Your personal AI memory system
-https://github.com/chronicle-ai/chronicle
+https://github.com/SimpleOpenSoftware/chronicle
 """
