@@ -14,7 +14,7 @@ from typing import Optional
 
 import yaml
 from bleak import BleakScanner
-from main import (
+from chronicle_wearable.cli import (
     CONFIG_PATH,
     check_config,
     connect_and_stream,

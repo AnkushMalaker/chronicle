@@ -4,7 +4,7 @@ macOS client that scans for BLE wearable devices (OMI, Neo1, Friend), connects, 
 
 > **Unified tray:** device scan/connect/stream now also lives as the *Pendant*
 > section of the [Chronicle tray](../chronicle-tray/) (`chronicle-tray install
-> --pendant`), which reuses this project's `ble_manager.py` and config in place.
+> --pendant`), which depends on this project's `chronicle_wearable` package.
 > The rumps menu bar app below still works and remains the home of the macOS
 > screen-capture settings UI.
 

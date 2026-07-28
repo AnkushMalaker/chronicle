@@ -36,6 +36,6 @@ tray on the new code automatically.
 ## Section internals
 
 The tray reuses the sibling projects' logic in place rather than duplicating it:
-vault sync from `extras/vault-sync` (`vault_core.py`, `syncthing_manager.py`),
-pendant BLE from `extras/local-wearable-client` (`ble_manager.py`). Their state
+vault sync from the `chronicle-vault-sync` package and pendant BLE from the
+`chronicle-wearable` package, both declared as path dependencies. Their state
 directories and backend pairing flows are reused unchanged.

@@ -5,6 +5,8 @@ description = "Unified Chronicle desktop tray: vault sync, ScreenPipe, pendant s
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "chronicle-client",
+    "chronicle-vault-sync",
     "PySide6>=6.8.0",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
@@ -15,6 +17,7 @@ dependencies = [
 # pull the BLE/audio stack. Install with: chronicle-tray install --pendant
 [project.optional-dependencies]
 pendant = [
+    "chronicle-wearable",
     "friend-lite-sdk",
     "easy_audio_interfaces>=0.8",
     "websockets",
@@ -26,6 +29,9 @@ pendant = [
 chronicle-tray = "chronicle_tray.cli:main"
 
 [tool.uv.sources]
+chronicle-client = { path = "../chronicle-client", editable = true }
+chronicle-vault-sync = { path = "../vault-sync", editable = true }
+chronicle-wearable = { path = "../local-wearable-client", editable = true }
 friend-lite-sdk = { path = "../friend-lite-sdk", editable = true }
 
 [build-system]

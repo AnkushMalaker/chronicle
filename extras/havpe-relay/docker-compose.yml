@@ -4,6 +4,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      additional_contexts:
+        chronicleclient: ../chronicle-client
     network_mode: host
     env_file: .env
     environment:

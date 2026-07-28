@@ -1,14 +1,13 @@
 """Chronicle vault-sync — core library + legacy service management.
 
 The menu bar / tray UI moved into the unified Chronicle tray
-(extras/chronicle-tray), which imports this project's vault_core.py and
-syncthing_manager.py in place. This CLI remains for managing (removing) a
+(extras/chronicle-tray), which imports this project's package in place. This CLI remains for managing (removing) a
 pre-tray login service install.
 """
 
 import argparse
 
-from service import logs, status, uninstall
+from chronicle_vault_sync.service import logs, status, uninstall
 
 _POINTER = (
     "The vault-sync tray moved into the unified Chronicle tray.\n"

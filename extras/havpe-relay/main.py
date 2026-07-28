@@ -19,7 +19,8 @@ import time
 import wave
 
 from dotenv import load_dotenv
-from relay_core import RelayConfig, check_credentials, run_device_session
+from chronicle_client import acheck_credentials
+from relay_core import RelayConfig, run_device_session
 from service import install, kickstart, logs, status, uninstall
 
 load_dotenv()
@@ -169,7 +170,7 @@ async def main():
         logger.error("Set CHRONICLE_API_KEY (env or --api-key)")
         return
 
-    if not await check_credentials(config.api_key, config.backend_url):
+    if not await acheck_credentials(config.api_key, config.backend_url):
         logger.error("Startup auth check failed")
         return
 

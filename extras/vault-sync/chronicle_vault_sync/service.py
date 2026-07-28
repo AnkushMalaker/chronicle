@@ -16,8 +16,6 @@ LOG_DIR = Path.home() / "Library" / "Logs" / "Chronicle"
 LOG_FILE = LOG_DIR / "vault-sync.log"
 APP_BUNDLE = Path.home() / "Applications" / "Chronicle Vault Sync.app"
 
-PROJECT_DIR = Path(__file__).resolve().parent
-
 
 def _remove_app_bundle() -> None:
     if APP_BUNDLE.exists():

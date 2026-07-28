@@ -2,7 +2,7 @@
 
 Provides a system tray icon with device scanning, connection management,
 and status display. Runs BLE operations in a background asyncio thread
-(see ble_manager.py — shared with the unified Chronicle tray).
+(see chronicle_wearable.ble — shared with the unified Chronicle tray).
 """
 
 import datetime as _dt
@@ -13,10 +13,10 @@ from collections import deque
 from typing import Optional
 
 import rumps
-from ble_manager import AsyncioThread, BLEManager, SharedState
+from chronicle_wearable.ble import AsyncioThread, BLEManager, SharedState
 from dotenv import load_dotenv, set_key
-from main import ENV_PATH
-from screen_capture import (
+from chronicle_wearable.cli import ENV_PATH
+from chronicle_wearable.screen_capture import (
     ScreenCaptureManager,
     accessibility_ok,
     request_permissions,

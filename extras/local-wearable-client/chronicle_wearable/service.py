@@ -15,7 +15,9 @@ LOG_DIR = Path.home() / "Library" / "Logs" / "Chronicle"
 LOG_FILE = LOG_DIR / "wearable-client.log"
 APP_BUNDLE = Path.home() / "Applications" / "Chronicle Wearable.app"
 
-PROJECT_DIR = Path(__file__).resolve().parent
+# parents[1]: this module lives in the chronicle_wearable package, one level
+# below the uv project root that `uv run --project` needs.
+PROJECT_DIR = Path(__file__).resolve().parents[1]
 
 
 def _find_uv() -> str:
@@ -116,8 +118,7 @@ def _build_plist() -> dict:
             "run",
             "--project",
             str(PROJECT_DIR),
-            "python",
-            str(PROJECT_DIR / "main.py"),
+            "chronicle-wearable",
             "menu",
         ],
         "WorkingDirectory": str(PROJECT_DIR),

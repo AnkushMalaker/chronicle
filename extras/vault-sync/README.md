@@ -11,7 +11,7 @@ Syncthing UI.
 > **The tray UI moved.** Vault sync now appears as a section in the unified
 > [Chronicle tray](../chronicle-tray/) (`extras/chronicle-tray`), alongside
 > ScreenPipe and pendant streaming. This project keeps the sync engine
-> (`vault_core.py`, `syncthing_manager.py`), while the tray reads client
+> (the `chronicle_vault_sync` package), while the tray reads client
 > configuration from the repository-root `.env`. If you had the
 > old single-purpose app installed as a login item, `uv run python main.py
 > uninstall` removes it (installing the new tray also removes it automatically).

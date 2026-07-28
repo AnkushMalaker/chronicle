@@ -1,10 +1,10 @@
 """Vault sync section — Obsidian vault ↔ Chronicle server via private Syncthing.
 
-Reuses the vault-sync project's core (vault_core + syncthing_manager) in place;
-this module is only the Qt menu glue. Client configuration comes from the
+Wraps the chronicle-vault-sync package; this module is only the Qt menu glue. Client configuration comes from the
 repository-root .env shared by Chronicle's native client components.
 """
 
+import importlib.util
 import logging
 import shutil
 import sys
@@ -15,9 +15,8 @@ from typing import Optional
 from urllib.parse import quote
 
 import httpx
-from chronicle_tray.paths import REPO_ROOT, VAULT_SYNC_DIR, add_vault_path
 from chronicle_tray.sections import Section
-from dotenv import load_dotenv
+from chronicle_client import load_client_env
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMenu
@@ -27,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 def _load_vault_environment() -> None:
     """Load the canonical client configuration before constructing the manager."""
-    load_dotenv(REPO_ROOT / ".env")
+    load_client_env()
 
 
 @dataclass
@@ -53,8 +52,7 @@ class SharedState:
 
 class VaultSyncManager:
     def __init__(self, state: SharedState) -> None:
-        from syncthing_manager import SyncthingManager
-        from vault_core import VaultSyncConfig
+        from chronicle_vault_sync import SyncthingManager, VaultSyncConfig
 
         self.state = state
         self.config = VaultSyncConfig.from_env()
@@ -66,7 +64,7 @@ class VaultSyncManager:
         threading.Thread(target=self._pair, daemon=True).start()
 
     def _pair(self) -> None:
-        from vault_core import broker_pair
+        from chronicle_vault_sync import broker_pair
 
         if not self._lock.acquire(blocking=False):
             return
@@ -107,7 +105,7 @@ class VaultSyncManager:
             self._lock.release()
 
     def set_vault_dir(self, path: str) -> None:
-        from vault_core import save_vault_dir
+        from chronicle_vault_sync import save_vault_dir
 
         save_vault_dir(path)
         self.config.local_vault_dir = path
@@ -140,8 +138,8 @@ class VaultSection(Section):
         self.status_item = None
 
     def available(self) -> tuple[bool, str]:
-        if not VAULT_SYNC_DIR.exists():
-            return False, "Vault sync: extras/vault-sync missing from checkout"
+        if importlib.util.find_spec("chronicle_vault_sync") is None:
+            return False, "Vault sync: chronicle-vault-sync is not installed"
         if shutil.which("syncthing") is None:
             hint = (
                 "brew install syncthing"
@@ -152,7 +150,6 @@ class VaultSection(Section):
         return True, ""
 
     def build(self, menu: QMenu) -> None:
-        add_vault_path()
         _load_vault_environment()
         self.manager = VaultSyncManager(self.state)
         self.manager.pair_async()

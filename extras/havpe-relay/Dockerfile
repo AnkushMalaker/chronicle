@@ -16,6 +16,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.6.10 /uv /uvx /bin/
 # Set up the working directory
 WORKDIR /app
 
+# chronicle-client arrives through a separate build context so this image's
+# main context stays limited to extras/havpe-relay (see docker-compose.yml).
+# /chronicle-client is ../chronicle-client relative to /app, which is exactly
+# what pyproject.toml declares on the host — one spec works in both places.
+COPY --from=chronicleclient . /chronicle-client
+
 # Copy dependency files
 COPY pyproject.toml .
 COPY uv.lock .

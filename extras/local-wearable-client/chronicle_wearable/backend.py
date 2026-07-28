@@ -6,24 +6,20 @@ import json
 import logging
 import os
 import ssl
-import sys
 import tempfile
-from pathlib import Path
 from typing import AsyncGenerator, Optional
 from urllib.parse import quote
 
 import httpx
 import websockets
-from dotenv import load_dotenv
-
-# Unified config: read the repository-root .env shared with the tray and vault
-# sync (BACKEND_URL / CHRONICLE_API_KEY). Mirrors vault_core.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(_REPO_ROOT / ".env")
+from chronicle_client import ClientConfig
 
 logger = logging.getLogger(__name__)
 
-VERIFY_SSL = os.getenv("VERIFY_SSL", "true").lower() == "true"
+# Backend address, credential and device name all come from the shared client
+# config (repository-root .env), so this module no longer derives any of them.
+_config = ClientConfig.from_env()
+VERIFY_SSL = _config.verify_ssl
 # Play backend TTS ("play-audio") responses on the laptop speaker. The wearable
 # has no speaker, so the relay laptop acts as the output device.
 PLAY_BACKEND_AUDIO = os.getenv("PLAY_BACKEND_AUDIO", "true").lower() == "true"
@@ -67,41 +63,12 @@ async def play_audio_on_laptop(audio_b64: str, fmt: str = "wav") -> None:
                 pass
 
 
-def _resolve_backend_url() -> str:
-    """Resolve the backend URL, logging how it was chosen (see discovery.py)."""
-    host = os.getenv("BACKEND_HOST")
-    if host:
-        scheme = (
-            "https" if os.getenv("USE_HTTPS", "false").lower() == "true" else "http"
-        )
-        url = f"{scheme}://{host}"
-        logger.info("Backend URL from BACKEND_HOST: %s", url)
-        return url
-
-    if str(_REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(_REPO_ROOT))
-    try:
-        # Lazy import: sys.path-dependent (repo-root discovery.py, inserted above)
-        from discovery import resolve_backend_url
-
-        # BACKEND_URL is the unified key (same one the tray/vault sync reads);
-        # an explicit value wins over discovery.
-        return resolve_backend_url(os.getenv("BACKEND_URL"), logger=logger)
-    except ImportError:
-        logger.warning("discovery module unavailable; set BACKEND_URL in .env")
-        return "http://localhost:8000"
-
-
-backend_url = _resolve_backend_url()
+backend_url = _config.backend_url
 USE_HTTPS = backend_url.startswith("https")
-_host_part = backend_url.split("://", 1)[-1]
-websocket_uri = f"{'wss' if USE_HTTPS else 'ws'}://{_host_part}/ws?codec=opus"
+websocket_uri = f"{_config.backend_ws_url}/ws?codec=opus"
+CHRONICLE_API_KEY = _config.api_key
 logger.info("Wearable backend resolved: %s (ws: %s)", backend_url, websocket_uri)
 
-# Long-lived Chronicle API key (Settings → API Keys). The client re-dials the
-# backend for as long as the wearable stays paired, so it needs a credential
-# that does not expire mid-session.
-CHRONICLE_API_KEY = os.getenv("CHRONICLE_API_KEY")
 
 # Module-level websocket reference for sending control messages (e.g., button events)
 _active_websocket = None

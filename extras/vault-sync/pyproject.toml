@@ -5,6 +5,7 @@ description = "Desktop tray app that syncs your Chronicle Obsidian vault via Syn
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "chronicle-client",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
     "rumps>=0.4.0; sys_platform == 'darwin'",
@@ -12,3 +13,16 @@ dependencies = [
     "PySide6>=6.8.0; sys_platform == 'linux'",
     "minidisc-python>=0.1.0",
 ]
+
+[project.scripts]
+chronicle-vault-sync = "chronicle_vault_sync.cli:cli"
+
+[tool.uv.sources]
+chronicle-client = { path = "../chronicle-client", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["chronicle_vault_sync"]

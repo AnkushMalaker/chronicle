@@ -5,6 +5,7 @@ description = "TCP→WebSocket bridge between ESP32 Voice PE and Chronicle backe
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "chronicle-client",
     "httpx>=0.27.0",
     "websockets>=15.0.1",
     "rumps>=0.4.0; sys_platform == 'darwin'",
@@ -12,6 +13,9 @@ dependencies = [
     "aioesphomeapi>=30.2.0",
     "minidisc-python>=0.1.0",
 ]
+
+[tool.uv.sources]
+chronicle-client = { path = "../chronicle-client", editable = true }
 
 [dependency-groups]
 dev = [

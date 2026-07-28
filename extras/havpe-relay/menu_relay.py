@@ -16,7 +16,8 @@ from typing import Optional
 
 import rumps
 from dotenv import load_dotenv
-from relay_core import RelayConfig, check_credentials, run_device_session
+from chronicle_client import acheck_credentials
+from relay_core import RelayConfig, run_device_session
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +171,7 @@ class RelayManager:
             self.state.update(status="error", error="CHRONICLE_API_KEY not set in .env")
             return
 
-        if not await check_credentials(self.config.api_key, self.config.backend_url):
+        if not await acheck_credentials(self.config.api_key, self.config.backend_url):
             self.state.update(status="error", error="Backend auth failed")
             return
 

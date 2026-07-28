@@ -1,14 +1,13 @@
 """Pendant section — BLE wearable (OMI/Neo/Friend) scanning + audio streaming.
 
-Reuses the local-wearable-client project's UI-free BLE stack (ble_manager.py)
-in place. Only available when the tray was installed with the ``pendant``
-extra (BLE/audio deps) — data-only client nodes skip that weight.
+Uses the chronicle-wearable package's UI-free BLE stack. Only available when
+the tray was installed with the ``pendant`` extra (BLE/audio deps) —
+data-only client nodes skip that weight.
 """
 
 import importlib.util
 import logging
 
-from chronicle_tray.paths import WEARABLE_DIR, add_wearable_path
 from chronicle_tray.sections import Section
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMenu
@@ -26,8 +25,8 @@ class PendantSection(Section):
         self.devices_menu = None
 
     def available(self) -> tuple[bool, str]:
-        if not WEARABLE_DIR.exists():
-            return False, "Pendant: extras/local-wearable-client missing from checkout"
+        if importlib.util.find_spec("chronicle_wearable") is None:
+            return False, "Pendant: chronicle-wearable is not installed"
         if importlib.util.find_spec("bleak") is None:
             return (
                 False,
@@ -36,10 +35,8 @@ class PendantSection(Section):
         return True, ""
 
     def build(self, menu: QMenu) -> None:
-        # Must come before the vault dir on sys.path: ble_manager imports the
-        # wearable client's flat `main` module (see chronicle_tray.paths).
-        add_wearable_path()
-        from ble_manager import AsyncioThread, BLEManager, SharedState
+        # Deferred: pulls in the BLE/audio stack, which is an optional extra.
+        from chronicle_wearable.ble import AsyncioThread, BLEManager, SharedState
 
         self.state = SharedState()
         bg = AsyncioThread()

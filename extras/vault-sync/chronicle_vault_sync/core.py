@@ -1,27 +1,22 @@
-"""Config, backend auth, and pairing-broker calls for the vault-sync app.
+"""Config and pairing-broker calls for the vault-sync app.
 
-The Mac authenticates to Chronicle with its normal JWT and asks the backend's
-``/api/vault-sync`` broker to pair it. The broker returns the server's Syncthing
-device id + sync address + this user's folder id, which the local Syncthing is then
-configured with (see syncthing_manager).
+This machine authenticates to Chronicle with a long-lived API key and asks the
+backend's ``/api/vault-sync`` broker to pair it. The broker returns the server's
+Syncthing device id + sync address + this user's folder id, which the local
+Syncthing is then configured with (see :mod:`chronicle_vault_sync.syncthing`).
 """
 
 import logging
 import os
-import socket
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import httpx
+from chronicle_client import ClientConfig, auth_headers
 
 logger = logging.getLogger(__name__)
-
-# Make the repo-root discovery.py importable when running from the repo checkout.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 # Persisted local vault directory (set via the "Choose Vault Folder…" menu item).
 APP_SUPPORT = (
@@ -56,20 +51,15 @@ class VaultSyncConfig:
 
     @classmethod
     def from_env(cls) -> "VaultSyncConfig":
-        # Lazy import: sys.path-dependent (repo-root discovery.py, inserted above)
-        from discovery import resolve_backend_url
-
-        backend_url = resolve_backend_url(os.getenv("BACKEND_URL"), logger=logger)
-
+        client = ClientConfig.from_env()
         vault_dir = (
             _persisted_vault_dir() or os.getenv("LOCAL_VAULT_DIR") or "~/ChronicleVault"
         )
-
         return cls(
-            backend_url=backend_url,
-            api_key=os.getenv("CHRONICLE_API_KEY", ""),
+            backend_url=client.backend_url,
+            api_key=client.api_key,
             local_vault_dir=os.path.expanduser(vault_dir),
-            device_name=os.getenv("DEVICE_NAME") or socket.gethostname(),
+            device_name=client.device_name,
         )
 
 
@@ -82,7 +72,7 @@ def broker_pair(backend_url: str, token: str, device_id: str, device_name: str) 
     with httpx.Client(timeout=15.0) as client:
         resp = client.post(
             f"{backend_url}/api/vault-sync/pair",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=auth_headers(token),
             json={"device_id": device_id, "device_name": device_name},
         )
     resp.raise_for_status()

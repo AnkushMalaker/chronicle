@@ -10,22 +10,18 @@ import base64
 import json
 import logging
 import os
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 
-import httpx
 import websockets
+from chronicle_client import ClientConfig, acheck_credentials
 from device_controller import DeviceController
-from dotenv import load_dotenv
 from tone_server import serve_audio_bytes
 
 # Max backend→relay WS frame. Bumped above the websockets 1 MiB default so larger
 # inline TTS audio payloads (play-audio audio_b64) are not rejected.
 _WS_MAX_SIZE = 16 * 1024 * 1024
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
 
@@ -49,54 +45,15 @@ class RelayConfig:
 
     @classmethod
     def from_env(cls) -> "RelayConfig":
-        # discovery.py lives at the repo root (two levels up)
-        _repo_root = str(Path(__file__).resolve().parent.parent.parent)
-        if _repo_root not in sys.path:
-            sys.path.insert(0, _repo_root)
-
-        try:
-            # Lazy import: sys.path-dependent (only importable after the
-            # repo-root insertion above).
-            from discovery import resolve_backend_url
-
-            backend_url = resolve_backend_url(os.getenv("BACKEND_URL"), logger=logger)
-        except ImportError:
-            logger.warning("discovery module unavailable; set BACKEND_URL in .env")
-            backend_url = os.getenv("BACKEND_URL") or "http://localhost:8000"
-
-        backend_ws_url = os.getenv("BACKEND_WS_URL") or backend_url.replace(
-            "http://", "ws://"
-        ).replace("https://", "wss://")
-
+        client = ClientConfig.from_env(default_device_name="havpe")
         return cls(
-            backend_url=backend_url,
-            backend_ws_url=backend_ws_url,
-            api_key=os.getenv("CHRONICLE_API_KEY", ""),
-            device_name=os.getenv("DEVICE_NAME", "havpe"),
+            backend_url=client.backend_url,
+            backend_ws_url=client.backend_ws_url,
+            api_key=client.api_key,
+            device_name=client.device_name,
             esphome_device_ip=os.getenv("ESPHOME_DEVICE_IP", ""),
             device_idle_timeout=float(os.getenv("DEVICE_IDLE_TIMEOUT", "300")),
         )
-
-
-async def check_credentials(api_key: str, backend_url: str) -> bool:
-    """Confirm the API key is accepted, so a bad credential is reported once at
-    startup rather than as an opaque WebSocket close on every reconnect."""
-    if not api_key:
-        logger.error("CHRONICLE_API_KEY is not set")
-        return False
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
-                f"{backend_url}/users/me",
-                headers={"Authorization": f"Bearer {api_key}"},
-            )
-        if resp.status_code == 200:
-            logger.info("Auth OK")
-            return True
-        logger.error("Auth failed: %d", resp.status_code)
-    except Exception as e:
-        logger.error("Auth error: %s", e)
-    return False
 
 
 async def forward_tcp_to_ws(
@@ -332,7 +289,7 @@ async def run_device_session(
     if on_session_start:
         on_session_start(addr_str)
 
-    if not await check_credentials(config.api_key, config.backend_url):
+    if not await acheck_credentials(config.api_key, config.backend_url):
         logger.error("Auth failed, dropping connection")
         if on_auth_failure:
             on_auth_failure()

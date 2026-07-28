@@ -1,0 +1,18 @@
+[project]
+name = "chronicle-client"
+version = "0.1.0"
+description = "Shared configuration and auth for Chronicle's native client apps (tray, vault sync, wearable client, relays)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+    "minidisc-python>=0.1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["chronicle_client"]

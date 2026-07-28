@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import yaml
-from backend_sender import send_button_event, stream_to_backend
+from chronicle_wearable.backend import send_button_event, stream_to_backend
 from bleak import BleakScanner
 from dotenv import load_dotenv
 from easy_audio_interfaces.filesystem import RollingFileSink
@@ -38,9 +38,9 @@ from friend_lite import (
 )
 from friend_lite.decoder import OmiOpusDecoder
 from friend_lite.wifi import WifiErrorCode
-from service import install, kickstart, logs, status, uninstall
-from wifi_join import get_current_wifi, join_wifi_ap
-from wifi_receiver import WifiAudioReceiver
+from chronicle_wearable.service import install, kickstart, logs, status, uninstall
+from chronicle_wearable.wifi_join import get_current_wifi, join_wifi_ap
+from chronicle_wearable.wifi_receiver import WifiAudioReceiver
 from wyoming.audio import AudioChunk
 
 logging.basicConfig(
@@ -50,7 +50,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Unified config lives in the repository-root .env (shared with the tray and
-# vault sync), same as backend_sender.
+# vault sync), same as chronicle_wearable.backend.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_REPO_ROOT / ".env")
 
@@ -795,7 +795,7 @@ def main() -> None:
     elif command == "menu":
         # Lazy import: macOS-only menu app (rumps/AppKit); also avoids a circular
         # import since menu_app imports back from this module.
-        from menu_app import run_menu_app
+        from chronicle_wearable.menu_app import run_menu_app
 
         run_menu_app()
 

@@ -1,21 +1,33 @@
 [project]
-name = "local-wearable-client"
+name = "chronicle-wearable"
 version = "0.1.0"
 description = "Background service that auto-scans, connects, and streams audio from OMI/Neo devices to the Chronicle backend"
 requires-python = ">= 3.10"
 dependencies = [
+    "chronicle-client",
     "friend-lite-sdk",
     "easy_audio_interfaces>=0.8",
     "python-dotenv",
     "httpx",
     "websockets",
     "pyyaml",
-    "rumps",
+    "rumps; sys_platform == 'darwin'",  # macOS menu-bar app (menu_app.py, imported lazily)
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
     "pyobjc-framework-ApplicationServices>=10.0; sys_platform == 'darwin'",
     "pyobjc-framework-ScreenCaptureKit>=10.0; sys_platform == 'darwin'",
     "pyobjc-framework-Vision>=10.0; sys_platform == 'darwin'",
 ]
 
+[project.scripts]
+chronicle-wearable = "chronicle_wearable.cli:main"
+
 [tool.uv.sources]
+chronicle-client = { path = "../chronicle-client", editable = true }
 friend-lite-sdk = { path = "../friend-lite-sdk", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["chronicle_wearable"]
