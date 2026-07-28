@@ -48,8 +48,16 @@ def _find_repo_root() -> Path:
             if _looks_like_repo_root(candidate):
                 return candidate
 
-    # extras/chronicle-client/chronicle_client/config.py -> repo root
-    return here.parents[3]
+    # No checkout anywhere above us. In a container image the package is copied
+    # to a shallow path (/chronicle-client/chronicle_client/config.py), which has
+    # fewer than 4 parents — indexing blindly here raised IndexError at import
+    # time and took the whole relay down. Returning the package's own directory
+    # is harmless: there is no .env or discovery.py to find either way, and a
+    # containerised client is configured from the environment instead.
+    source_tree_root = 3  # extras/chronicle-client/chronicle_client/config.py
+    if len(here.parents) > source_tree_root:
+        return here.parents[source_tree_root]
+    return here.parent.parent
 
 
 REPO_ROOT = _find_repo_root()
