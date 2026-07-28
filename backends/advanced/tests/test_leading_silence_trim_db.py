@@ -19,7 +19,10 @@ from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation, create_conversation
 from advanced_omi_backend.workers.conversation_jobs import trim_leading_silence
 
-pytestmark = pytest.mark.asyncio(loop_scope="session")
+pytestmark = [
+    pytest.mark.asyncio(loop_scope="session"),
+    pytest.mark.usefixtures("mongo_service"),
+]
 
 
 def _mongo_url():

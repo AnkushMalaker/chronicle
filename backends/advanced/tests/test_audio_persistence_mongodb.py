@@ -47,7 +47,7 @@ def get_test_db_name():
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
-async def mongodb_client():
+async def mongodb_client(mongo_service):
     """Create MongoDB client for tests."""
     client = AsyncIOMotorClient(get_mongodb_url())
     yield client

@@ -8,11 +8,71 @@ collection succeeds without depending on a developer's local ``.env``.
 
 ``setdefault`` is used so a real environment (CI secrets or a local ``.env``
 already exported) always wins over these placeholders.
+
+It also provides ``redis_service`` / ``mongo_service``, which skip a module when
+the backing service is not running — see those fixtures for why.
 """
 
 import os
+import socket
+from urllib.parse import urlparse
+
+import pytest
 
 # Import-time required secrets (see advanced_omi_backend.auth).
 os.environ.setdefault("AUTH_SECRET_KEY", "test-auth-secret-key")
 os.environ.setdefault("ADMIN_PASSWORD", "test-admin-password")
 os.environ.setdefault("ADMIN_EMAIL", "admin@example.com")
+
+
+# --- Tests that need a real backing service ---------------------------------
+#
+# A few modules genuinely exercise Redis or MongoDB rather than mocking them.
+# Vault writes take a Redis lock that fails CLOSED by design (see
+# services/memory/vault_lock.py — "Redis is down" must never mean "proceed
+# unlocked"), and the audio-chunk and silence-trim tests assert against real
+# Mongo documents. Neither can be faked without testing something other than
+# what ships.
+#
+# Without these fixtures, a developer with no containers running gets 20
+# failures and errors that look like broken code but are really just a missing
+# service — each after a multi-second connection timeout. Skipping with the
+# command to fix it keeps a bare checkout's test run honest and fast.
+#
+# Start both locally with the same ports CI uses:
+#   podman run -d --rm --name chr-test-redis -p 6379:6379 redis:7-alpine
+#   podman run -d --rm --name chr-test-mongo -p 27018:27017 mongo:8
+
+
+def _reachable(url: str, default_port: int, timeout: float = 0.5) -> bool:
+    """Whether something is listening where this URL points."""
+    parsed = urlparse(url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or default_port
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+@pytest.fixture(scope="session")
+def redis_service():
+    """Skip the module unless Redis is reachable."""
+    url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    if not _reachable(url, 6379):
+        pytest.skip(
+            f"needs Redis at {url} — "
+            "podman run -d --rm --name chr-test-redis -p 6379:6379 redis:7-alpine"
+        )
+
+
+@pytest.fixture(scope="session")
+def mongo_service():
+    """Skip the module unless MongoDB is reachable."""
+    url = os.getenv("MONGODB_URI", "mongodb://localhost:27018")
+    if not _reachable(url, 27017):
+        pytest.skip(
+            f"needs MongoDB at {url} — "
+            "podman run -d --rm --name chr-test-mongo -p 27018:27017 mongo:8"
+        )

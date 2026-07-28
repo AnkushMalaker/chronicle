@@ -113,8 +113,10 @@ jobs:
         working-directory: backends/advanced
     services:
       # Some backend tests hit real local services (vault locks are Redis-backed
-      # and fail closed; test_leading_silence_trim_db uses Mongo). Match the
-      # defaults the code assumes: redis://localhost:6379, mongodb://localhost:27018.
+      # and fail closed; the audio-chunk and silence-trim tests assert on real
+      # Mongo documents). Match the defaults the code assumes:
+      # redis://localhost:6379, mongodb://localhost:27018. Without them those
+      # modules skip themselves rather than failing — see tests/conftest.py.
       redis:
         image: redis:7-alpine
         ports:
@@ -149,7 +151,6 @@ jobs:
       - name: Run unit tests with coverage
         run: >-
           uv run --group test pytest
-          --ignore=tests/test_audio_persistence_mongodb.py
           --cov=advanced_omi_backend
           --cov-report=term-missing
           --cov-report=xml

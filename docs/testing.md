@@ -25,24 +25,31 @@ PYTHONPATH=backends/advanced/src uv run \
 
 ### Advanced backend
 
-The default fast lane excludes the MongoDB integration module:
-
 ```bash
 cd backends/advanced
 uv sync --locked --group test
 uv run --group test pytest \
-  --ignore=tests/test_audio_persistence_mongodb.py \
   --cov=advanced_omi_backend \
   --cov-report=term-missing \
   --cov-report=xml \
   --cov-report=html
 ```
 
-Run the MongoDB integration module explicitly when the test database is available:
+Twenty of these tests exercise a real Redis or MongoDB rather than a mock, because
+what they assert only exists in the real thing: vault writes take a Redis lock that
+[fails closed by design](../backends/advanced/src/advanced_omi_backend/services/memory/vault_lock.py),
+and the audio-chunk and silence-trim tests assert on stored Mongo documents.
+
+**Without those services they skip**, naming the command to start them — so a bare
+checkout still gets a clean run (`379 passed, 20 skipped`). To run the full set,
+start both on the ports the code defaults to:
 
 ```bash
-uv run --group test pytest tests/test_audio_persistence_mongodb.py
+podman run -d --rm --name chr-test-redis -p 6379:6379 redis:7-alpine
+podman run -d --rm --name chr-test-mongo -p 27018:27017 mongo:8
 ```
+
+CI runs them as job `services:`, so all 399 run there.
 
 ### ASR services
 

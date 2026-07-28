@@ -16,6 +16,11 @@ from advanced_omi_backend.services.memory.agent.vault_tools import (
     VaultTools,
 )
 
+# Every mutating VaultTools call takes the Redis-backed per-note write lock, which
+# fails closed on purpose — so these need a real Redis even though the vault itself
+# is a tmp_path.
+pytestmark = pytest.mark.usefixtures("redis_service")
+
 PERSON_TEMPLATE = """---
 categories:
   - "[[People]]"
