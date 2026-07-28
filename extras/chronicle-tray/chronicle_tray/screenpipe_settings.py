@@ -3,8 +3,9 @@
 Audio is controlled per source (system output, microphone) on two independent
 axes: whether ScreenPipe records it locally (its systemd unit's ExecStart
 flags) and whether the Chronicle collector forwards it (``forward_audio`` in
-its config.json). Forwarding a source requires recording it, so the update
-helper keeps forwarding a subset of capture.
+its config.json). Forwarding a source requires recording it, so ``_audio_modes``
+rejects any pair where forwarding isn't a subset of capture — the settings
+dialog and the tray's master audio switch both fold their edits through it.
 """
 
 import json
@@ -133,30 +134,29 @@ def _audio_modes(captured: set[str], forwarded: set[str]) -> tuple[str, str]:
         raise ValueError(f"unsupported audio sources: {error.args[0]}") from error
 
 
-def _updated_audio_modes(
+def _toggled_audio_modes(
     capture_mode: str,
     forwarding_mode: str,
-    source: str,
-    setting: str,
     enabled: bool,
+    restore: tuple[str, str] = ("both", "both"),
 ) -> tuple[str, str]:
-    """Apply one tray toggle while keeping forwarding dependent on capture."""
-    if source not in {"system", "mic"}:
-        raise ValueError(f"unsupported audio source: {source}")
-    if setting not in {"record", "forward"}:
-        raise ValueError(f"unsupported audio setting: {setting}")
-    captured = _audio_sources(capture_mode)
-    forwarded = _audio_sources(forwarding_mode, forwarding=True)
-    target = captured if setting == "record" else forwarded
-    if enabled:
-        target.add(source)
-        if setting == "forward":
-            captured.add(source)
-    else:
-        target.discard(source)
-        if setting == "record":
-            forwarded.discard(source)
-    return _audio_modes(captured, forwarded)
+    """Apply the tray's master audio switch over both axes at once.
+
+    Switching audio off drops forwarding with it (forwarding a source requires
+    recording it). Switching it back on restores ``restore`` — the pair that
+    was in effect when it was switched off, or every source when there is no
+    such memory. Already-on stays exactly as configured.
+    """
+    if not enabled:
+        return "off", "none"
+    if capture_mode != "off":
+        return capture_mode, forwarding_mode
+    captured, forwarded = restore
+    if captured == "off":
+        captured, forwarded = "both", "both"
+    return _audio_modes(
+        _audio_sources(captured), _audio_sources(forwarded, forwarding=True)
+    )
 
 
 def _save_capture_settings(

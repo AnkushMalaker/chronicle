@@ -2,6 +2,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from chronicle_tray.screenpipe_settings import (
@@ -11,7 +13,7 @@ from chronicle_tray.screenpipe_settings import (
     _forward_audio_setting,
     _save_capture_settings,
     _save_forward_audio_setting,
-    _updated_audio_modes,
+    _toggled_audio_modes,
 )
 
 
@@ -97,22 +99,28 @@ def test_audio_source_modes_round_trip():
     assert _audio_modes({"system", "mic"}, {"system"}) == ("both", "output")
 
 
-def test_forwarding_source_automatically_enables_local_recording():
-    assert _updated_audio_modes("mic", "none", "system", "forward", True) == (
-        "both",
-        "output",
-    )
+def test_forwarding_a_source_that_is_not_recorded_is_rejected():
+    with pytest.raises(ValueError):
+        _audio_modes({"mic"}, {"system", "mic"})
 
 
-def test_disabling_local_recording_also_disables_forwarding():
-    assert _updated_audio_modes("both", "both", "system", "record", False) == (
+def test_switching_audio_off_stops_forwarding_too():
+    assert _toggled_audio_modes("both", "both", False) == ("off", "none")
+
+
+def test_switching_audio_back_on_restores_the_remembered_sources():
+    assert _toggled_audio_modes("off", "none", True, ("mic", "input")) == (
         "mic",
         "input",
     )
 
 
-def test_disabling_forwarding_keeps_local_recording():
-    assert _updated_audio_modes("both", "both", "mic", "forward", False) == (
-        "both",
-        "output",
+def test_switching_audio_on_without_a_memory_enables_every_source():
+    assert _toggled_audio_modes("off", "none", True) == ("both", "both")
+
+
+def test_switching_audio_on_when_it_is_already_on_changes_nothing():
+    assert _toggled_audio_modes("mic", "none", True, ("both", "both")) == (
+        "mic",
+        "none",
     )

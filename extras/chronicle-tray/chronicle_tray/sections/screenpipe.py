@@ -3,10 +3,10 @@
 Shows frame/audio/storage counts from the local ScreenPipe database and
 start/stop/restart controls for the capture engine and the Chronicle
 collector. On Linux the section also edits capture settings in place: pause
-timers for the engine, independent record/forward toggles per audio source,
-and a screen-capture toggle (all systemd-unit / collector-config edits, so
-they are Linux-only). On macOS ScreenPipe manages its own launchd service, so
-only the stats and the collector control are shown.
+timers for the engine, a Capture submenu with master audio/video switches,
+and a settings dialog for per-source record/forward choices (all systemd-unit
+/ collector-config edits, so they are Linux-only). On macOS ScreenPipe manages
+its own launchd service, so only the stats and the collector control are shown.
 """
 
 import json
@@ -17,14 +17,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+from chronicle_tray.capture_settings_dialog import CaptureSettingsDialog
 from chronicle_tray.paths import add_repo_root
 from chronicle_tray.screenpipe_settings import (
+    _audio_modes,
     _audio_sources,
     _capture_settings,
     _forward_audio_setting,
     _save_capture_settings,
     _save_forward_audio_setting,
-    _updated_audio_modes,
+    _toggled_audio_modes,
 )
 from chronicle_tray.sections import Section
 from PySide6.QtCore import QTimer
@@ -83,8 +85,11 @@ class ScreenPipeSection(Section):
         self.pause_menu = None
         self.pause_timer = None
         self.unit_actions: dict[str, dict[str, QAction]] = {}
-        self.audio_actions: dict[str, dict[str, QAction]] = {}
-        self.screen_capture = None
+        self.audio_capture = None
+        self.video_capture = None
+        self.settings_action = None
+        # What to restore when the master audio switch is turned back on.
+        self.audio_restore = ("both", "both")
 
     def available(self) -> tuple[bool, str]:
         if shutil.which("screenpipe") or SCREENPIPE_DB.exists():
@@ -106,7 +111,7 @@ class ScreenPipeSection(Section):
             engine = self._unit_actions(menu, "ScreenPipe", "screenpipe.service")
             self._pause_actions(engine)
             self._unit_actions(menu, "Collector", "chronicle-screenpipe.service")
-            self._settings_actions(menu)
+            self._capture_actions(menu)
         else:
             self._collector_actions_macos(menu)
 
@@ -146,29 +151,18 @@ class ScreenPipeSection(Section):
                 title, lambda _checked=False, m=minutes: self._pause_capture(m)
             )
 
-    def _settings_actions(self, menu: QMenu) -> None:
-        settings_menu = menu.addMenu("Settings")
-        audio_menu = settings_menu.addMenu("Audio")
-        for source, title in (("system", "System audio"), ("mic", "Microphone")):
-            source_menu = audio_menu.addMenu(title)
-            record = source_menu.addAction("Record locally")
-            record.setCheckable(True)
-            record.triggered.connect(
-                lambda checked=False, selected=source: self._save_audio_source(
-                    selected, "record", checked
-                )
-            )
-            forward = source_menu.addAction("Send to Chronicle")
-            forward.setCheckable(True)
-            forward.triggered.connect(
-                lambda checked=False, selected=source: self._save_audio_source(
-                    selected, "forward", checked
-                )
-            )
-            self.audio_actions[source] = {"record": record, "forward": forward}
-        self.screen_capture = settings_menu.addAction("Screen capture")
-        self.screen_capture.setCheckable(True)
-        self.screen_capture.triggered.connect(self._save_screen_capture)
+    def _capture_actions(self, menu: QMenu) -> None:
+        """Master on/off switches in the menu; the detail lives in the dialog."""
+        capture_menu = menu.addMenu("Capture")
+        self.audio_capture = capture_menu.addAction("Audio capture")
+        self.audio_capture.setCheckable(True)
+        self.audio_capture.triggered.connect(self._toggle_audio_capture)
+        self.video_capture = capture_menu.addAction("Video capture")
+        self.video_capture.setCheckable(True)
+        self.video_capture.triggered.connect(self._toggle_video_capture)
+        self.settings_action = menu.addAction(
+            "Capture settings…", self._open_capture_settings
+        )
 
     def _unit(self, verb: str, unit: str) -> None:
         if (
@@ -184,29 +178,25 @@ class ScreenPipeSection(Section):
         self._unit("stop", "screenpipe.service")
         self.pause_timer.start(minutes * 60 * 1000)
 
-    def _save_screen_capture(self) -> None:
-        try:
-            was_active = _unit_state("screenpipe.service") == "active"
-            _save_capture_settings(
-                _capture_settings()[0], self.screen_capture.isChecked()
-            )
-            subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-            if was_active:
-                self._unit("restart", "screenpipe.service")
-        except (OSError, StopIteration, ValueError, subprocess.CalledProcessError):
-            logger.exception("Could not save ScreenPipe settings")
-            self._refresh_capture_settings()
+    def _edit_capture_settings(self, plan) -> None:
+        """Read the live settings, run ``plan`` over them, persist the result.
 
-    def _save_audio_source(self, source: str, setting: str, enabled: bool) -> None:
+        ``plan(capture_mode, forwarding_mode, screen_enabled)`` returns the same
+        triple, or None to leave everything alone (a cancelled dialog). Reading
+        and writing share one guard so a half-applied edit can't leave the two
+        config files disagreeing; the services are restarted once, at the end,
+        and only if they were running.
+        """
         try:
+            capture_mode, screen_enabled = _capture_settings()
+            forwarding_mode = _forward_audio_setting()
+            planned = plan(capture_mode, forwarding_mode, screen_enabled)
+            if planned is None:
+                return
+            capture_mode, forwarding_mode, screen_enabled = planned
             was_capture_active = _unit_state("screenpipe.service") == "active"
             was_collector_active = (
                 _unit_state("chronicle-screenpipe.service") == "active"
-            )
-            capture_mode, screen_enabled = _capture_settings()
-            forwarding_mode = _forward_audio_setting()
-            capture_mode, forwarding_mode = _updated_audio_modes(
-                capture_mode, forwarding_mode, source, setting, enabled
             )
             _save_capture_settings(capture_mode, screen_enabled)
             _save_forward_audio_setting(forwarding_mode)
@@ -222,29 +212,63 @@ class ScreenPipeSection(Section):
             json.JSONDecodeError,
             subprocess.CalledProcessError,
         ):
-            logger.exception("Could not save audio settings")
+            logger.exception("Could not save capture settings")
+        finally:
             self._refresh_capture_settings()
 
+    def _toggle_audio_capture(self, enabled: bool) -> None:
+        def plan(capture_mode, forwarding_mode, screen_enabled):
+            if not enabled:
+                # Remember the per-source choices so switching back on restores
+                # them rather than turning every source on.
+                self.audio_restore = (capture_mode, forwarding_mode)
+            capture_mode, forwarding_mode = _toggled_audio_modes(
+                capture_mode, forwarding_mode, enabled, self.audio_restore
+            )
+            return capture_mode, forwarding_mode, screen_enabled
+
+        self._edit_capture_settings(plan)
+
+    def _toggle_video_capture(self, enabled: bool) -> None:
+        self._edit_capture_settings(
+            lambda capture_mode, forwarding_mode, _screen: (
+                capture_mode,
+                forwarding_mode,
+                enabled,
+            )
+        )
+
+    def _open_capture_settings(self) -> None:
+        def plan(capture_mode, forwarding_mode, screen_enabled):
+            dialog = CaptureSettingsDialog(
+                _audio_sources(capture_mode),
+                _audio_sources(forwarding_mode, forwarding=True),
+                screen_enabled,
+            )
+            if not dialog.exec():
+                return None
+            captured, forwarded, screen_enabled = dialog.settings()
+            capture_mode, forwarding_mode = _audio_modes(captured, forwarded)
+            return capture_mode, forwarding_mode, screen_enabled
+
+        self._edit_capture_settings(plan)
+
     def _refresh_capture_settings(self) -> None:
-        if not self.audio_actions:
+        if self.audio_capture is None:
             return
         try:
             audio_mode, screen_enabled = _capture_settings()
-            captured = _audio_sources(audio_mode)
-            forwarded = _audio_sources(_forward_audio_setting(), forwarding=True)
-            for source, actions in self.audio_actions.items():
-                actions["record"].setChecked(source in captured)
-                actions["forward"].setChecked(source in forwarded)
-                actions["record"].setEnabled(True)
-                actions["forward"].setEnabled(True)
-            self.screen_capture.setChecked(screen_enabled)
-            self.screen_capture.setEnabled(True)
+            _forward_audio_setting()  # unreadable ⇒ nothing here can be edited
+            self.audio_capture.setChecked(audio_mode != "off")
+            self.video_capture.setChecked(screen_enabled)
+            for action in (self.audio_capture, self.video_capture):
+                action.setEnabled(True)
+            self.settings_action.setEnabled(True)
         except (OSError, KeyError, StopIteration, ValueError, json.JSONDecodeError):
-            logger.exception("Could not read audio settings")
-            for actions in self.audio_actions.values():
-                actions["record"].setEnabled(False)
-                actions["forward"].setEnabled(False)
-            self.screen_capture.setEnabled(False)
+            logger.exception("Could not read capture settings")
+            for action in (self.audio_capture, self.video_capture):
+                action.setEnabled(False)
+            self.settings_action.setEnabled(False)
 
     def _collector_actions_macos(self, menu: QMenu) -> None:
         submenu = menu.addMenu("Collector")

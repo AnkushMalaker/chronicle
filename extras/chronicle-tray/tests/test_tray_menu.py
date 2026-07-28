@@ -47,6 +47,35 @@ def test_log_buffer_is_bounded():
     assert list(handler.lines) == ["2", "3", "4"]
 
 
+def test_screenpipe_menu_offers_capture_toggles_and_a_settings_dialog():
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    from chronicle_tray.sections.screenpipe import IS_LINUX, ScreenPipeSection
+
+    if not IS_LINUX:
+        pytest.skip("capture settings are edited through systemd units")
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    section = ScreenPipeSection()
+    menu = QtWidgets.QMenu()
+    section.build(menu)
+    try:
+        # QAction.menu() hands ownership of the submenu to the action wrapper:
+        # chaining off a temporary action collects the submenu with it.
+        capture_action = next(
+            action for action in menu.actions() if action.text() == "Capture"
+        )
+        capture = capture_action.menu()
+        assert [item.text() for item in capture.actions()] == [
+            "Audio capture",
+            "Video capture",
+        ]
+        assert all(item.isCheckable() for item in capture.actions())
+        assert "Capture settings…" in [action.text() for action in menu.actions()]
+    finally:
+        section.shutdown()
+        del menu
+
+
 def test_tray_menu_offers_view_logs():
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
     from chronicle_tray.app import ChronicleTray

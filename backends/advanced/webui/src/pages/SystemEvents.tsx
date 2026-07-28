@@ -34,10 +34,23 @@ const CATEGORY_CHIP: Record<string, string> = {
 
 const SEVERITIES: Severity[] = ['critical', 'error', 'warning', 'info']
 const CATEGORIES = ['service', 'client', 'pipeline', 'job', 'plugin', 'config', 'api', 'log']
+const SYSTEM_EVENTS_TIME_ZONE = 'Asia/Kolkata'
+const systemEventsTimeFormatter = new Intl.DateTimeFormat('en-GB', {
+  timeZone: SYSTEM_EVENTS_TIME_ZONE,
+  day: '2-digit',
+  month: 'short',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+})
 
 function formatTime(iso: string | null): string {
   if (!iso) return '—'
-  return new Date(iso).toLocaleString()
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '—'
+  return `${systemEventsTimeFormatter.format(date)} IST`
 }
 
 // ---- One event row ---------------------------------------------------------
@@ -284,7 +297,7 @@ export default function SystemEvents() {
     const ts = e.last_seen_at || e.created_at || ''
     const lines = [
       `[${e.severity.toUpperCase()}] ${e.title}${e.count > 1 ? ` (×${e.count})` : ''}`,
-      `category: ${e.category} | source: ${e.source}${ts ? ` | ${ts}` : ''}`,
+      `category: ${e.category} | source: ${e.source}${ts ? ` | ${formatTime(ts)}` : ''}`,
     ]
     if (e.client_id) lines.push(`client_id: ${e.client_id}`)
     if (e.conversation_id) lines.push(`conversation_id: ${e.conversation_id}`)
@@ -370,7 +383,7 @@ export default function SystemEvents() {
       <p className="mb-5 text-sm text-gray-500 dark:text-gray-400">
         Operational and application failures across the system — captured backend errors, client
         error-disconnects, failed jobs, plugin failures, and service crash-loop / recovery transitions.
-        New events stream in live. Retained for 30 days.
+        New events stream in live. Times shown in IST. Retained for 30 days.
       </p>
 
       {error && (
