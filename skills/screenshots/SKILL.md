@@ -52,12 +52,12 @@ uv run --with playwright python skills/screenshots/scripts/capture_dashboard.py 
 
 For public pages, omit `--authenticate`. Use `--backend-url`, `--env-file`, and `--output-dir` when the deployment differs. It rejects login redirects and blank pages rather than saving misleading screenshots.
 
-For a same-origin HTTPS proxy such as Chronicle's LAN deployment, point both URLs at the proxy and allow its development certificate:
+For a same-origin HTTPS proxy such as a LAN deployment behind Caddy, point both URLs at the proxy and allow its development certificate (substitute your own host — see your local agent config for the deployment address):
 
 ```bash
 uv run --with playwright python skills/screenshots/scripts/capture_dashboard.py \
-  --base-url https://192.168.0.110 \
-  --backend-url https://192.168.0.110 \
+  --base-url https://<deployment-host> \
+  --backend-url https://<deployment-host> \
   --ignore-https-errors \
   --authenticate \
   --route conversation=/conversations/<conversation-id>

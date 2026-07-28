@@ -15,29 +15,34 @@ This supports a comprehensive web dashboard for management.
 
 ## Live Deployment Location
 
-The normal live Chronicle deployment is hosted on the Tailnet machine **`kraken`**. Run
-`hostname` before acting on this section — this file is checked in and reads the same on
-every machine, including Kraken itself, where the deployment is *local* and there is no
-remote host to reach. On any other machine a stopped or unconfigured local stack does
-not mean Chronicle is unavailable.
+A Chronicle deployment often runs on a **different machine** from the checkout you are
+working in — commonly a home server reached over a Tailnet. A stopped or unconfigured
+local stack therefore does not mean Chronicle is unavailable.
+
+This file is checked in and reads the same everywhere, so it deliberately names no
+host. Run `hostname` first, then read `CLAUDE.local.md` (gitignored, per-user) for the
+addresses that apply to the machine you are on — including the case where the checkout
+you are in *is* the deployment, and everything is local.
 
 For read-only checks of the running application (health checks, API inspection, or
 browser/screenshot verification):
 
-1. Try `https://kraken.parrot-census.ts.net` first. Use HTTPS; plain HTTP redirects.
-2. If that name is unavailable, inspect the current Tailscale mesh with
-   `tailscale status --json` and resolve the online peer whose `HostName` is `Kraken`
-   **and whose `OS` is `linux`** — Kraken runs under WSL2, so the Windows host
-   advertises the same hostname and answers pings while serving no Chronicle.
-   Prefer its returned `DNSName`; use its current Tailscale IP only as a temporary
-   fallback. Do not persist a `100.x` address because it may change.
+1. Use the deployment address from `CLAUDE.local.md`, if there is one. Prefer HTTPS;
+   plain HTTP usually redirects. A self-signed or internal-CA cert needs `curl -k`.
+2. Otherwise inspect the current Tailscale mesh with `tailscale status --json` and
+   resolve the online peer serving Chronicle. Match on `OS` as well as `HostName` — a
+   host running under WSL2 advertises the same hostname from both the Windows host and
+   the Linux guest, and only the guest serves anything. Prefer the returned `DNSName`;
+   use a Tailscale IP only as a temporary fallback, and never persist a `100.x` address
+   because it may change.
 3. If the host is reachable but the Chronicle endpoint is unclear, use the repository's
    `discovery.py`/minidisc support to discover the `chronicle-backend` service on the
    Tailnet.
 
-Do not start a duplicate local deployment merely to inspect the live application.
-Remote deployment, restarts, or other mutations on Kraken still require the user's
-request to change or deploy the running system.
+Do not assume a remote deployment's checkout is clean or matches `origin` — check
+`git status` there before pulling. Do not start a duplicate local deployment merely to
+inspect the live application. Remote deployment, restarts, or other mutations still
+require the user's request to change or deploy the running system.
 
 ## Initial Setup & Configuration
 

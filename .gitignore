@@ -103,6 +103,10 @@ certs/*.pem
 docs/plans/
 docs/research/
 
+# Per-user, per-machine agent guidance (fleet hostnames, LAN addresses).
+# Project-wide guidance belongs in AGENTS.md / CLAUDE.md, which are checked in.
+CLAUDE.local.md
+
 # Legacy per-service SSL (kept for cleanup)
 extras/speaker-recognition/ssl/*
 backends/advanced/ssl/*

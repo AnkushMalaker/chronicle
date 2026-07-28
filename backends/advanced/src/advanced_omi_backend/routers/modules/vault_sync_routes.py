@@ -32,7 +32,7 @@ router = APIRouter(prefix="/vault-sync", tags=["vault-sync"])
 SYNCTHING_URL = os.getenv("VAULT_SYNC_SYNCTHING_URL", "http://vault-syncthing:8384")
 SYNCTHING_API_KEY = os.getenv("VAULT_SYNC_API_KEY", "")
 # Externally reachable sync address(es) handed to the Mac — comma-separated, e.g.
-# "tcp://my-host.ts.net:22000,tcp://192.168.0.110:22000"; the client dials each
+# "tcp://my-host.ts.net:22000,tcp://10.0.0.5:22000"; the client dials each
 # until one connects (Tailnet when remote, LAN IP when a device has no Tailscale).
 # Empty -> the Mac relies on Syncthing's own discovery/relays to find the server.
 SYNCTHING_ADDRESS = os.getenv("VAULT_SYNC_ADDRESS", "")

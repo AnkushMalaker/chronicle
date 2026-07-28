@@ -7,6 +7,7 @@ Captures audio from microphone or file and sends to ASR service for transcriptio
 import argparse
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from easy_audio_interfaces.audio_interfaces import ResamplingBlock
@@ -319,8 +320,8 @@ Examples:
     parser.add_argument(
         "--asr-url",
         type=str,
-        default="tcp://192.168.0.110:8765",
-        help="ASR service URL (default: %(default)s)",
+        default=os.getenv("ASR_URL") or "tcp://127.0.0.1:8765",
+        help="ASR service URL, or set ASR_URL (default: %(default)s)",
     )
     parser.add_argument(
         "-v",
