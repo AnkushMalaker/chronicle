@@ -822,6 +822,10 @@ cron_jobs:
     description: "Discover a bounded set of salient Immich photo candidates"
     enabled: false
     schedule: "30 4 * * *"
+  person_photos:
+    description: "Embed Immich face photos into the vault's People notes"
+    enabled: false
+    schedule: "45 4 * * *"
   device_audio_ingest:
     description: "Assemble uploaded device audio into speech-driven conversations"
     enabled: true

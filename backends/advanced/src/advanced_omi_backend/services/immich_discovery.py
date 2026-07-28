@@ -14,16 +14,29 @@ from advanced_omi_backend.models.device_input import (
     DeviceInputItem,
     utcnow,
 )
+from advanced_omi_backend.users import User
 
 _DAILY_LIMIT = 12
 _BURST_GAP = timedelta(minutes=15)
 
 
-def _settings() -> tuple[str, str, str] | None:
+def _settings() -> tuple[str, str] | None:
     url = os.getenv("IMMICH_URL", "").rstrip("/")
     key = os.getenv("IMMICH_API_KEY", "")
-    user_id = os.getenv("IMMICH_USER_ID", "")
-    return (url, key, user_id) if url and key and user_id else None
+    return (url, key) if url and key else None
+
+
+async def resolve_immich_user_id() -> str | None:
+    """Chronicle user that owns imported Immich references.
+
+    ``IMMICH_USER_ID`` when set; otherwise the admin account, so the wizard can
+    configure Immich before the first backend start has minted any ObjectId.
+    """
+    configured = os.getenv("IMMICH_USER_ID", "")
+    if configured:
+        return configured
+    admin = await User.find_one(User.is_superuser == True)  # noqa: E712
+    return str(admin.id) if admin else None
 
 
 def _asset_time(asset: dict[str, Any]) -> datetime | None:
@@ -64,9 +77,12 @@ async def scan_immich_memories() -> dict[str, Any]:
     if settings is None:
         return {
             "status": "disabled",
-            "reason": "IMMICH_URL, IMMICH_API_KEY and IMMICH_USER_ID are required",
+            "reason": "IMMICH_URL and IMMICH_API_KEY are required",
         }
-    url, key, user_id = settings
+    url, key = settings
+    user_id = await resolve_immich_user_id()
+    if user_id is None:
+        return {"status": "disabled", "reason": "no IMMICH_USER_ID and no admin user"}
     source_id = "immich-default"
     source = await CaptureSource.find_one(
         CaptureSource.user_id == user_id, CaptureSource.source_id == source_id

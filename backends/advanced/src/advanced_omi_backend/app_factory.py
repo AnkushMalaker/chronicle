@@ -281,6 +281,7 @@ async def lifespan(app: FastAPI):
             from advanced_omi_backend.services.observation_curation import (
                 process_observation_curation,
             )
+            from advanced_omi_backend.services.person_photos import sync_person_photos
             from advanced_omi_backend.workers.annotation_jobs import (
                 surface_error_suggestions,
             )
@@ -300,6 +301,7 @@ async def lifespan(app: FastAPI):
             register_cron_job("annotation_suggestions", surface_error_suggestions)
             register_cron_job("auto_clean", run_auto_clean_cron)
             register_cron_job("immich_memories", scan_immich_memories)
+            register_cron_job("person_photos", sync_person_photos)
             register_cron_job("device_audio_ingest", process_device_audio)
             register_cron_job("observation_curation", process_observation_curation)
             register_cron_job("screen_context_retention", purge_screen_context)
