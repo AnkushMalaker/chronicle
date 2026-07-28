@@ -9,78 +9,68 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from chronicle_tray.screenpipe_settings import (
     _audio_modes,
     _audio_sources,
-    _capture_settings,
+    _capture_argv,
+    _capture_settings_from_argv,
     _forward_audio_setting,
-    _save_capture_settings,
     _save_forward_audio_setting,
     _toggled_audio_modes,
 )
 
 
-def _unit(tmp_path: Path, flags: str = "") -> Path:
-    path = tmp_path / "screenpipe.service"
-    path.write_text(
-        "[Service]\nExecStart=/usr/bin/screenpipe record --api-auth true"
-        f" {flags}\nRestart=on-failure\n",
-        encoding="utf-8",
-    )
-    return path
+def _argv(flags: str = "") -> list[str]:
+    return ["/usr/bin/screenpipe", "record", "--api-auth", "true", *flags.split()]
 
 
-def test_capture_settings_default_to_audio_and_screen_enabled(tmp_path):
-    path = _unit(tmp_path)
-
-    assert _capture_settings(path) == ("both", True)
+def test_capture_settings_default_to_audio_and_screen_enabled():
+    assert _capture_settings_from_argv(_argv()) == ("both", True)
 
 
-def test_save_capture_settings_updates_only_capture_flags(tmp_path):
-    path = _unit(tmp_path, "--disable-audio")
-
-    _save_capture_settings(
+def test_save_capture_settings_updates_only_capture_flags():
+    args = _capture_argv(
+        _argv("--disable-audio"),
         audio_mode="system",
         screen_enabled=False,
-        path=path,
         audio_devices=["Speakers (output)"],
     )
 
-    assert _capture_settings(path) == ("system", False)
-    text = path.read_text(encoding="utf-8")
-    assert "--api-auth true" in text
-    assert "--disable-audio" not in text
-    assert text.count("--disable-vision") == 1
+    assert _capture_settings_from_argv(args) == ("system", False)
+    # Unrelated flags survive the edit.
+    assert args[args.index("--api-auth") + 1] == "true"
+    assert "--disable-audio" not in args
+    assert args.count("--disable-vision") == 1
 
 
-def test_save_capture_settings_is_idempotent(tmp_path):
-    path = _unit(tmp_path, "--disable-audio --disable-vision")
+def test_save_capture_settings_is_idempotent():
+    args = _capture_argv(
+        _argv("--disable-audio --disable-vision"),
+        audio_mode="off",
+        screen_enabled=False,
+    )
 
-    _save_capture_settings(audio_mode="off", screen_enabled=False, path=path)
-
-    text = path.read_text(encoding="utf-8")
-    assert text.count("--disable-audio") == 1
-    assert text.count("--disable-vision") == 1
-
-
-def test_save_capture_settings_supports_both_default_sources(tmp_path):
-    path = _unit(tmp_path, "--disable-audio")
-
-    _save_capture_settings(audio_mode="both", screen_enabled=True, path=path)
-
-    assert _capture_settings(path) == ("both", True)
-    assert "--use-system-default-audio true" in path.read_text(encoding="utf-8")
+    assert args.count("--disable-audio") == 1
+    assert args.count("--disable-vision") == 1
 
 
-def test_save_capture_settings_supports_microphone_only(tmp_path):
-    path = _unit(tmp_path)
+def test_save_capture_settings_supports_both_default_sources():
+    args = _capture_argv(
+        _argv("--disable-audio"), audio_mode="both", screen_enabled=True
+    )
 
-    _save_capture_settings(
+    assert _capture_settings_from_argv(args) == ("both", True)
+    assert args[args.index("--use-system-default-audio") + 1] == "true"
+
+
+def test_save_capture_settings_supports_microphone_only():
+    args = _capture_argv(
+        _argv(),
         audio_mode="mic",
         screen_enabled=True,
-        path=path,
         audio_devices=["Built-in Mic (input)", "Speakers (output)"],
     )
 
-    assert _capture_settings(path) == ("mic", True)
-    assert "--audio-device 'Built-in Mic (input)'" in path.read_text(encoding="utf-8")
+    assert _capture_settings_from_argv(args) == ("mic", True)
+    # A device name with spaces stays one argv element — no shell quoting needed.
+    assert args[args.index("--audio-device") + 1] == "Built-in Mic (input)"
 
 
 def test_audio_forwarding_setting_is_independent_from_capture_unit(tmp_path):

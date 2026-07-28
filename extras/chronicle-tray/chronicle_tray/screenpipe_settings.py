@@ -1,29 +1,44 @@
 """ScreenPipe capture/forwarding settings — pure helpers, no Qt.
 
 Audio is controlled per source (system output, microphone) on two independent
-axes: whether ScreenPipe records it locally (its systemd unit's ExecStart
-flags) and whether the Chronicle collector forwards it (``forward_audio`` in
-its config.json). Forwarding a source requires recording it, so ``_audio_modes``
-rejects any pair where forwarding isn't a subset of capture — the settings
-dialog and the tray's master audio switch both fold their edits through it.
+axes: whether ScreenPipe records it locally (the recorder's argv) and whether
+the Chronicle collector forwards it (``forward_audio`` in its config.json).
+Forwarding a source requires recording it, so ``_audio_modes`` rejects any pair
+where forwarding isn't a subset of capture — the settings dialog and the tray's
+master audio switch both fold their edits through it.
+
+The recorder's argv lives in the client component spec (see clients.py), not in
+a systemd unit, so these helpers work the same on Linux and macOS. The functions
+taking/returning an argv list are pure; the ones that read or persist go through
+clients.py, which regenerates the unit or launchd plist.
 """
 
 import json
-import shlex
 import subprocess
 from pathlib import Path
 
-SCREENPIPE_UNIT = Path.home() / ".config/systemd/user/screenpipe.service"
+from chronicle_tray.paths import add_repo_root
+
 COLLECTOR_CONFIG = Path.home() / ".config/chronicle-screenpipe/config.json"
 
 
-def _capture_settings(path: Path = SCREENPIPE_UNIT) -> tuple[str, bool]:
+def _clients():
+    add_repo_root()
+    import clients
+
+    return clients
+
+
+def _recorder_argv() -> list[str]:
+    return list(_clients().read_component_spec("screenpipe")["argv"])
+
+
+def _capture_settings() -> tuple[str, bool]:
     """Return the audio mode and whether screen capture is enabled."""
-    text = path.read_text(encoding="utf-8")
-    exec_start = next(
-        line for line in text.splitlines() if line.startswith("ExecStart=")
-    )
-    args = shlex.split(exec_start.removeprefix("ExecStart="))
+    return _capture_settings_from_argv(_recorder_argv())
+
+
+def _capture_settings_from_argv(args: list[str]) -> tuple[str, bool]:
     if "--disable-audio" in args:
         audio_mode = "off"
     else:
@@ -162,16 +177,28 @@ def _toggled_audio_modes(
 def _save_capture_settings(
     audio_mode: str,
     screen_enabled: bool,
-    path: Path = SCREENPIPE_UNIT,
     audio_devices: list[str] | None = None,
 ) -> None:
-    """Persist independent audio-source and screen settings in ScreenPipe's unit."""
+    """Persist independent audio-source and screen settings for the recorder.
+
+    Rewrites the component spec and regenerates the unit/plist; the caller
+    restarts the recorder if it was running.
+    """
+    _clients().update_component_argv(
+        "screenpipe",
+        _capture_argv(_recorder_argv(), audio_mode, screen_enabled, audio_devices),
+    )
+
+
+def _capture_argv(
+    args: list[str],
+    audio_mode: str,
+    screen_enabled: bool,
+    audio_devices: list[str] | None = None,
+) -> list[str]:
+    """Apply the audio/screen choices to a recorder argv, leaving the rest alone."""
     if audio_mode not in {"off", "system", "mic", "both"}:
         raise ValueError(f"unsupported audio mode: {audio_mode}")
-    text = path.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    index = next(i for i, line in enumerate(lines) if line.startswith("ExecStart="))
-    args = shlex.split(lines[index].removeprefix("ExecStart="))
     args = _without_options(args, {"--audio-device", "--use-system-default-audio"})
     args = [arg for arg in args if arg not in {"--disable-audio", "--disable-vision"}]
     if audio_mode == "off":
@@ -192,7 +219,4 @@ def _save_capture_settings(
         )
     if not screen_enabled:
         args.append("--disable-vision")
-    lines[index] = f"ExecStart={shlex.join(args)}"
-    path.write_text(
-        "\n".join(lines) + ("\n" if text.endswith("\n") else ""), encoding="utf-8"
-    )
+    return args

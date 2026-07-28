@@ -7,22 +7,43 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def test_screenpipe_unit_uses_privacy_defaults_and_api_auth(tmp_path, monkeypatch):
-    monkeypatch.setattr(MODULE, "SYSTEMD_USER_DIR", tmp_path)
-    path = MODULE.write_screenpipe_unit(
+def _flag(argv, option):
+    return argv[argv.index(option) + 1]
+
+
+def test_recorder_argv_uses_privacy_defaults_and_api_auth():
+    argv = MODULE.recorder_argv(
         "/usr/bin/screenpipe",
-        "local-key",
         "system",
         ["Speakers (output)"],
     )
-    text = path.read_text()
-    assert "--audio-transcription-engine disabled" in text
-    assert "--disable-keyboard-capture" in text
-    assert "--disable-clipboard-capture" in text
-    assert "--api-auth true" in text
-    assert "Environment=SCREENPIPE_API_KEY=local-key" in text
-    assert "--use-system-default-audio false" in text
-    assert "--audio-device 'Speakers (output)'" in text
+    assert argv[:2] == ["/usr/bin/screenpipe", "record"]
+    assert _flag(argv, "--audio-transcription-engine") == "disabled"
+    assert "--disable-keyboard-capture" in argv
+    assert "--disable-clipboard-capture" in argv
+    assert _flag(argv, "--api-auth") == "true"
+    assert _flag(argv, "--use-system-default-audio") == "false"
+    # One argv element, so a device name with spaces needs no quoting.
+    assert _flag(argv, "--audio-device") == "Speakers (output)"
+
+
+def test_install_recorder_saves_argv_and_api_key_to_the_component_spec(monkeypatch):
+    saved = {}
+    monkeypatch.setattr(
+        MODULE.clients,
+        "write_component_spec",
+        lambda name, argv, env: saved.update(name=name, argv=list(argv), env=dict(env)),
+    )
+    monkeypatch.setattr(
+        MODULE.clients, "install_component", lambda name: saved.update(installed=name)
+    )
+
+    MODULE.install_recorder("/usr/bin/screenpipe", "local-key", "both", [])
+
+    assert saved["name"] == "screenpipe"
+    assert saved["installed"] == "screenpipe"
+    assert saved["env"] == {"SCREENPIPE_API_KEY": "local-key"}
+    assert _flag(saved["argv"], "--use-system-default-audio") == "true"
 
 
 def test_audio_arguments_keep_microphone_and_system_independent():

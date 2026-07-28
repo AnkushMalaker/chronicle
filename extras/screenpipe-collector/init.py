@@ -5,11 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import secrets
-import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from rich.console import Console
@@ -17,7 +16,10 @@ from rich.prompt import Confirm, Prompt
 
 console = Console()
 PROJECT = Path(__file__).resolve().parent
-SYSTEMD_USER_DIR = Path.home() / ".config/systemd/user"
+REPO_ROOT = PROJECT.parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+import clients  # noqa: E402  (needs REPO_ROOT on sys.path)
 
 
 def screenpipe_command() -> str | None:
@@ -46,14 +48,11 @@ def audio_arguments(mode: str, devices: list[str]) -> list[str]:
     return ["--use-system-default-audio", "false", "--audio-device", matches[0]]
 
 
-def write_screenpipe_unit(
+def recorder_argv(
     binary: str,
-    api_key: str,
     audio_mode: str = "both",
     devices: list[str] | None = None,
-) -> Path:
-    SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
-    path = SYSTEMD_USER_DIR / "screenpipe.service"
+) -> list[str]:
     args = [
         binary,
         "record",
@@ -79,16 +78,22 @@ def write_screenpipe_unit(
         "true",
     ]
     args.extend(audio_arguments(audio_mode, devices or []))
-    path.write_text(
-        "[Unit]\nDescription=ScreenPipe local recorder for Chronicle\n"
-        "After=graphical-session.target\n\n[Service]\nType=simple\n"
-        f"Environment=SCREENPIPE_API_KEY={api_key}\n"
-        f"ExecStart={shlex.join(args)}\nRestart=on-failure\nRestartSec=5\n\n"
-        "[Install]\nWantedBy=default.target\n",
-        encoding="utf-8",
+    return args
+
+
+def install_recorder(
+    binary: str,
+    api_key: str,
+    audio_mode: str = "both",
+    devices: list[str] | None = None,
+) -> None:
+    """Install the recorder as a user service (systemd unit / launchd agent)."""
+    clients.write_component_spec(
+        "screenpipe",
+        recorder_argv(binary, audio_mode, devices),
+        {"SCREENPIPE_API_KEY": api_key},
     )
-    path.chmod(0o600)
-    return path
+    clients.install_component("screenpipe")
 
 
 def run(*args: str) -> None:
@@ -158,7 +163,7 @@ def main() -> None:
         "--forward-audio",
         forward_audio,
     )
-    write_screenpipe_unit(binary, api_key, audio_mode, devices)
+    install_recorder(binary, api_key, audio_mode, devices)
     run(
         "uv",
         "run",
@@ -167,24 +172,34 @@ def main() -> None:
         "chronicle-screenpipe",
         "install-service",
     )
-    run("systemctl", "--user", "daemon-reload")
-    run("systemctl", "--user", "enable", "--now", "screenpipe.service")
-    run("systemctl", "--user", "restart", "chronicle-screenpipe.service")
+    clients.component_action("screenpipe-collector", "restart")
 
     if Confirm.ask("Check service status now?", default=True):
-        run(
-            "systemctl",
-            "--user",
-            "--no-pager",
-            "--full",
-            "status",
-            "screenpipe.service",
-            "chronicle-screenpipe.service",
-        )
+        for component in ("screenpipe", "screenpipe-collector"):
+            status = clients.component_status(component)
+            state = (
+                "[green]active[/green]"
+                if status["active"]
+                else (
+                    "[red]not running[/red]" if status["installed"] else "not installed"
+                )
+            )
+            console.print(f"  {status['description']}: {state}")
+
     console.print(
         "\n[green]✅ Capture node connected.[/green] Activity should appear in "
         "Chronicle Timeline after ScreenPipe records a stable app/window span."
     )
+    if clients.IS_MACOS:
+        console.print(
+            "\n[yellow]macOS:[/yellow] grant [cyan]Screen & System Audio Recording[/cyan] "
+            "and [cyan]Accessibility[/cyan] to the ScreenPipe binary in System Settings → "
+            "Privacy & Security (plus [cyan]Microphone[/cyan] if capturing input audio). "
+            "A launchd agent cannot raise those prompts itself — until they are granted "
+            "the recorder starts but captures nothing. After granting, restart it from "
+            "the tray or with:\n  [cyan]launchctl kickstart -k "
+            f"gui/$(id -u)/{clients.CLIENT_COMPONENTS['screenpipe']['label']}[/cyan]"
+        )
 
 
 if __name__ == "__main__":

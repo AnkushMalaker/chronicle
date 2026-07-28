@@ -49,10 +49,7 @@ def test_log_buffer_is_bounded():
 
 def test_screenpipe_menu_offers_capture_toggles_and_a_settings_dialog():
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
-    from chronicle_tray.sections.screenpipe import IS_LINUX, ScreenPipeSection
-
-    if not IS_LINUX:
-        pytest.skip("capture settings are edited through systemd units")
+    from chronicle_tray.sections.screenpipe import ScreenPipeSection
 
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     section = ScreenPipeSection()
@@ -89,3 +86,45 @@ def test_tray_menu_offers_view_logs():
         tray.shutdown()
         del tray
         app.processEvents()
+
+
+def test_screenpipe_controls_only_use_real_client_components(monkeypatch):
+    """Every service control must name a component clients.py knows.
+
+    The controls take component names, not systemd unit names; passing a
+    leftover "screenpipe.service" would only fail when the menu item (or the
+    pause timer) actually fired.
+    """
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    from chronicle_tray.paths import add_repo_root
+    from chronicle_tray.sections import screenpipe as section_module
+
+    add_repo_root()
+    import clients
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    section = section_module.ScreenPipeSection()
+    menu = QtWidgets.QMenu()
+    section.build(menu)
+    used = []
+    monkeypatch.setattr(
+        section_module,
+        "_clients",
+        lambda: type(
+            "C", (), {"component_action": staticmethod(lambda n, v: used.append(n))}
+        ),
+    )
+    try:
+        section._unit("stop", section_module.RECORDER)
+        section._unit("restart", section_module.COLLECTOR)
+        section._pause_capture(5)
+        # Firing the timer is the only thing that exercises its resume target.
+        section.pause_timer.timeout.emit()
+    finally:
+        section.shutdown()
+        del menu
+
+    assert used, "no component actions were exercised"
+    assert set(used) <= set(
+        clients.CLIENT_COMPONENTS
+    ), f"unknown component(s): {set(used) - set(clients.CLIENT_COMPONENTS)}"

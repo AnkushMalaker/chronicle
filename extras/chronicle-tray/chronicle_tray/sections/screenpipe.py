@@ -1,12 +1,13 @@
 """ScreenPipe section — local capture stats, service controls, and settings.
 
-Shows frame/audio/storage counts from the local ScreenPipe database and
-start/stop/restart controls for the capture engine and the Chronicle
-collector. On Linux the section also edits capture settings in place: pause
-timers for the engine, a Capture submenu with master audio/video switches,
-and a settings dialog for per-source record/forward choices (all systemd-unit
-/ collector-config edits, so they are Linux-only). On macOS ScreenPipe manages
-its own launchd service, so only the stats and the collector control are shown.
+Shows frame/audio/storage counts from the local ScreenPipe database, plus
+start/stop/restart controls for the recorder and the Chronicle collector, pause
+timers, master audio/video switches, and a per-source record/forward dialog.
+
+Both services are client components (clients.py), which installs them as systemd
+user units on Linux and launchd agents on macOS, so this menu is identical on
+both. Capture settings edit the recorder's argv in its component spec rather
+than a unit file, for the same reason.
 """
 
 import json
@@ -14,7 +15,6 @@ import logging
 import shutil
 import sqlite3
 import subprocess
-import sys
 from pathlib import Path
 
 from chronicle_tray.capture_settings_dialog import CaptureSettingsDialog
@@ -35,14 +35,24 @@ from PySide6.QtWidgets import QMenu
 
 logger = logging.getLogger(__name__)
 SCREENPIPE_DB = Path.home() / ".screenpipe/db.sqlite"
-IS_LINUX = sys.platform.startswith("linux")
+# Recorder and collector are both client components (clients.py), so the same
+# controls work over systemd units and launchd agents alike.
+RECORDER = "screenpipe"
+COLLECTOR = "screenpipe-collector"
 
 
-def _unit_state(name: str) -> str:
-    result = subprocess.run(
-        ["systemctl", "--user", "is-active", name], capture_output=True, text=True
-    )
-    return result.stdout.strip() or "unknown"
+def _clients():
+    add_repo_root()
+    import clients
+
+    return clients
+
+
+def _component_state(name: str) -> str:
+    status = _clients().component_status(name)
+    if not status["installed"]:
+        return "not installed"
+    return "active" if status["active"] else "inactive"
 
 
 def _stats() -> str:
@@ -100,22 +110,18 @@ class ScreenPipeSection(Section):
         )
 
     def build(self, menu: QMenu) -> None:
-        if IS_LINUX:
-            self.engine_status = menu.addAction("ScreenPipe: checking…")
-            self.engine_status.setEnabled(False)
+        self.engine_status = menu.addAction("ScreenPipe: checking…")
+        self.engine_status.setEnabled(False)
         self.collector_status = menu.addAction("Chronicle collector: checking…")
         self.collector_status.setEnabled(False)
         self.stats_item = menu.addAction("Stats: checking…")
         self.stats_item.setEnabled(False)
-        if IS_LINUX:
-            engine = self._unit_actions(menu, "ScreenPipe", "screenpipe.service")
-            self._pause_actions(engine)
-            self._unit_actions(menu, "Collector", "chronicle-screenpipe.service")
-            self._capture_actions(menu)
-        else:
-            self._collector_actions_macos(menu)
+        engine = self._unit_actions(menu, "ScreenPipe", RECORDER)
+        self._pause_actions(engine)
+        self._unit_actions(menu, "Collector", COLLECTOR)
+        self._capture_actions(menu)
 
-    def _unit_actions(self, menu: QMenu, label: str, unit: str) -> QMenu:
+    def _unit_actions(self, menu: QMenu, label: str, component: str) -> QMenu:
         submenu = menu.addMenu(label)
         actions = {}
         for title, verb in (
@@ -125,19 +131,17 @@ class ScreenPipeSection(Section):
         ):
             action = QAction(title, submenu)
             action.triggered.connect(
-                lambda _checked=False, v=verb, u=unit: self._unit(v, u)
+                lambda _checked=False, v=verb, c=component: self._unit(v, c)
             )
             submenu.addAction(action)
             actions[verb] = action
-        self.unit_actions[unit] = actions
+        self.unit_actions[component] = actions
         return submenu
 
     def _pause_actions(self, submenu: QMenu) -> None:
         self.pause_timer = QTimer()
         self.pause_timer.setSingleShot(True)
-        self.pause_timer.timeout.connect(
-            lambda: self._unit("start", "screenpipe.service")
-        )
+        self.pause_timer.timeout.connect(lambda: self._unit("start", RECORDER))
         self.pause_menu = submenu.addMenu("Pause for")
         for title, minutes in (
             ("5 minutes", 5),
@@ -164,18 +168,18 @@ class ScreenPipeSection(Section):
             "Capture settings…", self._open_capture_settings
         )
 
-    def _unit(self, verb: str, unit: str) -> None:
+    def _unit(self, verb: str, component: str) -> None:
         if (
             self.pause_timer is not None
-            and unit == "screenpipe.service"
+            and component == RECORDER
             and verb in {"start", "restart"}
         ):
             self.pause_timer.stop()
-        subprocess.run(["systemctl", "--user", verb, unit], check=False)
+        _clients().component_action(component, verb)
         QTimer.singleShot(500, self.refresh)
 
     def _pause_capture(self, minutes: int) -> None:
-        self._unit("stop", "screenpipe.service")
+        self._unit("stop", RECORDER)
         self.pause_timer.start(minutes * 60 * 1000)
 
     def _edit_capture_settings(self, plan) -> None:
@@ -194,17 +198,15 @@ class ScreenPipeSection(Section):
             if planned is None:
                 return
             capture_mode, forwarding_mode, screen_enabled = planned
-            was_capture_active = _unit_state("screenpipe.service") == "active"
-            was_collector_active = (
-                _unit_state("chronicle-screenpipe.service") == "active"
-            )
+            was_capture_active = _component_state(RECORDER) == "active"
+            was_collector_active = _component_state(COLLECTOR) == "active"
+            # Rewrites the spec and regenerates the unit/plist.
             _save_capture_settings(capture_mode, screen_enabled)
             _save_forward_audio_setting(forwarding_mode)
-            subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
             if was_capture_active:
-                self._unit("restart", "screenpipe.service")
+                self._unit("restart", RECORDER)
             if was_collector_active:
-                self._unit("restart", "chronicle-screenpipe.service")
+                self._unit("restart", COLLECTOR)
         except (
             OSError,
             StopIteration,
@@ -270,47 +272,19 @@ class ScreenPipeSection(Section):
                 action.setEnabled(False)
             self.settings_action.setEnabled(False)
 
-    def _collector_actions_macos(self, menu: QMenu) -> None:
-        submenu = menu.addMenu("Collector")
-        for title, verb in (
-            ("Start", "start"),
-            ("Stop", "stop"),
-            ("Restart", "restart"),
-        ):
-            action = QAction(title, submenu)
-            action.triggered.connect(
-                lambda _checked=False, v=verb: self._collector_macos(v)
-            )
-            submenu.addAction(action)
-
-    def _collector_macos(self, verb: str) -> None:
-        add_repo_root()
-        import clients
-
-        clients.component_action("screenpipe-collector", verb)
-        QTimer.singleShot(500, self.refresh)
-
     def _collector_state(self) -> str:
-        if IS_LINUX:
-            return _unit_state("chronicle-screenpipe.service")
-        add_repo_root()
-        import clients
-
-        status = clients.component_status("screenpipe-collector")
-        if not status["installed"]:
-            return "not installed"
-        return "active" if status["active"] else "inactive"
+        return _component_state(COLLECTOR)
 
     def refresh(self) -> None:
         if self.engine_status is not None:
-            engine = _unit_state("screenpipe.service")
+            engine = _component_state(RECORDER)
             self.engine_status.setText(f"ScreenPipe: {engine}")
             if self.pause_menu is not None:
                 self.pause_menu.setEnabled(engine == "active")
         collector = self._collector_state()
         self.collector_status.setText(f"Chronicle collector: {collector}")
-        for unit, actions in self.unit_actions.items():
-            active = _unit_state(unit) == "active"
+        for component, actions in self.unit_actions.items():
+            active = _component_state(component) == "active"
             actions["start"].setEnabled(not active)
             actions["stop"].setEnabled(active)
         self.stats_item.setText(_stats())

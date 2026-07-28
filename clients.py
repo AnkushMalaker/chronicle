@@ -30,7 +30,19 @@ IS_MACOS = sys.platform == "darwin"
 _SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
 _LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 _MAC_LOG_DIR = Path.home() / "Library" / "Logs" / "Chronicle"
+_SPEC_DIR = (
+    Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config"))
+    / "chronicle"
+    / "clients"
+)
 
+# A component is either a *project* component (a uv project in this repo, run as
+# `uv run --project <path> <command>`) or a *spec* component, whose argv and
+# environment are resolved at setup time and stored in _SPEC_DIR. The recorder is
+# the latter: it is a third-party binary whose flags depend on the machine's audio
+# devices and carries a per-node API key, none of which can be a static literal
+# here. Both kinds install identically on both platforms.
+#
 # name -> component config. Keys:
 #   path         project dir relative to the repo root (a uv project)
 #   description  human description (unit Description= / WebUI)
@@ -40,7 +52,17 @@ _MAC_LOG_DIR = Path.home() / "Library" / "Logs" / "Chronicle"
 #   graphical    needs a desktop session (tray): graphical-session target /
 #                launchd ProcessType Interactive
 #   after_units  extra systemd After= ordering deps (Linux only)
+#   spec         set for spec components: argv/env come from _SPEC_DIR, and
+#                `path`/`command` are absent
 CLIENT_COMPONENTS = {
+    "screenpipe": {
+        "description": "ScreenPipe local recorder for Chronicle",
+        "unit": "screenpipe.service",
+        "label": "com.chronicle.screenpipe-recorder",
+        "spec": True,
+        # Screen capture needs a logged-in graphical session on both platforms.
+        "graphical": True,
+    },
     "tray": {
         "path": "extras/chronicle-tray",
         "description": "Chronicle desktop tray (vault sync, ScreenPipe, pendant)",
@@ -111,8 +133,59 @@ def _unit_path_env(uv_path: str) -> str:
     return ":".join(seen)
 
 
+def component_spec_path(name: str) -> Path:
+    return _SPEC_DIR / f"{name}.json"
+
+
+def write_component_spec(name: str, argv, env=None) -> Path:
+    """Record the resolved argv/env for a spec component.
+
+    Written 0600 because the environment carries the recorder's API key. Call
+    before install_component(); the unit/plist is generated from this.
+    """
+    import json
+
+    if not CLIENT_COMPONENTS[name].get("spec"):
+        raise RuntimeError(f"{name} is not a spec component")
+    _SPEC_DIR.mkdir(parents=True, exist_ok=True)
+    path = component_spec_path(name)
+    path.write_text(
+        json.dumps({"argv": list(argv), "env": dict(env or {})}, indent=2),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    return path
+
+
+def update_component_argv(name: str, argv) -> None:
+    """Replace a spec component's argv, preserving its environment, and
+    regenerate the unit/plist so the change takes effect on next start."""
+    spec = read_component_spec(name)
+    write_component_spec(name, argv, spec.get("env", {}))
+    install_component(name)
+
+
+def read_component_spec(name: str) -> dict:
+    import json
+
+    path = component_spec_path(name)
+    if not path.exists():
+        raise RuntimeError(
+            f"{name} has no saved spec at {path} — run the capture-node setup first"
+        )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _component_project(name: str) -> Path:
+    """Working directory for the unit. Spec components have no repo project."""
+    cfg = CLIENT_COMPONENTS[name]
+    return Path.home() if cfg.get("spec") else REPO_ROOT / cfg["path"]
+
+
 def _exec_argv(name: str, extras=()) -> list[str]:
     cfg = CLIENT_COMPONENTS[name]
+    if cfg.get("spec"):
+        return list(read_component_spec(name)["argv"])
     uv = _find_uv()
     argv = [uv, "run", "--project", str(REPO_ROOT / cfg["path"])]
     for extra in extras:
@@ -152,14 +225,21 @@ def _install_linux(name: str, extras=()) -> None:
         raise RuntimeError(
             "no systemd user instance — on WSL set systemd=true in /etc/wsl.conf"
         )
+    import shlex
+
     uv = _find_uv()
-    project = REPO_ROOT / cfg["path"]
+    project = _component_project(name)
     afters = ["network-online.target"] + list(cfg.get("after_units", []))
     wanted = "default.target"
     if cfg.get("graphical"):
         afters.insert(0, "graphical-session.target")
         wanted = "graphical-session.target"
-    exec_start = " ".join(_exec_argv(name, extras))
+    # shlex.join so a flag value containing spaces (e.g. an --audio-device name
+    # like "MacBook Pro Microphone (input)") survives systemd's own splitting.
+    exec_start = shlex.join(_exec_argv(name, extras))
+    env = {"PATH": _unit_path_env(uv)}
+    if cfg.get("spec"):
+        env.update(read_component_spec(name).get("env", {}))
     unit = _SYSTEMD_USER_DIR / cfg["unit"]
     unit.parent.mkdir(parents=True, exist_ok=True)
     unit.write_text(
@@ -168,11 +248,13 @@ def _install_linux(name: str, extras=()) -> None:
         + "".join(f"After={a}\n" for a in afters)
         + "\n[Service]\nType=simple\n"
         f"WorkingDirectory={project}\n"
-        f"Environment=PATH={_unit_path_env(uv)}\n"
-        f"ExecStart={exec_start}\n"
+        + "".join(f"Environment={k}={v}\n" for k, v in env.items())
+        + f"ExecStart={exec_start}\n"
         "Restart=on-failure\nRestartSec=5\n"
         f"\n[Install]\nWantedBy={wanted}\n"
     )
+    # The unit embeds the component's environment, which may hold an API key.
+    unit.chmod(0o600)
     subprocess.run(["loginctl", "enable-linger"], capture_output=True)
     _systemctl("daemon-reload")
     result = _systemctl("enable", "--now", cfg["unit"])
@@ -218,15 +300,20 @@ def _install_macos(name: str, extras=()) -> None:
 
     cfg = CLIENT_COMPONENTS[name]
     label = cfg["label"]
-    project = REPO_ROOT / cfg["path"]
+    project = _component_project(name)
     log_file = _MAC_LOG_DIR / f"{name}.log"
     _MAC_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     # launchd starts agents with no login env. The tray reads the repository-root
     # .env itself so edits take effect on restart instead of being copied into
     # (and potentially shadowed by) its plist. Other components retain their
-    # project-local environment.
-    env = {} if name == "tray" else _dotenv_values(project / ".env")
+    # project-local environment; spec components carry their own.
+    if cfg.get("spec"):
+        env = dict(read_component_spec(name).get("env", {}))
+    elif name == "tray":
+        env = {}
+    else:
+        env = _dotenv_values(project / ".env")
     env["PATH"] = _unit_path_env(_find_uv()) + ":" + os.environ.get("PATH", "")
 
     # The pendant (BLE) extra decodes Opus audio via opuslib, which loads the
@@ -257,6 +344,8 @@ def _install_macos(name: str, extras=()) -> None:
         _launchctl("bootout", f"gui/{os.getuid()}", str(path))
     with open(path, "wb") as f:
         plistlib.dump(plist, f)
+    # EnvironmentVariables may hold an API key.
+    path.chmod(0o600)
     result = _launchctl("bootstrap", f"gui/{os.getuid()}", str(path))
     if result.returncode != 0:
         raise RuntimeError(
@@ -331,6 +420,8 @@ def uninstall_component(name: str) -> None:
         _uninstall_macos_label(cfg["label"])
     else:
         _uninstall_linux_unit(cfg["unit"])
+    if cfg.get("spec"):
+        component_spec_path(name).unlink(missing_ok=True)
 
 
 def component_action(name: str, action: str) -> bool:
@@ -398,10 +489,16 @@ def restart_installed(progress=None) -> list[tuple[str, bool]]:
     ``uv run`` straight from this checkout, so a restart is all an update
     needs. Best-effort by design — a tray that fails to relaunch must not fail
     (or roll back) a node update. Returns [(unit, ok)].
+
+    Spec components are skipped: they run a third-party binary this repo does
+    not ship, so an update gives them nothing and a restart would drop a live
+    capture session for no reason.
     """
     progress = progress or (lambda msg: None)
     results: list[tuple[str, bool]] = []
     for name in installed_components():
+        if CLIENT_COMPONENTS[name].get("spec"):
+            continue
         progress(f"Restarting {name}…")
         results.append((name, component_action(name, "restart")))
     for legacy in installed_legacy_units():
@@ -425,7 +522,7 @@ def binary_checks() -> list[dict]:
     checks = [
         {
             "name": "screenpipe",
-            "needed_by": "screenpipe-collector",
+            "needed_by": "screenpipe, screenpipe-collector",
             "found": shutil.which("screenpipe") is not None,
             "suggest": "install ScreenPipe: curl -fsSL get.screenpi.pe/cli | sh "
             "(see https://screenpi.pe), then `screenpipe service install`",
