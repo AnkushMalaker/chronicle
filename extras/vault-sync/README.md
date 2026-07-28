@@ -60,7 +60,7 @@ login item. Or run the same setup directly / configure by hand:
 
 ```bash
 cd extras/vault-sync
-uv run --with-requirements ../../setup-requirements.txt python init.py
+uv run --with-requirements setup-requirements.txt python extras/vault-sync/init.py
 
 # manual alternative — client config lives in the repository-root .env:
 cd ../..

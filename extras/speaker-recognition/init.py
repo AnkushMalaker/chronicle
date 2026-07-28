@@ -14,15 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
-from dotenv import set_key
-from rich.console import Console
-from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
-from rich.text import Text
-
-# Add repo root to path for imports
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from setup_utils import (
+from chronicle_setup import (
     decide_cert_mode,
     detect_cuda_version,
     mask_value,
@@ -30,6 +22,17 @@ from setup_utils import (
     resolve_ingest_config,
     tailscale_socket_path,
 )
+from dotenv import set_key
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
+from rich.text import Text
+
+# Anchored to this file, not the working directory: setup runs from the
+# repository root so that setup-requirements.txt resolves, but every path a
+# service reads or writes belongs to the service's own directory.
+SERVICE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SERVICE_DIR.parent.parent
 
 
 class SpeakerRecognitionSetup:
@@ -75,7 +78,7 @@ class SpeakerRecognitionSetup:
 
     def read_existing_env_value(self, key: str) -> str:
         """Read a value from existing .env file (delegates to shared utility)"""
-        return read_env_value(".env", key)
+        return read_env_value(str(SERVICE_DIR / ".env"), key)
 
     def mask_api_key(self, key: str, show_chars: int = 5) -> str:
         """Mask API key (delegates to shared utility)"""
@@ -104,10 +107,10 @@ class SpeakerRecognitionSetup:
 
     def backup_existing_env(self):
         """Backup existing .env file"""
-        env_path = Path(".env")
+        env_path = SERVICE_DIR / ".env"
         if env_path.exists():
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = f".env.backup.{timestamp}"
+            backup_path = SERVICE_DIR / f".env.backup.{timestamp}"
             shutil.copy2(env_path, backup_path)
             self.console.print(
                 f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}"
@@ -332,7 +335,7 @@ class SpeakerRecognitionSetup:
             self.console.print(
                 "[blue][INFO][/blue] Creating Caddyfile configuration..."
             )
-            caddyfile_template = Path("Caddyfile.template")
+            caddyfile_template = SERVICE_DIR / "Caddyfile.template"
             if caddyfile_template.exists():
                 try:
                     with open(caddyfile_template, "r") as f:
@@ -356,7 +359,7 @@ class SpeakerRecognitionSetup:
                             1,
                         )
 
-                    with open("Caddyfile", "w") as f:
+                    with open(SERVICE_DIR / "Caddyfile", "w") as f:
                         f.write(caddyfile_content)
 
                     self.console.print(
@@ -419,8 +422,8 @@ class SpeakerRecognitionSetup:
 
     def generate_env_file(self):
         """Generate .env file from template and update with configuration"""
-        env_path = Path(".env")
-        env_template = Path(".env.template")
+        env_path = SERVICE_DIR / ".env"
+        env_template = SERVICE_DIR / ".env.template"
 
         # Backup existing .env if it exists
         self.backup_existing_env()
@@ -538,7 +541,7 @@ class SpeakerRecognitionSetup:
             # locally. Source stays auto-derived (speaker-recognition), so
             # CHRONICLE_SERVICE_NAME is intentionally not set.
             ingest_url, ingest_token = resolve_ingest_config(
-                ["../../backends/advanced/.env", "../../.env"]
+                [str(REPO_ROOT / "backends/advanced/.env"), str(REPO_ROOT / ".env")]
             )
             if ingest_url and ingest_token:
                 self.config["CHRONICLE_INGEST_URL"] = ingest_url

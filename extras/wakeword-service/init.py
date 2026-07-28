@@ -11,14 +11,11 @@ import shutil
 import sys
 from pathlib import Path
 
+from chronicle_setup import read_env_value
 from dotenv import set_key
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
-
-# Repo root for shared utilities.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from setup_utils import read_env_value  # noqa: E402
 
 console = Console()
 HERE = Path(__file__).resolve().parent

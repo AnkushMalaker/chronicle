@@ -11,13 +11,10 @@ from pathlib import Path
 
 import discovery
 import services
-from config_manager import ConfigManager
-from dotenv import set_key
-from rich.console import Console
-from rich.prompt import Confirm, Prompt
 
-# Import shared setup utilities
-from setup_utils import (
+# Shared setup helpers (extras/chronicle-setup, installed via setup-requirements.txt)
+from chronicle_setup import (
+    ConfigManager,
     decide_cert_mode,
     detect_tailscale_info,
     enable_tailscaled_at_boot,
@@ -29,6 +26,9 @@ from setup_utils import (
     read_env_value,
     tailscaled_enabled_at_boot,
 )
+from dotenv import set_key
+from rich.console import Console
+from rich.prompt import Confirm, Prompt
 
 console = Console()
 
@@ -65,18 +65,30 @@ def get_existing_stream_provider(config_yml: dict):
     return mapping.get(stt_stream)
 
 
+# The repository root. Setup commands run from here because setup-requirements.txt
+# lists chronicle-setup as a relative path and uv resolves that against the working
+# directory. Each init.py locates its own files from __file__, so running from the
+# root does not change which .env a service writes.
+REPO_ROOT = Path(__file__).resolve().parent
+
+
+def setup_command(script_path: str) -> list:
+    """Command that runs a service's init.py, to be launched with cwd=REPO_ROOT."""
+    return [
+        "uv",
+        "run",
+        "--with-requirements",
+        "setup-requirements.txt",
+        "python",
+        script_path,
+    ]
+
+
 SERVICES = {
     "backend": {
         "advanced": {
             "path": "backends/advanced",
-            "cmd": [
-                "uv",
-                "run",
-                "--with-requirements",
-                "../../setup-requirements.txt",
-                "python",
-                "init.py",
-            ],
+            "cmd": setup_command("backends/advanced/init.py"),
             "description": "Advanced AI backend with full feature set",
             "required": True,
         }
@@ -84,74 +96,32 @@ SERVICES = {
     "extras": {
         "speaker-recognition": {
             "path": "extras/speaker-recognition",
-            "cmd": [
-                "uv",
-                "run",
-                "--with-requirements",
-                "../../setup-requirements.txt",
-                "python",
-                "init.py",
-            ],
+            "cmd": setup_command("extras/speaker-recognition/init.py"),
             "description": "Speaker identification and enrollment",
         },
         "asr-services": {
             "path": "extras/asr-services",
-            "cmd": [
-                "uv",
-                "run",
-                "--with-requirements",
-                "../../setup-requirements.txt",
-                "python",
-                "init.py",
-            ],
+            "cmd": setup_command("extras/asr-services/init.py"),
             "description": "Offline speech-to-text",
         },
         "langfuse": {
             "path": "extras/langfuse",
-            "cmd": [
-                "uv",
-                "run",
-                "--with-requirements",
-                "../../setup-requirements.txt",
-                "python",
-                "init.py",
-            ],
+            "cmd": setup_command("extras/langfuse/init.py"),
             "description": "LLM observability and prompt management (local)",
         },
         "llm-services": {
             "path": "extras/llm-services",
-            "cmd": [
-                "uv",
-                "run",
-                "--with-requirements",
-                "../../setup-requirements.txt",
-                "python",
-                "init.py",
-            ],
+            "cmd": setup_command("extras/llm-services/init.py"),
             "description": "Local LLM via llama.cpp (chat + embeddings)",
         },
         "wakeword-service": {
             "path": "extras/wakeword-service",
-            "cmd": [
-                "uv",
-                "run",
-                "--with-requirements",
-                "../../setup-requirements.txt",
-                "python",
-                "init.py",
-            ],
+            "cmd": setup_command("extras/wakeword-service/init.py"),
             "description": "Hermes acoustic wake-word detection",
         },
         "tts": {
             "path": "extras/tts",
-            "cmd": [
-                "uv",
-                "run",
-                "--with-requirements",
-                "../../setup-requirements.txt",
-                "python",
-                "init.py",
-            ],
+            "cmd": setup_command("extras/tts/init.py"),
             "description": "Text-to-speech (TADA / Fish Speech / KittenTTS)",
         },
     },
@@ -160,7 +130,7 @@ SERVICES = {
 # Repo-root .env is the canonical store for the shared Hugging Face token: the wizard
 # reads/writes it here, and each service's init.py also falls back to it. So a token
 # set once (here or by hand) flows to every service that pulls models from HF.
-ROOT_ENV_PATH = ".env"
+ROOT_ENV_PATH = str(REPO_ROOT / ".env")
 
 # Services whose containers pull (possibly gated) models from HuggingFace and thus
 # benefit from an HF token (avoids 429 IP rate-limits, unlocks gated repos). The
@@ -188,7 +158,10 @@ def discover_available_plugins():
             }
         }
     """
-    plugins_dir = Path("backends/advanced/src/advanced_omi_backend/plugins")
+    # Plugin implementations live at the repository root; only the framework
+    # (base.py, router.py, ...) is under advanced_omi_backend/plugins. Scanning
+    # the framework directory found zero plugins, so none were ever offered.
+    plugins_dir = REPO_ROOT / "plugins"
 
     if not plugins_dir.exists():
         console.print(
@@ -217,7 +190,7 @@ def discover_available_plugins():
 
 def check_service_exists(service_name, service_config):
     """Check if service directory and script exist"""
-    service_path = Path(service_config["path"])
+    service_path = REPO_ROOT / service_config["path"]
     if not service_path.exists():
         return False, f"Directory {service_path} does not exist"
 
@@ -587,7 +560,7 @@ def run_service_setup(
     try:
         result = subprocess.run(
             cmd,
-            cwd=service["path"],
+            cwd=REPO_ROOT,
             check=True,
             timeout=300,  # 5 minute timeout for service setup
         )
@@ -608,17 +581,13 @@ def run_service_setup(
         console.print(f"❌ {service_name} setup timed out after {e.timeout}s")
         console.print(f"[yellow]   Configuration may be partially written.[/yellow]")
         console.print(f"[yellow]   To retry just this service:[/yellow]")
-        console.print(
-            f"[yellow]   cd {service['path']} && {' '.join(service['cmd'])}[/yellow]"
-        )
+        console.print(f"[yellow]   {' '.join(service['cmd'])}[/yellow]")
         return False
     except subprocess.CalledProcessError as e:
         console.print(f"❌ {service_name} setup failed with exit code {e.returncode}")
         console.print(f"[yellow]   Check the error output above for details.[/yellow]")
         console.print(f"[yellow]   To retry just this service:[/yellow]")
-        console.print(
-            f"[yellow]   cd {service['path']} && {' '.join(service['cmd'])}[/yellow]"
-        )
+        console.print(f"[yellow]   {' '.join(service['cmd'])}[/yellow]")
         return False
     except Exception as e:
         console.print(f"❌ {service_name} setup failed: {e}")
@@ -649,15 +618,8 @@ def run_plugin_setup(plugin_id, plugin_info):
         # Run plugin setup script interactively (don't capture output)
         # This allows the plugin to prompt for user input
         result = subprocess.run(
-            [
-                "uv",
-                "run",
-                "--with-requirements",
-                "setup-requirements.txt",
-                "python",
-                str(setup_path),
-            ],
-            cwd=str(Path.cwd()),
+            setup_command(str(setup_path)),
+            cwd=REPO_ROOT,
         )
 
         if result.returncode == 0:
@@ -794,7 +756,7 @@ def _persist_hf_token(hf_token):
     (main machine), else the repo-root .env (backend-less join node). Both are
     gitignored. Each service's init.py reads from the same locations.
     """
-    backend_env = Path("backends/advanced/.env")
+    backend_env = REPO_ROOT / "backends" / "advanced" / ".env"
     target = str(backend_env) if backend_env.exists() else ROOT_ENV_PATH
     Path(target).touch(mode=0o600, exist_ok=True)
     set_key(target, "HF_TOKEN", hf_token, quote_mode="never")
@@ -1631,27 +1593,20 @@ def select_setup_type():
 
 def setup_capture_node():
     """Delegate ScreenPipe capture-node setup to its separate companion."""
-    init_script = Path("extras/screenpipe-collector/init.py")
+    init_script = REPO_ROOT / "extras/screenpipe-collector/init.py"
     if not init_script.exists():
         console.print(f"[red]✗ Capture-node setup is missing: {init_script}[/red]")
         return False
 
     backend_url = discovery.discover_service(discovery.CHRONICLE_BACKEND)
-    cmd = [
-        "uv",
-        "run",
-        "--with-requirements",
-        "../../setup-requirements.txt",
-        "python",
-        "init.py",
-    ]
+    cmd = setup_command("extras/screenpipe-collector/init.py")
     if backend_url:
         console.print(
             f"[green]✅[/green] Found Chronicle at [cyan]{backend_url}[/cyan]"
         )
         cmd.extend(["--backend", backend_url])
     try:
-        subprocess.run(cmd, cwd=init_script.parent, check=True)
+        subprocess.run(cmd, cwd=REPO_ROOT, check=True)
         return True
     except (OSError, subprocess.CalledProcessError) as exc:
         console.print(f"[red]✗ Capture-node setup failed: {exc}[/red]")
@@ -1675,17 +1630,7 @@ def setup_companion():
             "extras/vault-sync/README.md."
         )
         return
-    subprocess.run(
-        [
-            "uv",
-            "run",
-            "--with-requirements",
-            "../../setup-requirements.txt",
-            "python",
-            "init.py",
-        ],
-        cwd="extras/vault-sync",
-    )
+    subprocess.run(setup_command("extras/vault-sync/init.py"), cwd=REPO_ROOT)
 
 
 def join_cluster():
@@ -2488,13 +2433,13 @@ def main():
     # Show individual service usage
     console.print(f"\n💡 [dim]Tip: You can also setup services individually:[/dim]")
     console.print(
-        f"[dim]   cd backends/advanced && uv run --with-requirements ../../setup-requirements.txt python init.py[/dim]"
+        f"[dim]   uv run --with-requirements setup-requirements.txt python backends/advanced/init.py[/dim]"
     )
     console.print(
-        f"[dim]   cd extras/speaker-recognition && uv run --with-requirements ../../setup-requirements.txt python init.py[/dim]"
+        f"[dim]   uv run --with-requirements setup-requirements.txt python extras/speaker-recognition/init.py[/dim]"
     )
     console.print(
-        f"[dim]   cd extras/asr-services && uv run --with-requirements ../../setup-requirements.txt python init.py[/dim]"
+        f"[dim]   uv run --with-requirements setup-requirements.txt python extras/asr-services/init.py[/dim]"
     )
 
 

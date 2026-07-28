@@ -14,20 +14,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
+from chronicle_setup import (
+    mask_value,
+    mint_chronicle_api_key,
+    prompt_with_existing_masked,
+    read_env_value,
+)
 from dotenv import set_key
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.text import Text
 
-# Add repo root to path for imports
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from setup_utils import (
-    mask_value,
-    mint_chronicle_api_key,
-    prompt_with_existing_masked,
-    read_env_value,
-)
+# Anchored to this file, not the working directory: setup runs from the
+# repository root so that setup-requirements.txt resolves, but every path a
+# service reads or writes belongs to the service's own directory.
+SERVICE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SERVICE_DIR.parent.parent
 
 
 class HavpeRelaySetup:
@@ -77,7 +80,7 @@ class HavpeRelaySetup:
 
     def read_existing_env_value(self, key: str) -> str:
         """Read a value from existing .env file"""
-        return read_env_value(".env", key)
+        return read_env_value(str(SERVICE_DIR / ".env"), key)
 
     def read_backend_env_value(self, key: str) -> str:
         """Read a value from the backend's .env file"""
@@ -87,10 +90,10 @@ class HavpeRelaySetup:
 
     def backup_existing_env(self):
         """Backup existing .env file"""
-        env_path = Path(".env")
+        env_path = SERVICE_DIR / ".env"
         if env_path.exists():
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = f".env.backup.{timestamp}"
+            backup_path = SERVICE_DIR / f".env.backup.{timestamp}"
             shutil.copy2(env_path, backup_path)
             self.console.print(
                 f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}"
@@ -302,8 +305,8 @@ class HavpeRelaySetup:
         )
 
         # Backup existing secrets.yaml
-        secrets_path = Path("firmware/secrets.yaml")
-        template_path = Path("firmware/secrets.template.yaml")
+        secrets_path = SERVICE_DIR / "firmware/secrets.yaml"
+        template_path = SERVICE_DIR / "firmware/secrets.template.yaml"
 
         if secrets_path.exists():
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -352,8 +355,8 @@ class HavpeRelaySetup:
 
     def generate_env_file(self):
         """Generate .env file from template and update with configuration"""
-        env_path = Path(".env")
-        env_template = Path(".env.template")
+        env_path = SERVICE_DIR / ".env"
+        env_template = SERVICE_DIR / ".env.template"
 
         # Backup existing .env if it exists
         self.backup_existing_env()

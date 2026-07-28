@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # package is installed editable — a regular install puts this module in
 # site-packages, where counting parents silently yields the wrong directory
 # (and a silently-empty API key).
-_ROOT_MARKERS = ("discovery.py", "setup_utils.py")
+_ROOT_MARKERS = ("discovery.py", "wizard.py")
 
 
 def _looks_like_repo_root(path: Path) -> bool:
@@ -37,7 +37,9 @@ def _find_repo_root() -> Path:
         candidate = Path(override).expanduser().resolve()
         if _looks_like_repo_root(candidate):
             return candidate
-        logger.warning("CHRONICLE_REPO_ROOT=%s does not look like a checkout", candidate)
+        logger.warning(
+            "CHRONICLE_REPO_ROOT=%s does not look like a checkout", candidate
+        )
 
     here = Path(__file__).resolve()
     cwd = Path.cwd().resolve()
@@ -127,9 +129,7 @@ class ClientConfig:
             backend_ws_url=os.getenv("BACKEND_WS_URL") or websocket_url(backend_url),
             api_key=os.getenv("CHRONICLE_API_KEY", ""),
             device_name=(
-                os.getenv("DEVICE_NAME")
-                or default_device_name
-                or socket.gethostname()
+                os.getenv("DEVICE_NAME") or default_device_name or socket.gethostname()
             ),
             verify_ssl=os.getenv("VERIFY_SSL", "true").lower() == "true",
         )

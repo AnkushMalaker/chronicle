@@ -7,21 +7,17 @@ Interactive configuration for provider-based TTS services
 import argparse
 import os
 import shutil
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from chronicle_setup import detect_cuda_version as _detect_cuda_version
+from chronicle_setup import read_env_value
 from dotenv import set_key
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
-
-# Add repo root to path for imports
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from setup_utils import detect_cuda_version as _detect_cuda_version
-from setup_utils import read_env_value
 
 PROVIDERS = {
     "tada": {

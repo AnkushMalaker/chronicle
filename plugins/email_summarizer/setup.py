@@ -12,18 +12,17 @@ Follows Chronicle's clean configuration architecture:
 import shutil
 import sys
 from datetime import datetime
-from pathlib import Path
 
+from chronicle_setup import find_repo_root, prompt_value, prompt_with_existing_masked
 from dotenv import set_key
 from rich.console import Console
 from rich.prompt import Confirm
 from ruamel.yaml import YAML
 
-# Add repo root to path for setup_utils import
-project_root = Path(__file__).resolve().parents[6]
-sys.path.insert(0, str(project_root))
-
-from setup_utils import prompt_value, prompt_with_existing_masked
+# This used to be parents[6], correct only back when plugins lived under
+# backends/advanced/src/advanced_omi_backend/plugins. From the repository root
+# it resolves to "/", so every config path below pointed outside the checkout.
+project_root = find_repo_root()
 
 console = Console()
 

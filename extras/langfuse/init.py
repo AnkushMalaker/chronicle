@@ -8,20 +8,22 @@ import argparse
 import os
 import secrets
 import shutil
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from chronicle_setup import mask_value, prompt_with_existing_masked, read_env_value
 from dotenv import set_key
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-# Add repo root to path for imports
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from setup_utils import mask_value, prompt_with_existing_masked, read_env_value
+# Anchored to this file, not the working directory: setup runs from the
+# repository root so that setup-requirements.txt resolves, but every path a
+# service reads or writes belongs to the service's own directory.
+SERVICE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SERVICE_DIR.parent.parent
 
 console = Console()
 
@@ -43,10 +45,10 @@ def print_section(title: str):
 
 def backup_existing_env():
     """Backup existing .env file"""
-    env_path = Path(".env")
+    env_path = SERVICE_DIR / ".env"
     if env_path.exists():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = f".env.backup.{timestamp}"
+        backup_path = SERVICE_DIR / f".env.backup.{timestamp}"
         shutil.copy2(env_path, backup_path)
         console.print(
             f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}"
@@ -64,18 +66,18 @@ def run(args):
     console.print("Configuring LangFuse for LLM tracing and prompt management")
     console.print()
 
-    env_path = Path(".env")
-    env_template = Path(".env.template")
+    env_path = SERVICE_DIR / ".env"
+    env_template = SERVICE_DIR / ".env.template"
     public_url = (
         getattr(args, "public_url", None)
-        or read_env_value(".env", "NEXTAUTH_URL")
+        or read_env_value(str(SERVICE_DIR / ".env"), "NEXTAUTH_URL")
         or "http://localhost:3002"
     )
 
     # --- Internal secrets (auto-generate if not already set) ---
     print_section("Internal Secrets")
 
-    existing_salt = read_env_value(".env", "LANGFUSE_SALT")
+    existing_salt = read_env_value(str(SERVICE_DIR / ".env"), "LANGFUSE_SALT")
     if existing_salt:
         salt = existing_salt
         console.print(f"[green][PRESERVED][/green] LANGFUSE_SALT: {mask_value(salt)}")
@@ -83,7 +85,9 @@ def run(args):
         salt = generate_secret(16)
         console.print(f"[green][GENERATED][/green] LANGFUSE_SALT: {mask_value(salt)}")
 
-    existing_enc_key = read_env_value(".env", "LANGFUSE_ENCRYPTION_KEY")
+    existing_enc_key = read_env_value(
+        str(SERVICE_DIR / ".env"), "LANGFUSE_ENCRYPTION_KEY"
+    )
     if (
         existing_enc_key
         and existing_enc_key
@@ -99,7 +103,9 @@ def run(args):
             f"[green][GENERATED][/green] LANGFUSE_ENCRYPTION_KEY: {mask_value(enc_key)}"
         )
 
-    existing_nextauth = read_env_value(".env", "LANGFUSE_NEXTAUTH_SECRET")
+    existing_nextauth = read_env_value(
+        str(SERVICE_DIR / ".env"), "LANGFUSE_NEXTAUTH_SECRET"
+    )
     if existing_nextauth and existing_nextauth != "mysecret":
         nextauth_secret = existing_nextauth
         console.print(
@@ -114,7 +120,9 @@ def run(args):
     # --- Project API keys (auto-generate if not already set) ---
     print_section("Project API Keys")
 
-    existing_pub_key = read_env_value(".env", "LANGFUSE_INIT_PROJECT_PUBLIC_KEY")
+    existing_pub_key = read_env_value(
+        str(SERVICE_DIR / ".env"), "LANGFUSE_INIT_PROJECT_PUBLIC_KEY"
+    )
     if existing_pub_key:
         public_key = existing_pub_key
         console.print(
@@ -126,7 +134,9 @@ def run(args):
             f"[green][GENERATED][/green] Public key: {mask_value(public_key)}"
         )
 
-    existing_sec_key = read_env_value(".env", "LANGFUSE_INIT_PROJECT_SECRET_KEY")
+    existing_sec_key = read_env_value(
+        str(SERVICE_DIR / ".env"), "LANGFUSE_INIT_PROJECT_SECRET_KEY"
+    )
     if existing_sec_key:
         secret_key = existing_sec_key
         console.print(
@@ -147,7 +157,9 @@ def run(args):
     if admin_email:
         console.print(f"[green][FROM WIZARD][/green] Admin email: {admin_email}")
     else:
-        existing_email = read_env_value(".env", "LANGFUSE_INIT_USER_EMAIL")
+        existing_email = read_env_value(
+            str(SERVICE_DIR / ".env"), "LANGFUSE_INIT_USER_EMAIL"
+        )
         admin_email = prompt_with_existing_masked(
             prompt_text="LangFuse admin email",
             existing_value=existing_email,
@@ -161,7 +173,9 @@ def run(args):
             f"[green][FROM WIZARD][/green] Admin password: {mask_value(admin_password)}"
         )
     else:
-        existing_password = read_env_value(".env", "LANGFUSE_INIT_USER_PASSWORD")
+        existing_password = read_env_value(
+            str(SERVICE_DIR / ".env"), "LANGFUSE_INIT_USER_PASSWORD"
+        )
         admin_password = prompt_with_existing_masked(
             prompt_text="LangFuse admin password",
             existing_value=existing_password,

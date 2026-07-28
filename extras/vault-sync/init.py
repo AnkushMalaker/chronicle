@@ -20,20 +20,17 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import requests
-from dotenv import set_key
-from rich.console import Console
-from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
-from rich.text import Text
-
-# Add repo root to path for imports
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from setup_utils import (
+from chronicle_setup import (
     mask_value,
     mint_chronicle_api_key,
     prompt_with_existing_masked,
     read_env_value,
 )
+from dotenv import set_key
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
+from rich.text import Text
 
 PROJECT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PROJECT_DIR.parent.parent

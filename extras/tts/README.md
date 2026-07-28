@@ -7,7 +7,7 @@ Provider-based text-to-speech services for Chronicle. Follows the same architect
 ```bash
 # Run setup wizard
 cd extras/tts
-uv run --with-requirements ../../setup-requirements.txt python init.py
+uv run --with-requirements setup-requirements.txt python extras/tts/init.py
 
 # Start the service (TADA or Fish Speech)
 docker compose up tada-tts -d --build

@@ -7,6 +7,8 @@ on:
       - "setup-requirements.txt"
       - ".coveragerc"
       - "tests/unit/**"
+      - "extras/chronicle-setup/**"
+      - "extras/chronicle-client/**"
       - "backends/advanced/src/**"
       - "backends/advanced/tests/**"
       - "backends/advanced/pyproject.toml"
@@ -67,6 +69,40 @@ jobs:
           path: coverage-reports/
           if-no-files-found: warn
           retention-days: 14
+
+  client-packages:
+    name: Shared client/setup package tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      # Both packages locate the checkout by searching for marker files, so their
+      # tests must run against a real one — hence no working-directory override.
+      - name: chronicle-setup
+        run: >-
+          uv run --no-project
+          --with ./extras/chronicle-setup
+          --with pytest
+          pytest extras/chronicle-setup/tests -q
+
+      - name: chronicle-client
+        run: >-
+          uv run --no-project
+          --with ./extras/chronicle-client
+          --with pytest
+          pytest extras/chronicle-client/tests -q
 
   advanced-backend-unit:
     name: Advanced backend unit tests

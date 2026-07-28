@@ -33,24 +33,28 @@ def _install_rich_stubs():
     sys.modules.setdefault("rich.prompt", rich_prompt_mod)
 
 
-def _install_setup_utils_stub():
-    setup_utils_mod = types.ModuleType("setup_utils")
-    setup_utils_mod.detect_tailscale_info = lambda: (None, None)
-    setup_utils_mod.decide_cert_mode = lambda *_: "caddy"
-    setup_utils_mod.generate_tailscale_certs = lambda *_: False
-    setup_utils_mod.is_placeholder = lambda value, *placeholders: value in placeholders
-    setup_utils_mod.mask_value = lambda value, *_: value
-    setup_utils_mod.prompt_password = lambda *_, **__: ""
-    setup_utils_mod.prompt_with_existing_masked = (
+def _install_chronicle_setup_stub():
+    mod = types.ModuleType("chronicle_setup")
+    mod.ConfigManager = lambda *_, **__: None
+    mod.detect_tailscale_info = lambda: (None, None)
+    mod.decide_cert_mode = lambda *_: "caddy"
+    mod.enable_tailscaled_at_boot = lambda *_: False
+    mod.generate_tailscale_certs = lambda *_: False
+    mod.is_placeholder = lambda value, *placeholders: value in placeholders
+    mod.mask_value = lambda value, *_: value
+    mod.prompt_password = lambda *_, **__: ""
+    mod.prompt_with_existing_masked = (
         lambda *_, existing_value=None, default="", **__: existing_value or default
     )
-    setup_utils_mod.read_env_value = lambda *_: None
-    sys.modules.setdefault("setup_utils", setup_utils_mod)
+    mod.read_env_value = lambda *_: None
+    mod.tailscaled_enabled_at_boot = lambda *_: None
+    mod.tailscale_socket_path = lambda *_: None
+    sys.modules.setdefault("chronicle_setup", mod)
 
 
 def _load_wizard_module():
     _install_rich_stubs()
-    _install_setup_utils_stub()
+    _install_chronicle_setup_stub()
     module_path = Path(__file__).resolve().parents[2] / "wizard.py"
     repo_root = str(module_path.parent)
     if repo_root not in sys.path:

@@ -37,7 +37,14 @@ _stub_missing("rich", {})
 _stub_missing("rich.console", {"Console": MagicMock})
 _stub_missing("rich.markup", {"escape": lambda s: s})
 _stub_missing("rich.table", {"Table": MagicMock})
-_stub_missing("setup_utils", {"read_env_value": lambda *a, **kw: None})
+_stub_missing(
+    "chronicle_setup",
+    {
+        "ConfigManager": MagicMock,
+        "ensure_tailscale_cert": lambda *a, **kw: None,
+        "read_env_value": lambda *a, **kw: None,
+    },
+)
 
 import updates  # noqa: E402  (needs the stubs + sys.path above)
 

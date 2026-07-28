@@ -1,0 +1,17 @@
+[project]
+name = "chronicle-setup"
+version = "0.1.0"
+description = "Shared helpers for Chronicle's setup wizard and service init scripts"
+requires-python = ">=3.9"
+dependencies = [
+    "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
+    "ruamel-yaml>=0.18.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["chronicle_setup"]

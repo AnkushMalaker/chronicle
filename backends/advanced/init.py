@@ -14,22 +14,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
+from chronicle_setup import (
+    ConfigManager,
+    decide_cert_mode,
+    detect_tailscale_info,
+    mask_value,
+)
+from chronicle_setup import prompt_password as util_prompt_password
+from chronicle_setup import (
+    prompt_with_existing_masked,
+    read_env_value,
+    tailscale_socket_path,
+)
 from dotenv import dotenv_values, set_key
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.text import Text
 
-# Add repo root to path for imports
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from config_manager import ConfigManager
-from setup_utils import decide_cert_mode, detect_tailscale_info, mask_value
-from setup_utils import prompt_password as util_prompt_password
-from setup_utils import (
-    prompt_with_existing_masked,
-    read_env_value,
-    tailscale_socket_path,
-)
+# Anchored to this file, not the working directory: setup runs from the
+# repository root so that setup-requirements.txt resolves, but every path this
+# script reads or writes belongs to the backend's own directory.
+SERVICE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SERVICE_DIR.parent.parent
 
 
 class ChronicleSetup:
@@ -37,14 +44,12 @@ class ChronicleSetup:
         self.console = Console()
         self.config: Dict[str, Any] = {}
         self.args = args or argparse.Namespace()
-        self.config_yml_path = Path(
-            "../../config/config.yml"
-        )  # Main config at config/config.yml
+        self.config_yml_path = REPO_ROOT / "config" / "config.yml"
 
-        # Check if we're in the right directory
-        if not Path("pyproject.toml").exists() or not Path("src").exists():
+        if not (SERVICE_DIR / "pyproject.toml").exists():
             self.console.print(
-                "[red][ERROR][/red] Please run this script from the backends/advanced directory"
+                f"[red][ERROR][/red] {SERVICE_DIR} does not look like the backend "
+                "(no pyproject.toml)"
             )
             sys.exit(1)
 
@@ -116,8 +121,8 @@ class ChronicleSetup:
 
     def _ensure_plugins_yml_exists(self):
         """Ensure plugins.yml exists by copying from template if missing."""
-        plugins_yml = Path("../../config/plugins.yml")
-        plugins_template = Path("../../config/plugins.yml.template")
+        plugins_yml = REPO_ROOT / "config" / "plugins.yml"
+        plugins_template = REPO_ROOT / "config" / "plugins.yml.template"
 
         if not plugins_yml.exists():
             if plugins_template.exists():
@@ -144,10 +149,10 @@ class ChronicleSetup:
 
     def backup_existing_env(self):
         """Backup existing .env file"""
-        env_path = Path(".env")
+        env_path = SERVICE_DIR / ".env"
         if env_path.exists():
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = f".env.backup.{timestamp}"
+            backup_path = SERVICE_DIR / f".env.backup.{timestamp}"
             shutil.copy2(env_path, backup_path)
             self.console.print(
                 f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}"
@@ -155,7 +160,7 @@ class ChronicleSetup:
 
     def read_existing_env_value(self, key: str) -> str:
         """Read a value from existing .env file (delegates to shared utility)"""
-        return read_env_value(".env", key)
+        return read_env_value(str(SERVICE_DIR / ".env"), key)
 
     def mask_api_key(self, key: str, show_chars: int = 5) -> str:
         """Mask API key (delegates to shared utility)"""
@@ -171,7 +176,7 @@ class ChronicleSetup:
     ) -> str:
         """
         Prompt for a value, showing masked existing value from .env if present.
-        Delegates to shared utility from setup_utils.
+        Delegates to shared utility from chronicle_setup.
 
         Args:
             prompt_text: The prompt to display
@@ -186,7 +191,7 @@ class ChronicleSetup:
         # Use shared utility with auto-read from .env
         return prompt_with_existing_masked(
             prompt_text=prompt_text,
-            env_file_path=".env",
+            env_file_path=str(SERVICE_DIR / ".env"),
             env_key=env_key,
             placeholders=placeholders,
             is_password=is_password,
@@ -249,7 +254,7 @@ class ChronicleSetup:
         if getattr(self.args, "asr_url", None):
             self.console.print(f"[green]✅[/green] {env_key} = {self.args.asr_url}")
             return self.args.asr_url
-        existing = read_env_value(".env", env_key) or default
+        existing = read_env_value(str(SERVICE_DIR / ".env"), env_key) or default
         return self.prompt_value(f"{env_key}", existing)
 
     def setup_transcription(self):
@@ -395,7 +400,7 @@ class ChronicleSetup:
                 "[blue][INFO][/blue] Offline VibeVoice ASR selected (built-in speaker diarization)"
             )
             existing_vibevoice_url = (
-                read_env_value(".env", "VIBEVOICE_ASR_URL")
+                read_env_value(str(SERVICE_DIR / ".env"), "VIBEVOICE_ASR_URL")
                 or "http://host.docker.internal:8767"
             )
             vibevoice_url = self.prompt_value(
@@ -643,7 +648,7 @@ class ChronicleSetup:
 
         # Prompt for streaming provider env vars if not already set
         if streaming_provider == "deepgram":
-            existing_key = read_env_value(".env", "DEEPGRAM_API_KEY")
+            existing_key = read_env_value(str(SERVICE_DIR / ".env"), "DEEPGRAM_API_KEY")
             if not existing_key or existing_key in (
                 "your_deepgram_api_key_here",
                 "your-deepgram-key-here",
@@ -664,7 +669,7 @@ class ChronicleSetup:
                 # Preserve existing key so generate_env_file() doesn't lose it
                 self.config["DEEPGRAM_API_KEY"] = existing_key
         elif streaming_provider == "smallest":
-            existing_key = read_env_value(".env", "SMALLEST_API_KEY")
+            existing_key = read_env_value(str(SERVICE_DIR / ".env"), "SMALLEST_API_KEY")
             if not existing_key or existing_key in (
                 "your_smallest_api_key_here",
                 "your-smallest-key-here",
@@ -685,7 +690,9 @@ class ChronicleSetup:
                 # Preserve existing key so generate_env_file() doesn't lose it
                 self.config["SMALLEST_API_KEY"] = existing_key
         elif streaming_provider == "qwen3-asr":
-            existing_url = read_env_value(".env", "QWEN3_ASR_STREAM_URL")
+            existing_url = read_env_value(
+                str(SERVICE_DIR / ".env"), "QWEN3_ASR_STREAM_URL"
+            )
             if not existing_url:
                 qwen3_url = self.prompt_value(
                     "Qwen3-ASR streaming URL", "http://host.docker.internal:8769"
@@ -694,7 +701,7 @@ class ChronicleSetup:
                 self.config["QWEN3_ASR_STREAM_URL"] = stream_host
         elif streaming_provider == "gemma4":
             # Streaming shares the gemma4-asr service (the /stream WS endpoint).
-            existing_url = read_env_value(".env", "GEMMA4_ASR_URL")
+            existing_url = read_env_value(str(SERVICE_DIR / ".env"), "GEMMA4_ASR_URL")
             if not existing_url:
                 gemma4_url = self.prompt_value(
                     "Gemma 4 ASR URL", "host.docker.internal:8767"
@@ -704,7 +711,9 @@ class ChronicleSetup:
                 ).rstrip("/")
         elif streaming_provider == "nemotron":
             # Nemotron serves batch + streaming from one container on 8772.
-            existing_url = read_env_value(".env", "NEMOTRON_ASR_STREAM_URL")
+            existing_url = read_env_value(
+                str(SERVICE_DIR / ".env"), "NEMOTRON_ASR_STREAM_URL"
+            )
             if not existing_url:
                 nemotron_url = self.prompt_value(
                     "Nemotron ASR URL", "host.docker.internal:8772"
@@ -1698,8 +1707,8 @@ class ChronicleSetup:
         Preserves existing .env values that weren't explicitly set during this
         wizard run, preventing silent data loss on re-runs.
         """
-        env_path = Path(".env")
-        env_template = Path(".env.template")
+        env_path = SERVICE_DIR / ".env"
+        env_template = SERVICE_DIR / ".env.template"
 
         # Read ALL existing .env values before overwriting so we can preserve
         # keys that weren't touched during this wizard run (e.g., API keys
@@ -1747,10 +1756,13 @@ class ChronicleSetup:
         """Copy other configuration files"""
 
         if (
-            not Path("diarization_config.json").exists()
-            and Path("diarization_config.json.template").exists()
+            not (SERVICE_DIR / "diarization_config.json").exists()
+            and (SERVICE_DIR / "diarization_config.json.template").exists()
         ):
-            shutil.copy2("diarization_config.json.template", "diarization_config.json")
+            shutil.copy2(
+                SERVICE_DIR / "diarization_config.json.template",
+                SERVICE_DIR / "diarization_config.json",
+            )
             self.console.print(
                 "[green][SUCCESS][/green] diarization_config.json created"
             )

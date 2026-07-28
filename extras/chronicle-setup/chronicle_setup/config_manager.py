@@ -10,15 +10,14 @@ Key principles:
 - All config updates should use this module to maintain consistency
 
 Usage:
-    # From any service in the project
-    from config_manager import ConfigManager
+    from chronicle_setup import ConfigManager
 
-    # For backend service
+    # Scoped to a service, so .env writes land in that service's directory
     config = ConfigManager(service_path="backends/advanced")
     provider = config.get_memory_provider()
     config.set_memory_provider("chronicle")
 
-    # Auto-detects paths from cwd
+    # config.yml only, no service .env
     config = ConfigManager()
 """
 
@@ -31,6 +30,8 @@ from typing import Any, Dict, List, Optional
 
 from dotenv import set_key as dotenv_set_key
 from ruamel.yaml import YAML
+
+from .repo import find_repo_root
 
 logger = logging.getLogger(__name__)
 
@@ -48,18 +49,15 @@ class ConfigManager:
         Initialize ConfigManager.
 
         Args:
-            service_path: Path to service directory (e.g., "backends/advanced", "extras/speaker-recognition").
-                         If None, auto-detects from current working directory.
-            repo_root: Path to repository root. If None, auto-detects by finding config.yml.
+            service_path: Path to service directory, relative to the repository root
+                         (e.g. "backends/advanced"). None means config.yml only —
+                         no service .env is read or written.
+            repo_root: Path to repository root. If None, it is located by marker files.
         """
-        # Find repo root
         if repo_root is None:
-            repo_root = self._find_repo_root()
+            repo_root = find_repo_root()
         self.repo_root = Path(repo_root)
 
-        # Find service directory
-        if service_path is None:
-            service_path = self._detect_service_path()
         self.service_path = self.repo_root / service_path if service_path else None
 
         # Paths
@@ -70,29 +68,6 @@ class ConfigManager:
             f"ConfigManager initialized: repo_root={self.repo_root}, "
             f"service_path={self.service_path}, config_yml={self.config_yml_path}"
         )
-
-    def _find_repo_root(self) -> Path:
-        """Find repository root using __file__ location (config_manager.py is always at repo root)."""
-        return Path(__file__).parent
-
-    def _detect_service_path(self) -> Optional[str]:
-        """Auto-detect service path from current working directory."""
-        cwd = Path.cwd()
-
-        # Check if we're in a known service directory
-        known_services = [
-            "backends/advanced",
-            "extras/speaker-recognition",
-            "extras/asr-services",
-        ]
-
-        for service in known_services:
-            service_full_path = self.repo_root / service
-            if cwd == service_full_path or str(cwd).startswith(str(service_full_path)):
-                return service
-
-        logger.debug("Could not auto-detect service path from cwd")
-        return None
 
     def ensure_config_yml(self) -> None:
         """Create config.yml from template if it doesn't exist.

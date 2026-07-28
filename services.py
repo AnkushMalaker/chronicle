@@ -19,12 +19,11 @@ from pathlib import Path
 import clients
 import requests
 import yaml
-from config_manager import ConfigManager
+from chronicle_setup import ConfigManager, ensure_tailscale_cert, read_env_value
 from dotenv import dotenv_values, set_key
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
-from setup_utils import ensure_tailscale_cert, read_env_value
 
 console = Console()
 

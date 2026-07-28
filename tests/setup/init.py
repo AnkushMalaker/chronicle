@@ -10,14 +10,11 @@ import shutil
 import sys
 from pathlib import Path
 
+from chronicle_setup import is_placeholder, prompt_with_existing_masked
 from dotenv import set_key
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
-
-# Add repo root to path for imports
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from setup_utils import is_placeholder, prompt_with_existing_masked
 
 SETUP_DIR = Path(__file__).resolve().parent
 ENV_TEST_PATH = SETUP_DIR / ".env.test"

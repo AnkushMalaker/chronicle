@@ -238,9 +238,10 @@ if [[ -f "$INIT_SCRIPT" ]]; then
         INIT_ARGS="--backend-url $BACKEND_URL"
     fi
     info "Running configuration wizard for $SERVICE_NAME..."
-    cd "$SERVICE_DIR"
-    uv run --with-requirements "$CHRONICLE_HOME/setup-requirements.txt" python init.py $INIT_ARGS </dev/tty
+    # From the root, so uv resolves ./extras/chronicle-setup in the requirements.
     cd "$CHRONICLE_HOME"
+    uv run --with-requirements setup-requirements.txt \
+        python "$INIT_SCRIPT" $INIT_ARGS </dev/tty
 elif [[ -f "$SERVICE_DIR/setup.sh" ]]; then
     info "Running setup script for $SERVICE_NAME..."
     cd "$SERVICE_DIR"

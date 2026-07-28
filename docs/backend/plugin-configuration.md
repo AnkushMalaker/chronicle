@@ -280,7 +280,7 @@ grep MY_PLUGIN .env
 
 ## Using Shared Setup Utilities in Plugin Setup Scripts
 
-Chronicle provides shared utilities (`setup_utils.py`) for creating interactive plugin setup wizards with password masking and existing value detection.
+Chronicle provides a shared package (`extras/chronicle-setup`, importable as `chronicle_setup`) for creating interactive plugin setup wizards with password masking and existing value detection.
 
 ### Quick Reference
 
@@ -293,7 +293,7 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parents[6]
 sys.path.insert(0, str(project_root))
 
-from setup_utils import (
+from chronicle_setup import (
     prompt_with_existing_masked,  # Main function for masked prompts
     prompt_value,                   # Simple value prompts
     prompt_password,                # Password with validation
@@ -378,7 +378,7 @@ See `backends/advanced/src/advanced_omi_backend/plugins/email_summarizer/setup.p
 For common patterns, use the convenience wrappers:
 
 ```python
-from setup_utils import prompt_api_key, prompt_token
+from chronicle_setup import prompt_api_key, prompt_token
 
 # API keys
 openai_key = prompt_api_key("OpenAI", env_file_path="../../.env")
@@ -396,4 +396,4 @@ ha_token = prompt_token("Home Assistant", env_file_path="../../.env")
 - [AGENTS.md](../../AGENTS.md) - Main development reference
 - [Plugin Development Guide](plugin-development-guide.md) - Creating custom plugins
 - [Configuration Guide](../../config/README.md) - Configuration and environment reference
-- [setup_utils.py](../../setup_utils.py) - Shared setup utility reference
+- [chronicle-setup](../../extras/chronicle-setup/README.md) - Shared setup utility reference

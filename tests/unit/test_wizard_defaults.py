@@ -25,8 +25,8 @@ PROJECT_ROOT = str(WIZARD_PATH.parent)
 
 
 def _load_wizard():
-    # wizard.py and setup_utils.py both live in the project root.
-    # Add the root to sys.path so the relative import resolves.
+    # wizard.py imports sibling root modules (discovery, services); add the root
+    # so those resolve. chronicle_setup comes from the installed package.
     if PROJECT_ROOT not in sys.path:
         sys.path.insert(0, PROJECT_ROOT)
     spec = importlib.util.spec_from_file_location("wizard", WIZARD_PATH)

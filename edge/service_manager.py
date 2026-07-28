@@ -58,7 +58,7 @@ import discovery  # noqa: E402  (repo-root discovery.py)
 import services  # noqa: E402  (repo-root services.py)
 import status  # noqa: E402  (repo-root status.py — restart-count helper)
 import updates  # noqa: E402  (repo-root updates.py — version + self-update)
-from setup_utils import detect_cuda_version, detect_tailscale_info  # noqa: E402
+from chronicle_setup import detect_cuda_version, detect_tailscale_info  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,

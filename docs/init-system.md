@@ -54,18 +54,20 @@ The orchestrator will:
 ### Individual Service Setup
 Each service can be configured independently:
 
+All setup commands run **from the repository root** — `setup-requirements.txt`
+lists the shared `chronicle-setup` package as a relative path, and uv resolves
+that against the working directory. Each `init.py` finds its own files from
+`__file__`, so this does not change which `.env` it writes.
+
 ```bash
 # Advanced Backend only
-cd backends/advanced
-uv run --with-requirements setup-requirements.txt python init.py
+uv run --with-requirements setup-requirements.txt python backends/advanced/init.py
 
 # Speaker Recognition only
-cd extras/speaker-recognition
-./setup.sh
+uv run --with-requirements setup-requirements.txt python extras/speaker-recognition/init.py
 
 # ASR Services only
-cd extras/asr-services
-./setup.sh
+uv run --with-requirements setup-requirements.txt python extras/asr-services/init.py
 ```
 
 ## Service Details

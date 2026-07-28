@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
+from chronicle_setup import ConfigManager
+from chronicle_setup import detect_cuda_version as _detect_cuda_version
+from chronicle_setup import read_env_value, resolve_ingest_config
 from dotenv import set_key
 from rich.console import Console
 from rich.panel import Panel
@@ -21,11 +24,11 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
-# Add repo root to path for imports
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from config_manager import ConfigManager
-from setup_utils import detect_cuda_version as _detect_cuda_version
-from setup_utils import read_env_value, resolve_ingest_config
+# Anchored to this file, not the working directory: setup runs from the
+# repository root so that setup-requirements.txt resolves, but every path a
+# service reads or writes belongs to the service's own directory.
+SERVICE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SERVICE_DIR.parent.parent
 
 # Provider and model definitions
 PROVIDERS = {
@@ -234,7 +237,7 @@ class ASRServicesSetup:
 
     def read_existing_env_value(self, key: str) -> Optional[str]:
         """Read a value from existing .env file (delegates to shared utility)"""
-        return read_env_value(".env", key)
+        return read_env_value(str(SERVICE_DIR / ".env"), key)
 
     def resolve_hf_token(self) -> Optional[str]:
         """HF token, in priority order: --hf-token arg, backend .env, repo-root .env,
@@ -247,7 +250,11 @@ class ASRServicesSetup:
         arg_token = getattr(self.args, "hf_token", None)
         if arg_token:
             return arg_token
-        for path in ("../../backends/advanced/.env", "../../.env", ".env"):
+        for path in (
+            str(REPO_ROOT / "backends/advanced/.env"),
+            str(REPO_ROOT / ".env"),
+            str(SERVICE_DIR / ".env"),
+        ):
             value = read_env_value(path, "HF_TOKEN")
             if value:
                 return value
@@ -255,10 +262,10 @@ class ASRServicesSetup:
 
     def backup_existing_env(self):
         """Backup existing .env file"""
-        env_path = Path(".env")
+        env_path = SERVICE_DIR / ".env"
         if env_path.exists():
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = f".env.backup.{timestamp}"
+            backup_path = SERVICE_DIR / f".env.backup.{timestamp}"
             shutil.copy2(env_path, backup_path)
             self.console.print(
                 f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}"
@@ -473,7 +480,9 @@ class ASRServicesSetup:
                     self.config["WANDB_ENABLED"] = "true"
                     wandb_key = self.prompt_value(
                         "wandb API key",
-                        default=read_env_value(str(Path(".env")), "WANDB_API_KEY")
+                        default=read_env_value(
+                            str(SERVICE_DIR / ".env"), "WANDB_API_KEY"
+                        )
                         or "",
                     )
                     if wandb_key:
@@ -514,7 +523,9 @@ class ASRServicesSetup:
                     self.config["WANDB_ENABLED"] = "true"
                     wandb_key = self.prompt_value(
                         "wandb API key",
-                        default=read_env_value(str(Path(".env")), "WANDB_API_KEY")
+                        default=read_env_value(
+                            str(SERVICE_DIR / ".env"), "WANDB_API_KEY"
+                        )
                         or "",
                     )
                     if wandb_key:
@@ -569,8 +580,8 @@ class ASRServicesSetup:
 
     def generate_env_file(self):
         """Generate .env file from configuration"""
-        env_path = Path(".env")
-        env_template = Path(".env.template")
+        env_path = SERVICE_DIR / ".env"
+        env_template = SERVICE_DIR / ".env.template"
 
         self.backup_existing_env()
 
@@ -786,7 +797,7 @@ class ASRServicesSetup:
             # CHRONICLE_SERVICE_NAME is intentionally NOT set so the source stays
             # auto-derived per running provider (asr-<provider>) across switches.
             ingest_url, ingest_token = resolve_ingest_config(
-                ["../../backends/advanced/.env", "../../.env"]
+                [str(REPO_ROOT / "backends/advanced/.env"), str(REPO_ROOT / ".env")]
             )
             if ingest_url and ingest_token:
                 self.config["CHRONICLE_INGEST_URL"] = ingest_url

@@ -1,4 +1,9 @@
-# Dependencies for Friend-Lite setup scripts (root wizard + all service init scripts)
+# Dependencies for Chronicle setup scripts (root wizard + all service init scripts)
+#
+# The relative path below is resolved by uv against the *working directory*, not
+# against this file, so setup commands must be run from the repository root:
+#   uv run --with-requirements setup-requirements.txt python extras/<svc>/init.py
+./extras/chronicle-setup
 rich>=13.0.0
 python-dotenv>=1.0.0
 requests>=2.31.0

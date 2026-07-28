@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
+from chronicle_setup import ConfigManager, read_env_value
 from dotenv import set_key
 from rich.console import Console
 from rich.panel import Panel
@@ -20,10 +21,11 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich.text import Text
 
-# Add repo root to path for imports
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from config_manager import ConfigManager
-from setup_utils import read_env_value
+# Anchored to this file, not the working directory: setup runs from the
+# repository root so that setup-requirements.txt resolves, but every path a
+# service reads or writes belongs to the service's own directory.
+SERVICE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SERVICE_DIR.parent.parent
 
 # LLM model options. The `hf` field is a HuggingFace `repo:quant` reference that
 # llama.cpp's server downloads and caches automatically on first start (via
@@ -110,7 +112,7 @@ class LLMServicesSetup:
                 return default
 
     def read_existing_env_value(self, key: str) -> Optional[str]:
-        return read_env_value(".env", key)
+        return read_env_value(str(SERVICE_DIR / ".env"), key)
 
     def resolve_hf_token(self) -> Optional[str]:
         """HF token, in priority order: --hf-token arg, backend .env, repo-root .env,
@@ -123,17 +125,21 @@ class LLMServicesSetup:
         arg_token = getattr(self.args, "hf_token", None)
         if arg_token:
             return arg_token
-        for path in ("../../backends/advanced/.env", "../../.env", ".env"):
+        for path in (
+            str(REPO_ROOT / "backends/advanced/.env"),
+            str(REPO_ROOT / ".env"),
+            str(SERVICE_DIR / ".env"),
+        ):
             value = read_env_value(path, "HF_TOKEN")
             if value:
                 return value
         return None
 
     def backup_existing_env(self):
-        env_path = Path(".env")
+        env_path = SERVICE_DIR / ".env"
         if env_path.exists():
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = f".env.backup.{timestamp}"
+            backup_path = SERVICE_DIR / f".env.backup.{timestamp}"
             shutil.copy2(env_path, backup_path)
             self.console.print(
                 f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}"
@@ -226,7 +232,7 @@ class LLMServicesSetup:
         """
         self.print_section("Model Source")
 
-        models_dir = Path("models")
+        models_dir = SERVICE_DIR / "models"
         models_dir.mkdir(exist_ok=True)
 
         for kind, info in (("Chat", llm_info), ("Embedding", embed_info)):
@@ -252,7 +258,7 @@ class LLMServicesSetup:
 
     def generate_env_file(self):
         """Generate .env file from configuration."""
-        env_path = Path(".env")
+        env_path = SERVICE_DIR / ".env"
         self.backup_existing_env()
         env_path.touch(mode=0o600)
 

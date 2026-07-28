@@ -13,6 +13,28 @@ This supports a comprehensive web dashboard for management.
 
 **❌ No Backward Compatibility**: Do NOT add backward compatibility code unless explicitly requested. This includes fallback logic, legacy field support, or compatibility layers. Always ask before adding backward compatibility - in most cases the answer is no during active development.
 
+## Live Deployment Location
+
+The normal live Chronicle deployment is hosted on the Tailnet machine **`kraken`**, not
+on the machine containing this workspace. A stopped or unconfigured local stack does
+not mean Chronicle is unavailable.
+
+For read-only checks of the running application (health checks, API inspection, or
+browser/screenshot verification):
+
+1. Try `https://kraken.parrot-census.ts.net` first. Use HTTPS; plain HTTP redirects.
+2. If that name is unavailable, inspect the current Tailscale mesh with
+   `tailscale status --json` and resolve the online peer whose `HostName` is `Kraken`.
+   Prefer its returned `DNSName`; use its current Tailscale IP only as a temporary
+   fallback. Do not persist a `100.x` address because it may change.
+3. If the host is reachable but the Chronicle endpoint is unclear, use the repository's
+   `discovery.py`/minidisc support to discover the `chronicle-backend` service on the
+   Tailnet.
+
+Do not start a duplicate local deployment merely to inspect the live application.
+Remote deployment, restarts, or other mutations on Kraken still require the user's
+request to change or deploy the running system.
+
 ## Initial Setup & Configuration
 
 Chronicle includes an **interactive setup wizard** for easy configuration. The wizard guides you through:
@@ -461,12 +483,11 @@ Provider-based text-to-speech (`extras/tts/`), built on the same provider patter
 ### Setup & Run
 
 ```bash
-cd extras/tts
-
-# Configure (selects provider, model, CUDA version)
-uv run --with-requirements ../../setup-requirements.txt python init.py
+# Configure (selects provider, model, CUDA version) — from the repository root
+uv run --with-requirements setup-requirements.txt python extras/tts/init.py
 
 # Start ONE provider
+cd extras/tts
 docker compose up tada-tts -d --build       # or fish-tts / kittentts-tts
 
 # Test
@@ -668,3 +689,10 @@ For temporary Python-backed tooling that is not part of the repo dependencies, p
 - The build cache is efficient and saves significant time during development
 
 - Remember that whenever there's a python command, you should use uv run python3 instead
+- **Run setup commands from the repository root.** `setup-requirements.txt` lists
+  the shared `chronicle-setup` package as a relative path and uv resolves that
+  against the working directory, so
+  `uv run --with-requirements setup-requirements.txt python extras/<svc>/init.py`
+  works while the old `cd extras/<svc> && ... ../../setup-requirements.txt` form
+  now fails. Each `init.py` anchors its own paths to `__file__`, so this does not
+  change which `.env` a service reads or writes.

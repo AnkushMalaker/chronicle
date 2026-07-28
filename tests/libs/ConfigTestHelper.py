@@ -1,16 +1,12 @@
 import os
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 from urllib.parse import urlparse
 
 import yaml
+from chronicle_setup import ConfigManager
 from omegaconf import OmegaConf
-
-# Add repo root to path to import config_manager
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from config_manager import ConfigManager
 
 
 class ConfigTestHelper:

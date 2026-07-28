@@ -163,7 +163,7 @@ one-command choice for the user, the wizard / `services.py` should automate them
 | Manual step today | Who should automate it | Notes |
 |---|---|---|
 | `unqualified-search-registries=["docker.io"]` + `short-name-mode="permissive"` | wizard (write `~/.config/containers/registries.conf` if absent) | idempotent; required for builds to resolve short names |
-| `nvidia-ctk cdi generate` (GPU hosts) | wizard (already detects CUDA via `setup_utils.detect_cuda_version`) | needs sudo; prompt + run |
+| `nvidia-ctk cdi generate` (GPU hosts) | wizard (already detects CUDA via `chronicle_setup.detect_cuda_version`) | needs sudo; prompt + run |
 | `sysctl net.ipv4.ip_unprivileged_port_start=80` | `services.py` preflight when the `https`/Caddy profile is active | needs sudo; only if Caddy enabled. Could also drop Caddy's `:80` listener for rootless |
 | Data-dir ownership remap (`sudo chown` + `podman unshare chown 999`) | a `services.py migrate-podman` helper (one-shot) | only when migrating an existing docker install |
 | Clear Docker Desktop `credsStore` | wizard (detect `desktop` credsStore, offer to neutralize) | harmless on fresh hosts |

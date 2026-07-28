@@ -106,7 +106,7 @@ elif [ -n "$HF_TOKEN" ]; then
     print_info "HF_TOKEN configured: $MASKED_TOKEN"
 else
     print_warning "HF_TOKEN not found - speaker recognition tests may fail"
-    print_info "Configure via wizard: uv run --with-requirements ../setup-requirements.txt python ../wizard.py"
+    print_info "Configure via wizard: (cd .. && uv run --with-requirements setup-requirements.txt python wizard.py)"
 fi
 
 export HF_TOKEN
