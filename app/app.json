@@ -2,7 +2,7 @@
   "expo": {
     "name": "chronicle",
     "slug": "friend-lite-app",
-    "version": "1.0.8",
+    "version": "1.0.10",
     "scheme": "chronicle",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
