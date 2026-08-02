@@ -32,7 +32,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      PYTHONPATH: ${{ github.workspace }}/backends/advanced/src
+      # services.py and status.py live at the repo root, so tests/unit needs the
+      # workspace itself importable, not just the backend package.
+      PYTHONPATH: ${{ github.workspace }}/backends/advanced/src:${{ github.workspace }}
 
     steps:
       - name: Checkout code
