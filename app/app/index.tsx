@@ -19,7 +19,8 @@ import { usePhoneAudioRecorder } from '@/hooks/usePhoneAudioRecorder';
 import { usePhoneAudioDevices } from '@/hooks/usePhoneAudioDevices';
 import { useBatteryMonitor } from '@/hooks/useBatteryMonitor';
 import { useBackendHealth, isNotConfigured } from '@/hooks/useBackendHealth';
-import { saveLastConnectedDeviceId } from '@/utils/storage';
+import { saveLastConnectedDeviceId, saveMicCaptureProfile, getMicCaptureProfile } from '@/utils/storage';
+import type { MicCaptureProfile } from '@/utils/storage';
 
 // Components
 import BluetoothStatusBanner from '@/components/BluetoothStatusBanner';
@@ -58,6 +59,16 @@ export default function App() {
   });
   const phoneAudioRecorder = usePhoneAudioRecorder();
   const phoneAudioDevices = usePhoneAudioDevices();
+
+  // iOS mic processing profile for phone-mic capture (persisted).
+  const [micCaptureProfile, setMicCaptureProfile] = useState<MicCaptureProfile>('far-field');
+  useEffect(() => {
+    getMicCaptureProfile().then(setMicCaptureProfile);
+  }, []);
+  const handleSelectCaptureProfile = useCallback((profile: MicCaptureProfile) => {
+    setMicCaptureProfile(profile);
+    saveMicCaptureProfile(profile);
+  }, []);
 
   const { isListeningAudio: isOmiAudioListenerActive, audioPacketsReceived, startAudioListener: originalStartAudioListener, stopAudioListener: originalStopAudioListener, isRetrying: isAudioListenerRetrying, retryAttempts: audioListenerRetryAttempts } = useAudioListener(omiConnection, () => !!deviceConnection.connectedDeviceId);
 
@@ -148,6 +159,7 @@ export default function App() {
     originalStartAudioListener,
     originalStopAudioListener,
     resolvePhoneInputDeviceId: phoneAudioDevices.resolveEffectiveDeviceId,
+    phoneCaptureProfile: micCaptureProfile,
     settings,
   });
 
@@ -340,6 +352,8 @@ export default function App() {
                   disabled={phoneAudioRecorder.isRecording || orchestrator.isPhoneAudioMode}
                   onSelect={phoneAudioDevices.setSelectedDeviceId}
                   onRefresh={phoneAudioDevices.refresh}
+                  captureProfile={micCaptureProfile}
+                  onSelectCaptureProfile={handleSelectCaptureProfile}
                 />
               )}
             </>

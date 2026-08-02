@@ -1,8 +1,9 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Platform } from 'react-native';
 import { useTheme, ThemeColors } from '../theme';
 import type { AudioDevice } from '@siteed/expo-audio-studio';
 import { AUTO_DEVICE_ID, isBluetoothInput } from '../hooks/usePhoneAudioDevices';
+import type { MicCaptureProfile } from '../utils/storage';
 
 interface PhoneAudioMicPickerProps {
   devices: AudioDevice[];
@@ -13,7 +14,15 @@ interface PhoneAudioMicPickerProps {
   disabled: boolean;
   onSelect: (id: string) => void;
   onRefresh: () => void;
+  /** iOS mic processing profile; the row is hidden on other platforms. */
+  captureProfile: MicCaptureProfile;
+  onSelectCaptureProfile: (profile: MicCaptureProfile) => void;
 }
+
+const PROFILE_OPTIONS: { id: MicCaptureProfile; label: string; subtitle: string }[] = [
+  { id: 'far-field', label: 'Far-field', subtitle: 'raw, whole room' },
+  { id: 'voice', label: 'Voice', subtitle: 'iOS processed' },
+];
 
 const deviceLabel = (device: AudioDevice): string => {
   const base = device.name?.trim() || 'Unknown device';
@@ -29,6 +38,8 @@ const PhoneAudioMicPicker: React.FC<PhoneAudioMicPickerProps> = ({
   disabled,
   onSelect,
   onRefresh,
+  captureProfile,
+  onSelectCaptureProfile,
 }) => {
   const { colors } = useTheme();
   const s = createStyles(colors);
@@ -82,6 +93,35 @@ const PhoneAudioMicPicker: React.FC<PhoneAudioMicPickerProps> = ({
         <Text style={s.hint}>
           No input devices detected. Connect your Bluetooth headset, then tap Refresh.
         </Text>
+      )}
+
+      {Platform.OS === 'ios' && (
+        <>
+          <View style={[s.header, s.processingHeader]}>
+            <Text style={s.label}>Processing</Text>
+          </View>
+          <View style={s.chipRow}>
+            {PROFILE_OPTIONS.map(({ id, label, subtitle }) => {
+              const isSelected = captureProfile === id;
+              return (
+                <TouchableOpacity
+                  key={id}
+                  style={[s.chip, isSelected && s.chipSelected, disabled && s.chipDisabled]}
+                  onPress={() => !disabled && onSelectCaptureProfile(id)}
+                  disabled={disabled}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[s.chipText, isSelected && s.chipTextSelected]} numberOfLines={1}>
+                    {label}
+                  </Text>
+                  <Text style={[s.chipSubtitle, isSelected && s.chipTextSelected]} numberOfLines={1}>
+                    {subtitle}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </>
       )}
     </View>
   );
@@ -149,6 +189,9 @@ const createStyles = (colors: ThemeColors) =>
       fontSize: 12,
       color: colors.textTertiary,
       fontStyle: 'italic',
+    },
+    processingHeader: {
+      marginTop: 12,
     },
   });
 

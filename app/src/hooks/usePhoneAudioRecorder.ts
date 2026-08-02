@@ -10,11 +10,19 @@ import {
 import type { AudioDataEvent } from '@siteed/expo-audio-studio';
 // @ts-ignore - no type declarations available
 import base64 from 'react-native-base64';
+import {
+  applyFarFieldTuning,
+  getMicrophoneModeInfo,
+  showMicrophoneModePicker,
+} from '../../modules/chronicle-mic-control';
+import type { MicCaptureProfile } from '../utils/storage';
 
 
 interface StartRecordingOptions {
   /** Specific input device to record from. Omit/undefined to use the system default mic. */
   deviceId?: string;
+  /** iOS mic processing: 'far-field' (raw, Measurement mode) or 'voice' (default processing). */
+  captureProfile?: MicCaptureProfile;
 }
 
 interface UsePhoneAudioRecorder {
@@ -147,9 +155,12 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
         throw new Error('Microphone permission denied');
       }
 
+      const captureProfile: MicCaptureProfile = options?.captureProfile ?? 'far-field';
+
       console.log(
         '[PhoneAudioRecorder] Starting audio recording...',
-        options?.deviceId ? `deviceId=${options.deviceId}` : 'deviceId=default'
+        options?.deviceId ? `deviceId=${options.deviceId}` : 'deviceId=default',
+        `profile=${captureProfile}`
       );
 
       // EXACT config from 2025 guide + processing for audio levels
@@ -166,10 +177,14 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
         deviceDisconnectionBehavior: 'fallback' as const,
         // iOS requires PlayAndRecord + AllowBluetooth for the OS to route input to a
         // Bluetooth (HFP/SCO) headset mic; without it iOS keeps the built-in mic.
+        // Mode selects Apple's input processing: 'Measurement' strips the voice
+        // processing (AGC/noise suppression) that attenuates distant or quiet
+        // speakers — what Chronicle wants for whole-room capture. 'Default'
+        // keeps iOS processing for close-talking use.
         ios: {
           audioSession: {
             category: 'PlayAndRecord' as const,
-            mode: 'Default' as const,
+            mode: (captureProfile === 'voice' ? 'Default' : 'Measurement') as 'Default' | 'Measurement',
             categoryOptions: ['AllowBluetooth', 'DefaultToSpeaker'] as ('AllowBluetooth' | 'DefaultToSpeaker')[],
           },
         },
@@ -193,6 +208,29 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
 
       if (!result) {
         throw new Error('Failed to start recording');
+      }
+
+      if (Platform.OS === 'ios') {
+        // Both calls are best-effort: the session is now active, so tuning can
+        // apply, but a failure should never take down the recording itself.
+        if (captureProfile === 'far-field') {
+          const tuning = await applyFarFieldTuning();
+          console.log('[PhoneAudioRecorder] Far-field tuning:', JSON.stringify(tuning));
+        }
+        // The system Mic Mode is user-controlled and persists per app; Voice
+        // Isolation suppresses every voice except the nearest one, which
+        // silently ruins room capture. Apps can't change it — only surface it.
+        const micModes = await getMicrophoneModeInfo();
+        if (micModes?.active === 'voiceIsolation') {
+          Alert.alert(
+            'Voice Isolation is on',
+            'iOS is filtering out all voices except the one closest to the phone, so Chronicle will miss other speakers. Switch the mic mode to Standard or Wide Spectrum.',
+            [
+              { text: 'Ignore', style: 'cancel' },
+              { text: 'Change Mic Mode', onPress: () => { showMicrophoneModePicker(); } },
+            ]
+          );
+        }
       }
 
       setStateSafe(setIsInitializing, false);

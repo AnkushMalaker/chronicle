@@ -183,6 +183,24 @@ Stream audio directly from your phone's microphone to Chronicle backend, bypassi
 - **Automatic Detection**: App disables conflicting options when one is active
 - **Visual Feedback**: Clear indicators show active audio source
 
+#### Mic Processing (iOS)
+The mic picker has a **Processing** row controlling how much of Apple's input
+processing is applied. It only affects the built-in mic path on iOS:
+
+- **Far-field** (default): records with the `Measurement` audio-session mode —
+  no automatic gain control or noise suppression — and prefers an
+  omnidirectional polar pattern on the built-in mic. Best for whole-room
+  ambient capture where distant speakers must not be attenuated.
+- **Voice**: keeps iOS's default input processing. Better for close-talking
+  dictation into the phone.
+
+iOS's system **Mic Mode** (Control Center: Standard / Voice Isolation / Wide
+Spectrum) is user-controlled and per-app; apps cannot set it. If Voice
+Isolation is active when recording starts, the app warns and offers the system
+picker, since Voice Isolation removes every voice except the nearest one.
+The native side lives in `modules/chronicle-mic-control/` (a local Expo
+module), so a new dev-client/EAS build is required after adding or changing it.
+
 ### Troubleshooting Phone Audio
 
 #### Audio Not Streaming
