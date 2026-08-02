@@ -159,12 +159,15 @@ def write_source_fallback_conversation_note(
     title: str | None,
 ) -> None:
     """Write a minimal lossless note after both semantic LLM attempts fail."""
-    excerpt = " ".join(transcript.split())[:500].strip()
-    if not excerpt:
+    source = " ".join(transcript.split()).strip()
+    if not source:
         raise ConversationNoteError(
             "cannot create source fallback for empty transcript"
         )
-    safe_excerpt = excerpt.replace('"', "'")
+    # Summary stays skimmable; Key Facts carries the full source — this note is
+    # the vault's only record of the conversation, so truncating it loses data.
+    safe_excerpt = source[:500].replace('"', "'")
+    safe_source = source.replace('"', "'")
     fallback_title = (title or "").strip() or f"Conversation on {date[:10]}"
     duration = "" if duration_minutes is None else f"{float(duration_minutes):g}"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,10 +186,10 @@ def write_source_fallback_conversation_note(
                 f"## {fallback_title}",
                 "",
                 "### Summary",
-                f'The source transcript contains this short utterance: "{safe_excerpt}"',
+                f'The source transcript begins: "{safe_excerpt}"',
                 "",
                 "### Key Facts",
-                f'- Verbatim source excerpt: "{safe_excerpt}"',
+                f'- Verbatim source transcript: "{safe_source}"',
                 "",
                 "### Action Items",
                 "- [ ]",

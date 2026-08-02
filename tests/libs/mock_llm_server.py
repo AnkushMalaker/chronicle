@@ -10,6 +10,12 @@ Architecture:
 - Deterministic responses for reproducible tests
 
 Request Detection:
+- Vault memory agent: request carries tools including "write_note" — the mock
+  acts as a minimal agent: one write_note tool call recording a conversation
+  note whose facts are derived from the actual transcript, then a final
+  summary once the tool result comes back. Deriving facts from the input is
+  what keeps content assertions (e.g. "a memory mentions the trumpet flower")
+  meaningful under the mock profile.
 - Fact extraction: system prompt contains "FACT_RETRIEVAL_PROMPT" or "extract facts"
 - Memory updates: system prompt contains "UPDATE_MEMORY_PROMPT" or "memory manager"
 """
@@ -19,7 +25,8 @@ import asyncio
 import hashlib
 import json
 import logging
-from typing import List
+import re
+from typing import List, Optional
 
 import numpy as np
 from aiohttp import web
@@ -74,6 +81,105 @@ def detect_request_type(messages: List[dict]) -> str:
         return "memory_update"
 
     return "general"
+
+
+def _task_field(task: str, name: str) -> Optional[str]:
+    """Read one 'name: value' line from the memory agent's task message."""
+    match = re.search(rf"^{name}:\s*(.+)$", task, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def derive_facts_from_transcript(transcript: str) -> List[str]:
+    """Distill a speaker-labelled transcript into one fact per sentence.
+
+    Deterministic stand-in for LLM extraction: strip speaker labels, split into
+    sentences, keep the substantive ones verbatim. Because facts come from the
+    real input, content assertions hold the same way they would against a real
+    provider's extraction.
+    """
+    text = " ".join(transcript.split())
+    text = re.sub(r"(?:^|\s)(?:[A-Z]|Speaker[ _]?\d+):\s+", " ", text)
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    return [s.strip() for s in sentences if len(s.strip()) >= 8]
+
+
+def create_vault_agent_response(messages: List[dict]) -> dict:
+    """Act as a minimal vault memory agent.
+
+    Round 1: one write_note tool call creating Conversations/<id>.md in the
+    note-template shape, with facts derived from the transcript. Round 2 (a
+    tool result is present): a plain completion so the agent loop finishes.
+    """
+    if any(m.get("role") == "tool" for m in messages):
+        return create_general_response("Recorded the conversation note.")
+
+    task = next((m.get("content", "") for m in messages if m.get("role") == "user"), "")
+    conversation_id = _task_field(task, "conversation_id") or "unknown-conversation"
+    date = _task_field(task, "date") or "1970-01-01T00:00:00"
+    duration = _task_field(task, "duration_minutes") or "unknown"
+    title = _task_field(task, "source_title") or "Conversation"
+    transcript = task.split("Transcript (speaker-labelled):", 1)[-1].strip()
+
+    facts = derive_facts_from_transcript(transcript) or ["No transcript content."]
+    summary = " ".join(facts[:2])
+    note = "\n".join(
+        [
+            "---",
+            "categories:",
+            '  - "[[Conversations]]"',
+            f"conversation_id: {json.dumps(conversation_id)}",
+            f"date: {json.dumps(date)}",
+            "people: []",
+            "topics: []",
+            f"duration_minutes: {duration if duration != 'unknown' else ''}",
+            "---",
+            f"## {title}",
+            "",
+            "### Summary",
+            summary,
+            "",
+            "### Key Facts",
+            *[f"- {fact}" for fact in facts],
+            "",
+            "### Action Items",
+            "- [ ]",
+            "",
+        ]
+    )
+
+    return {
+        "id": "chatcmpl-mock-vault-agent",
+        "object": "chat.completion",
+        "created": 1234567890,
+        "model": "gpt-4o-mini",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-mock-write-note",
+                            "type": "function",
+                            "function": {
+                                "name": "write_note",
+                                "arguments": json.dumps(
+                                    {
+                                        "path": f"Conversations/{conversation_id}.md",
+                                        "content": note,
+                                        "overwrite": True,
+                                    }
+                                ),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 200, "completion_tokens": 150, "total_tokens": 350},
+    }
 
 
 def create_fact_extraction_response() -> dict:
@@ -183,6 +289,17 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
         data = await request.json()
         messages = data.get("messages", [])
         json_mode = (data.get("response_format") or {}).get("type") == "json_object"
+
+        # The vault memory agent is identified by its write tools, not its
+        # prompt: only that caller offers write_note. Read-only tool callers
+        # (the retrieval agent) fall through to a plain content answer, which
+        # they treat as a deliberate completion.
+        tool_names = {
+            (t.get("function") or {}).get("name") for t in data.get("tools") or []
+        }
+        if "write_note" in tool_names:
+            logger.info("Chat completion request detected as: vault_agent")
+            return web.json_response(create_vault_agent_response(messages))
 
         # Detect request type
         request_type = detect_request_type(messages)
