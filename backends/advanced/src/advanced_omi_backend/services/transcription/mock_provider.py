@@ -1,13 +1,87 @@
 """
 Mock transcription provider for testing without external API dependencies.
 
-This provider returns predefined transcripts for testing purposes, allowing
-tests to run without Deepgram or other external transcription APIs.
+Two modes, in priority order:
+
+1. Cassette replay. If the audio matches a recorded response in the cassette
+   directory, that response is returned verbatim. A cassette is real ASR output
+   for a known fixture, so assertions about transcript content hold identically
+   whether a test ran against a real provider or against this stub -- which is
+   what allows one test suite to cover both without gating any test on the
+   presence of an API key.
+2. Synthetic fallback, for audio no cassette covers.
+
+Record or refresh cassettes with `make record-cassettes` (see
+tests/scripts/record_cassettes.py). They are committed, so this costs nothing
+per run.
 """
 
+import hashlib
+import json
+import logging
+import os
+from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 from .base import BatchTranscriptionProvider
+
+logger = logging.getLogger(__name__)
+
+# Mounted read-only into the backend and worker test containers.
+CASSETTE_DIR = Path(os.getenv("TEST_CASSETTE_DIR", "/app/test-cassettes"))
+
+# A cassette is matched by exact audio hash first. Duration is a fallback,
+# because the pipeline may hand the provider a re-encoded or silence-trimmed
+# copy whose bytes differ from the fixture on disk while the content is the
+# same recording.
+_DURATION_TOLERANCE = 0.02
+
+
+@lru_cache(maxsize=1)
+def _load_cassettes() -> tuple[dict, ...]:
+    if not CASSETTE_DIR.is_dir():
+        return ()
+    cassettes = []
+    for path in sorted(CASSETTE_DIR.glob("*.json")):
+        try:
+            cassettes.append(json.loads(path.read_text()))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Ignoring unreadable cassette %s: %s", path.name, exc)
+    if cassettes:
+        logger.info(
+            "Loaded %d transcription cassette(s) from %s", len(cassettes), CASSETTE_DIR
+        )
+    return tuple(cassettes)
+
+
+def _find_cassette(audio_data: bytes, sample_rate: int) -> Optional[dict]:
+    cassettes = _load_cassettes()
+    if not cassettes:
+        return None
+
+    digest = hashlib.sha256(audio_data).hexdigest()
+    for cassette in cassettes:
+        if cassette.get("audio_sha256") == digest:
+            logger.info("Cassette hit (exact) for %s", cassette.get("fixture"))
+            return cassette
+
+    duration = len(audio_data) / (sample_rate * 2)
+    for cassette in cassettes:
+        recorded = cassette.get("duration_seconds")
+        if not recorded:
+            continue
+        if abs(recorded - duration) <= max(_DURATION_TOLERANCE * recorded, 0.5):
+            logger.info(
+                "Cassette hit (duration %.2fs ~ %.2fs) for %s",
+                duration,
+                recorded,
+                cassette.get("fixture"),
+            )
+            return cassette
+
+    logger.info("No cassette for %.2fs of audio; using synthetic transcript", duration)
+    return None
 
 
 class MockTranscriptionProvider(BatchTranscriptionProvider):
@@ -62,6 +136,20 @@ class MockTranscriptionProvider(BatchTranscriptionProvider):
         # Simulate transcription failure if fail_mode is enabled
         if self.fail_mode:
             raise RuntimeError("Mock transcription failure (test mode)")
+
+        # Prefer a recorded real response when one covers this audio, so content
+        # assertions mean the same thing here as against a real provider.
+        cassette = _find_cassette(audio_data, sample_rate)
+        if cassette is not None:
+            batch = cassette["batch"]
+            return {
+                "text": batch["text"],
+                "words": batch["words"],
+                "segments": batch["segments"],
+                "language": "en",
+                "provider": "mock",
+                "cassette": cassette.get("fixture"),
+            }
 
         # Calculate audio duration from bytes (assuming 16-bit PCM)
         audio_duration = len(audio_data) / (sample_rate * 2)  # 2 bytes per sample

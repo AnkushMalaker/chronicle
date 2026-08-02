@@ -20,6 +20,7 @@ services:
       - ./data/test_data:/app/data
       - ../../config:/app/config  # Mount config directory with defaults.yml
       - ../../tests/configs:/app/test-configs:ro  # Mount test-specific configs
+      - ../../tests/cassettes:/app/test-cassettes:ro  # Recorded real provider responses replayed by the mock STT
       - ${PLUGINS_CONFIG:-../../tests/config/plugins.test.yml}:/app/config/plugins.yml  # Mount test plugins config to correct location
       - ../../plugins:/app/plugins  # External plugins directory
     environment:
@@ -28,7 +29,7 @@ services:
       - REDIS_URL=redis://redis-test:6379/0
       - DEBUG_DIR=/app/debug  # Fixed: match plugin database mount path
       # Test configuration file
-      - CONFIG_FILE=${TEST_CONFIG_FILE:-/app/test-configs/deepgram-openai.yml}
+      - CONFIG_FILE=${TEST_CONFIG_FILE:-/app/test-configs/mock-services.yml}
       # Import API keys from environment
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -38,8 +39,6 @@ services:
       - AUTH_SECRET_KEY=test-jwt-signing-key-for-integration-tests
       - ADMIN_PASSWORD=test-admin-password-123
       - ADMIN_EMAIL=test-admin@example.com
-      # Transcription provider configuration
-      - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER:-deepgram}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       # Memory provider configuration
       - MEMORY_PROVIDER=${MEMORY_PROVIDER:-chronicle}
@@ -351,6 +350,7 @@ services:
       - ./data/test_data:/app/data
       - ../../config:/app/config  # Mount config directory with defaults.yml
       - ../../tests/configs:/app/test-configs:ro  # Mount test-specific configs
+      - ../../tests/cassettes:/app/test-cassettes:ro  # Recorded real provider responses replayed by the mock STT
       - ${PLUGINS_CONFIG:-../../tests/config/plugins.test.yml}:/app/config/plugins.yml  # Mount test plugins config to correct location
       - ../../plugins:/app/plugins  # External plugins directory
     environment:
@@ -359,7 +359,7 @@ services:
       - REDIS_URL=redis://redis-test:6379/0
       - DEBUG_DIR=/app/debug  # Fixed: match plugin database mount path
       # Test configuration file
-      - CONFIG_FILE=${TEST_CONFIG_FILE:-/app/test-configs/deepgram-openai.yml}
+      - CONFIG_FILE=${TEST_CONFIG_FILE:-/app/test-configs/mock-services.yml}
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - SMALLEST_API_KEY=${SMALLEST_API_KEY}
@@ -367,7 +367,6 @@ services:
       - AUTH_SECRET_KEY=test-jwt-signing-key-for-integration-tests
       - ADMIN_PASSWORD=test-admin-password-123
       - ADMIN_EMAIL=test-admin@example.com
-      - TRANSCRIPTION_PROVIDER=${TRANSCRIPTION_PROVIDER:-deepgram}
       - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
       - MEMORY_PROVIDER=${MEMORY_PROVIDER:-chronicle}
       # Speaker recognition controlled by config.yml (disabled in test config for CI performance)
