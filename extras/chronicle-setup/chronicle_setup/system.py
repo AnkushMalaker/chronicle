@@ -54,6 +54,41 @@ def detect_tailscale_info() -> Tuple[Optional[str], Optional[str]]:
     return dns_name, ip
 
 
+def list_tailnet_peers(include_self: bool = True) -> list:
+    """List Tailnet nodes as [{host, dns_name, ip, online, is_self}].
+
+    Empty when Tailscale is unavailable. DNS names have the trailing dot
+    stripped; prefer them over 100.x IPs, which can change over time.
+    """
+    try:
+        result = subprocess.run(
+            ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            return []
+        status = json.loads(result.stdout)
+    except (subprocess.SubprocessError, FileNotFoundError, json.JSONDecodeError):
+        return []
+
+    def _node(info: dict, is_self: bool) -> dict:
+        ips = info.get("TailscaleIPs") or []
+        return {
+            "host": info.get("HostName") or "",
+            "dns_name": (info.get("DNSName") or "").rstrip("."),
+            "ip": next((addr for addr in ips if ":" not in addr), None),
+            # Self carries no Online flag — this machine is trivially reachable.
+            "online": is_self or bool(info.get("Online")),
+            "is_self": is_self,
+        }
+
+    nodes = []
+    if include_self and status.get("Self"):
+        nodes.append(_node(status["Self"], True))
+    for info in (status.get("Peer") or {}).values():
+        nodes.append(_node(info, False))
+    return nodes
+
+
 def generate_tailscale_certs(certs_dir: str) -> bool:
     """
     Generate trusted TLS certificates via Tailscale.
