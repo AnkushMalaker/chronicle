@@ -214,185 +214,82 @@ ${jobs}=    Wait Until Keyword Succeeds    30s    2s
 - Use consistent variable naming across tests
 - Document required environment variables and their purposes
 
-## API Key Separation and Test Organization
+## Service Profiles (real vs stubbed backing services)
 
-### Overview
+Chronicle runs **one** test suite. Tests are never selected by whether a
+credential happens to be present.
 
-Chronicle tests are separated into two execution paths based on external API dependencies:
+What varies between runs is a **service profile**: a declaration of which backing
+services are real and which are stubbed, defined in
+[`tests/profiles.yml`](profiles.yml).
 
-1. **No API Keys Required (~70% of tests)** - Run on all PRs by default
-2. **API Keys Required (~30% of tests)** - Run on dev/main branches only
+```bash
+make test                              # profile: mock (default) -- no credentials
+make test PROFILE=deepgram-openai      # real Deepgram STT + real OpenAI LLM
+make test PROFILE=deepgram-openai-speaker   # ...plus the real speaker service
+make test PROFILE=parakeet-ollama      # real local ASR + local Ollama
+```
 
-This separation enables:
-- Fast PR validation without external API dependencies
-- External contributors can run full CI without secret access
-- Reduced API costs (only charged on dev/main pushes)
-- Comprehensive testing still happens on protected branches
+Every test runs in every profile. A profile that names a real service declares
+what it needs (`requires_env`, `requires_service`); the harness verifies that
+up-front and fails with the exact remedy, so a missing key is a clear setup error
+rather than a pile of confusing test failures.
 
-### The `requires-api-keys` Tag
+### Why there is no `requires-api-keys` tag
 
-**Purpose**: Mark tests that require external API services (Deepgram, OpenAI, etc.)
+Gating tests on credentials meant a test skipped on pull requests was a test
+nobody ran, and because fork pull requests cannot read repository secrets under
+any circumstance, "run it later with a label" never covered the case it was added
+for. Tags tied to credentials also rot silently: the suite hid genuinely broken
+tests for as long as they stayed gated.
 
-**Usage**: Add to test files that make external API calls for transcription or memory extraction:
+So the credential axis is gone. If a test appears to need a real provider, that
+is a statement about **stub fidelity**, not about the test.
+
+### Cassettes: how stubs stay honest
+
+A stub that invents its own output forces a choice between skipping the test and
+asserting something meaningless. Instead, stubs replay **cassettes** -- recorded
+real provider responses, keyed by the sha256 of the audio that produced them and
+committed under [`tests/cassettes/`](cassettes/).
+
+That makes a content assertion identical in both directions:
 
 ```robot
-*** Test Cases ***
-Full Pipeline Integration Test
-    [Documentation]    Complete end-to-end test with transcription and memory extraction
-    [Tags]    e2e	requires-api-keys
-    [Timeout]    600s
-
-    # This test will be excluded from PR runs
-    # It will run on dev/main branches with API keys
+# Holds against real Deepgram AND against the stub, because the stub replays
+# a real recorded transcript of the same fixture.
+Verify Transcription Quality    ${conversation}    ${EXPECTED_TRANSCRIPT_PHRASES}
 ```
 
-### When to Use `requires-api-keys`
+Record or refresh them with real credentials, once:
 
-**Add this tag when tests:**
-- Require actual transcription (Deepgram or other STT providers)
-- Require memory extraction with LLM (OpenAI, Ollama with real inference)
-- Verify transcript quality against ground truth
-- Test end-to-end pipeline with real API integration
-
-**Do NOT add this tag when tests:**
-- Test API endpoints (CRUD operations, permissions, etc.)
-- Test infrastructure (worker management, queue operations)
-- Test system health and readiness
-- Can work with mock/stub services
-
-### Test Execution Modes
-
-**1. No-API Tests (PR runs)**
 ```bash
-# Excludes tests tagged with requires-api-keys
-cd tests
-make test-no-api
+make record-cassettes PROFILE=deepgram-openai
 ```
-- Uses `configs/mock-services.yml`
-- No external API calls
-- Fast feedback (~10-15 minutes)
-- Runs ~70% of test suite
 
-**2. Full Tests with API Keys (dev/main runs)**
-```bash
-# Runs all tests including API-dependent ones
-cd tests
-./run-robot-tests.sh
-```
-- Uses `configs/deepgram-openai.yml`
-- Requires DEEPGRAM_API_KEY and OPENAI_API_KEY
-- Comprehensive validation (~20-30 minutes)
-- Runs 100% of test suite
+This is the same rule the rest of the project follows for paid APIs: record once,
+commit, never spend again. A normal test run makes no external calls.
 
-**3. Label-Triggered PR Tests**
-- Add label `test-with-api-keys` to PR
-- Triggers full test suite before merge
-- Useful for testing API integration changes
+### Writing assertions that survive every profile
 
-### Mock Services Configuration
+Assert on **behaviour and content**, not on one provider's formatting.
 
-For tests that don't require API keys, use the mock services config:
-
-**File**: `tests/configs/mock-services.yml`
-
-**Features**:
-- Disables external transcription and LLM services
-- Keeps core services operational (MongoDB, Redis, FalkorDB)
-- No API keys required
-- Fast test execution
-
-**Use Cases**:
-- Endpoint testing (auth, permissions, CRUD)
-- Infrastructure testing (workers, queues)
-- System health monitoring
-- Local development without API keys
-
-### Writing Tests for API Separation
-
-**Good Example - Endpoint Test (No API Keys)**:
 ```robot
-*** Test Cases ***
-User Can Create and Delete Conversations
-    [Documentation]    Test conversation CRUD without transcription
-    [Tags]    conversation
+# Good - content words any competent engine produces
+Should Contain    ${transcript}    glass
 
-    ${session}=    Get Admin API Session
-    ${conversation}=    Create Test Conversation    ${session}
-    ${deleted}=    Delete Conversation    ${session}    ${conversation}[id]
-    Should Be True    ${deleted}
+# Bad - encodes Deepgram's tokenization; other engines emit "glassblowing",
+# so this silently means "only run against Deepgram"
+Should Contain    ${transcript}    glass blowing
+
+# Bad - pins an exact snapshot of one provider's segmentation, which drifts
+# whenever that provider updates its model
+Should Be Equal    ${segment}[end]    10.08
 ```
 
-**Good Example - Integration Test (Requires API Keys)**:
-```robot
-*** Test Cases ***
-Audio Upload Produces Quality Transcript
-    [Documentation]    Verify transcription quality with ground truth
-    [Tags]    e2e	requires-api-keys
+If an assertion can only hold for one provider, either widen it to the invariant
+you actually care about, or anchor it to a cassette.
 
-    ${conversation}=    Upload Audio File    ${TEST_AUDIO_FILE}
-    Verify Transcription Quality    ${conversation}    ${EXPECTED_TRANSCRIPT}
-    Verify Memory Extraction    ${conversation}
-```
-
-### GitHub Workflows
-
-**Three workflows handle test execution:**
-
-1. **`robot-tests.yml`** (PR - No API Keys)
-   - Triggers: All pull requests
-   - Execution: Excludes `requires-api-keys` tests
-   - No secrets required
-
-2. **`full-tests-with-api.yml`** (Dev/Main - Full Suite)
-   - Triggers: Push to dev/main branches
-   - Execution: All tests including API-dependent
-   - Requires: DEEPGRAM_API_KEY, OPENAI_API_KEY
-
-3. **`pr-tests-with-api.yml`** (PR - Label Triggered)
-   - Triggers: PR with `test-with-api-keys` label
-   - Execution: Full test suite before merge
-   - Requires: DEEPGRAM_API_KEY, OPENAI_API_KEY
-
-### Tag Guidelines for API Separation
-
-**File-Level Tagging**:
-- Tag entire test files that require API keys
-- If ANY test in the file needs APIs, mark the whole file
-- Simpler maintenance than per-test tagging
-
-**Multiple Tags**:
-- Use tab-separated tags (see `tags.md`)
-- Example: `[Tags]    e2e	requires-api-keys`
-- Always include primary component tag (e2e, conversation, memory)
-
-**Tag Statistics**:
-- `requires-api-keys`: ~1-2 test files (integration_test.robot)
-- Most tests: No API requirements
-- See `tests/tags.md` for complete tag list
-
-### Local Development
-
-**Running Tests Locally Without API Keys**:
-```bash
-cd tests
-make test-no-api
-```
-- Works without any API key configuration
-- Fast feedback for most development
-- Tests endpoint logic and infrastructure
-
-**Running Full Tests Locally**:
-```bash
-# Set API keys
-export DEEPGRAM_API_KEY=xxx
-export OPENAI_API_KEY=yyy
-
-cd tests
-./run-robot-tests.sh
-```
-- Validates full pipeline integration
-- Tests transcription and memory extraction
-- Use before pushing to dev/main
 
 ## Slow and SDK Test Organization
 

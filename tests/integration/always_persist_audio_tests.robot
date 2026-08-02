@@ -263,7 +263,7 @@ Conversation Updates To Completed When Transcription Succeeds
     [Documentation]    Verify that when transcription succeeds, the placeholder conversation
     ...                updates from processing_status="active" to "completed",
     ...                and the title updates from placeholder to actual summary.
-    [Tags]    conversation	audio-streaming	requires-api-keys
+    [Tags]    conversation	audio-streaming
 
     ${device_name}=    Set Variable    test-complete
     ${client_id}=    Get Client ID From Device Name    ${device_name}

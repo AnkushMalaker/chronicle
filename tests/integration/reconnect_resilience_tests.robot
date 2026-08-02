@@ -14,8 +14,8 @@ Documentation    Reconnect resilience and leading-silence trimming (always_persi
 ...                 soft-deleted remnant (audio kept in Mongo) so the visible conversation
 ...                 begins at the first speech.
 ...
-...              Both need real streaming transcription (the no-API mock is batch only),
-...              so they are tagged requires-api-keys and slow.
+...              Both restart the backend mid-stream, so they are tagged slow and are
+...              excluded from the default run.
 
 Resource         ../resources/websocket_keywords.robot
 Resource         ../resources/conversation_keywords.robot
@@ -36,7 +36,7 @@ Reconnect Mid Session Does Not Orphan Transcripts
     [Documentation]    An abrupt disconnect followed by a reconnect on the same device
     ...                must not leave a transcript-bearing conversation soft-deleted as
     ...                audio_chunks_not_ready. Reproduces the reconnect orphaning bug.
-    [Tags]    e2e	audio-streaming	requires-api-keys	slow
+    [Tags]    e2e	audio-streaming	slow
     [Timeout]    300s
 
     ${device}=    Set Variable    test-reconnect
@@ -67,7 +67,7 @@ Leading Silence Is Trimmed Off The Conversation
     [Documentation]    With always_persist on, a long silence before speech is split off
     ...                onto a soft-deleted "leading_silence" remnant so the visible
     ...                conversation begins at the speech (silence audio stays in Mongo).
-    [Tags]    e2e	audio-streaming	requires-api-keys	slow
+    [Tags]    e2e	audio-streaming	slow
     [Timeout]    300s
 
     ${device}=    Set Variable    test-silence

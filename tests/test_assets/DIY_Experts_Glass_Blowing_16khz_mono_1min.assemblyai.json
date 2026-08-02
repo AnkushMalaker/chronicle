@@ -1,0 +1,2595 @@
+{
+  "id": "0f569dfd-1b57-4ece-b503-d5f31c5c7b49",
+  "language_model": "assemblyai_default",
+  "acoustic_model": "assemblyai_default",
+  "language_code": "en",
+  "speech_understanding": null,
+  "translated_texts": null,
+  "status": "completed",
+  "audio_url": "https://cdn.assemblyai.com/upload/1e28f92f487daecf52600ef6f438dd66252f588ade7ee31567e9a0598b82d594/a8245808-9b21-4279-bfb2-448e70c27e38",
+  "text": "The pumpkin that'll last for forever. Finally. Does it count? Today we're taking a glassblowing class. I'm sweating already. We've worked with a lot of materials before, but we've only scratched the surface when it comes to glass. And that's because it's a little intimidating. Yeah, let's take our jackets off. But also very exciting. Woo! So we're at Wimberley Glassworks with our instructor, Nick. So I am Nicholas Noble, or Nick. I've been working here at Umberley Glassworks for about 3 years. I've been blowing glass in total for about 9. I got my degree in glassblowing from the University of South Alabama and excited to do these classes with y'all. So it sounds like you know what you're doing. Ah, sometimes. This video is brought to you by Squarespace, the all-in-one platform for all your website needs. So this is the flower that y'all are going to be making. This is called a trumpet flower. This is the first thing I ever learned how to make in glass. It looks",
+  "words": [
+    {
+      "text": "The",
+      "start": 112,
+      "end": 160,
+      "confidence": 0.99030954,
+      "speaker": "A"
+    },
+    {
+      "text": "pumpkin",
+      "start": 192,
+      "end": 480,
+      "confidence": 0.9985012,
+      "speaker": "A"
+    },
+    {
+      "text": "that'll",
+      "start": 480,
+      "end": 673,
+      "confidence": 0.9164578,
+      "speaker": "A"
+    },
+    {
+      "text": "last",
+      "start": 673,
+      "end": 1074,
+      "confidence": 0.9995896,
+      "speaker": "A"
+    },
+    {
+      "text": "for",
+      "start": 1074,
+      "end": 1218,
+      "confidence": 0.76339936,
+      "speaker": "A"
+    },
+    {
+      "text": "forever.",
+      "start": 1218,
+      "end": 1683,
+      "confidence": 0.7232275,
+      "speaker": "A"
+    },
+    {
+      "text": "Finally.",
+      "start": 1955,
+      "end": 2452,
+      "confidence": 0.6439253,
+      "speaker": "A"
+    },
+    {
+      "text": "Does",
+      "start": 2741,
+      "end": 3045,
+      "confidence": 0.98887336,
+      "speaker": "A"
+    },
+    {
+      "text": "it",
+      "start": 3302,
+      "end": 3478,
+      "confidence": 0.9987814,
+      "speaker": "A"
+    },
+    {
+      "text": "count?",
+      "start": 3478,
+      "end": 4199,
+      "confidence": 0.99429554,
+      "speaker": "A"
+    },
+    {
+      "text": "Today",
+      "start": 7950,
+      "end": 8287,
+      "confidence": 0.84393656,
+      "speaker": "B"
+    },
+    {
+      "text": "we're",
+      "start": 8287,
+      "end": 8447,
+      "confidence": 0.5596438,
+      "speaker": "B"
+    },
+    {
+      "text": "taking",
+      "start": 8447,
+      "end": 8656,
+      "confidence": 0.9998442,
+      "speaker": "B"
+    },
+    {
+      "text": "a",
+      "start": 8832,
+      "end": 8848,
+      "confidence": 0.99712974,
+      "speaker": "B"
+    },
+    {
+      "text": "glassblowing",
+      "start": 8848,
+      "end": 9457,
+      "confidence": 0.7066883,
+      "speaker": "B"
+    },
+    {
+      "text": "class.",
+      "start": 9553,
+      "end": 9778,
+      "confidence": 0.9986377,
+      "speaker": "B"
+    },
+    {
+      "text": "I'm",
+      "start": 10211,
+      "end": 10371,
+      "confidence": 0.9989446,
+      "speaker": "C"
+    },
+    {
+      "text": "sweating",
+      "start": 10371,
+      "end": 10660,
+      "confidence": 0.99964964,
+      "speaker": "C"
+    },
+    {
+      "text": "already.",
+      "start": 10756,
+      "end": 11140,
+      "confidence": 0.99665046,
+      "speaker": "C"
+    },
+    {
+      "text": "We've",
+      "start": 11493,
+      "end": 12856,
+      "confidence": 0.98761153,
+      "speaker": "C"
+    },
+    {
+      "text": "worked",
+      "start": 12856,
+      "end": 13144,
+      "confidence": 0.9999112,
+      "speaker": "C"
+    },
+    {
+      "text": "with",
+      "start": 13144,
+      "end": 13256,
+      "confidence": 0.99966633,
+      "speaker": "C"
+    },
+    {
+      "text": "a",
+      "start": 13256,
+      "end": 13337,
+      "confidence": 0.9997297,
+      "speaker": "C"
+    },
+    {
+      "text": "lot",
+      "start": 13337,
+      "end": 13513,
+      "confidence": 0.9988813,
+      "speaker": "C"
+    },
+    {
+      "text": "of",
+      "start": 13513,
+      "end": 13593,
+      "confidence": 0.9987858,
+      "speaker": "C"
+    },
+    {
+      "text": "materials",
+      "start": 13657,
+      "end": 14186,
+      "confidence": 0.9984717,
+      "speaker": "C"
+    },
+    {
+      "text": "before,",
+      "start": 14298,
+      "end": 14731,
+      "confidence": 0.88422364,
+      "speaker": "C"
+    },
+    {
+      "text": "but",
+      "start": 15004,
+      "end": 15116,
+      "confidence": 0.9999168,
+      "speaker": "C"
+    },
+    {
+      "text": "we've",
+      "start": 15116,
+      "end": 15292,
+      "confidence": 0.99932003,
+      "speaker": "C"
+    },
+    {
+      "text": "only",
+      "start": 15324,
+      "end": 15565,
+      "confidence": 0.9999093,
+      "speaker": "C"
+    },
+    {
+      "text": "scratched",
+      "start": 15565,
+      "end": 15949,
+      "confidence": 0.99997485,
+      "speaker": "C"
+    },
+    {
+      "text": "the",
+      "start": 16046,
+      "end": 16126,
+      "confidence": 0.9998758,
+      "speaker": "C"
+    },
+    {
+      "text": "surface",
+      "start": 16126,
+      "end": 16495,
+      "confidence": 0.99994373,
+      "speaker": "C"
+    },
+    {
+      "text": "when",
+      "start": 16607,
+      "end": 16703,
+      "confidence": 0.99920505,
+      "speaker": "C"
+    },
+    {
+      "text": "it",
+      "start": 16703,
+      "end": 16767,
+      "confidence": 0.999944,
+      "speaker": "C"
+    },
+    {
+      "text": "comes",
+      "start": 16767,
+      "end": 16991,
+      "confidence": 0.9999777,
+      "speaker": "C"
+    },
+    {
+      "text": "to",
+      "start": 17024,
+      "end": 17104,
+      "confidence": 0.99984443,
+      "speaker": "C"
+    },
+    {
+      "text": "glass.",
+      "start": 17168,
+      "end": 17504,
+      "confidence": 0.656954,
+      "speaker": "C"
+    },
+    {
+      "text": "And",
+      "start": 17825,
+      "end": 17889,
+      "confidence": 0.9993387,
+      "speaker": "C"
+    },
+    {
+      "text": "that's",
+      "start": 17969,
+      "end": 18146,
+      "confidence": 0.9994009,
+      "speaker": "C"
+    },
+    {
+      "text": "because",
+      "start": 18146,
+      "end": 18514,
+      "confidence": 0.9995652,
+      "speaker": "C"
+    },
+    {
+      "text": "it's",
+      "start": 18627,
+      "end": 18723,
+      "confidence": 0.984342,
+      "speaker": "C"
+    },
+    {
+      "text": "a",
+      "start": 18723,
+      "end": 18739,
+      "confidence": 0.9994135,
+      "speaker": "C"
+    },
+    {
+      "text": "little",
+      "start": 18739,
+      "end": 19091,
+      "confidence": 0.9997671,
+      "speaker": "C"
+    },
+    {
+      "text": "intimidating.",
+      "start": 19091,
+      "end": 19717,
+      "confidence": 0.96791226,
+      "speaker": "C"
+    },
+    {
+      "text": "Yeah,",
+      "start": 19973,
+      "end": 20165,
+      "confidence": 0.71961755,
+      "speaker": "B"
+    },
+    {
+      "text": "let's",
+      "start": 20710,
+      "end": 20919,
+      "confidence": 0.9992992,
+      "speaker": "B"
+    },
+    {
+      "text": "take",
+      "start": 21015,
+      "end": 21191,
+      "confidence": 0.9996573,
+      "speaker": "B"
+    },
+    {
+      "text": "our",
+      "start": 21191,
+      "end": 21272,
+      "confidence": 0.99939024,
+      "speaker": "B"
+    },
+    {
+      "text": "jackets",
+      "start": 21272,
+      "end": 21688,
+      "confidence": 0.99841475,
+      "speaker": "B"
+    },
+    {
+      "text": "off.",
+      "start": 21688,
+      "end": 21817,
+      "confidence": 0.87330616,
+      "speaker": "B"
+    },
+    {
+      "text": "But",
+      "start": 21993,
+      "end": 22137,
+      "confidence": 0.9990404,
+      "speaker": "C"
+    },
+    {
+      "text": "also",
+      "start": 22137,
+      "end": 22394,
+      "confidence": 0.99824953,
+      "speaker": "C"
+    },
+    {
+      "text": "very",
+      "start": 22394,
+      "end": 22682,
+      "confidence": 0.99611306,
+      "speaker": "C"
+    },
+    {
+      "text": "exciting.",
+      "start": 22714,
+      "end": 23147,
+      "confidence": 0.99438673,
+      "speaker": "C"
+    },
+    {
+      "text": "Woo!",
+      "start": 23452,
+      "end": 23708,
+      "confidence": 0.6122231,
+      "speaker": "B"
+    },
+    {
+      "text": "So",
+      "start": 25103,
+      "end": 25263,
+      "confidence": 0.9973568,
+      "speaker": "A"
+    },
+    {
+      "text": "we're",
+      "start": 25263,
+      "end": 25343,
+      "confidence": 0.9816921,
+      "speaker": "A"
+    },
+    {
+      "text": "at",
+      "start": 25423,
+      "end": 25519,
+      "confidence": 0.9997912,
+      "speaker": "A"
+    },
+    {
+      "text": "Wimberley",
+      "start": 25519,
+      "end": 25920,
+      "confidence": 0.79240584,
+      "speaker": "A"
+    },
+    {
+      "text": "Glassworks",
+      "start": 25984,
+      "end": 26642,
+      "confidence": 0.8192757,
+      "speaker": "A"
+    },
+    {
+      "text": "with",
+      "start": 26706,
+      "end": 26818,
+      "confidence": 0.9914055,
+      "speaker": "A"
+    },
+    {
+      "text": "our",
+      "start": 26818,
+      "end": 26898,
+      "confidence": 0.9998605,
+      "speaker": "A"
+    },
+    {
+      "text": "instructor,",
+      "start": 26962,
+      "end": 27603,
+      "confidence": 0.72034866,
+      "speaker": "A"
+    },
+    {
+      "text": "Nick.",
+      "start": 27684,
+      "end": 27844,
+      "confidence": 0.9470556,
+      "speaker": "A"
+    },
+    {
+      "text": "So",
+      "start": 27956,
+      "end": 28004,
+      "confidence": 0.9639748,
+      "speaker": "D"
+    },
+    {
+      "text": "I",
+      "start": 28148,
+      "end": 28197,
+      "confidence": 0.9521019,
+      "speaker": "D"
+    },
+    {
+      "text": "am",
+      "start": 28549,
+      "end": 28806,
+      "confidence": 0.99927217,
+      "speaker": "D"
+    },
+    {
+      "text": "Nicholas",
+      "start": 29046,
+      "end": 29383,
+      "confidence": 0.9706105,
+      "speaker": "D"
+    },
+    {
+      "text": "Noble,",
+      "start": 29447,
+      "end": 29848,
+      "confidence": 0.6901458,
+      "speaker": "D"
+    },
+    {
+      "text": "or",
+      "start": 29928,
+      "end": 30024,
+      "confidence": 0.9970372,
+      "speaker": "D"
+    },
+    {
+      "text": "Nick.",
+      "start": 30168,
+      "end": 30409,
+      "confidence": 0.93332064,
+      "speaker": "D"
+    },
+    {
+      "text": "I've",
+      "start": 30553,
+      "end": 31050,
+      "confidence": 0.95614827,
+      "speaker": "D"
+    },
+    {
+      "text": "been",
+      "start": 31050,
+      "end": 31226,
+      "confidence": 0.99972445,
+      "speaker": "D"
+    },
+    {
+      "text": "working",
+      "start": 31274,
+      "end": 31531,
+      "confidence": 0.999681,
+      "speaker": "D"
+    },
+    {
+      "text": "here",
+      "start": 31531,
+      "end": 31755,
+      "confidence": 0.9993974,
+      "speaker": "D"
+    },
+    {
+      "text": "at",
+      "start": 31755,
+      "end": 31980,
+      "confidence": 0.8784513,
+      "speaker": "D"
+    },
+    {
+      "text": "Umberley",
+      "start": 31900,
+      "end": 32092,
+      "confidence": 0.03630935,
+      "speaker": "D"
+    },
+    {
+      "text": "Glassworks",
+      "start": 32092,
+      "end": 32557,
+      "confidence": 0.74773973,
+      "speaker": "D"
+    },
+    {
+      "text": "for",
+      "start": 32557,
+      "end": 32717,
+      "confidence": 0.99261934,
+      "speaker": "D"
+    },
+    {
+      "text": "about",
+      "start": 32717,
+      "end": 32893,
+      "confidence": 0.998024,
+      "speaker": "D"
+    },
+    {
+      "text": "3",
+      "start": 32893,
+      "end": 33134,
+      "confidence": 0.99985695,
+      "speaker": "D"
+    },
+    {
+      "text": "years.",
+      "start": 33134,
+      "end": 33438,
+      "confidence": 0.93849266,
+      "speaker": "D"
+    },
+    {
+      "text": "I've",
+      "start": 33759,
+      "end": 33823,
+      "confidence": 0.9970171,
+      "speaker": "D"
+    },
+    {
+      "text": "been",
+      "start": 33855,
+      "end": 33967,
+      "confidence": 0.9995915,
+      "speaker": "D"
+    },
+    {
+      "text": "blowing",
+      "start": 34096,
+      "end": 34384,
+      "confidence": 0.99992156,
+      "speaker": "D"
+    },
+    {
+      "text": "glass",
+      "start": 34400,
+      "end": 34737,
+      "confidence": 0.99969184,
+      "speaker": "D"
+    },
+    {
+      "text": "in",
+      "start": 34961,
+      "end": 35105,
+      "confidence": 0.98127717,
+      "speaker": "D"
+    },
+    {
+      "text": "total",
+      "start": 35121,
+      "end": 35506,
+      "confidence": 0.9999467,
+      "speaker": "D"
+    },
+    {
+      "text": "for",
+      "start": 35522,
+      "end": 35618,
+      "confidence": 0.9985441,
+      "speaker": "D"
+    },
+    {
+      "text": "about",
+      "start": 35618,
+      "end": 35811,
+      "confidence": 0.99939656,
+      "speaker": "D"
+    },
+    {
+      "text": "9.",
+      "start": 35923,
+      "end": 36228,
+      "confidence": 0.99609846,
+      "speaker": "D"
+    },
+    {
+      "text": "I",
+      "start": 36644,
+      "end": 36692,
+      "confidence": 0.99917775,
+      "speaker": "D"
+    },
+    {
+      "text": "got",
+      "start": 36981,
+      "end": 37141,
+      "confidence": 0.9974267,
+      "speaker": "D"
+    },
+    {
+      "text": "my",
+      "start": 37157,
+      "end": 37334,
+      "confidence": 0.9998276,
+      "speaker": "D"
+    },
+    {
+      "text": "degree",
+      "start": 37526,
+      "end": 37879,
+      "confidence": 0.99997306,
+      "speaker": "D"
+    },
+    {
+      "text": "in",
+      "start": 37927,
+      "end": 37975,
+      "confidence": 0.9997881,
+      "speaker": "D"
+    },
+    {
+      "text": "glassblowing",
+      "start": 38023,
+      "end": 38552,
+      "confidence": 0.775475,
+      "speaker": "D"
+    },
+    {
+      "text": "from",
+      "start": 38584,
+      "end": 38712,
+      "confidence": 0.99975306,
+      "speaker": "D"
+    },
+    {
+      "text": "the",
+      "start": 38808,
+      "end": 38985,
+      "confidence": 0.9975178,
+      "speaker": "D"
+    },
+    {
+      "text": "University",
+      "start": 39129,
+      "end": 39594,
+      "confidence": 0.99973935,
+      "speaker": "D"
+    },
+    {
+      "text": "of",
+      "start": 39642,
+      "end": 39754,
+      "confidence": 0.9998479,
+      "speaker": "D"
+    },
+    {
+      "text": "South",
+      "start": 39786,
+      "end": 40091,
+      "confidence": 0.9997261,
+      "speaker": "D"
+    },
+    {
+      "text": "Alabama",
+      "start": 40091,
+      "end": 40604,
+      "confidence": 0.99997544,
+      "speaker": "D"
+    },
+    {
+      "text": "and",
+      "start": 40652,
+      "end": 40908,
+      "confidence": 0.5134824,
+      "speaker": "D"
+    },
+    {
+      "text": "excited",
+      "start": 41149,
+      "end": 41469,
+      "confidence": 0.880709,
+      "speaker": "D"
+    },
+    {
+      "text": "to",
+      "start": 41469,
+      "end": 41565,
+      "confidence": 0.99978346,
+      "speaker": "D"
+    },
+    {
+      "text": "do",
+      "start": 41694,
+      "end": 41838,
+      "confidence": 0.99941397,
+      "speaker": "D"
+    },
+    {
+      "text": "these",
+      "start": 41854,
+      "end": 41998,
+      "confidence": 0.99908054,
+      "speaker": "D"
+    },
+    {
+      "text": "classes",
+      "start": 42014,
+      "end": 42319,
+      "confidence": 0.9978053,
+      "speaker": "D"
+    },
+    {
+      "text": "with",
+      "start": 42335,
+      "end": 42415,
+      "confidence": 0.9966342,
+      "speaker": "D"
+    },
+    {
+      "text": "y'all.",
+      "start": 42415,
+      "end": 42575,
+      "confidence": 0.933862,
+      "speaker": "D"
+    },
+    {
+      "text": "So",
+      "start": 42832,
+      "end": 42976,
+      "confidence": 0.9861981,
+      "speaker": "C"
+    },
+    {
+      "text": "it",
+      "start": 42976,
+      "end": 43024,
+      "confidence": 0.97700864,
+      "speaker": "C"
+    },
+    {
+      "text": "sounds",
+      "start": 43024,
+      "end": 43120,
+      "confidence": 0.99976665,
+      "speaker": "C"
+    },
+    {
+      "text": "like",
+      "start": 43152,
+      "end": 43313,
+      "confidence": 0.99979,
+      "speaker": "C"
+    },
+    {
+      "text": "you",
+      "start": 43313,
+      "end": 43393,
+      "confidence": 0.99687177,
+      "speaker": "C"
+    },
+    {
+      "text": "know",
+      "start": 43393,
+      "end": 43537,
+      "confidence": 0.9998542,
+      "speaker": "C"
+    },
+    {
+      "text": "what",
+      "start": 43537,
+      "end": 43617,
+      "confidence": 0.99923015,
+      "speaker": "C"
+    },
+    {
+      "text": "you're",
+      "start": 43617,
+      "end": 43777,
+      "confidence": 0.99853444,
+      "speaker": "C"
+    },
+    {
+      "text": "doing.",
+      "start": 43777,
+      "end": 44082,
+      "confidence": 0.9071645,
+      "speaker": "C"
+    },
+    {
+      "text": "Ah,",
+      "start": 44819,
+      "end": 44867,
+      "confidence": 0.43799543,
+      "speaker": "C"
+    },
+    {
+      "text": "sometimes.",
+      "start": 45380,
+      "end": 45733,
+      "confidence": 0.8809829,
+      "speaker": "C"
+    },
+    {
+      "text": "This",
+      "start": 46022,
+      "end": 46502,
+      "confidence": 0.8686,
+      "speaker": "C"
+    },
+    {
+      "text": "video",
+      "start": 46502,
+      "end": 47240,
+      "confidence": 0.999691,
+      "speaker": "C"
+    },
+    {
+      "text": "is",
+      "start": 47240,
+      "end": 47288,
+      "confidence": 0.9917745,
+      "speaker": "C"
+    },
+    {
+      "text": "brought",
+      "start": 47384,
+      "end": 47560,
+      "confidence": 0.999864,
+      "speaker": "C"
+    },
+    {
+      "text": "to",
+      "start": 47560,
+      "end": 47641,
+      "confidence": 0.9999101,
+      "speaker": "C"
+    },
+    {
+      "text": "you",
+      "start": 47641,
+      "end": 47737,
+      "confidence": 0.999925,
+      "speaker": "C"
+    },
+    {
+      "text": "by",
+      "start": 47737,
+      "end": 47881,
+      "confidence": 0.9999498,
+      "speaker": "C"
+    },
+    {
+      "text": "Squarespace,",
+      "start": 47881,
+      "end": 48410,
+      "confidence": 0.98669565,
+      "speaker": "C"
+    },
+    {
+      "text": "the",
+      "start": 48666,
+      "end": 48747,
+      "confidence": 0.99856156,
+      "speaker": "C"
+    },
+    {
+      "text": "all-in-one",
+      "start": 48827,
+      "end": 49115,
+      "confidence": 0.9988081,
+      "speaker": "C"
+    },
+    {
+      "text": "platform",
+      "start": 49163,
+      "end": 49708,
+      "confidence": 0.999985,
+      "speaker": "C"
+    },
+    {
+      "text": "for",
+      "start": 49708,
+      "end": 49917,
+      "confidence": 0.99989724,
+      "speaker": "C"
+    },
+    {
+      "text": "all",
+      "start": 49949,
+      "end": 50029,
+      "confidence": 0.9999263,
+      "speaker": "C"
+    },
+    {
+      "text": "your",
+      "start": 50029,
+      "end": 50189,
+      "confidence": 0.9987429,
+      "speaker": "C"
+    },
+    {
+      "text": "website",
+      "start": 50189,
+      "end": 50606,
+      "confidence": 0.999982,
+      "speaker": "C"
+    },
+    {
+      "text": "needs.",
+      "start": 50606,
+      "end": 50895,
+      "confidence": 0.9991855,
+      "speaker": "C"
+    },
+    {
+      "text": "So",
+      "start": 53075,
+      "end": 53219,
+      "confidence": 0.97153026,
+      "speaker": "D"
+    },
+    {
+      "text": "this",
+      "start": 53251,
+      "end": 53491,
+      "confidence": 0.9942405,
+      "speaker": "D"
+    },
+    {
+      "text": "is",
+      "start": 53491,
+      "end": 53540,
+      "confidence": 0.9996082,
+      "speaker": "D"
+    },
+    {
+      "text": "the",
+      "start": 53716,
+      "end": 53908,
+      "confidence": 0.9992902,
+      "speaker": "D"
+    },
+    {
+      "text": "flower",
+      "start": 54052,
+      "end": 54517,
+      "confidence": 0.99930525,
+      "speaker": "D"
+    },
+    {
+      "text": "that",
+      "start": 54517,
+      "end": 54581,
+      "confidence": 0.9988875,
+      "speaker": "D"
+    },
+    {
+      "text": "y'all",
+      "start": 54613,
+      "end": 54726,
+      "confidence": 0.9891758,
+      "speaker": "D"
+    },
+    {
+      "text": "are",
+      "start": 54774,
+      "end": 54854,
+      "confidence": 0.9998111,
+      "speaker": "D"
+    },
+    {
+      "text": "going",
+      "start": 54854,
+      "end": 54934,
+      "confidence": 0.87400454,
+      "speaker": "D"
+    },
+    {
+      "text": "to",
+      "start": 54934,
+      "end": 54998,
+      "confidence": 0.999908,
+      "speaker": "D"
+    },
+    {
+      "text": "be",
+      "start": 54998,
+      "end": 55094,
+      "confidence": 0.99993277,
+      "speaker": "D"
+    },
+    {
+      "text": "making.",
+      "start": 55094,
+      "end": 55383,
+      "confidence": 0.9607763,
+      "speaker": "D"
+    },
+    {
+      "text": "This",
+      "start": 55479,
+      "end": 55543,
+      "confidence": 0.99971145,
+      "speaker": "D"
+    },
+    {
+      "text": "is",
+      "start": 55639,
+      "end": 55704,
+      "confidence": 0.9999217,
+      "speaker": "D"
+    },
+    {
+      "text": "called",
+      "start": 55736,
+      "end": 56120,
+      "confidence": 0.9999343,
+      "speaker": "D"
+    },
+    {
+      "text": "a",
+      "start": 56120,
+      "end": 56297,
+      "confidence": 0.9996574,
+      "speaker": "D"
+    },
+    {
+      "text": "trumpet",
+      "start": 56361,
+      "end": 56649,
+      "confidence": 0.97676337,
+      "speaker": "D"
+    },
+    {
+      "text": "flower.",
+      "start": 56681,
+      "end": 57034,
+      "confidence": 0.9599601,
+      "speaker": "D"
+    },
+    {
+      "text": "This",
+      "start": 57162,
+      "end": 57242,
+      "confidence": 0.79334176,
+      "speaker": "D"
+    },
+    {
+      "text": "is",
+      "start": 57242,
+      "end": 57322,
+      "confidence": 0.99776125,
+      "speaker": "D"
+    },
+    {
+      "text": "the",
+      "start": 57322,
+      "end": 57419,
+      "confidence": 0.999426,
+      "speaker": "D"
+    },
+    {
+      "text": "first",
+      "start": 57659,
+      "end": 57948,
+      "confidence": 0.9982541,
+      "speaker": "D"
+    },
+    {
+      "text": "thing",
+      "start": 57964,
+      "end": 58028,
+      "confidence": 0.99973816,
+      "speaker": "D"
+    },
+    {
+      "text": "I",
+      "start": 58124,
+      "end": 58204,
+      "confidence": 0.99974865,
+      "speaker": "D"
+    },
+    {
+      "text": "ever",
+      "start": 58204,
+      "end": 58364,
+      "confidence": 0.99969614,
+      "speaker": "D"
+    },
+    {
+      "text": "learned",
+      "start": 58364,
+      "end": 58525,
+      "confidence": 0.9999604,
+      "speaker": "D"
+    },
+    {
+      "text": "how",
+      "start": 58525,
+      "end": 58621,
+      "confidence": 0.99964345,
+      "speaker": "D"
+    },
+    {
+      "text": "to",
+      "start": 58621,
+      "end": 58701,
+      "confidence": 0.99994624,
+      "speaker": "D"
+    },
+    {
+      "text": "make",
+      "start": 58701,
+      "end": 58958,
+      "confidence": 0.9999535,
+      "speaker": "D"
+    },
+    {
+      "text": "in",
+      "start": 59038,
+      "end": 59150,
+      "confidence": 0.9971174,
+      "speaker": "D"
+    },
+    {
+      "text": "glass.",
+      "start": 59166,
+      "end": 59486,
+      "confidence": 0.99104375,
+      "speaker": "D"
+    },
+    {
+      "text": "It",
+      "start": 59823,
+      "end": 59903,
+      "confidence": 0.95629585,
+      "speaker": "C"
+    },
+    {
+      "text": "looks",
+      "start": 59903,
+      "end": 61875,
+      "confidence": 0.86591697,
+      "speaker": "C"
+    }
+  ],
+  "utterances": [
+    {
+      "speaker": "A",
+      "text": "The pumpkin that'll last for forever. Finally. Does it count?",
+      "confidence": 0.9017361,
+      "start": 112,
+      "end": 4199,
+      "words": [
+        {
+          "text": "The",
+          "start": 112,
+          "end": 160,
+          "confidence": 0.99030954,
+          "speaker": "A"
+        },
+        {
+          "text": "pumpkin",
+          "start": 192,
+          "end": 480,
+          "confidence": 0.9985012,
+          "speaker": "A"
+        },
+        {
+          "text": "that'll",
+          "start": 480,
+          "end": 673,
+          "confidence": 0.9164578,
+          "speaker": "A"
+        },
+        {
+          "text": "last",
+          "start": 673,
+          "end": 1074,
+          "confidence": 0.9995896,
+          "speaker": "A"
+        },
+        {
+          "text": "for",
+          "start": 1074,
+          "end": 1218,
+          "confidence": 0.76339936,
+          "speaker": "A"
+        },
+        {
+          "text": "forever.",
+          "start": 1218,
+          "end": 1683,
+          "confidence": 0.7232275,
+          "speaker": "A"
+        },
+        {
+          "text": "Finally.",
+          "start": 1955,
+          "end": 2452,
+          "confidence": 0.6439253,
+          "speaker": "A"
+        },
+        {
+          "text": "Does",
+          "start": 2741,
+          "end": 3045,
+          "confidence": 0.98887336,
+          "speaker": "A"
+        },
+        {
+          "text": "it",
+          "start": 3302,
+          "end": 3478,
+          "confidence": 0.9987814,
+          "speaker": "A"
+        },
+        {
+          "text": "count?",
+          "start": 3478,
+          "end": 4199,
+          "confidence": 0.99429554,
+          "speaker": "A"
+        }
+      ]
+    },
+    {
+      "speaker": "B",
+      "text": "Today we're taking a glassblowing class.",
+      "confidence": 0.85098004,
+      "start": 7950,
+      "end": 9778,
+      "words": [
+        {
+          "text": "Today",
+          "start": 7950,
+          "end": 8287,
+          "confidence": 0.84393656,
+          "speaker": "B"
+        },
+        {
+          "text": "we're",
+          "start": 8287,
+          "end": 8447,
+          "confidence": 0.5596438,
+          "speaker": "B"
+        },
+        {
+          "text": "taking",
+          "start": 8447,
+          "end": 8656,
+          "confidence": 0.9998442,
+          "speaker": "B"
+        },
+        {
+          "text": "a",
+          "start": 8832,
+          "end": 8848,
+          "confidence": 0.99712974,
+          "speaker": "B"
+        },
+        {
+          "text": "glassblowing",
+          "start": 8848,
+          "end": 9457,
+          "confidence": 0.7066883,
+          "speaker": "B"
+        },
+        {
+          "text": "class.",
+          "start": 9553,
+          "end": 9778,
+          "confidence": 0.9986377,
+          "speaker": "B"
+        }
+      ]
+    },
+    {
+      "speaker": "C",
+      "text": "I'm sweating already. We've worked with a lot of materials before, but we've only scratched the surface when it comes to glass. And that's because it's a little intimidating.",
+      "confidence": 0.9816252,
+      "start": 10211,
+      "end": 19717,
+      "words": [
+        {
+          "text": "I'm",
+          "start": 10211,
+          "end": 10371,
+          "confidence": 0.9989446,
+          "speaker": "C"
+        },
+        {
+          "text": "sweating",
+          "start": 10371,
+          "end": 10660,
+          "confidence": 0.99964964,
+          "speaker": "C"
+        },
+        {
+          "text": "already.",
+          "start": 10756,
+          "end": 11140,
+          "confidence": 0.99665046,
+          "speaker": "C"
+        },
+        {
+          "text": "We've",
+          "start": 11493,
+          "end": 12856,
+          "confidence": 0.98761153,
+          "speaker": "C"
+        },
+        {
+          "text": "worked",
+          "start": 12856,
+          "end": 13144,
+          "confidence": 0.9999112,
+          "speaker": "C"
+        },
+        {
+          "text": "with",
+          "start": 13144,
+          "end": 13256,
+          "confidence": 0.99966633,
+          "speaker": "C"
+        },
+        {
+          "text": "a",
+          "start": 13256,
+          "end": 13337,
+          "confidence": 0.9997297,
+          "speaker": "C"
+        },
+        {
+          "text": "lot",
+          "start": 13337,
+          "end": 13513,
+          "confidence": 0.9988813,
+          "speaker": "C"
+        },
+        {
+          "text": "of",
+          "start": 13513,
+          "end": 13593,
+          "confidence": 0.9987858,
+          "speaker": "C"
+        },
+        {
+          "text": "materials",
+          "start": 13657,
+          "end": 14186,
+          "confidence": 0.9984717,
+          "speaker": "C"
+        },
+        {
+          "text": "before,",
+          "start": 14298,
+          "end": 14731,
+          "confidence": 0.88422364,
+          "speaker": "C"
+        },
+        {
+          "text": "but",
+          "start": 15004,
+          "end": 15116,
+          "confidence": 0.9999168,
+          "speaker": "C"
+        },
+        {
+          "text": "we've",
+          "start": 15116,
+          "end": 15292,
+          "confidence": 0.99932003,
+          "speaker": "C"
+        },
+        {
+          "text": "only",
+          "start": 15324,
+          "end": 15565,
+          "confidence": 0.9999093,
+          "speaker": "C"
+        },
+        {
+          "text": "scratched",
+          "start": 15565,
+          "end": 15949,
+          "confidence": 0.99997485,
+          "speaker": "C"
+        },
+        {
+          "text": "the",
+          "start": 16046,
+          "end": 16126,
+          "confidence": 0.9998758,
+          "speaker": "C"
+        },
+        {
+          "text": "surface",
+          "start": 16126,
+          "end": 16495,
+          "confidence": 0.99994373,
+          "speaker": "C"
+        },
+        {
+          "text": "when",
+          "start": 16607,
+          "end": 16703,
+          "confidence": 0.99920505,
+          "speaker": "C"
+        },
+        {
+          "text": "it",
+          "start": 16703,
+          "end": 16767,
+          "confidence": 0.999944,
+          "speaker": "C"
+        },
+        {
+          "text": "comes",
+          "start": 16767,
+          "end": 16991,
+          "confidence": 0.9999777,
+          "speaker": "C"
+        },
+        {
+          "text": "to",
+          "start": 17024,
+          "end": 17104,
+          "confidence": 0.99984443,
+          "speaker": "C"
+        },
+        {
+          "text": "glass.",
+          "start": 17168,
+          "end": 17504,
+          "confidence": 0.656954,
+          "speaker": "C"
+        },
+        {
+          "text": "And",
+          "start": 17825,
+          "end": 17889,
+          "confidence": 0.9993387,
+          "speaker": "C"
+        },
+        {
+          "text": "that's",
+          "start": 17969,
+          "end": 18146,
+          "confidence": 0.9994009,
+          "speaker": "C"
+        },
+        {
+          "text": "because",
+          "start": 18146,
+          "end": 18514,
+          "confidence": 0.9995652,
+          "speaker": "C"
+        },
+        {
+          "text": "it's",
+          "start": 18627,
+          "end": 18723,
+          "confidence": 0.984342,
+          "speaker": "C"
+        },
+        {
+          "text": "a",
+          "start": 18723,
+          "end": 18739,
+          "confidence": 0.9994135,
+          "speaker": "C"
+        },
+        {
+          "text": "little",
+          "start": 18739,
+          "end": 19091,
+          "confidence": 0.9997671,
+          "speaker": "C"
+        },
+        {
+          "text": "intimidating.",
+          "start": 19091,
+          "end": 19717,
+          "confidence": 0.96791226,
+          "speaker": "C"
+        }
+      ]
+    },
+    {
+      "speaker": "B",
+      "text": "Yeah, let's take our jackets off.",
+      "confidence": 0.9316142,
+      "start": 19973,
+      "end": 21817,
+      "words": [
+        {
+          "text": "Yeah,",
+          "start": 19973,
+          "end": 20165,
+          "confidence": 0.71961755,
+          "speaker": "B"
+        },
+        {
+          "text": "let's",
+          "start": 20710,
+          "end": 20919,
+          "confidence": 0.9992992,
+          "speaker": "B"
+        },
+        {
+          "text": "take",
+          "start": 21015,
+          "end": 21191,
+          "confidence": 0.9996573,
+          "speaker": "B"
+        },
+        {
+          "text": "our",
+          "start": 21191,
+          "end": 21272,
+          "confidence": 0.99939024,
+          "speaker": "B"
+        },
+        {
+          "text": "jackets",
+          "start": 21272,
+          "end": 21688,
+          "confidence": 0.99841475,
+          "speaker": "B"
+        },
+        {
+          "text": "off.",
+          "start": 21688,
+          "end": 21817,
+          "confidence": 0.87330616,
+          "speaker": "B"
+        }
+      ]
+    },
+    {
+      "speaker": "C",
+      "text": "But also very exciting.",
+      "confidence": 0.99694747,
+      "start": 21993,
+      "end": 23147,
+      "words": [
+        {
+          "text": "But",
+          "start": 21993,
+          "end": 22137,
+          "confidence": 0.9990404,
+          "speaker": "C"
+        },
+        {
+          "text": "also",
+          "start": 22137,
+          "end": 22394,
+          "confidence": 0.99824953,
+          "speaker": "C"
+        },
+        {
+          "text": "very",
+          "start": 22394,
+          "end": 22682,
+          "confidence": 0.99611306,
+          "speaker": "C"
+        },
+        {
+          "text": "exciting.",
+          "start": 22714,
+          "end": 23147,
+          "confidence": 0.99438673,
+          "speaker": "C"
+        }
+      ]
+    },
+    {
+      "speaker": "B",
+      "text": "Woo!",
+      "confidence": 0.6122231,
+      "start": 23452,
+      "end": 23708,
+      "words": [
+        {
+          "text": "Woo!",
+          "start": 23452,
+          "end": 23708,
+          "confidence": 0.6122231,
+          "speaker": "B"
+        }
+      ]
+    },
+    {
+      "speaker": "A",
+      "text": "So we're at Wimberley Glassworks with our instructor, Nick.",
+      "confidence": 0.91657686,
+      "start": 25103,
+      "end": 27844,
+      "words": [
+        {
+          "text": "So",
+          "start": 25103,
+          "end": 25263,
+          "confidence": 0.9973568,
+          "speaker": "A"
+        },
+        {
+          "text": "we're",
+          "start": 25263,
+          "end": 25343,
+          "confidence": 0.9816921,
+          "speaker": "A"
+        },
+        {
+          "text": "at",
+          "start": 25423,
+          "end": 25519,
+          "confidence": 0.9997912,
+          "speaker": "A"
+        },
+        {
+          "text": "Wimberley",
+          "start": 25519,
+          "end": 25920,
+          "confidence": 0.79240584,
+          "speaker": "A"
+        },
+        {
+          "text": "Glassworks",
+          "start": 25984,
+          "end": 26642,
+          "confidence": 0.8192757,
+          "speaker": "A"
+        },
+        {
+          "text": "with",
+          "start": 26706,
+          "end": 26818,
+          "confidence": 0.9914055,
+          "speaker": "A"
+        },
+        {
+          "text": "our",
+          "start": 26818,
+          "end": 26898,
+          "confidence": 0.9998605,
+          "speaker": "A"
+        },
+        {
+          "text": "instructor,",
+          "start": 26962,
+          "end": 27603,
+          "confidence": 0.72034866,
+          "speaker": "A"
+        },
+        {
+          "text": "Nick.",
+          "start": 27684,
+          "end": 27844,
+          "confidence": 0.9470556,
+          "speaker": "A"
+        }
+      ]
+    },
+    {
+      "speaker": "D",
+      "text": "So I am Nicholas Noble, or Nick. I've been working here at Umberley Glassworks for about 3 years. I've been blowing glass in total for about 9. I got my degree in glassblowing from the University of South Alabama and excited to do these classes with y'all.",
+      "confidence": 0.9385828,
+      "start": 27956,
+      "end": 42575,
+      "words": [
+        {
+          "text": "So",
+          "start": 27956,
+          "end": 28004,
+          "confidence": 0.9639748,
+          "speaker": "D"
+        },
+        {
+          "text": "I",
+          "start": 28148,
+          "end": 28197,
+          "confidence": 0.9521019,
+          "speaker": "D"
+        },
+        {
+          "text": "am",
+          "start": 28549,
+          "end": 28806,
+          "confidence": 0.99927217,
+          "speaker": "D"
+        },
+        {
+          "text": "Nicholas",
+          "start": 29046,
+          "end": 29383,
+          "confidence": 0.9706105,
+          "speaker": "D"
+        },
+        {
+          "text": "Noble,",
+          "start": 29447,
+          "end": 29848,
+          "confidence": 0.6901458,
+          "speaker": "D"
+        },
+        {
+          "text": "or",
+          "start": 29928,
+          "end": 30024,
+          "confidence": 0.9970372,
+          "speaker": "D"
+        },
+        {
+          "text": "Nick.",
+          "start": 30168,
+          "end": 30409,
+          "confidence": 0.93332064,
+          "speaker": "D"
+        },
+        {
+          "text": "I've",
+          "start": 30553,
+          "end": 31050,
+          "confidence": 0.95614827,
+          "speaker": "D"
+        },
+        {
+          "text": "been",
+          "start": 31050,
+          "end": 31226,
+          "confidence": 0.99972445,
+          "speaker": "D"
+        },
+        {
+          "text": "working",
+          "start": 31274,
+          "end": 31531,
+          "confidence": 0.999681,
+          "speaker": "D"
+        },
+        {
+          "text": "here",
+          "start": 31531,
+          "end": 31755,
+          "confidence": 0.9993974,
+          "speaker": "D"
+        },
+        {
+          "text": "at",
+          "start": 31755,
+          "end": 31980,
+          "confidence": 0.8784513,
+          "speaker": "D"
+        },
+        {
+          "text": "Umberley",
+          "start": 31900,
+          "end": 32092,
+          "confidence": 0.03630935,
+          "speaker": "D"
+        },
+        {
+          "text": "Glassworks",
+          "start": 32092,
+          "end": 32557,
+          "confidence": 0.74773973,
+          "speaker": "D"
+        },
+        {
+          "text": "for",
+          "start": 32557,
+          "end": 32717,
+          "confidence": 0.99261934,
+          "speaker": "D"
+        },
+        {
+          "text": "about",
+          "start": 32717,
+          "end": 32893,
+          "confidence": 0.998024,
+          "speaker": "D"
+        },
+        {
+          "text": "3",
+          "start": 32893,
+          "end": 33134,
+          "confidence": 0.99985695,
+          "speaker": "D"
+        },
+        {
+          "text": "years.",
+          "start": 33134,
+          "end": 33438,
+          "confidence": 0.93849266,
+          "speaker": "D"
+        },
+        {
+          "text": "I've",
+          "start": 33759,
+          "end": 33823,
+          "confidence": 0.9970171,
+          "speaker": "D"
+        },
+        {
+          "text": "been",
+          "start": 33855,
+          "end": 33967,
+          "confidence": 0.9995915,
+          "speaker": "D"
+        },
+        {
+          "text": "blowing",
+          "start": 34096,
+          "end": 34384,
+          "confidence": 0.99992156,
+          "speaker": "D"
+        },
+        {
+          "text": "glass",
+          "start": 34400,
+          "end": 34737,
+          "confidence": 0.99969184,
+          "speaker": "D"
+        },
+        {
+          "text": "in",
+          "start": 34961,
+          "end": 35105,
+          "confidence": 0.98127717,
+          "speaker": "D"
+        },
+        {
+          "text": "total",
+          "start": 35121,
+          "end": 35506,
+          "confidence": 0.9999467,
+          "speaker": "D"
+        },
+        {
+          "text": "for",
+          "start": 35522,
+          "end": 35618,
+          "confidence": 0.9985441,
+          "speaker": "D"
+        },
+        {
+          "text": "about",
+          "start": 35618,
+          "end": 35811,
+          "confidence": 0.99939656,
+          "speaker": "D"
+        },
+        {
+          "text": "9.",
+          "start": 35923,
+          "end": 36228,
+          "confidence": 0.99609846,
+          "speaker": "D"
+        },
+        {
+          "text": "I",
+          "start": 36644,
+          "end": 36692,
+          "confidence": 0.99917775,
+          "speaker": "D"
+        },
+        {
+          "text": "got",
+          "start": 36981,
+          "end": 37141,
+          "confidence": 0.9974267,
+          "speaker": "D"
+        },
+        {
+          "text": "my",
+          "start": 37157,
+          "end": 37334,
+          "confidence": 0.9998276,
+          "speaker": "D"
+        },
+        {
+          "text": "degree",
+          "start": 37526,
+          "end": 37879,
+          "confidence": 0.99997306,
+          "speaker": "D"
+        },
+        {
+          "text": "in",
+          "start": 37927,
+          "end": 37975,
+          "confidence": 0.9997881,
+          "speaker": "D"
+        },
+        {
+          "text": "glassblowing",
+          "start": 38023,
+          "end": 38552,
+          "confidence": 0.775475,
+          "speaker": "D"
+        },
+        {
+          "text": "from",
+          "start": 38584,
+          "end": 38712,
+          "confidence": 0.99975306,
+          "speaker": "D"
+        },
+        {
+          "text": "the",
+          "start": 38808,
+          "end": 38985,
+          "confidence": 0.9975178,
+          "speaker": "D"
+        },
+        {
+          "text": "University",
+          "start": 39129,
+          "end": 39594,
+          "confidence": 0.99973935,
+          "speaker": "D"
+        },
+        {
+          "text": "of",
+          "start": 39642,
+          "end": 39754,
+          "confidence": 0.9998479,
+          "speaker": "D"
+        },
+        {
+          "text": "South",
+          "start": 39786,
+          "end": 40091,
+          "confidence": 0.9997261,
+          "speaker": "D"
+        },
+        {
+          "text": "Alabama",
+          "start": 40091,
+          "end": 40604,
+          "confidence": 0.99997544,
+          "speaker": "D"
+        },
+        {
+          "text": "and",
+          "start": 40652,
+          "end": 40908,
+          "confidence": 0.5134824,
+          "speaker": "D"
+        },
+        {
+          "text": "excited",
+          "start": 41149,
+          "end": 41469,
+          "confidence": 0.880709,
+          "speaker": "D"
+        },
+        {
+          "text": "to",
+          "start": 41469,
+          "end": 41565,
+          "confidence": 0.99978346,
+          "speaker": "D"
+        },
+        {
+          "text": "do",
+          "start": 41694,
+          "end": 41838,
+          "confidence": 0.99941397,
+          "speaker": "D"
+        },
+        {
+          "text": "these",
+          "start": 41854,
+          "end": 41998,
+          "confidence": 0.99908054,
+          "speaker": "D"
+        },
+        {
+          "text": "classes",
+          "start": 42014,
+          "end": 42319,
+          "confidence": 0.9978053,
+          "speaker": "D"
+        },
+        {
+          "text": "with",
+          "start": 42335,
+          "end": 42415,
+          "confidence": 0.9966342,
+          "speaker": "D"
+        },
+        {
+          "text": "y'all.",
+          "start": 42415,
+          "end": 42575,
+          "confidence": 0.933862,
+          "speaker": "D"
+        }
+      ]
+    },
+    {
+      "speaker": "C",
+      "text": "So it sounds like you know what you're doing. Ah, sometimes. This video is brought to you by Squarespace, the all-in-one platform for all your website needs.",
+      "confidence": 0.963885,
+      "start": 42832,
+      "end": 50895,
+      "words": [
+        {
+          "text": "So",
+          "start": 42832,
+          "end": 42976,
+          "confidence": 0.9861981,
+          "speaker": "C"
+        },
+        {
+          "text": "it",
+          "start": 42976,
+          "end": 43024,
+          "confidence": 0.97700864,
+          "speaker": "C"
+        },
+        {
+          "text": "sounds",
+          "start": 43024,
+          "end": 43120,
+          "confidence": 0.99976665,
+          "speaker": "C"
+        },
+        {
+          "text": "like",
+          "start": 43152,
+          "end": 43313,
+          "confidence": 0.99979,
+          "speaker": "C"
+        },
+        {
+          "text": "you",
+          "start": 43313,
+          "end": 43393,
+          "confidence": 0.99687177,
+          "speaker": "C"
+        },
+        {
+          "text": "know",
+          "start": 43393,
+          "end": 43537,
+          "confidence": 0.9998542,
+          "speaker": "C"
+        },
+        {
+          "text": "what",
+          "start": 43537,
+          "end": 43617,
+          "confidence": 0.99923015,
+          "speaker": "C"
+        },
+        {
+          "text": "you're",
+          "start": 43617,
+          "end": 43777,
+          "confidence": 0.99853444,
+          "speaker": "C"
+        },
+        {
+          "text": "doing.",
+          "start": 43777,
+          "end": 44082,
+          "confidence": 0.9071645,
+          "speaker": "C"
+        },
+        {
+          "text": "Ah,",
+          "start": 44819,
+          "end": 44867,
+          "confidence": 0.43799543,
+          "speaker": "C"
+        },
+        {
+          "text": "sometimes.",
+          "start": 45380,
+          "end": 45733,
+          "confidence": 0.8809829,
+          "speaker": "C"
+        },
+        {
+          "text": "This",
+          "start": 46022,
+          "end": 46502,
+          "confidence": 0.8686,
+          "speaker": "C"
+        },
+        {
+          "text": "video",
+          "start": 46502,
+          "end": 47240,
+          "confidence": 0.999691,
+          "speaker": "C"
+        },
+        {
+          "text": "is",
+          "start": 47240,
+          "end": 47288,
+          "confidence": 0.9917745,
+          "speaker": "C"
+        },
+        {
+          "text": "brought",
+          "start": 47384,
+          "end": 47560,
+          "confidence": 0.999864,
+          "speaker": "C"
+        },
+        {
+          "text": "to",
+          "start": 47560,
+          "end": 47641,
+          "confidence": 0.9999101,
+          "speaker": "C"
+        },
+        {
+          "text": "you",
+          "start": 47641,
+          "end": 47737,
+          "confidence": 0.999925,
+          "speaker": "C"
+        },
+        {
+          "text": "by",
+          "start": 47737,
+          "end": 47881,
+          "confidence": 0.9999498,
+          "speaker": "C"
+        },
+        {
+          "text": "Squarespace,",
+          "start": 47881,
+          "end": 48410,
+          "confidence": 0.98669565,
+          "speaker": "C"
+        },
+        {
+          "text": "the",
+          "start": 48666,
+          "end": 48747,
+          "confidence": 0.99856156,
+          "speaker": "C"
+        },
+        {
+          "text": "all-in-one",
+          "start": 48827,
+          "end": 49115,
+          "confidence": 0.9988081,
+          "speaker": "C"
+        },
+        {
+          "text": "platform",
+          "start": 49163,
+          "end": 49708,
+          "confidence": 0.999985,
+          "speaker": "C"
+        },
+        {
+          "text": "for",
+          "start": 49708,
+          "end": 49917,
+          "confidence": 0.99989724,
+          "speaker": "C"
+        },
+        {
+          "text": "all",
+          "start": 49949,
+          "end": 50029,
+          "confidence": 0.9999263,
+          "speaker": "C"
+        },
+        {
+          "text": "your",
+          "start": 50029,
+          "end": 50189,
+          "confidence": 0.9987429,
+          "speaker": "C"
+        },
+        {
+          "text": "website",
+          "start": 50189,
+          "end": 50606,
+          "confidence": 0.999982,
+          "speaker": "C"
+        },
+        {
+          "text": "needs.",
+          "start": 50606,
+          "end": 50895,
+          "confidence": 0.9991855,
+          "speaker": "C"
+        }
+      ]
+    },
+    {
+      "speaker": "D",
+      "text": "So this is the flower that y'all are going to be making. This is called a trumpet flower. This is the first thing I ever learned how to make in glass.",
+      "confidence": 0.98380804,
+      "start": 53075,
+      "end": 59486,
+      "words": [
+        {
+          "text": "So",
+          "start": 53075,
+          "end": 53219,
+          "confidence": 0.97153026,
+          "speaker": "D"
+        },
+        {
+          "text": "this",
+          "start": 53251,
+          "end": 53491,
+          "confidence": 0.9942405,
+          "speaker": "D"
+        },
+        {
+          "text": "is",
+          "start": 53491,
+          "end": 53540,
+          "confidence": 0.9996082,
+          "speaker": "D"
+        },
+        {
+          "text": "the",
+          "start": 53716,
+          "end": 53908,
+          "confidence": 0.9992902,
+          "speaker": "D"
+        },
+        {
+          "text": "flower",
+          "start": 54052,
+          "end": 54517,
+          "confidence": 0.99930525,
+          "speaker": "D"
+        },
+        {
+          "text": "that",
+          "start": 54517,
+          "end": 54581,
+          "confidence": 0.9988875,
+          "speaker": "D"
+        },
+        {
+          "text": "y'all",
+          "start": 54613,
+          "end": 54726,
+          "confidence": 0.9891758,
+          "speaker": "D"
+        },
+        {
+          "text": "are",
+          "start": 54774,
+          "end": 54854,
+          "confidence": 0.9998111,
+          "speaker": "D"
+        },
+        {
+          "text": "going",
+          "start": 54854,
+          "end": 54934,
+          "confidence": 0.87400454,
+          "speaker": "D"
+        },
+        {
+          "text": "to",
+          "start": 54934,
+          "end": 54998,
+          "confidence": 0.999908,
+          "speaker": "D"
+        },
+        {
+          "text": "be",
+          "start": 54998,
+          "end": 55094,
+          "confidence": 0.99993277,
+          "speaker": "D"
+        },
+        {
+          "text": "making.",
+          "start": 55094,
+          "end": 55383,
+          "confidence": 0.9607763,
+          "speaker": "D"
+        },
+        {
+          "text": "This",
+          "start": 55479,
+          "end": 55543,
+          "confidence": 0.99971145,
+          "speaker": "D"
+        },
+        {
+          "text": "is",
+          "start": 55639,
+          "end": 55704,
+          "confidence": 0.9999217,
+          "speaker": "D"
+        },
+        {
+          "text": "called",
+          "start": 55736,
+          "end": 56120,
+          "confidence": 0.9999343,
+          "speaker": "D"
+        },
+        {
+          "text": "a",
+          "start": 56120,
+          "end": 56297,
+          "confidence": 0.9996574,
+          "speaker": "D"
+        },
+        {
+          "text": "trumpet",
+          "start": 56361,
+          "end": 56649,
+          "confidence": 0.97676337,
+          "speaker": "D"
+        },
+        {
+          "text": "flower.",
+          "start": 56681,
+          "end": 57034,
+          "confidence": 0.9599601,
+          "speaker": "D"
+        },
+        {
+          "text": "This",
+          "start": 57162,
+          "end": 57242,
+          "confidence": 0.79334176,
+          "speaker": "D"
+        },
+        {
+          "text": "is",
+          "start": 57242,
+          "end": 57322,
+          "confidence": 0.99776125,
+          "speaker": "D"
+        },
+        {
+          "text": "the",
+          "start": 57322,
+          "end": 57419,
+          "confidence": 0.999426,
+          "speaker": "D"
+        },
+        {
+          "text": "first",
+          "start": 57659,
+          "end": 57948,
+          "confidence": 0.9982541,
+          "speaker": "D"
+        },
+        {
+          "text": "thing",
+          "start": 57964,
+          "end": 58028,
+          "confidence": 0.99973816,
+          "speaker": "D"
+        },
+        {
+          "text": "I",
+          "start": 58124,
+          "end": 58204,
+          "confidence": 0.99974865,
+          "speaker": "D"
+        },
+        {
+          "text": "ever",
+          "start": 58204,
+          "end": 58364,
+          "confidence": 0.99969614,
+          "speaker": "D"
+        },
+        {
+          "text": "learned",
+          "start": 58364,
+          "end": 58525,
+          "confidence": 0.9999604,
+          "speaker": "D"
+        },
+        {
+          "text": "how",
+          "start": 58525,
+          "end": 58621,
+          "confidence": 0.99964345,
+          "speaker": "D"
+        },
+        {
+          "text": "to",
+          "start": 58621,
+          "end": 58701,
+          "confidence": 0.99994624,
+          "speaker": "D"
+        },
+        {
+          "text": "make",
+          "start": 58701,
+          "end": 58958,
+          "confidence": 0.9999535,
+          "speaker": "D"
+        },
+        {
+          "text": "in",
+          "start": 59038,
+          "end": 59150,
+          "confidence": 0.9971174,
+          "speaker": "D"
+        },
+        {
+          "text": "glass.",
+          "start": 59166,
+          "end": 59486,
+          "confidence": 0.99104375,
+          "speaker": "D"
+        }
+      ]
+    },
+    {
+      "speaker": "C",
+      "text": "It looks",
+      "confidence": 0.9111064,
+      "start": 59823,
+      "end": 61875,
+      "words": [
+        {
+          "text": "It",
+          "start": 59823,
+          "end": 59903,
+          "confidence": 0.95629585,
+          "speaker": "C"
+        },
+        {
+          "text": "looks",
+          "start": 59903,
+          "end": 61875,
+          "confidence": 0.86591697,
+          "speaker": "C"
+        }
+      ]
+    }
+  ],
+  "confidence": 0.9505105,
+  "audio_duration": 61,
+  "punctuate": true,
+  "format_text": true,
+  "dual_channel": false,
+  "webhook_url": null,
+  "webhook_status_code": null,
+  "webhook_auth": false,
+  "webhook_auth_header_name": null,
+  "speed_boost": false,
+  "auto_highlights_result": null,
+  "auto_highlights": false,
+  "audio_start_from": null,
+  "audio_end_at": null,
+  "word_boost": [],
+  "boost_param": null,
+  "prompt": null,
+  "keyterms_prompt": [],
+  "filter_profanity": false,
+  "redact_pii": false,
+  "redact_pii_audio": false,
+  "redact_pii_audio_quality": null,
+  "redact_pii_audio_options": null,
+  "redact_pii_policies": null,
+  "redact_pii_sub": null,
+  "speaker_labels": true,
+  "speaker_options": null,
+  "content_safety": false,
+  "iab_categories": false,
+  "content_safety_labels": {
+    "status": "unavailable",
+    "results": [],
+    "summary": {}
+  },
+  "iab_categories_result": {
+    "status": "unavailable",
+    "results": [],
+    "summary": {}
+  },
+  "language_detection": true,
+  "language_detection_options": null,
+  "language_detection_results": null,
+  "language_confidence_threshold": null,
+  "language_confidence": 0.9995,
+  "custom_spelling": null,
+  "throttled": false,
+  "auto_chapters": false,
+  "summarization": false,
+  "summary_type": null,
+  "summary_model": null,
+  "custom_topics": false,
+  "topics": [],
+  "speech_threshold": null,
+  "speech_model": null,
+  "speech_models": [
+    "universal-3-pro"
+  ],
+  "speech_model_used": "universal-3-pro",
+  "temperature": null,
+  "remove_audio_tags": null,
+  "chapters": null,
+  "disfluencies": false,
+  "entity_detection": false,
+  "sentiment_analysis": false,
+  "sentiment_analysis_results": null,
+  "entities": null,
+  "speakers_expected": null,
+  "summary": null,
+  "custom_topics_results": null,
+  "is_deleted": null,
+  "multichannel": null,
+  "project_id": 1732679,
+  "token_id": 1753804
+}

@@ -23,7 +23,7 @@ Test Setup       Clear Test Databases
 *** Test Cases ***
 Full Pipeline Integration Test
     [Documentation]    Complete end-to-end test of audio started pipeline
-    [Tags]    e2e	requires-api-keys
+    [Tags]    e2e
     [Timeout]          600s
 
     Log    Starting Full Pipeline Integration Test    INFO
@@ -37,7 +37,7 @@ Full Pipeline Integration Test
     Set Global Variable    ${TEST_CONVERSATION}    ${conversation}
 
     # Phase 5: Transcription Verification
-    Verify Transcription Quality    ${TEST_CONVERSATION}    ${EXPECTED_TRANSCRIPT}
+    Verify Transcription Quality    ${TEST_CONVERSATION}    ${EXPECTED_TRANSCRIPT_PHRASES}
 
     # Phase 6: Memory Extraction Verification
     Verify Memory Extraction    api    ${TEST_CONVERSATION}
@@ -126,7 +126,7 @@ End To End Pipeline With Memory Validation Test
     [Documentation]    Complete E2E test with memory extraction and OpenAI quality validation.
     ...                Provides comprehensive integration testing of the entire audio started pipeline.
     ...                Separate from other tests to avoid breaking existing upload-only tests.
-    [Tags]    e2e	memory	requires-api-keys
+    [Tags]    e2e	memory
     [Timeout]    600s
 
     Log    Starting End-to-End Pipeline Test with Memory Validation    INFO
@@ -141,7 +141,7 @@ End To End Pipeline With Memory Validation Test
 
     # Phase 2: Verify transcription quality
     Log    Verifying transcription quality    INFO
-    Verify Transcription Quality    ${TEST_CONVERSATION}    ${EXPECTED_TRANSCRIPT}
+    Verify Transcription Quality    ${TEST_CONVERSATION}    ${EXPECTED_TRANSCRIPT_PHRASES}
 
     # Phase 3: Verify memories were extracted
     ${memory_count}=    Get Length    ${memories}
@@ -179,10 +179,17 @@ Verify Transcription Quality
     ...    Set Variable    ${transcript_raw}[0][text]
     ...    ELSE    Set Variable    ${transcript_raw}
 
-    # Check transcript contains expected content
+    # Check transcript contains expected content. ${expected_content} may be a
+    # single phrase or a list of content words; both are checked the same way.
     ${transcript_lower}=    Convert To Lower Case    ${transcript_text}
-    ${expected_lower}=      Convert To Lower Case    ${expected_content}
-    Should Contain    ${transcript_lower}    ${expected_lower}    Transcript does not contain expected content
+    ${phrases}=    Run Keyword If    isinstance($expected_content, list)
+    ...    Set Variable    ${expected_content}
+    ...    ELSE    Create List    ${expected_content}
+    FOR    ${phrase}    IN    @{phrases}
+        ${phrase_lower}=    Convert To Lower Case    ${phrase}
+        Should Contain    ${transcript_lower}    ${phrase_lower}
+        ...    Transcript does not contain expected content: ${phrase}
+    END
 
     # Verify transcript has reasonable length (at least 50 characters for 4-minute audio)
     ${transcript_length}=    Get Length    ${transcript_text}

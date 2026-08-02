@@ -4,7 +4,7 @@ This document defines the standard tags used across the Chronicle test suite.
 
 ## Simplified Tag Set
 
-Chronicle uses 11 business tags and four execution-requirement tags. The 15 permitted tags are
+Chronicle uses 11 business tags and three execution-requirement tags. The 14 permitted tags are
 defined in [`robot-tags.json`](robot-tags.json), which is the canonical machine-readable allowlist.
 
 ## Tag Format
@@ -91,12 +91,12 @@ defined in [`robot-tags.json`](robot-tags.json), which is the canonical machine-
 
 ### Special Tags
 
-**`requires-api-keys`** - Tests requiring external API services (cloud providers)
-- Full E2E integration tests with transcription and LLM processing
-- Memory extraction verification tests
-- Transcript similarity verification tests
-- Requires: DEEPGRAM_API_KEY and/or OPENAI_API_KEY environment variables
-- These tests are excluded from PR runs by default (run only on dev/main branches)
+> **There is no `requires-api-keys` tag.** Tests are never selected by whether a
+> credential is present. Which backing services are real is a property of the
+> *service profile* a run uses (`tests/profiles.yml`), not of individual tests,
+> and the suite is identical in every profile. If a test seems to need a real
+> provider, the stub is not faithful enough -- record a cassette
+> (`make record-cassettes`) rather than tagging the test out of CI.
 
 **`slow`** - Tests requiring long timeouts (>30s) or infrastructure operations
 - Backend restart tests (service stop/start cycles)
@@ -163,10 +163,9 @@ Use 2-3 tags only when testing interactions between components:
 8. **Is it about health checks?** → `health`
 9. **Is it end-to-end?** → `e2e`
 10. **Is it infrastructure/config?** → `infra`
-11. **Does it require external API keys?** → Add `requires-api-keys` tag
-12. **Does it take >30s or restart services?** → Add `slow` tag
-13. **Is it for unreleased SDK features?** → Add `sdk` tag
-14. **Does it require GPU hardware?** → Add `requires-gpu` tag
+11. **Does it take >30s or restart services?** → Add `slow` tag
+12. **Is it for unreleased SDK features?** → Add `sdk` tag
+13. **Does it require GPU hardware?** → Add `requires-gpu` tag
 
 ### Examples
 
@@ -198,7 +197,7 @@ Use 2-3 tags only when testing interactions between components:
 
 ## Prohibited Tags
 
-**DO NOT create or use any tags other than the 15 approved tags above.**
+**DO NOT create or use any tags other than the 14 approved tags above.**
 
 Commonly misused tags that should NOT be used:
 - ❌ `positive`, `negative` - Test outcome is in the results, not tags
@@ -235,7 +234,7 @@ robot --include audio-upload --include audio-streaming tests/
 
 **STOP!** Ask yourself:
 1. Can I use one of the 11 business tags?
-2. Does the test genuinely need one of the four execution-requirement tags?
+2. Does the test genuinely need one of the three execution-requirement tags?
 3. Is a new tag really necessary for test selection?
 4. Have I checked with the team?
 
@@ -265,12 +264,11 @@ Current distribution (approximate):
 - `audio-upload`: 3 tests
 - `slow`: 2 tests (backend restart tests)
 - `sdk`: 2 tests (SDK integration tests)
-- `requires-api-keys`: 1 test (integration_test.robot)
 - `requires-gpu`: 5 tests (ASR GPU integration tests)
 - `audio-batch`: 0 tests (reserved for future use)
 
 ---
 
 **Last Updated:** 2026-01-29
-**Total Approved Tags:** 15
+**Total Approved Tags:** 14
 **Enforcement:** Mandatory - no exceptions

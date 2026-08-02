@@ -5,7 +5,7 @@
         containers-start containers-stop containers-restart containers-rebuild \
         containers-start-rebuild containers-clean containers-status containers-logs \
         start stop restart rebuild start-rebuild status logs \
-        test test-quick test-custom test-slow test-sdk test-no-api test-with-api-keys test-all-with-slow-and-sdk clean-all \
+        test test-quick test-custom test-slow test-sdk record-cassettes test-all-with-slow-and-sdk clean-all \
         test-asr test-asr-gpu test-asr-strix-parakeet \
         results results-path results-detailed
 
@@ -14,21 +14,25 @@ OUTPUTDIR ?= results
 TEST_DIR = endpoints integration infrastructure asr configuration
 SERVICE ?= chronicle-backend-test
 
-# Test configuration file (set this to use different configs)
-# Can be overridden with CONFIG variable for convenience
-# Examples:
-#   make test CONFIG=deepgram-openai.yml
-#   make test-quick CONFIG=mock-services.yml
-#   make start CONFIG=/app/test-configs/custom.yml
+# Service profile: which backing services are REAL for this run.
+# Declared in tests/profiles.yml; see that file for the full list.
+#
+#   make test                          # stubs only, no credentials (default)
+#   make test PROFILE=deepgram-openai  # real Deepgram + OpenAI
+#
+# There is no separate "with API keys" / "without API keys" test set: the suite
+# is identical in every profile. Stubs replay recorded real responses (see
+# tests/cassettes/), so content assertions hold either way.
+export PROFILE ?= mock
+
+# CONFIG remains as a raw escape hatch for a one-off config file that has no
+# profile entry. When set it wins over PROFILE.
 ifdef CONFIG
-  # If CONFIG is just a filename, prepend the path
   ifeq ($(findstring /,$(CONFIG)),)
     export TEST_CONFIG_FILE = /app/test-configs/$(CONFIG)
   else
     export TEST_CONFIG_FILE = $(CONFIG)
   endif
-else
-  export TEST_CONFIG_FILE ?= /app/test-configs/deepgram-openai.yml
 endif
 
 help:
@@ -36,8 +40,8 @@ help:
 	@echo ""
 	@echo "Quick Commands:"
 	@echo "  make configure     - Set up test API keys (Deepgram, OpenAI)"
-	@echo "  make test          - Start containers + run tests (uses real APIs)"
-	@echo "  make test-no-api   - Run tests without API keys (CI mode)"
+	@echo "  make test          - Start containers + run all tests (PROFILE=mock by default)"
+	@echo "  make test PROFILE=deepgram-openai - Run the same suite against real providers"
 	@echo "  make test-quick    - Run tests on existing containers"
 	@echo "  make start         - Start test containers"
 	@echo "  make stop          - Stop containers (keep volumes)"
@@ -67,7 +71,6 @@ help:
 	@echo "Special Test Tags:"
 	@echo "  make test-slow                    - Run ONLY slow tests (backend restarts)"
 	@echo "  make test-sdk                     - Run ONLY SDK tests (unreleased)"
-	@echo "  make test-no-api                  - Run tests without API keys (CI mode)"
 	@echo "  make test-all-with-slow-and-sdk   - Run ALL tests including excluded"
 	@echo ""
 	@echo "Container Management:"
@@ -92,21 +95,23 @@ help:
 	@echo "Environment Variables:"
 	@echo "  OUTPUTDIR - Output directory (default: results)"
 	@echo "  SERVICE   - Service name for logs (default: chronicle-backend-test)"
-	@echo "  CONFIG    - Config file to use (e.g., deepgram-openai.yml or full path)"
+	@echo "  PROFILE   - Service profile from profiles.yml (default: mock)"
+	@echo "  CONFIG    - Raw config-file override (escape hatch; wins over PROFILE)"
 	@echo ""
-	@echo "Config Options:"
-	@echo "  deepgram-openai.yml            - Real API keys (default)"
-	@echo "  mock-services.yml              - No API keys (for CI)"
-	@echo "  mock-transcription-failure.yml - Test transcription failure scenarios"
+	@echo "Profiles (tests/profiles.yml) - which services are REAL:"
+	@echo "  mock                     - everything stubbed; no credentials (default)"
+	@echo "  deepgram-openai          - real Deepgram STT + real OpenAI LLM"
+	@echo "  deepgram-openai-speaker  - the above + real speaker recognition"
+	@echo "  parakeet-ollama          - real local ASR + local Ollama (no cloud keys)"
+	@echo ""
+	@echo "Cassettes:"
+	@echo "  make record-cassettes PROFILE=deepgram-openai  - re-record stub responses"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make test                          # Default (uses real APIs)"
-	@echo "  make test-no-api                   # CI mode (no API keys)"
-	@echo "  make test CONFIG=mock-services.yml # Custom config"
-	@echo "  make endpoints CONFIG=mock-services.yml  # Endpoint tests with mock"
-	@echo "  make start-rebuild CONFIG=custom.yml     # Rebuild with custom config"
+	@echo "  make test                              # stubs, free, no keys"
+	@echo "  make test PROFILE=deepgram-openai      # same suite, real providers"
 	@echo "  make containers-logs SERVICE=workers-test  # View worker logs"
-	@echo "  make show-config                   # Show current config"
+	@echo "  make show-config                       # Show current config"
 
 # Run all tests (excludes slow, sdk, and requires-gpu tests for faster feedback)
 # Creates a persistent fixture conversation that won't be deleted between suites
@@ -160,10 +165,11 @@ configuration: validate-tags
 # Show current test configuration
 show-config:
 	@echo "Current Test Configuration:"
+	@echo "  PROFILE          = $(PROFILE)"
 	@echo "  TEST_CONFIG_FILE = $(TEST_CONFIG_FILE)"
 	@echo ""
-	@echo "To change config:"
-	@echo "  make test CONFIG=deepgram-openai.yml"
+	@echo "To change profile:"
+	@echo "  make test PROFILE=deepgram-openai"
 	@echo "  make test CONFIG=/path/to/custom.yml"
 
 # Validate suite metadata before spending time starting the composed environment.
@@ -236,20 +242,21 @@ logs: containers-logs
 # Full workflow: start containers + run all tests
 # Auto-detects config mismatch and recreates containers if needed
 test:
-	@RUNNING_CONFIG=$$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
-		$$(docker compose -f ../backends/advanced/docker-compose-test.yml ps -q chronicle-backend-test 2>/dev/null) 2>/dev/null \
-		| grep '^CONFIG_FILE=' | cut -d= -f2); \
-	if [ -n "$$RUNNING_CONFIG" ]; then \
-		if [ "$$RUNNING_CONFIG" != "$(TEST_CONFIG_FILE)" ]; then \
-			echo "⚠️  Container config mismatch: running=$$RUNNING_CONFIG expected=$(TEST_CONFIG_FILE)"; \
-			echo "🔄 Recreating containers with correct config..."; \
-			$(MAKE) containers-stop; \
-			$(MAKE) containers-start; \
-		else \
-			echo "✅ Containers running with correct config: $$RUNNING_CONFIG"; \
-		fi; \
+	@EXPECTED=$$(uv run --with-requirements test-requirements.txt python scripts/resolve_profile.py \
+		--skip-checks 2>/dev/null | grep '^export TEST_CONFIG_FILE=' | cut -d= -f2); \
+	if [ -n "$(TEST_CONFIG_FILE)" ]; then EXPECTED="$(TEST_CONFIG_FILE)"; fi; \
+	ENGINE=$$(./bin/engine-name.sh); \
+	CID=$$($$ENGINE ps -q --filter "name=chronicle-backend-test" 2>/dev/null | head -1); \
+	RUNNING_CONFIG=$$($$ENGINE inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
+		$$CID 2>/dev/null | grep '^CONFIG_FILE=' | cut -d= -f2); \
+	if [ -n "$$RUNNING_CONFIG" ] && [ "$$RUNNING_CONFIG" = "$$EXPECTED" ]; then \
+		echo "✅ Containers already running profile '$(PROFILE)' ($$RUNNING_CONFIG)"; \
 	else \
-		echo "🚀 Starting containers..."; \
+		if [ -n "$$RUNNING_CONFIG" ]; then \
+			echo "⚠️  Profile mismatch: running=$$RUNNING_CONFIG expected=$$EXPECTED"; \
+			$(MAKE) containers-stop; \
+		fi; \
+		echo "🚀 Starting containers for profile '$(PROFILE)'..."; \
 		$(MAKE) containers-start; \
 	fi
 	@$(MAKE) all
@@ -285,40 +292,14 @@ test-sdk:
 		--include sdk \
 		$(TEST_DIR)
 
-# Run ONLY tests that require API keys (Deepgram + OpenAI)
-# Uses default deepgram-openai.yml config
-test-with-api-keys:
-	@echo "🧪 Running tests that require API keys..."
-	@if [ -z "$$DEEPGRAM_API_KEY" ] || [ -z "$$OPENAI_API_KEY" ]; then \
-		echo "❌ Error: DEEPGRAM_API_KEY and OPENAI_API_KEY must be set"; \
-		echo "   export DEEPGRAM_API_KEY='your-key-here'"; \
-		echo "   export OPENAI_API_KEY='your-key-here'"; \
-		exit 1; \
-	fi
-	CREATE_FIXTURE=true uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
-		--name "API Key Tests" \
-		--console verbose \
-		--loglevel INFO:INFO \
-		--include requires-api-keys \
-		$(TEST_DIR)
-
-# Run tests without API keys (CI mode)
-# Switches to mock-services.yml config and excludes requires-api-keys tests
-test-no-api: validate-tags
-	@echo "🔄 Running tests without API keys (CI mode)..."
-	@$(MAKE) containers-stop
-	@TEST_CONFIG_FILE=/app/test-configs/mock-services.yml $(MAKE) containers-start
-	@echo "✅ Containers running with mock-services.yml"
-	@echo "🧪 Running tests (excluding requires-api-keys)..."
-	CREATE_FIXTURE=true uv run --with-requirements test-requirements.txt robot --outputdir $(OUTPUTDIR) \
-		--name "No API Tests" \
-		--console verbose \
-		--loglevel INFO:INFO \
-		--exclude slow \
-		--exclude sdk \
-		--exclude requires-api-keys \
-		--exclude requires-gpu \
-		$(TEST_DIR)
+# Record real provider responses as cassettes for the stubs to replay.
+# This is the ONLY target that needs real credentials, and it is run by hand --
+# never as part of a test run. Cassettes are committed, so a normal run costs
+# nothing and needs no keys.
+record-cassettes:
+	@echo "🎙️  Recording provider cassettes (PROFILE=$(PROFILE))..."
+	uv run --with-requirements test-requirements.txt --with requests \
+		python scripts/record_cassettes.py
 
 # Run ALL tests including slow and SDK tests
 test-all-with-slow-and-sdk:

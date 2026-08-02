@@ -1,3 +1,9 @@
+# The configuration/ suite exercises the real ConfigManager, so the shared
+# chronicle-setup package must be importable. uv resolves this relative path
+# against the WORKING DIRECTORY, not against this file -- every Make target in
+# this directory runs from tests/, so it must stay written relative to tests/.
+../extras/chronicle-setup
+
 robotframework
 robotframework-tidy
 robotframework-requests

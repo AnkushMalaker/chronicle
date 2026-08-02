@@ -14,167 +14,64 @@ Chronicle uses **three separate test workflows** to balance fast PR feedback wit
 |----------|---------|---------------|----------|---------|
 | `python-tests.yml` | Relevant PRs, dev/main | Root, backend, and ASR pytest lanes | Not required | Unit tests and branch coverage reports |
 | `robot-tests.yml` | All PRs | No-API Robot subset | Not required | Fast PR validation |
-| `full-tests-with-api.yml` | Push to dev/main | Full Robot selection | Required | Comprehensive validation |
-| `pr-tests-with-api.yml` | PR label trigger | Full Robot selection | Required | Pre-merge API testing |
 
 ## Workflow Details
 
-### 1. `robot-tests.yml` - PR Tests (No API Keys)
+### 1. `robot-tests.yml` - Robot Framework Tests
 
 **File**: `.github/workflows/robot-tests.yml`
 
-**Trigger**:
-```yaml
-on:
-  pull_request:
-    paths:
-      - 'tests/**/*.robot'
-      - 'tests/**/*.py'
-      - 'backends/advanced/src/**'
+One workflow, one test suite. What varies per run is the **service profile**
+(`tests/profiles.yml`) -- which backing services are real:
+
+| Trigger | Profiles | Secrets |
+|---------|----------|---------|
+| `pull_request` | `mock` | none needed |
+| `push` to `dev`/`main` | `mock`, `deepgram-openai` | Deepgram + OpenAI |
+| `workflow_dispatch` | chosen from a dropdown | as the profile requires |
+
+**There is no API-key test split.** Every test runs in every profile. The `mock`
+profile replays recorded real provider responses from `tests/cassettes/`, so
+assertions about transcript content hold identically with or without
+credentials.
+
+Two consequences worth knowing:
+
+- Fork pull requests work unchanged, because the PR profile needs no secrets.
+- The old `test-with-api-keys` label is gone. It could never have worked for the
+  fork case it was added for: a `pull_request` run from a fork gets no secrets
+  regardless of labels. Supporting that would require `pull_request_target`,
+  which executes untrusted code with secrets in scope.
+
+To validate against real providers before merging, either push to `dev`, or run
+the workflow manually:
+
+```bash
+gh workflow run robot-tests.yml --ref <branch> -f profile=deepgram-openai
 ```
-
-**Characteristics**:
-- **No secrets required** - Works for external contributors
-- **Excludes**: Tests tagged with `requires-api-keys`
-- **Config**: `tests/configs/mock-services.yml`
-- **Makefile Target**: `make test-no-api OUTPUTDIR=results-no-api`
-- **Results**: `results-no-api/`
-- **Time**: ~10-15 minutes
-- **Selection**: Robot cases that do not require secrets, GPUs, or excluded slow/SDK environments
-
-**Benefits**:
-- Fast feedback on PRs
-- No API costs for every PR
-- External contributors can run full CI
-- Most development workflows covered
-
-**What's Tested**:
-- API endpoints (auth, CRUD, permissions)
-- Infrastructure (workers, queues, health)
-- Basic integration (non-transcription)
-
-**What's Skipped**:
-- Audio upload with transcription
-- Memory operations requiring LLM
-- Audio streaming with STT
-- Full E2E pipeline tests
-
-### 2. `full-tests-with-api.yml` - Dev/Main Tests (Full Suite)
-
-**File**: `.github/workflows/full-tests-with-api.yml`
-
-**Trigger**:
-```yaml
-on:
-  push:
-    branches: [dev, main]
-    paths:
-      - 'tests/**'
-      - 'backends/advanced/src/**'
-  workflow_dispatch:  # Manual trigger available
-```
-
-**Characteristics**:
-- **Requires secrets**: `DEEPGRAM_API_KEY`, `OPENAI_API_KEY`, `HF_TOKEN`
-- **Includes**: All tests (including `requires-api-keys`)
-- **Config**: `tests/configs/deepgram-openai.yml`
-- **Test Script**: `./run-robot-tests.sh`
-- **Results**: `results/`
-- **Time**: ~20-30 minutes
-- **Coverage**: 100% of test suite
-
-**Benefits**:
-- Full validation before deployment
-- Catches API integration issues
-- Validates real transcription and memory processing
-- Comprehensive E2E coverage
-
-**What's Tested**:
-- Everything from `robot-tests.yml` PLUS:
-- Audio upload with real transcription
-- Memory extraction with LLM
-- Audio streaming with STT
-- Full E2E pipeline validation
-
-### 3. `pr-tests-with-api.yml` - Label-Triggered PR Tests
-
-**File**: `.github/workflows/pr-tests-with-api.yml`
-
-**Trigger**:
-```yaml
-on:
-  pull_request:
-    types: [labeled, synchronize]
-```
-
-**Condition**:
-```yaml
-if: contains(github.event.pull_request.labels.*.name, 'test-with-api-keys')
-```
-
-**Characteristics**:
-- **Requires**: PR labeled with `test-with-api-keys`
-- **Requires secrets**: `DEEPGRAM_API_KEY`, `OPENAI_API_KEY`, `HF_TOKEN`
-- **Includes**: All tests (same as full-tests-with-api.yml)
-- **Config**: `tests/configs/deepgram-openai.yml`
-- **Time**: ~20-30 minutes
-- **Re-runs**: On new commits while label present
-
-**Benefits**:
-- Test API integrations before merging
-- Useful for PRs modifying transcription/LLM code
-- Maintainers can trigger on trusted PRs
-- Catches issues before they reach dev/main
-
-**Use Cases**:
-- PRs that modify transcription logic
-- PRs that change memory extraction
-- PRs that affect audio processing pipeline
-- Before merging large feature branches
 
 ## Usage Guide
 
 ### For Contributors
 
-**Normal PR Workflow**:
-1. Push your branch
-2. Create PR
-3. `robot-tests.yml` runs the no-API Robot selection automatically
-4. Fix any failures
-5. Merge when tests pass
+Run the same thing CI runs on your PR:
 
-**Testing API Integrations**:
-1. Push your branch
-2. Create PR
-3. Ask maintainer to add `test-with-api-keys` label
-4. `pr-tests-with-api.yml` runs the full Robot selection
-5. Fix any failures
-6. Merge when tests pass
+```bash
+cd tests
+make test                    # profile: mock -- free, no credentials
+```
+
+If it passes locally it should pass on the PR: same suite, same profile.
 
 ### For Maintainers
 
-**Adding the Label**:
 ```bash
-# Via GitHub UI
-1. Go to PR
-2. Click "Labels" on right sidebar
-3. Select "test-with-api-keys"
+# Same suite against real providers
+cd tests && make test PROFILE=deepgram-openai
 
-# Via GitHub CLI
-gh pr edit <pr-number> --add-label "test-with-api-keys"
+# Refresh recorded provider responses (the only step needing credentials)
+cd tests && make record-cassettes PROFILE=deepgram-openai
 ```
-
-**When to Use Label**:
-- PR modifies audio processing or transcription
-- PR changes memory extraction logic
-- PR affects LLM integration
-- Before merging large features
-- When in doubt about API changes
-
-**Removing the Label**:
-- Label is automatically retained on new commits
-- Remove manually if no longer needed
-- Saves API costs if changes don't affect APIs
 
 ## Test Results
 
@@ -220,8 +117,8 @@ Downloadable artifacts for deeper analysis:
 Must be configured in GitHub repository settings:
 
 ```bash
-DEEPGRAM_API_KEY    # Required for full-tests-with-api.yml
-OPENAI_API_KEY      # Required for full-tests-with-api.yml
+DEEPGRAM_API_KEY    # Required for the deepgram-openai profile (dev/main pushes)
+OPENAI_API_KEY      # Required for the deepgram-openai profile (dev/main pushes)
 HF_TOKEN            # Optional (speaker recognition)
 ```
 
@@ -256,7 +153,7 @@ Workflows validate secrets before running tests:
 - **Monthly**: Potentially hundreds of runs
 - **Savings**: Significant with external contributors
 
-**Full Tests** (`full-tests-with-api.yml`, `pr-tests-with-api.yml`):
+**Real-provider runs** (`deepgram-openai` profile, dev/main pushes):
 - **Transcription**: ~$0.10-0.30 per run (Deepgram)
 - **LLM**: ~$0.05-0.15 per run (OpenAI)
 - **Total**: ~$0.15-0.45 per run
@@ -365,14 +262,22 @@ runs-on: ubuntu-latest
 - Look for timing issues (increase timeouts)
 - Check Docker resource limits in CI
 
-### Label Workflow Not Running
+### Want a real-provider run on a PR
 
-**Problem**: Added label but workflow doesn't trigger
-**Solutions**:
-- Verify label name is exactly `test-with-api-keys`
-- Check workflow trigger includes `types: [labeled]`
-- Try removing and re-adding label
-- Push new commit to trigger synchronize event
+There is no label for this, and there cannot usefully be one: a `pull_request`
+run from a fork cannot read repository secrets. Instead:
+
+```bash
+gh workflow run robot-tests.yml --ref <branch> -f profile=deepgram-openai
+```
+
+Or merge to `dev`, where the `deepgram-openai` profile runs automatically.
+
+### A profile fails immediately with a credential error
+
+That is the harness refusing to start a stack it cannot configure. The message
+names the missing variable and how to set it. Run `make test PROFILE=mock` if
+you do not need real providers.
 
 ## Maintenance
 

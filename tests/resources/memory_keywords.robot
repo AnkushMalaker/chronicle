@@ -256,11 +256,11 @@ Check Memory Similarity With OpenAI
     # Call OpenAI API
     ${headers}=    Create Dictionary    Authorization=Bearer ${openai_api_key}    Content-Type=application/json
     ${payload}=    Create Dictionary
-    ...    model=gpt-4o-mini
+    ...    model=${LLM_MODEL}
     ...    messages=${{ [{"role": "user", "content": """${prompt}"""}] }}
     ...    response_format=${{ {"type": "json_object"} }}
 
-    ${response}=    POST    https://api.openai.com/v1/chat/completions
+    ${response}=    POST    ${LLM_API_BASE}/chat/completions
     ...    headers=${headers}
     ...    json=${payload}
     ...    expected_status=200

@@ -6,10 +6,13 @@ Library          Collections
 Library          String
 Library          OperatingSystem
 Variables        ../setup/test_data.py
+Variables        ../setup/test_env.py
 
 *** Variables ***
-${OPENAI_API_BASE}           https://api.openai.com/v1
-${OPENAI_MODEL}              gpt-4o-mini
+# Resolved from the ACTIVE PROFILE's configured LLM (see setup/test_env.py), so a
+# stub run judges with the stub LLM instead of making a real, billable call.
+${OPENAI_API_BASE}           ${LLM_API_BASE}
+${OPENAI_MODEL}              ${LLM_MODEL}
 ${SIMILARITY_THRESHOLD}      0.7
 ${EXPECTED_GROUND_TRUTH}     experts in glass blowing demonstrating techniques
 
@@ -19,8 +22,7 @@ Verify Transcript With AI Similarity
     [Arguments]    ${transcript}    ${ground_truth}=${EXPECTED_GROUND_TRUTH}    ${threshold}=${SIMILARITY_THRESHOLD}
 
     # Get OpenAI API key
-    ${openai_key}=    Get Environment Variable    OPENAI_API_KEY    ${EMPTY}
-    Should Not Be Empty    ${openai_key}    OPENAI_API_KEY required for AI similarity checking
+    ${openai_key}=    Set Variable    ${LLM_API_KEY}
 
     # Prepare similarity check prompt
     ${prompt}=    Create Similarity Check Prompt    ${transcript}    ${ground_truth}
@@ -210,50 +212,51 @@ Verify Segment Speaker Diarization
     RETURN    ${speaker_count}
 
 Verify Segments Match Expected Timestamps
-    [Documentation]    Verify that segment timestamps match expected test data within tolerance
+    [Documentation]    Verify segment timestamps are internally consistent.
+    ...
+    ...                This deliberately checks INVARIANTS, not exact values. It used to
+    ...                compare against a snapshot of one provider's segmentation with a
+    ...                0.01s tolerance, which is unstable even against that same provider
+    ...                (any model update shifts the boundaries) and meaningless against any
+    ...                other. That made the test a statement about the vendor rather than
+    ...                about Chronicle.
+    ...
+    ...                What the pipeline actually owes us is that segments come back ordered,
+    ...                non-overlapping, positive-length, and inside the audio -- which holds
+    ...                for every provider and every profile.
     ...
     ...                Arguments:
     ...                - segments: Actual segments from conversation to verify
-    ...                - expected_segments: Expected segment timestamps (default: EXPECTED_SEGMENT_TIMES from test_data.py)
-    ...                - tolerance: Maximum allowed time difference in seconds (default: SEGMENT_TIME_TOLERANCE from test_data.py)
-    [Arguments]    ${segments}    ${expected_segments}=${None}    ${tolerance}=${None}
+    ...                - audio_duration: Upper bound in seconds (default: no upper bound)
+    [Arguments]    ${segments}    ${audio_duration}=${None}
 
-    # Use defaults from test_data.py if not provided
-    ${expected_segments}=    Set Variable If    ${expected_segments} is ${None}    ${EXPECTED_SEGMENT_TIMES}    ${expected_segments}
-    ${tolerance}=            Set Variable If    ${tolerance} is ${None}            ${SEGMENT_TIME_TOLERANCE}    ${tolerance}
+    ${count}=    Get Length    ${segments}
+    Should Be True    ${count} > 0    No segments returned
 
-    # Verify we have the expected number of segments
-    ${actual_count}=    Get Length    ${segments}
-    ${expected_count}=  Get Length    ${expected_segments}
-    # # Should Be Equal As Integers    ${actual_count}    ${expected_count}
-    # ...    Expected ${expected_count} segments, got ${actual_count}
+    ${prev_end}=    Set Variable    ${0}
+    FOR    ${index}    ${segment}    IN ENUMERATE    @{segments}
+        Dictionary Should Contain Key    ${segment}    start
+        Dictionary Should Contain Key    ${segment}    end
 
-    # Compare each segment's timestamps
-    ${index}=    Set Variable    ${0}
-    FOR    ${segment}    IN    @{segments}
-        ${expected}=    Set Variable    ${expected_segments}[${index}]
+        ${start}=    Set Variable    ${segment}[start]
+        ${end}=      Set Variable    ${segment}[end]
 
-        ${actual_start}=    Set Variable    ${segment}[start]
-        ${actual_end}=      Set Variable    ${segment}[end]
-        ${expected_start}=  Set Variable    ${expected}[start]
-        ${expected_end}=    Set Variable    ${expected}[end]
+        Should Be True    $start >= 0
+        ...    Segment ${index} starts before zero: ${start}s
+        Should Be True    $end > $start
+        ...    Segment ${index} has non-positive duration: ${start}s -> ${end}s
+        Should Be True    $start >= $prev_end - 0.1
+        ...    Segment ${index} overlaps the previous segment (starts ${start}s, previous ended ${prev_end}s)
 
-        # Check start time within tolerance
-        ${start_diff}=    Evaluate    abs($actual_start - $expected_start)
-        Should Be True    $start_diff <= $tolerance
-        ...    Segment ${index} start time mismatch: expected ${expected_start}s, got ${actual_start}s (diff: ${start_diff}s, tolerance: ${tolerance}s)
+        IF    $audio_duration is not None
+            Should Be True    $end <= $audio_duration + 1
+            ...    Segment ${index} ends at ${end}s, past the ${audio_duration}s of audio
+        END
 
-        # Check end time within tolerance
-        ${end_diff}=    Evaluate    abs($actual_end - $expected_end)
-        Should Be True    $end_diff <= $tolerance
-        ...    Segment ${index} end time mismatch: expected ${expected_end}s, got ${actual_end}s (diff: ${end_diff}s, tolerance: ${tolerance}s)
-
-        Log    Segment ${index}: start=${actual_start}s (expected ${expected_start}s), end=${actual_end}s (expected ${expected_end}s) ✓    INFO
-        ${index}=    Evaluate    ${index} + 1
+        ${prev_end}=    Set Variable    ${end}
     END
 
-    Log    All ${actual_count} segments matched expected timestamps within ${tolerance}s tolerance    INFO
-
+    Log    ${count} segments are ordered, non-overlapping and in range    INFO
 
 
 Verify Transcript Content

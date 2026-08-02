@@ -15,7 +15,7 @@ Test Setup       Test Cleanup
 
 Get User Memories Test
     [Documentation]    Test getting memories for authenticated user and verify trumpet flower memory exists if memories are present
-    [Tags]    memory	permissions	requires-api-keys
+    [Tags]    memory	permissions
 
     ${response}=       GET On Session    api    /api/memories
 
@@ -67,7 +67,7 @@ Get User Memories Test
 
 Search Memories Test
     [Documentation]    Test searching memories by query and verify trumpet flower memory exists
-    [Tags]    memory	requires-api-keys
+    [Tags]    memory
 
     &{params}=         Create Dictionary    query=trumpet flower    limit=20    score_threshold=0.4
     ${response}=       GET On Session    api    /api/memories/search    params=${params}
@@ -100,7 +100,7 @@ Search Memories Test
 
 Memory Pagination Test
     [Documentation]    Test memory pagination with different limits
-    [Tags]    memory	requires-api-keys
+    [Tags]    memory
 
     # Test with small limit
     &{params1}=    Create Dictionary    limit=5

@@ -140,7 +140,7 @@ Reload Memory Config Test
 
 Delete All User Memories Test
     [Documentation]    Test deleting all memories for current user
-    [Tags]    infra	memory	permissions	requires-api-keys
+    [Tags]    infra	memory	permissions
 
     ${response}=       DELETE On Session    api   /api/admin/memory/delete-all
     Should Be Equal As Integers    ${response.status_code}    200

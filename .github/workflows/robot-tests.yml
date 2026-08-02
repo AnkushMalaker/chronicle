@@ -1,291 +1,174 @@
-name: Robot Framework Tests (No API Keys)
+name: Robot Framework Tests
+
+# One suite, run against a service profile (tests/profiles.yml).
+#
+# There is deliberately no "with API keys" / "without API keys" split. Every test
+# runs in every profile; the stub profile replays recorded real provider
+# responses (tests/cassettes/) so content assertions mean the same thing either
+# way. What varies between profiles is which backing services are real, not which
+# tests execute.
+#
+#   pull_request      -> mock. Needs no secrets, so it works unchanged on forks.
+#                        (A fork PR cannot read secrets under `pull_request` no
+#                        matter what label it carries, so the old
+#                        label-triggered workflow could never have worked for
+#                        the fork case it was added for. Making it work would
+#                        need `pull_request_target`, which runs untrusted code
+#                        with secrets in scope -- not worth it.)
+#   push dev/main     -> mock.
+#   workflow_dispatch -> any profile, on demand.
+#
+# No cloud provider runs automatically. Automatic runs against a paid API cost
+# money on every push and pin CI to whichever vendor happens to be listed here,
+# which goes stale the moment the deployment switches providers. Testing a
+# specific provider's integration is a deliberate act: dispatch the profile you
+# want.
 
 on:
   pull_request:
     paths:
-      - 'tests/**/*.robot'
-      - 'tests/**/*.py'
+      - 'tests/**'
       - 'backends/advanced/src/**'
       - '.github/workflows/robot-tests.yml'
+  push:
+    branches: [dev, main]
+    paths:
+      - 'tests/**'
+      - 'backends/advanced/src/**'
+      - '.github/workflows/robot-tests.yml'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Service profile to run against'
+        required: true
+        default: 'mock'
+        type: choice
+        options:
+          - mock
+          - smallest-openai
+          - deepgram-openai
+          - deepgram-openai-speaker
+          - parakeet-ollama
 
 permissions:
   contents: read
   pull-requests: write
-  issues: write
-  pages: write
-  id-token: write
 
 jobs:
-  robot-tests:
+  select-profiles:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    outputs:
+      profiles: ${{ steps.pick.outputs.profiles }}
+    steps:
+      - id: pick
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo 'profiles=["${{ inputs.profile }}"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'profiles=["mock"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  robot-tests:
+    needs: select-profiles
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ${{ fromJSON(needs.select-profiles.outputs.profiles) }}
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      with:
-        driver-opts: |
-          image=moby/buildkit:latest
-          network=host
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
 
-    - name: Cache Docker layers
-      uses: actions/cache@v4
-      with:
-        path: /tmp/.buildx-cache
-        key: ${{ runner.os }}-buildx-${{ hashFiles('backends/advanced/Dockerfile', 'backends/advanced/pyproject.toml') }}
-        restore-keys: |
-          ${{ runner.os }}-buildx-
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ hashFiles('backends/advanced/Dockerfile', 'backends/advanced/pyproject.toml') }}
+          restore-keys: ${{ runner.os }}-buildx-
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.12"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-    - name: Install uv
-      uses: astral-sh/setup-uv@v4
-      with:
-        version: "latest"
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
 
-    - name: Install Robot Framework and dependencies
-      run: |
-        uv pip install --system robotframework robotframework-requests python-dotenv websockets
+      - name: Create plugins.yml from template
+        run: cp config/plugins.yml.template config/plugins.yml
 
-    - name: Create test config.yml
-      run: |
-        echo "Copying mock services configuration file..."
-        mkdir -p config
-        cp tests/configs/mock-services.yml config/config.yml
-        echo "✓ Test config.yml created from tests/configs/mock-services.yml"
-        echo "ℹ️  This config disables external API dependencies (transcription, LLM)"
-        ls -lh config/config.yml
+      - name: Run Robot Framework tests (profile=${{ matrix.profile }})
+        working-directory: tests
+        env:
+          PROFILE: ${{ matrix.profile }}
+          # Every provider credential the dispatchable profiles might ask for.
+          # All are absent for the mock profile and on fork PRs, which is fine --
+          # resolve_profile.py fails fast with an actionable message when the
+          # chosen profile needs one and it is missing, rather than letting auth
+          # errors surface as confusing test failures.
+          SMALLEST_API_KEY: ${{ secrets.SMALLEST_API_KEY }}
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          CLEANUP_CONTAINERS: "false"
+        run: |
+          TEST_EXIT_CODE=0
+          make test OUTPUTDIR=results || TEST_EXIT_CODE=$?
+          echo "test_exit_code=$TEST_EXIT_CODE" >> "$GITHUB_ENV"
+          exit 0
 
-    - name: Create plugins.yml from template
-      run: |
-        echo "Creating plugins.yml from template..."
-        if [ -f "config/plugins.yml.template" ]; then
-          cp config/plugins.yml.template config/plugins.yml
-          echo "✓ plugins.yml created from template"
-          ls -lh config/plugins.yml
-        else
-          echo "❌ ERROR: config/plugins.yml.template not found"
-          exit 1
-        fi
+      - name: Save service logs
+        if: always()
+        working-directory: tests
+        run: |
+          mkdir -p logs
+          for svc in chronicle-backend-test workers-test mongo-test redis-test; do
+            docker logs "backend-test-$svc-1" > "logs/$svc.log" 2>&1 || true
+          done
 
-    - name: Run Robot Framework tests (No API Keys)
-      working-directory: tests
-      run: |
-        # Use Makefile target (starts containers with mock config, excludes api-keys/slow/sdk/gpu tests)
-        TEST_EXIT_CODE=0
-        make test-no-api OUTPUTDIR=results-no-api || TEST_EXIT_CODE=$?
-        echo "test_exit_code=$TEST_EXIT_CODE" >> "$GITHUB_ENV"
-        exit 0  # Don't fail here, we'll fail at the end after uploading artifacts
+      - name: Upload service logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robot-service-logs-${{ matrix.profile }}
+          path: tests/logs/
+          retention-days: 7
 
-    - name: Save service logs to files
-      if: always()
-      working-directory: backends/advanced
-      run: |
-        echo "Checking running containers..."
-        docker compose -f docker-compose-test.yml ps -a
-        echo ""
-        echo "Saving service logs to files..."
-        mkdir -p logs
-        docker compose -f docker-compose-test.yml logs chronicle-backend-test > logs/backend.log 2>&1 || true
-        docker compose -f docker-compose-test.yml logs workers-test > logs/workers.log 2>&1 || true
-        docker compose -f docker-compose-test.yml logs mongo-test > logs/mongo.log 2>&1 || true
-        docker compose -f docker-compose-test.yml logs redis-test > logs/redis.log 2>&1 || true
-        docker compose -f docker-compose-test.yml logs speaker-service-test > logs/speaker.log 2>&1 || true
-        echo "✓ Logs saved to backends/advanced/logs/"
-        ls -lh logs/
+      - name: Upload Robot reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: robot-reports-${{ matrix.profile }}
+          path: |
+            tests/results/report.html
+            tests/results/log.html
+            tests/results/output.xml
+          retention-days: 14
 
-    - name: Upload service logs
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: robot-service-logs
-        path: backends/advanced/logs/
-        if-no-files-found: warn
-        retention-days: 14
+      - name: Summarize
+        if: always()
+        working-directory: tests
+        run: |
+          {
+            echo "## Robot Framework — profile \`${{ matrix.profile }}\`"
+            echo ""
+            if [ -f results/output.xml ]; then
+              uv run --with-requirements test-requirements.txt python show_results.py || true
+            else
+              echo "No results produced."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
-    - name: Check if test results exist
-      if: always()
-      id: check_results
-      run: |
-        if [ -f tests/results-no-api/output.xml ]; then
-          echo "results_exist=true" >> $GITHUB_OUTPUT
-        else
-          echo "results_exist=false" >> $GITHUB_OUTPUT
-          echo "⚠️ No test results found in tests/results-no-api/"
-          ls -la tests/results-no-api/ || echo "Results directory doesn't exist"
-        fi
-
-    - name: Upload Robot Framework HTML reports
-      if: always() && steps.check_results.outputs.results_exist == 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: robot-test-reports-html-no-api
-        path: |
-          tests/results-no-api/report.html
-          tests/results-no-api/log.html
-        retention-days: 30
-
-    - name: Publish HTML Report as GitHub Pages artifact
-      if: always() && steps.check_results.outputs.results_exist == 'true'
-      uses: actions/upload-pages-artifact@v3
-      with:
-        path: tests/results-no-api
-
-    - name: Deploy to GitHub Pages
-      if: always() && steps.check_results.outputs.results_exist == 'true'
-      uses: actions/deploy-pages@v4
-      id: deployment
-
-    - name: Generate test summary
-      if: always() && steps.check_results.outputs.results_exist == 'true'
-      id: test_summary
-      run: |
-        # Parse test results
-        python3 << 'PYTHON_SCRIPT' > test_summary.txt
-        import xml.etree.ElementTree as ET
-        tree = ET.parse('tests/results-no-api/output.xml')
-        root = tree.getroot()
-        stats = root.find('.//total/stat')
-        if stats is not None:
-            passed = stats.get("pass", "0")
-            failed = stats.get("fail", "0")
-            total = int(passed) + int(failed)
-            print(f"PASSED={passed}")
-            print(f"FAILED={failed}")
-            print(f"TOTAL={total}")
-        PYTHON_SCRIPT
-
-        # Source the variables
-        source test_summary.txt
-
-        # Set outputs
-        echo "passed=$PASSED" >> $GITHUB_OUTPUT
-        echo "failed=$FAILED" >> $GITHUB_OUTPUT
-        echo "total=$TOTAL" >> $GITHUB_OUTPUT
-
-    - name: Post PR comment with test results
-      if: always() && steps.check_results.outputs.results_exist == 'true'
-      uses: actions/github-script@v7
-      with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        script: |
-          const passed = '${{ steps.test_summary.outputs.passed }}';
-          const failed = '${{ steps.test_summary.outputs.failed }}';
-          const total = '${{ steps.test_summary.outputs.total }}';
-          const runUrl = `https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
-          const pagesUrl = '${{ steps.deployment.outputs.page_url }}';
-
-          const status = failed === '0' ? '✅ All tests passed!' : '❌ Some tests failed';
-          const emoji = failed === '0' ? '🎉' : '⚠️';
-
-          const comment = `## ${emoji} Robot Framework Test Results (No API Keys)
-
-          **Status**: ${status}
-
-          ℹ️ **Note**: This run excludes tests requiring external API keys (Deepgram, OpenAI).
-          Tests tagged with \`requires-api-keys\` will run on dev/main branches.
-
-          | Metric | Count |
-          |--------|-------|
-          | ✅ Passed | ${passed} |
-          | ❌ Failed | ${failed} |
-          | 📊 Total | ${total} |
-
-          ### 📊 View Reports
-
-          **GitHub Pages (Live Reports):**
-          - [📋 Test Report](${pagesUrl}report.html)
-          - [📝 Detailed Log](${pagesUrl}log.html)
-
-          **Download Artifacts:**
-          - [robot-test-reports-html-no-api](${runUrl}) - HTML reports
-          - [robot-test-results-xml-no-api](${runUrl}) - XML output
-
-          ---
-          *[View full workflow run](${runUrl})*`;
-
-          github.rest.issues.createComment({
-            issue_number: context.issue.number,
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            body: comment
-          });
-
-    - name: Upload Robot Framework XML output
-      if: always() && steps.check_results.outputs.results_exist == 'true'
-      uses: actions/upload-artifact@v4
-      with:
-        name: robot-test-results-xml-no-api
-        path: tests/results-no-api/output.xml
-        retention-days: 30
-
-    - name: Upload logs on failure
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: robot-test-logs-no-api
-        path: |
-          backends/advanced/logs/*.log
-          backends/advanced/.env
-          tests/setup/.env.test
-        retention-days: 7
-
-    - name: Display test results summary
-      if: always()
-      run: |
-        if [ -f tests/results-no-api/output.xml ]; then
-          echo "Test results generated successfully (No API Keys mode)"
-          echo "========================================"
-          python3 << 'PYTHON_SCRIPT'
-        import xml.etree.ElementTree as ET
-        tree = ET.parse('tests/results-no-api/output.xml')
-        root = tree.getroot()
-        stats = root.find('.//total/stat')
-        if stats is not None:
-            passed = stats.get("pass", "0")
-            failed = stats.get("fail", "0")
-            print(f'✅ Passed: {passed}')
-            print(f'❌ Failed: {failed}')
-            print(f'📊 Total: {int(passed) + int(failed)}')
-        PYTHON_SCRIPT
-          echo "========================================"
-          echo ""
-          echo "ℹ️  Tests excluded: requires-api-keys (run on dev/main branches)"
-          echo ""
-          echo "📊 FULL TEST REPORTS AVAILABLE:"
-          echo "  1. Go to the 'Summary' tab at the top of this page"
-          echo "  2. Scroll down to 'Artifacts' section"
-          echo "  3. Download 'robot-test-reports-html-no-api'"
-          echo "  4. Extract and open report.html or log.html in your browser"
-          echo ""
-          echo "The HTML reports provide:"
-          echo "  - report.html: Executive summary with statistics"
-          echo "  - log.html: Detailed step-by-step execution log"
-          echo ""
-        fi
-
-    - name: Cleanup
-      if: always()
-      working-directory: backends/advanced
-      run: |
-        docker compose -f docker-compose-test.yml down -v
-
-    - name: Fail workflow if tests failed
-      if: always()
-      run: |
-        TEST_EXIT_CODE="${{ env.test_exit_code }}"
-        if [ -z "$TEST_EXIT_CODE" ]; then
-          echo "❌ Test step did not record an exit code; check earlier setup/test steps"
-          exit 1
-        elif [ "$TEST_EXIT_CODE" != "0" ]; then
-          echo "❌ Tests failed with exit code $TEST_EXIT_CODE"
-          exit 1
-        else
-          echo "✅ All tests passed"
-        fi
+      - name: Fail if tests failed
+        if: always()
+        run: |
+          if [ "${test_exit_code:-0}" != "0" ]; then
+            echo "Robot Framework tests failed (exit ${test_exit_code})"
+            exit 1
+          fi

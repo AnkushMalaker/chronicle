@@ -30,7 +30,12 @@ class ConfigTestHelper:
         # We need to ensure values are strings for os.environ
         str_env_vars = {k: str(v) for k, v in env_vars.items()}
 
-        with patch.dict(os.environ, str_env_vars):
+        # clear=True makes resolution hermetic. Without it patch.dict MERGES with
+        # the real environment, so a developer's .env leaks into the test: a case
+        # that passes {} to assert the template's default instead resolves against
+        # whatever that machine happens to export, and the result differs between
+        # machines and CI.
+        with patch.dict(os.environ, str_env_vars, clear=True):
             conf = OmegaConf.create(config_template)
             resolved = OmegaConf.to_container(conf, resolve=True)
             return resolved

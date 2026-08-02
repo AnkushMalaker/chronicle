@@ -34,24 +34,24 @@ Clear Test Databases
     Log To Console    Clearing test databases and audio files...
 
     # Clear MongoDB collections but preserve admin user and fixtures
-    Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.users.deleteMany({'email': {\\$ne:'${ADMIN_EMAIL}'}})"    shell=True
+    Run Process    ${CONTAINER_ENGINE} exec ${MONGO_CONTAINER} mongosh test_db --eval "db.users.deleteMany({'email': {\\$ne:'${ADMIN_EMAIL}'}})"    shell=True
 
     # Clear conversations except those tagged as fixtures
-    Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.deleteMany({\\$or: [{'is_fixture': {\\$exists: false}}, {'is_fixture': false}]})"    shell=True
+    Run Process    ${CONTAINER_ENGINE} exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.deleteMany({\\$or: [{'is_fixture': {\\$exists: false}}, {'is_fixture': false}]})"    shell=True
 
     # Delete old fixture conversations that don't have audio chunks (from pre-MongoDB-migration)
     ${delete_fixtures_script}=    Set Variable    const fixturesWithoutChunks = db.conversations.find({'is_fixture': true}).toArray().filter(c => db.audio_chunks.countDocuments({conversation_id: c.conversation_id}) === 0).map(c => c.conversation_id); if (fixturesWithoutChunks.length > 0) { db.conversations.deleteMany({conversation_id: {$in: fixturesWithoutChunks}}); print('Deleted ' + fixturesWithoutChunks.length + ' old fixture(s)'); }
-    Run Process    docker    exec    ${MONGO_CONTAINER}    mongosh    test_db    --eval    ${delete_fixtures_script}    shell=True
+    Run Process    ${CONTAINER_ENGINE}    exec    ${MONGO_CONTAINER}    mongosh    test_db    --eval    ${delete_fixtures_script}    shell=True
 
     # Clear audio chunks except those belonging to remaining fixture conversations
     ${clear_chunks_script}=    Set Variable    const fixtureIds = db.conversations.find({'is_fixture': true}, {conversation_id: 1}).map(c => c.conversation_id); db.audio_chunks.deleteMany({conversation_id: {$nin: fixtureIds}})
-    Run Process    docker    exec    ${MONGO_CONTAINER}    mongosh    test_db    --eval    ${clear_chunks_script}    shell=True
+    Run Process    ${CONTAINER_ENGINE}    exec    ${MONGO_CONTAINER}    mongosh    test_db    --eval    ${clear_chunks_script}    shell=True
 
     # Clear job references from remaining conversations to prevent "No such job" errors
-    Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.updateMany({}, {\\$unset: {'transcription_job_id': '', 'speaker_job_id': '', 'memory_job_id': ''}})"    shell=True
+    Run Process    ${CONTAINER_ENGINE} exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.updateMany({}, {\\$unset: {'transcription_job_id': '', 'speaker_job_id': '', 'memory_job_id': ''}})"    shell=True
 
     # Count fixtures for logging
-    ${result}=    Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.countDocuments({'is_fixture': true})" --quiet    shell=True
+    ${result}=    Run Process    ${CONTAINER_ENGINE} exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.countDocuments({'is_fixture': true})" --quiet    shell=True
     ${fixture_count}=    Strip String    ${result.stdout}
 
     IF    '${fixture_count}' != '0'
@@ -61,7 +61,7 @@ Clear Test Databases
     END
 
     # Clear admin user's registered_clients dict to prevent client_id counter increments
-    Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.users.updateOne({'email':'${ADMIN_EMAIL}'}, {\\$set: {'registered_clients': {}}})"    shell=True
+    Run Process    ${CONTAINER_ENGINE} exec ${MONGO_CONTAINER} mongosh test_db --eval "db.users.updateOne({'email':'${ADMIN_EMAIL}'}, {\\$set: {'registered_clients': {}}})"    shell=True
 
     # Clear audio files (except fixtures subfolder)
     Run Process    bash    -c    find ${BACKEND_DIR}/data/test_audio_chunks -maxdepth 1 -name "*.wav" -delete || true    shell=True
@@ -70,14 +70,19 @@ Clear Test Databases
     Log To Console    Audio files cleared (fixtures/ subfolder preserved)
 
     # Clear container audio files (except fixtures subfolder)
-    Run Process    bash    -c    docker exec ${BACKEND_CONTAINER} find /app/audio_chunks -maxdepth 1 -name "*.wav" -delete || true    shell=True
+    Run Process    bash    -c    ${CONTAINER_ENGINE} exec ${BACKEND_CONTAINER} find /app/audio_chunks -maxdepth 1 -name "*.wav" -delete || true    shell=True
     # Don't delete plugin database files - database is cleared via Clear Plugin Events keyword
-    # Run Process    bash    -c    docker exec ${BACKEND_CONTAINER} find /app/debug_dir -name "*" -type f -delete || true    shell=True
+    # Run Process    bash    -c    ${CONTAINER_ENGINE} exec ${BACKEND_CONTAINER} find /app/debug_dir -name "*" -type f -delete || true    shell=True
 
     # Clear Redis queues and job registries (preserve worker registrations, failed and finished jobs)
     # Delete all rq:* keys except worker registrations (rq:worker:*), failed jobs (rq:failed:*), and finished jobs (rq:finished:*)
-    ${redis_clear_script}=    Set Variable    redis-cli --scan --pattern "rq:*" | grep -Ev "^rq:(worker|failed|finished)" | xargs -r redis-cli DEL; redis-cli --scan --pattern "audio:*" | xargs -r redis-cli DEL; redis-cli --scan --pattern "consumer:*" | xargs -r redis-cli DEL; redis-cli --scan --pattern "transcription:*" | xargs -r redis-cli DEL
-    Run Process    docker    exec    ${REDIS_CONTAINER}    sh    -c    ${redis_clear_script}    shell=True
+    # audio:session:* is deliberately excluded -- see Cleanup Redis Audio State.
+    # The backend's ClientManager is in-process and survives a Redis flush, so
+    # deleting a session it still references makes it raise "Connected client X
+    # references missing session Y" on a LATER test (client ids are derived from
+    # user + device name, so they repeat across runs).
+    ${redis_clear_script}=    Set Variable    redis-cli --scan --pattern "rq:*" | grep -Ev "^rq:(worker|failed|finished)" | xargs -r redis-cli DEL; redis-cli --scan --pattern "audio:stream:*" | xargs -r redis-cli DEL; redis-cli --scan --pattern "audio:file:*" | xargs -r redis-cli DEL; redis-cli --scan --pattern "consumer:*" | xargs -r redis-cli DEL; redis-cli --scan --pattern "transcription:*" | xargs -r redis-cli DEL
+    Run Process    ${CONTAINER_ENGINE}    exec    ${REDIS_CONTAINER}    sh    -c    ${redis_clear_script}    shell=True
     Log To Console    Redis queues and job registries cleared (worker registrations preserved)
 
 Clear All Test Data
@@ -85,9 +90,9 @@ Clear All Test Data
     Log To Console    Clearing ALL test data including admin user and fixtures...
 
     # Wipe all MongoDB collections
-    Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.users.deleteMany({})"    shell=True
-    Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.deleteMany({})"    shell=True
-    Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.audio_chunks.deleteMany({})"    shell=True
+    Run Process    ${CONTAINER_ENGINE} exec ${MONGO_CONTAINER} mongosh test_db --eval "db.users.deleteMany({})"    shell=True
+    Run Process    ${CONTAINER_ENGINE} exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.deleteMany({})"    shell=True
+    Run Process    ${CONTAINER_ENGINE} exec ${MONGO_CONTAINER} mongosh test_db --eval "db.audio_chunks.deleteMany({})"    shell=True
     Log To Console    MongoDB completely cleared
 
     # Clear all audio files
@@ -95,7 +100,7 @@ Clear All Test Data
     Run Process    bash    -c    rm -rf ${BACKEND_DIR}/data/test_debug_dir/* || true    shell=True
 
     # Clear all Redis data
-    Run Process    docker    exec    ${REDIS_CONTAINER}    redis-cli    FLUSHALL    shell=True
+    Run Process    ${CONTAINER_ENGINE}    exec    ${REDIS_CONTAINER}    redis-cli    FLUSHALL    shell=True
     Log To Console    All test data cleared
 
 
@@ -151,7 +156,7 @@ Create Fixture Conversation
     Should Not Be Empty    ${transcript}    Fixture conversation has no transcript
 
     # Tag this conversation as a fixture in MongoDB so cleanup preserves it
-    ${result}=    Run Process    docker exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.updateOne({'conversation_id': '${conversation_id}'}, {\\$set: {'is_fixture': true}})"    shell=True
+    ${result}=    Run Process    ${CONTAINER_ENGINE} exec ${MONGO_CONTAINER} mongosh test_db --eval "db.conversations.updateOne({'conversation_id': '${conversation_id}'}, {\\$set: {'is_fixture': true}})"    shell=True
     Should Be Equal As Integers    ${result.rc}    0    Failed to tag conversation as fixture: ${result.stderr}
 
     Log To Console    ✓ Audio files stored in fixtures/ subfolder
@@ -198,11 +203,40 @@ Test Cleanup
     # from re-discovering and re-processing completed streams (zombie tasks)
     Cleanup Redis Audio State
 
+Wait For Sessions To Settle
+    [Documentation]    Block until no audio session is still ACTIVE.
+    ...
+    ...                Closing the client socket only starts the teardown: the backend's
+    ...                disconnect handler runs asynchronously and then reads the session it
+    ...                owns. ClientManager is in-process, so it survives a Redis flush --
+    ...                deleting audio:session:* while that handler is still pending makes it
+    ...                raise "Connected client X references missing session Y", which then
+    ...                fails the NEXT test rather than this one.
+    ...
+    ...                Waiting on the state the handler actually transitions (status leaves
+    ...                "active") is a causal barrier, so it is correct regardless of how long
+    ...                the handler takes -- unlike a fixed sleep.
+    ${script}=    Set Variable    for k in $(redis-cli --scan --pattern "audio:session:*"); do redis-cli HGET $k status; done | grep -c '^active$' || true
+    ${result}=    Run Process    ${CONTAINER_ENGINE}    exec    ${REDIS_CONTAINER}    sh    -c    ${script}    shell=True
+    ${active}=    Set Variable    ${result.stdout.strip()}
+    Should Be Equal    ${active}    0    ${active} session(s) still active
+
 Cleanup Redis Audio State
     [Documentation]    Delete audio/transcription Redis keys between tests.
     ...                Without this, the streaming consumer re-discovers completed streams,
-    ...                spawns zombie process_stream tasks that each open a Deepgram WebSocket
+    ...                spawns zombie process_stream tasks that each open a provider WebSocket
     ...                connection. After several tests, accumulated zombie connections exhaust
-    ...                Deepgram's concurrent connection limit, causing later tests to fail.
-    ${redis_clear_script}=    Set Variable    redis-cli --scan --pattern "audio:*" | xargs -r redis-cli DEL; redis-cli --scan --pattern "transcription:*" | xargs -r redis-cli DEL; redis-cli --scan --pattern "conversation:current:*" | xargs -r redis-cli DEL
-    Run Process    docker    exec    ${REDIS_CONTAINER}    sh    -c    ${redis_clear_script}    shell=True
+    ...                the provider's concurrent connection limit, causing later tests to fail.
+    # Barrier first: never delete session state out from under a pending disconnect handler.
+    Run Keyword And Ignore Error    Wait Until Keyword Succeeds    15s    1s    Wait For Sessions To Settle
+    #
+    # Deliberately NOT deleting audio:session:*. The zombie-stream problem this
+    # keyword exists for is about audio:stream:*; session hashes are owned by the
+    # backend, whose ClientManager is in-process and therefore survives a Redis
+    # flush. Deleting a session leaves that registry pointing at a key that no
+    # longer exists, and the backend then raises "Connected client X references
+    # missing session Y" -- on the NEXT run, because client ids are derived
+    # deterministically from user + device name and so repeat. The backend expires
+    # its own sessions after finalization; let it.
+    ${redis_clear_script}=    Set Variable    redis-cli --scan --pattern "audio:stream:*" | xargs -r redis-cli DEL; redis-cli --scan --pattern "audio:file:*" | xargs -r redis-cli DEL; redis-cli --scan --pattern "transcription:*" | xargs -r redis-cli DEL; redis-cli --scan --pattern "conversation:current:*" | xargs -r redis-cli DEL
+    Run Process    ${CONTAINER_ENGINE}    exec    ${REDIS_CONTAINER}    sh    -c    ${redis_clear_script}    shell=True

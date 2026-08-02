@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 
+import yaml
 from dotenv import load_dotenv
 
 # Load environment files with correct precedence:
@@ -73,8 +74,80 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 # Test Configuration
 TEST_CONFIG = {"retry_count": 3, "retry_delay": 1, "default_timeout": 30}
 
-# Container engine: docker in CI; export CONTAINER_ENGINE=podman on podman machines.
-CONTAINER_ENGINE = os.getenv("CONTAINER_ENGINE", "docker")
+
+# Container engine. Same precedence as tests/bin/_engine.sh and services.py:
+# CONTAINER_ENGINE env -> config/config.yml container_engine -> docker default.
+# Reading config.yml matters because a podman host selects the engine there, not
+# in the environment; without it the keywords shell out to a `docker` binary that
+# does not exist and every container-touching test fails for a reason that has
+# nothing to do with what it is testing.
+def _detect_container_engine() -> str:
+    from_env = os.getenv("CONTAINER_ENGINE")
+    if from_env:
+        return from_env
+
+    config_path = REPO_ROOT / "config" / "config.yml"
+    if config_path.exists():
+        for line in config_path.read_text().splitlines():
+            if line.startswith("container_engine:"):
+                return line.split(":", 1)[1].strip().strip("\"'")
+
+    return "docker"
+
+
+CONTAINER_ENGINE = _detect_container_engine()
+
+
+# The LLM the ACTIVE PROFILE configures -- never a hardcoded vendor endpoint.
+#
+# Some verification keywords ask an LLM to judge output quality. Pointing those
+# at api.openai.com directly means the stub profile still makes real, billable
+# calls (and fails with 429 when rate-limited), which defeats the point of having
+# profiles at all. Resolve the endpoint from the same config the backend is
+# running with instead.
+def _active_llm() -> dict:
+    config_name = os.path.basename(os.getenv("TEST_CONFIG_FILE", "")) or None
+    if not config_name:
+        profile = os.getenv("PROFILE") or "mock"
+        manifest = REPO_ROOT / "tests" / "profiles.yml"
+        try:
+            profiles = yaml.safe_load(manifest.read_text())["profiles"]
+            config_name = os.path.basename(profiles[profile]["config"])
+        except (OSError, KeyError, TypeError):
+            config_name = "mock-services.yml"
+
+    config_path = REPO_ROOT / "tests" / "configs" / config_name
+    try:
+        config = yaml.safe_load(config_path.read_text())
+        wanted = config["defaults"]["llm"]
+        model = next(m for m in config["models"] if m.get("name") == wanted)
+    except (OSError, KeyError, StopIteration, TypeError):
+        return {
+            "base": "http://localhost:11435/v1",
+            "key": "not-used",
+            "model": "gpt-4o-mini",
+        }
+
+    # Configs address services as the BACKEND sees them; Robot runs on the host,
+    # where those same services are published on localhost.
+    base = str(model.get("model_url", "")).replace("host.docker.internal", "localhost")
+
+    key = str(model.get("api_key", ""))
+    if key.startswith("${oc.env:"):
+        var, _, default = key[len("${oc.env:") : -1].partition(",")
+        key = os.getenv(var.strip(), default.strip())
+
+    return {
+        "base": base,
+        "key": key or "not-used",
+        "model": model.get("model_name", ""),
+    }
+
+
+_llm = _active_llm()
+LLM_API_BASE = _llm["base"]
+LLM_API_KEY = _llm["key"]
+LLM_MODEL = _llm["model"]
 
 # Container names (docker-compose-test.yml project name: backend-test).
 # docker compose joins with "-", podman-compose with "_".

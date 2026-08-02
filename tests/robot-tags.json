@@ -13,7 +13,6 @@
     "e2e"
   ],
   "execution": [
-    "requires-api-keys",
     "slow",
     "sdk",
     "requires-gpu"

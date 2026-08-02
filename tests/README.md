@@ -204,35 +204,46 @@ ls -lh tests/logs/                          # List all log archives
 cat tests/logs/2026-01-17_14-30-45/chronicle-backend-test.log
 ```
 
-## API Key Separation
+## Service Profiles
 
-Chronicle tests are separated into two execution paths:
+There is **one** test suite. Tests are never selected by whether an API key is
+present. What changes between runs is a **service profile** — a declaration of
+which backing services are real and which are stubbed, listed in
+[`profiles.yml`](profiles.yml).
 
-### 1. No API Keys Required
-These tests run without external API dependencies:
-- Endpoint tests (CRUD operations, permissions)
-- Infrastructure tests (workers, queues, health checks)
-- Basic integration tests
-
-**Configuration:** Uses `configs/mock-services.yml` (no transcription/LLM)
-
-### 2. API Keys Required (~30% of tests)
-These tests require external services:
-- Full E2E tests with transcription (Deepgram)
-- Memory extraction tests (OpenAI)
-- Transcript quality verification
-
-**Configuration:** Uses `configs/deepgram-openai.yml`
-
-**Setup:**
 ```bash
-# Copy template
-cp setup/.env.test.template setup/.env.test
-
-# Add API keys
-DEEPGRAM_API_KEY=your-key-here
-OPENAI_API_KEY=your-key-here
+make test                                   # mock (default): no credentials, no cost
+make test PROFILE=deepgram-openai           # real Deepgram STT + real OpenAI LLM
+make test PROFILE=deepgram-openai-speaker   # ...and the real speaker service
+make test PROFILE=parakeet-ollama           # real local ASR + local Ollama
 ```
+
+Every test runs in every profile. A profile that names a real service declares
+what it needs; the harness checks that before starting anything and fails with
+the exact remedy, instead of running and surfacing auth errors as test failures.
+
+To swap in a real service, add or pick a profile — you do not touch tests. A
+profile can change the provider config, flip an env var (for example
+`USE_MOCK_SPEAKER_CLIENT=false`), and bring up extra compose services, which is
+how `deepgram-openai-speaker` exercises the real pyannote service.
+
+### Cassettes
+
+Stubs do not invent output. They replay **cassettes**: recorded real provider
+responses, keyed by the sha256 of the audio that produced them, committed in
+[`cassettes/`](cassettes/). That is what lets a content assertion like
+"the transcript mentions glass" mean the same thing under stubs and under
+Deepgram — so no test has to be skipped when credentials are absent.
+
+Recording is the only step that needs real credentials, and it is manual:
+
+```bash
+cp setup/.env.test.template setup/.env.test   # add DEEPGRAM_API_KEY / OPENAI_API_KEY
+make record-cassettes PROFILE=deepgram-openai
+```
+
+Cassettes are committed, so ordinary runs make no external calls and cost
+nothing.
 
 ## Development Tips
 

@@ -1,0 +1,79 @@
+# Test service profiles
+#
+# A profile declares WHICH BACKING SERVICES ARE REAL for a test run. Services
+# that are not listed as real are served by the in-repo stubs (mock STT on
+# :9999/:8765, mock LLM on :11435, the in-process mock speaker client).
+#
+# The Robot suite is IDENTICAL across every profile. There is deliberately no
+# per-test credential gating: a test is never skipped because a key is absent.
+# Where a real provider's output would otherwise differ from a stub's, the stub
+# replays a recorded response (see tests/cassettes/) so the same assertion holds
+# in both. If you find yourself wanting to skip a test for a missing key, the
+# stub is not faithful enough yet — fix the stub.
+#
+# `real:` is declarative metadata: it is reported in run summaries and documents
+# the CI matrix. It is NOT wired to test selection.
+#
+# Usage:
+#   make test                              # default profile (mock)
+#   make test PROFILE=deepgram-openai
+#   make start PROFILE=deepgram-openai-speaker
+
+default: mock
+
+profiles:
+  mock:
+    description: >-
+      Every external service stubbed. Requires no credentials and no GPU, so it
+      runs unchanged on fork pull requests. This is the default and is what PR
+      CI executes.
+    config: configs/mock-services.yml
+    real: []
+
+  # No provider below is privileged. None of them runs automatically in CI --
+  # each exists to test THAT provider's integration, on demand. Which provider
+  # the deployment actually uses lives in config/config.yml and changes over
+  # time; nothing here should have to be updated when it does.
+
+  smallest-openai:
+    description: >-
+      Real smallest.ai Pulse transcription (paid, per-minute) plus real OpenAI.
+      Rate-limited above ~1 concurrent request, so keep runs sequential.
+    config: configs/smallest-openai.yml
+    real: [transcription, llm]
+    requires_env: [SMALLEST_API_KEY, OPENAI_API_KEY]
+
+  deepgram-openai:
+    description: >-
+      Real Deepgram transcription plus real OpenAI LLM and embeddings. Use this
+      to test the Deepgram integration specifically -- it is not the default for
+      anything.
+    config: configs/deepgram-openai.yml
+    real: [transcription, llm]
+    requires_env: [DEEPGRAM_API_KEY, OPENAI_API_KEY]
+
+  deepgram-openai-speaker:
+    description: >-
+      As deepgram-openai, and additionally exercises the real pyannote speaker
+      recognition service instead of the in-process mock client. The service is
+      defined in docker-compose-test.yml behind the `speaker` compose profile;
+      without this test profile there is no way to reach it.
+    config: configs/deepgram-openai.yml
+    real: [transcription, llm, speaker_recognition]
+    requires_env: [DEEPGRAM_API_KEY, OPENAI_API_KEY, HF_TOKEN]
+    compose_profiles: [speaker]
+    env:
+      USE_MOCK_SPEAKER_CLIENT: "false"
+
+  parakeet-ollama:
+    description: >-
+      Real local transcription (Parakeet ASR) and a real local LLM (Ollama).
+      Exercises genuine providers with no cloud credentials, but needs both
+      services already running on the host.
+    config: configs/parakeet-ollama.yml
+    real: [transcription, llm]
+    requires_service:
+      - name: Parakeet ASR
+        url: ${PARAKEET_ASR_URL:-http://localhost:8767}/health
+      - name: Ollama
+        url: ${OLLAMA_BASE_URL:-http://localhost:11434}/api/tags

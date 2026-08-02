@@ -24,7 +24,7 @@ Suite Setup      Suite Setup
 Suite Teardown   Suite Teardown
 Test Setup       Test Cleanup
 
-Test Tags        audio-streaming	e2e	requires-api-keys
+Test Tags        audio-streaming	e2e
 
 
 *** Test Cases ***
@@ -364,9 +364,13 @@ Streaming Completion Signal Is Set Before Transcript Read
     ${device_name}=    Set Variable    signal-test
     ${client_id}=    Get Client ID From Device Name    ${device_name}
 
-    # Stream audio and close
+    # Stream audio, resolving the session id while the stream is still active --
+    # the completion key is keyed by SESSION id, and after close the session is no
+    # longer this client's active one.
     ${stream_id}=    Open Audio Stream    device_name=${device_name}
     Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=100
+    ${session_id}=    Wait Until Keyword Succeeds    15s    1s
+    ...    Get Active Session ID For Client    ${client_id}
     Close Audio Stream    ${stream_id}
 
     # Wait for streaming consumer to complete and set the completion signal

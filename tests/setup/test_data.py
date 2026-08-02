@@ -30,8 +30,18 @@ TEST_AUDIO_FILE = os.path.join(
 )
 TEST_DEVICE_NAME = "Robot-test-device"
 
-# Expected content for transcript quality verification
-EXPECTED_TRANSCRIPT = "glass blowing"
+# Expected content for transcript quality verification.
+#
+# Assert on content words, not on a provider's tokenization. The old expectation
+# was the two-word "glass blowing", which Deepgram emits but other engines write
+# as the single token "glassblowing" -- so the assertion silently encoded "this
+# test only runs against Deepgram", which is why it had to be gated on an API
+# key. These words survive that difference, so the same assertion is meaningful
+# against a real provider and against a replayed cassette.
+EXPECTED_TRANSCRIPT_PHRASES = ["glass", "class", "pumpkin"]
+
+# Retained for callers that still want a single representative phrase.
+EXPECTED_TRANSCRIPT = "glass"
 
 # Expected memories for DIY Glass Blowing audio (from Python integration test)
 # Source: backends/advanced/tests/assets/expected_memories.json

@@ -142,9 +142,24 @@ def create_memory_update_response() -> dict:
     }
 
 
-def create_general_response(user_message: str) -> dict:
-    """Create general chat completion response."""
-    response_text = f"This is a mock response to: {user_message}"
+def create_general_response(user_message: str, json_mode: bool = False) -> dict:
+    """Create general chat completion response.
+
+    When the caller asked for response_format={"type": "json_object"} it will
+    json.loads() whatever comes back, so prose is not a valid answer -- honour the
+    contract the real API honours. The affirmative shape keeps LLM-as-judge
+    verification keywords working against the stub.
+    """
+    if json_mode:
+        response_text = json.dumps(
+            {
+                "similar": True,
+                "score": 0.9,
+                "reason": "Mock LLM: json_object response_format requested.",
+            }
+        )
+    else:
+        response_text = f"This is a mock response to: {user_message}"
 
     return {
         "id": "chatcmpl-mock-general",
@@ -167,6 +182,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
     try:
         data = await request.json()
         messages = data.get("messages", [])
+        json_mode = (data.get("response_format") or {}).get("type") == "json_object"
 
         # Detect request type
         request_type = detect_request_type(messages)
@@ -183,8 +199,8 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
 
         else:
             user_content = messages[-1].get("content", "") if messages else ""
-            response = create_general_response(user_content)
-            logger.info("Returning general response")
+            response = create_general_response(user_content, json_mode=json_mode)
+            logger.info(f"Returning general response (json_mode={json_mode})")
 
         return web.json_response(response)
 

@@ -86,7 +86,7 @@ Upload Audio And Verify Transcript Batch Event
 
 Conversation Complete Should Trigger Event
     [Documentation]    Verify conversation.complete event after conversation ends
-    [Tags]    conversation	requires-api-keys
+    [Tags]    conversation
 
     # Clear events
     Clear Plugin Events
@@ -141,7 +141,7 @@ Memory Processing Should Trigger Event
 
 WebSocket Disconnect Should Trigger Conversation Complete Event
     [Documentation]    Verify conversation.complete event when WebSocket disconnects
-    [Tags]    audio-streaming	conversation	requires-api-keys
+    [Tags]    audio-streaming	conversation
     [Timeout]    60s
 
     # Clear events

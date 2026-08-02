@@ -49,6 +49,20 @@ Get Redis Session Data
     RETURN    ${session_data}
 
 
+Get Redis Session Data For Client
+    [Documentation]    Read the Redis session hash for a client's current recording.
+    ...
+    ...                Sessions are keyed by SESSION id (``{client_id}-{uuid}``), not by
+    ...                client id -- one client produces a new session per recording. Reading
+    ...                ``audio:session:{client_id}`` therefore always returns an empty hash.
+    ...                Resolve the active session first, then read it.
+    [Arguments]    ${client_id}
+
+    ${session_id}=    Get Active Session ID For Client    ${client_id}
+    ${session_data}=    Get Redis Session Data    ${session_id}
+    RETURN    ${session_data}
+
+
 Verify Session Has Field
     [Documentation]    Verify a Redis session has a specific field
     [Arguments]    ${session_id}    ${field_name}

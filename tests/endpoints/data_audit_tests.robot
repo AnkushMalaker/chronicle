@@ -54,7 +54,7 @@ Full Split And Merge Round Trip
     [Documentation]    Upload audio → VAD analyze → split at the midpoint → verify two
     ...                children with reassigned chunks and re-timed transcripts → merge
     ...                the children back and verify totals and source soft-deletion.
-    [Tags]    conversation	requires-api-keys
+    [Tags]    conversation
     [Timeout]    600s
 
     # Arrange — create a conversation with audio chunks and a transcript

@@ -1,0 +1,102 @@
+chat:
+  system_prompt: You are a helpful AI assistant with access to the user's personal
+    memories and conversation history.
+defaults:
+  embedding: openai-embed
+  llm: openai-llm
+  stt: stt-smallest
+  stt_stream: stt-smallest-stream
+memory:
+  extraction:
+    enabled: true
+    prompt: 'Extract important information from this conversation and return a JSON
+      object with an array named "facts".
+
+      Include personal preferences, plans, names, dates, locations, numbers, and key
+      details.
+
+      Keep items concise and useful.
+
+      '
+  provider: chronicle
+  timeout_seconds: 1200
+models:
+- api_family: openai
+  api_key: ${oc.env:OPENAI_API_KEY,}
+  description: OpenAI GPT-4o-mini
+  model_name: gpt-4o-mini
+  model_output: json
+  model_params:
+    max_tokens: 2000
+    temperature: 0.2
+  model_provider: openai
+  model_type: llm
+  model_url: https://api.openai.com/v1
+  name: openai-llm
+- api_family: openai
+  api_key: ${oc.env:OPENAI_API_KEY,}
+  description: OpenAI text-embedding-3-small
+  embedding_dimensions: 1536
+  model_name: text-embedding-3-small
+  model_output: vector
+  model_provider: openai
+  model_type: embedding
+  model_url: https://api.openai.com/v1
+  name: openai-embed
+- name: stt-smallest
+  description: Smallest.ai Pulse STT (batch)
+  model_type: stt
+  model_provider: smallest
+  api_family: http
+  model_url: https://api.smallest.ai/waves/v1/pulse
+  api_key: ${oc.env:SMALLEST_API_KEY,}
+  capabilities:
+  - word_timestamps
+  - diarization
+  operations:
+    stt_transcribe:
+      method: POST
+      path: /get_text
+      headers:
+        Authorization: Bearer ${oc.env:SMALLEST_API_KEY,}
+      query:
+        model: pulse
+        language: hi
+        word_timestamps: 'true'
+      response:
+        type: json
+        extract:
+          text: transcription
+          words: words
+          segments: utterances
+- name: stt-smallest-stream
+  description: Smallest.ai Pulse streaming transcription over WebSocket
+  model_type: stt_stream
+  model_provider: smallest
+  api_family: websocket
+  model_url: wss://api.smallest.ai/waves/v1/pulse/get_text
+  api_key: ${oc.env:SMALLEST_API_KEY,}
+  capabilities:
+  - word_timestamps
+  - diarization
+  operations:
+    auth_prefix: Bearer
+    query:
+      language: hi
+      encoding: linear16
+      sample_rate: 16000
+      word_timestamps: 'true'
+      diarize: 'true'
+    end:
+      message:
+        type: finalize
+    expect:
+      interim_type: ''
+      final_type: ''
+      extract:
+        text: transcript
+        words: words
+        segments: utterances
+speaker_recognition:
+  enabled: true  # Using mock client by default (USE_MOCK_SPEAKER_CLIENT=true in docker-compose-test.yml)
+  timeout: 60

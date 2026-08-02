@@ -21,7 +21,7 @@ Suite Teardown      Suite Teardown
 
 Test Setup       Test Cleanup
 
-Test Tags           audio-upload	requires-api-keys
+Test Tags           audio-upload
 
 
 *** Test Cases ***

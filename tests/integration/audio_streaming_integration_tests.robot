@@ -16,7 +16,7 @@ Suite Setup      Suite Setup
 Suite Teardown   Suite Teardown
 Test Setup       Test Cleanup
 
-Test Tags        audio-streaming	requires-api-keys
+Test Tags        audio-streaming
 
 *** Variables ***
 
@@ -38,7 +38,7 @@ Redis Session Schema Contains All Required Fields
 
     # Get session data from Redis using client_id (not stream_id)
     ${client_id}=    Get Client ID From Device Name    ${device_name}
-    ${session_data}=    Get Redis Session Data    ${client_id}
+    ${session_data}=    Get Redis Session Data For Client    ${client_id}
 
     # Verify required fields exist
     Should Not Be Empty    ${session_data}[user_id]    Session missing user_id
@@ -78,14 +78,14 @@ Chunk Count Increments In Redis Session
     # Send first batch: 10 client chunks (10 * 3200 = 32000 bytes → 4 published chunks)
     Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=10
     Sleep    1s    # Allow chunk counter to update
-    ${session1}=    Get Redis Session Data    ${client_id}
+    ${session1}=    Get Redis Session Data For Client    ${client_id}
     ${count1}=    Convert To Integer    ${session1}[chunks_published]
     Should Be True    ${count1} > 0    First batch should produce at least 1 published chunk
 
     # Send second batch: 10 more client chunks
     Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=10
     Sleep    1s    # Allow chunk counter to update
-    ${session2}=    Get Redis Session Data    ${client_id}
+    ${session2}=    Get Redis Session Data For Client    ${client_id}
     ${count2}=    Convert To Integer    ${session2}[chunks_published]
 
     # Verify count increased between batches
@@ -111,7 +111,7 @@ Job IDs Stored In Redis Session
     Sleep    2s
 
     # Get session data
-    ${session_data}=    Get Redis Session Data    ${client_id}
+    ${session_data}=    Get Redis Session Data For Client    ${client_id}
 
     # Verify job IDs are populated (not empty strings)
     Should Not Be Empty    ${session_data}[speech_detection_job_id]
@@ -142,7 +142,7 @@ Generic Transcription Provider Works
     ...    Job Type Exists For Client    stream_speech_detection_job    ${client_id}
 
     # Verify provider is set in Redis session
-    ${session_data}=    Get Redis Session Data    ${client_id}
+    ${session_data}=    Get Redis Session Data For Client    ${client_id}
     Should Not Be Empty    ${session_data}[provider]
     Log    ✅ Transcription provider: ${session_data}[provider]
 
@@ -163,8 +163,11 @@ Session Cleaned Up After Stream Close
     Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=5
     Sleep    1s    # Allow session to be initialized
 
-    # Verify session is active
-    ${session_before}=    Get Redis Session Data    ${client_id}
+    # Verify session is active. Capture the session id while it is still active:
+    # after close it is no longer the client's ACTIVE session, so it can only be
+    # re-read by id.
+    ${session_id}=    Get Active Session ID For Client    ${client_id}
+    ${session_before}=    Get Redis Session Data    ${session_id}
     Should Be Equal    ${session_before}[status]    active
     Should Be Equal    ${session_before}[websocket_connected]    true
 
@@ -175,7 +178,7 @@ Session Cleaned Up After Stream Close
     Sleep    2s
 
     # Verify session is finalized or finished (jobs may finish quickly for short streams)
-    ${session_after}=    Get Redis Session Data    ${client_id}
+    ${session_after}=    Get Redis Session Data    ${session_id}
     Should Be True    '${session_after}[status]' in ['finalizing', 'finished']
     ...    Session status should be finalizing or finished, got: ${session_after}[status]
 
@@ -195,7 +198,7 @@ User Email Tracked In Session
     Sleep    1s    # Allow session to be initialized
 
     # Get session and verify email
-    ${session_data}=    Get Redis Session Data    ${client_id}
+    ${session_data}=    Get Redis Session Data For Client    ${client_id}
     Should Not Be Empty    ${session_data}[user_email]
     Should Contain    ${session_data}[user_email]    @    Email should contain @
 

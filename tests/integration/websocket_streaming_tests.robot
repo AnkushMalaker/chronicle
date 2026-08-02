@@ -14,7 +14,7 @@ Suite Setup      Suite Setup
 Suite Teardown   Suite Teardown
 Test Setup        Test Cleanup
 
-Test Tags         audio-streaming	requires-api-keys
+Test Tags         audio-streaming
 
 *** Variables ***
 
@@ -219,7 +219,7 @@ Live Transcript Available During Active Recording
     ...                trigger speech detection and conversation creation. Then keep
     ...                sending small batches to keep the conversation alive while
     ...                checking for live-v0 transcript in the database.
-    [Tags]    audio-streaming	conversation	requires-api-keys
+    [Tags]    audio-streaming	conversation
     [Timeout]    180s
 
     ${device_name}=    Set Variable    ws-live-tx
@@ -267,7 +267,7 @@ Live Transcript Available During Active Recording
 API Close Request Stops Active Conversation
     [Documentation]    Verify that POST /api/conversations/{client_id}/close
     ...                stops an active streaming conversation with end_reason=close_requested
-    [Tags]    audio-streaming	conversation	requires-api-keys
+    [Tags]    audio-streaming	conversation
     [Timeout]    120s
 
     ${device_name}=    Set Variable    ws-api-close
