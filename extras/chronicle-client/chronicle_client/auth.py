@@ -36,7 +36,8 @@ def check_credentials(
     try:
         with httpx.Client(timeout=timeout, verify=verify) as client:
             resp = client.get(
-                f"{backend_url.rstrip('/')}{_WHOAMI_PATH}", headers=auth_headers(api_key)
+                f"{backend_url.rstrip('/')}{_WHOAMI_PATH}",
+                headers=auth_headers(api_key),
             )
     except httpx.HTTPError as e:
         logger.error("Auth error: %s", e)
@@ -54,7 +55,8 @@ async def acheck_credentials(
     try:
         async with httpx.AsyncClient(timeout=timeout, verify=verify) as client:
             resp = await client.get(
-                f"{backend_url.rstrip('/')}{_WHOAMI_PATH}", headers=auth_headers(api_key)
+                f"{backend_url.rstrip('/')}{_WHOAMI_PATH}",
+                headers=auth_headers(api_key),
             )
     except httpx.HTTPError as e:
         logger.error("Auth error: %s", e)

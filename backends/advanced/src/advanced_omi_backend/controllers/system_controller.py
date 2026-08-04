@@ -2285,9 +2285,7 @@ async def create_plugin(
                 if events
                 else '"conversation.complete"'
             )
-            boilerplate = (
-                inspect.cleandoc(
-                    f'''
+            boilerplate = inspect.cleandoc(f'''
                 """
                 {class_name} implementation.
 
@@ -2324,10 +2322,7 @@ async def create_plugin(
                     async def on_conversation_complete(self, context: PluginContext) -> Optional[PluginResult]:
                         logger.info(f"Processing conversation for user: {{context.user_id}}")
                         return PluginResult(success=True, message="OK")
-            '''
-                )
-                + "\n"
-            )
+            ''') + "\n"
             (plugin_dir / "plugin.py").write_text(boilerplate, encoding="utf-8")
         created_files.append("plugin.py")
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Test SDK authentication."""
+
 import sys
 from pathlib import Path
 

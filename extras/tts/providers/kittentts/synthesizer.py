@@ -27,15 +27,15 @@ KITTEN_SAMPLE_RATE = 24000
 # other providers may use emoji as prosody/context, so we don't strip globally.
 _EMOJI_PATTERN = re.compile(
     "["
-    "\U0001F300-\U0001FAFF"  # symbols, pictographs, emoticons, transport, supplemental
-    "\U00002600-\U000027BF"  # misc symbols + dingbats
-    "\U0001F000-\U0001F0FF"  # mahjong, dominoes, playing cards
-    "\U00002190-\U000021FF"  # arrows
-    "\U00002B00-\U00002BFF"  # misc symbols and arrows (stars, etc.)
-    "\U0000FE00-\U0000FE0F"  # variation selectors
-    "\U0001F1E6-\U0001F1FF"  # regional indicators (flags)
-    "\U0000200D"  # zero-width joiner (compound emoji)
-    "\U000020E3"  # combining enclosing keycap
+    "\U0001f300-\U0001faff"  # symbols, pictographs, emoticons, transport, supplemental
+    "\U00002600-\U000027bf"  # misc symbols + dingbats
+    "\U0001f000-\U0001f0ff"  # mahjong, dominoes, playing cards
+    "\U00002190-\U000021ff"  # arrows
+    "\U00002b00-\U00002bff"  # misc symbols and arrows (stars, etc.)
+    "\U0000fe00-\U0000fe0f"  # variation selectors
+    "\U0001f1e6-\U0001f1ff"  # regional indicators (flags)
+    "\U0000200d"  # zero-width joiner (compound emoji)
+    "\U000020e3"  # combining enclosing keycap
     "]+",
     flags=re.UNICODE,
 )

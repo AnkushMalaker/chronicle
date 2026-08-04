@@ -1,7 +1,7 @@
 repos:
   # Code formatting
   - repo: https://github.com/psf/black
-    rev: 24.4.2
+    rev: 26.5.1
     hooks:
       - id: black
         exclude: \.venv/

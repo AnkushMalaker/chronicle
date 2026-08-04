@@ -7,6 +7,7 @@ Creates boilerplate plugin structure with templates and examples.
 Usage:
     uv run python scripts/create_plugin.py my_awesome_plugin
 """
+
 import argparse
 import os
 import shutil

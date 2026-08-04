@@ -31,7 +31,9 @@ def test_marker_lookup_beats_counting_parents(tmp_path, monkeypatch):
     root.mkdir()
     for marker in config._ROOT_MARKERS:
         (root / marker).write_text("")
-    deep = tmp_path / "venv" / "lib" / "python3.12" / "site-packages" / "chronicle_client"
+    deep = (
+        tmp_path / "venv" / "lib" / "python3.12" / "site-packages" / "chronicle_client"
+    )
     deep.mkdir(parents=True)
     monkeypatch.setattr(config, "__file__", str(deep / "config.py"))
     monkeypatch.chdir(root)

@@ -8,6 +8,7 @@ WebSocket connections and returning mock transcription results.
 Usage:
     python mock_transcription_server.py [--port PORT] [--host HOST]
 """
+
 import argparse
 import asyncio
 import json

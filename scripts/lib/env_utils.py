@@ -34,7 +34,7 @@ def get_resolved_env_vars() -> Dict[str, str]:
 
 
 def classify_secrets(
-    variables: Dict[str, str]
+    variables: Dict[str, str],
 ) -> tuple[Dict[str, str], Dict[str, str]]:
     """Classify variables into secrets and regular config"""
     secrets = {}

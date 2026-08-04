@@ -1485,7 +1485,9 @@ async def stream_speech_detection_job(
                         )
                     break
                 elif speaker_check_job.is_failed:
-                    logger.warning(f"⚠️ Speaker check job failed, assuming not enrolled")
+                    logger.warning(
+                        f"⚠️ Speaker check job failed, assuming not enrolled"
+                    )
 
                     # Update session event for speaker check failed
                     await store.record_event(session_id, "speaker_check_failed")

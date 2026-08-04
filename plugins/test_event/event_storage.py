@@ -80,8 +80,7 @@ class EventStorage:
             raise
 
         # Create events table
-        await self.db.execute(
-            """
+        await self.db.execute("""
             CREATE TABLE IF NOT EXISTS plugin_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME NOT NULL,
@@ -91,23 +90,18 @@ class EventStorage:
                 metadata TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
-        """
-        )
+        """)
 
         # Create index for faster queries
-        await self.db.execute(
-            """
+        await self.db.execute("""
             CREATE INDEX IF NOT EXISTS idx_event_type
             ON plugin_events(event)
-        """
-        )
+        """)
 
-        await self.db.execute(
-            """
+        await self.db.execute("""
             CREATE INDEX IF NOT EXISTS idx_user_id
             ON plugin_events(user_id)
-        """
-        )
+        """)
 
         await self.db.commit()
         logger.info(f"Event storage initialized at {self.db_path}")
@@ -243,13 +237,11 @@ class EventStorage:
         if not self.db:
             raise RuntimeError("Event storage not initialized")
 
-        cursor = await self.db.execute(
-            """
+        cursor = await self.db.execute("""
             SELECT id, timestamp, event, user_id, data, metadata, created_at
             FROM plugin_events
             ORDER BY created_at DESC
-            """
-        )
+            """)
 
         rows = await cursor.fetchall()
         return self._rows_to_dicts(rows)
