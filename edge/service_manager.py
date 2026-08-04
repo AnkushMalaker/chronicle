@@ -532,6 +532,157 @@ def _start_advertising_thread():
     threading.Thread(target=_advertise_worker, daemon=True, name="advertise").start()
 
 
+# ── Host watchdog ────────────────────────────────────────────────────────────
+#
+# Host-level faults are invisible to every container health check: the containers
+# stay up and Mongo/Redis stay green while the deployment is unusable from
+# outside. This agent runs natively on the host, so it is the only component that
+# can see them — and, being under `Restart=always`, the only one that keeps
+# looking while nobody is home.
+
+_WATCHDOG_DEFAULTS = {
+    "enabled": True,
+    "interval_secs": 300,
+    "auto_repair": True,
+    "failures_before_repair": 2,
+    "min_repair_interval_secs": 1800,
+}
+
+# The backend is normally co-located; a service-only node has none, in which case
+# reporting is skipped and the checks still run and repair locally.
+_BACKEND_URL = os.environ.get("CHRONICLE_BACKEND_URL", "http://127.0.0.1:8000")
+
+# check id → {"consecutive": int, "last_repair": float, "reported": bool}
+_watchdog_state: dict = {}
+_last_check_results: list = []
+
+
+def _watchdog_config() -> dict:
+    cfg = (services.load_config_yml() or {}).get("watchdog") or {}
+    merged = dict(_WATCHDOG_DEFAULTS)
+    for key in _WATCHDOG_DEFAULTS:
+        if key in cfg:
+            merged[key] = cfg[key]
+    merged["checks"] = cfg.get("checks") or {}
+    return merged
+
+
+def _report_event(severity, title, detail, incident_key, resolves=False) -> None:
+    """Push a finding into the backend's system-event ledger.
+
+    Best-effort by design: a host fault often *is* a connectivity fault, so a
+    failure to report must never stop the watchdog from repairing.
+    """
+    token = os.environ.get("SYSTEM_EVENT_INGEST_TOKEN") or TOKEN
+    if not token:
+        return
+    try:
+        requests.post(
+            f"{_BACKEND_URL}/api/admin/system-events/ingest",
+            json={
+                "severity": severity,
+                "category": "service",
+                "source": "host-watchdog",
+                "title": title,
+                "detail": detail,
+                "incident_key": incident_key,
+                "resolves_incident": resolves,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+    except requests.RequestException as exc:
+        logger.warning("watchdog: could not report %r: %s", title, exc)
+
+
+def run_host_checks() -> list:
+    """Run the host checks, caching the results for the /checks route."""
+    global _last_check_results
+    _last_check_results = services.run_all_checks(services.build_check_context())
+    return _last_check_results
+
+
+def _watchdog_cycle(cfg: dict) -> None:
+    enabled_checks = cfg.get("checks") or {}
+    for result in run_host_checks():
+        if enabled_checks.get(result.id) is False:
+            continue
+        state = _watchdog_state.setdefault(
+            result.id, {"consecutive": 0, "last_repair": 0.0, "reported": False}
+        )
+
+        if result.status not in (services.FAIL, services.WARN):
+            if state["reported"]:
+                _report_event(
+                    "info",
+                    f"Resolved: {result.title}",
+                    result.detail,
+                    incident_key=f"host-check:{result.id}",
+                    resolves=True,
+                )
+            state["consecutive"] = 0
+            state["reported"] = False
+            continue
+
+        state["consecutive"] += 1
+        if not state["reported"]:
+            _report_event(
+                "error" if result.status == services.FAIL else "warning",
+                result.title,
+                f"{result.detail}\n\n{result.remedy}".strip(),
+                incident_key=f"host-check:{result.id}",
+            )
+            state["reported"] = True
+
+        if result.status != services.FAIL or result.repair is None:
+            continue
+        if not cfg["auto_repair"]:
+            continue
+        # Require consecutive failures so one flaky probe can't restart anything,
+        # and rate-limit so a genuinely broken host is never put in a restart loop.
+        if state["consecutive"] < cfg["failures_before_repair"]:
+            continue
+        if time.time() - state["last_repair"] < cfg["min_repair_interval_secs"]:
+            continue
+
+        state["last_repair"] = time.time()
+        logger.info("watchdog: repairing %s", result.id)
+        # Serialise against user-initiated compose operations.
+        with _busy_lock:
+            try:
+                repaired = bool(result.repair())
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - a repair must never crash the loop
+                logger.warning("watchdog: repair of %s raised: %s", result.id, exc)
+                repaired = False
+        _report_event(
+            "info" if repaired else "error",
+            f"{'Repaired' if repaired else 'Repair failed'}: {result.title}",
+            result.detail,
+            incident_key=f"host-check:{result.id}",
+            resolves=repaired,
+        )
+        if repaired:
+            state["consecutive"] = 0
+            state["reported"] = False
+
+
+def _watchdog_worker() -> None:
+    while True:
+        cfg = _watchdog_config()
+        if cfg["enabled"]:
+            try:
+                _watchdog_cycle(cfg)
+            except Exception as exc:  # noqa: BLE001 - the loop must outlive any fault
+                logger.warning("watchdog: cycle failed: %s", exc)
+        time.sleep(max(60, int(cfg["interval_secs"])))
+
+
+def _start_watchdog_thread():
+    threading.Thread(target=_watchdog_worker, daemon=True, name="watchdog").start()
+
+
 # ── Routes ───────────────────────────────────────────────────────────────────
 
 
@@ -557,6 +708,25 @@ class ProviderBody(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok", "host": os.uname().nodename, "agent_port": PORT}
+
+
+@app.get("/checks", dependencies=[Depends(require_token)])
+def host_checks(refresh: bool = False):
+    """Host-level check results for this node.
+
+    Serves the watchdog's last cycle by default, since the probes shell out to the
+    container engine and openssl and are too slow to run on every request. Pass
+    ``?refresh=1`` to force a fresh run.
+    """
+    results = (
+        run_host_checks()
+        if (refresh or not _last_check_results)
+        else _last_check_results
+    )
+    return {
+        "status": services.worst_status(results),
+        "checks": [r.as_dict() for r in results],
+    }
 
 
 @app.get("/node", dependencies=[Depends(require_token)])
@@ -975,6 +1145,9 @@ def main():
         sys.exit(1)
     # Advertise on the Tailnet in the background — never blocks the control API.
     _start_advertising_thread()
+    # Watch for host-level faults nothing else can see. Separate thread from the
+    # advertiser: the probes are slower and run on a much longer interval.
+    _start_watchdog_thread()
     logger.info("Node agent listening on %s:%d", HOST, PORT)
     uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
 

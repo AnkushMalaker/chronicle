@@ -153,6 +153,26 @@ internally by querying `podman ps` scoped to the compose project label.
   grep -oE '^\s+- \./[^:]+:' docker-compose.yml | sed -E 's|.*\./||; s|:$||' \
     | sort -u | while read d; do [ -e "$d" ] || echo "MISSING $d"; done
   ```
+- **aardvark-dns stops forwarding external queries.** Ubuntu 24.04 ships
+  aardvark-dns 1.4.0, which can permanently stop forwarding upstream after a single
+  transient failure of the host resolver — while still answering container-name
+  lookups. The result is that Mongo and Redis stay green and every container health
+  check passes while nothing can reach the internet. It only re-reads its upstreams
+  when its config changes, which Podman rewrites on any container add/remove, so a
+  stable stack stays broken indefinitely. Diagnose by asking the resolver from
+  *inside* a container — from the host it looks fine:
+  ```bash
+  podman exec <container> getent hosts api.openai.com    # fails
+  podman exec <container> getent hosts mongo             # still works
+  ```
+  Chronicle prevents this by giving each service explicit `dns:` upstreams
+  (`x-public-dns` in `backends/advanced/docker-compose.yml`). On a DNS-enabled
+  network these become aardvark's *per-container* upstreams — the container's
+  `resolv.conf` still points at aardvark, so container-name resolution is
+  unaffected, but the broken global fallback is bypassed. `./services.py doctor`
+  checks for it; the node agent's watchdog repairs it by churning a throwaway
+  container to force a reload.
+
 - **Docker Desktop auto-start.** On Windows, Docker Desktop relaunches on login and
   its `restart: unless-stopped` containers reclaim host ports (27017/6379/…) via the
   WSL relay, blocking Podman. Uninstall it (or disable login-start + `compose down`

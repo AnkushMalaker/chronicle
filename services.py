@@ -19,7 +19,19 @@ from pathlib import Path
 import clients
 import requests
 import yaml
-from chronicle_setup import ConfigManager, ensure_tailscale_cert, read_env_value
+from chronicle_setup import (
+    FAIL,
+    NOT_APPLICABLE,
+    OK,
+    WARN,
+    CheckContext,
+    ConfigManager,
+    detect_tailscale_info,
+    ensure_tailscale_cert,
+    read_env_value,
+    run_all_checks,
+    worst_status,
+)
 from dotenv import dotenv_values, set_key
 from rich.console import Console
 from rich.markup import escape
@@ -2149,6 +2161,11 @@ def start_services(services, build=False, force_recreate=False):
     # companion Macs) can actually reach what just started. No-op elsewhere.
     firewall_sync(quiet=True)
 
+    # Host-level faults (dead container DNS, logged-out Tailscale, a stale socket
+    # mount) leave every container reporting healthy, so surface them here rather
+    # than letting the stack look fine while it is unusable. Advisory only.
+    preflight()
+
     # Show access URLs if backend was started
     if "backend" in services and check_service_enabled("backend"):
         backend_env = _get_backend_env_path()
@@ -2328,6 +2345,192 @@ def show_status():
     console.print("\n💡 [dim]Use './start.sh' to start all configured services[/dim]")
 
 
+_TAILSCALED_DROPIN = Path(
+    "/etc/systemd/system/tailscaled.service.d/10-chronicle-preserve-runtime.conf"
+)
+_TAILSCALED_DROPIN_BODY = """# Installed by Chronicle (services.py).
+#
+# tailscaled declares RuntimeDirectory=tailscale, so systemd deletes and recreates
+# /run/tailscale on every restart. Containers bind-mount that directory to reach
+# the socket; when it is replaced they keep the old, deleted inode and every
+# connection is refused -- which silently stops Caddy serving the *.ts.net
+# certificate and stops the backend advertising over minidisc. Preserving the
+# directory keeps those mounts valid across tailscaled restarts.
+[Service]
+RuntimeDirectoryPreserve=yes
+"""
+
+
+def _compose_container_names(service_name):
+    """Container names for a compose service, or [] if it isn't running.
+
+    Goes through compose_ps_json so it works under both engines — the naming
+    differs (``advanced_caddy_1`` vs ``advanced-caddy-1``), so these must never
+    be hardcoded.
+    """
+    try:
+        service_path = Path(__file__).parent / SERVICES[service_name]["path"]
+        return [c["name"] for c in compose_ps_json(service_path) if c.get("name")]
+    except Exception:
+        return []
+
+
+def build_check_context():
+    """Assemble the host facts the checks need.
+
+    Discovery lives here rather than in ``chronicle_setup.checks`` so that module
+    stays free of imports from this one (which already imports it) and remains
+    testable without a container engine.
+    """
+    # docker-compose-test.yml shares this working directory, and compose_ps_json is
+    # scoped by that label — so the test stack's containers show up here too.
+    # Probing one of those would report on the wrong deployment.
+    containers = tuple(
+        name
+        for name in _compose_container_names("backend")
+        if "-test" not in name and "_test" not in name
+    )
+
+    https_host = None
+    backend_env = _get_backend_env_path()
+    if backend_env.exists():
+        enabled = (read_env_value(str(backend_env), "HTTPS_ENABLED") or "").lower()
+        if enabled == "true":
+            https_host, _ = detect_tailscale_info()
+
+    return CheckContext(
+        engine=container_engine(),
+        # Probe DNS from every backend container: the fault is per-container, so
+        # the first running one is a fair sample.
+        dns_containers=containers,
+        socket_containers=containers,
+        https_host=https_host,
+        operator_user=os.environ.get("USER") or None,
+        network="chronicle-network",
+    )
+
+
+def install_tailscaled_dropin(quiet=False, interactive=True):
+    """Stop systemd deleting /run/tailscale out from under container mounts.
+
+    Returns True if the drop-in is in place afterwards. Needs root, so it is a
+    no-op (not a failure) where sudo is unavailable — the watchdog's socket check
+    is the fallback on those hosts.
+    """
+    if sys.platform != "linux" or shutil.which("systemctl") is None:
+        return False
+    try:
+        if _TAILSCALED_DROPIN.read_text() == _TAILSCALED_DROPIN_BODY:
+            return True
+    except OSError:
+        pass
+
+    sudo = ["sudo"] if interactive else ["sudo", "-n"]
+    script = (
+        f"mkdir -p {_TAILSCALED_DROPIN.parent} && "
+        f"cat > {_TAILSCALED_DROPIN} << 'CHRONICLE_EOF'\n"
+        f"{_TAILSCALED_DROPIN_BODY}"
+        "CHRONICLE_EOF\n"
+        "systemctl daemon-reload"
+    )
+    try:
+        result = subprocess.run(
+            [*sudo, "bash", "-c", script], capture_output=True, text=True, timeout=60
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+    if result.returncode == 0:
+        if not quiet:
+            console.print(
+                "[green]✅ tailscaled will now preserve /run/tailscale[/green]"
+            )
+        return True
+    if not quiet:
+        console.print(
+            "[yellow]⚠️  Could not install the tailscaled drop-in (needs root).[/yellow]\n"
+            f"   Run manually:\n     sudo mkdir -p {_TAILSCALED_DROPIN.parent}\n"
+            f"     sudo tee {_TAILSCALED_DROPIN} <<'EOF'\n{_TAILSCALED_DROPIN_BODY}EOF\n"
+            "     sudo systemctl daemon-reload"
+        )
+    return False
+
+
+_STATUS_STYLE = {
+    OK: ("[green]ok[/green]", "green"),
+    WARN: ("[yellow]warn[/yellow]", "yellow"),
+    FAIL: ("[red]FAIL[/red]", "red"),
+    NOT_APPLICABLE: ("[dim]n/a[/dim]", "dim"),
+}
+
+
+def run_doctor(as_json=False, repair=False):
+    """Report host-level faults that leave every service looking healthy.
+
+    Returns a process exit code: 0 unless something actually failed, so this is
+    usable from CI and from a shell one-liner.
+    """
+    ctx = build_check_context()
+    results = run_all_checks(ctx)
+
+    if repair:
+        for result in results:
+            if result.status == FAIL and result.repair is not None:
+                if not as_json:
+                    console.print(f"🔧 Repairing: {result.title}...")
+                if result.repair():
+                    # Re-run just this check so the report reflects reality.
+                    results = run_all_checks(ctx)
+                    break
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "status": worst_status(results),
+                    "checks": [r.as_dict() for r in results],
+                },
+                indent=2,
+            )
+        )
+    else:
+        table = Table(title="Chronicle host checks")
+        table.add_column("Check")
+        table.add_column("Status")
+        table.add_column("Detail", overflow="fold")
+        for result in results:
+            label, _ = _STATUS_STYLE.get(result.status, (result.status, ""))
+            table.add_row(result.title, label, escape(result.detail))
+        console.print(table)
+        for result in results:
+            if result.needs_attention and result.remedy:
+                console.print(
+                    f"\n[bold]{result.title}[/bold]\n  {escape(result.remedy)}"
+                )
+
+    return 1 if worst_status(results) == FAIL else 0
+
+
+def preflight():
+    """Warn about host faults before starting services.
+
+    Deliberately advisory: a failing check never blocks a start, because a broken
+    probe must not be able to keep Chronicle down. Repairs are not run here —
+    ``services.py doctor --repair`` and the node agent's watchdog own that.
+    """
+    try:
+        results = run_all_checks(build_check_context())
+    except Exception:
+        return
+    problems = [r for r in results if r.status == FAIL]
+    if not problems:
+        return
+    console.print("\n[yellow]⚠️  Host checks found problems:[/yellow]")
+    for result in problems:
+        console.print(f"   • {escape(result.title)}: {escape(result.detail)}")
+    console.print("   Run [bold]./services.py doctor[/bold] for details.\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Chronicle Service Management")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -2383,6 +2586,24 @@ def main():
 
     # Status command
     subparsers.add_parser("status", help="Show service status")
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Check for host-level faults (DNS, Tailscale, TLS, socket mounts)",
+    )
+    doctor_parser.add_argument(
+        "--json", action="store_true", help="Machine-readable output"
+    )
+    doctor_parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="Apply the safe, idempotent repair for any failing check",
+    )
+    doctor_parser.add_argument(
+        "--install-tailscaled-dropin",
+        action="store_true",
+        help="Stop systemd deleting /run/tailscale on tailscaled restart (needs root)",
+    )
 
     # Update command — move the git checkout and restart services from it
     update_parser = subparsers.add_parser(
@@ -2477,6 +2698,11 @@ def main():
 
     if args.command == "status":
         show_status()
+
+    elif args.command == "doctor":
+        if args.install_tailscaled_dropin:
+            install_tailscaled_dropin()
+        sys.exit(run_doctor(as_json=args.json, repair=args.repair))
 
     elif args.command == "start":
         if args.all:

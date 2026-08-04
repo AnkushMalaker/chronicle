@@ -793,6 +793,32 @@ observability:
     # Direct non-HTTPS fallback: http://localhost:3002
     public_url: ''
 
+# Host-level health watchdog, run by the node agent (edge/service_manager.py).
+#
+# These faults are invisible to every container health check: the containers stay
+# up and Mongo/Redis stay green while the deployment is unusable from outside. The
+# agent runs natively on the host, so it is the only component that can see them.
+#
+# auto_repair applies the safe, idempotent remedy for a failing check (restarting a
+# container holding a deleted socket, forcing an aardvark-dns reload, re-asserting
+# the Tailscale operator). Faults needing a human — an expired node key — are only
+# ever reported. Set false to report without acting.
+watchdog:
+  enabled: true
+  interval_secs: 300
+  auto_repair: true
+  # Consecutive failures before a repair is attempted, so one flaky probe cannot
+  # trigger a restart. Repairs are also rate-limited by min_repair_interval_secs.
+  failures_before_repair: 2
+  min_repair_interval_secs: 1800
+  checks:
+    container_dns: true
+    tailscale_login: true
+    tailscale_key_expiry: true
+    tailscale_operator: true
+    socket_mount_fresh: true
+    tls_cert: true
+
 cron_jobs:
   speaker_finetuning:
     description: "Process speaker diarization annotations and send to speaker recognition service for training"

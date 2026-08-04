@@ -63,6 +63,12 @@ class IngestEventRequest(BaseModel):
     client_id: Optional[str] = None
     conversation_id: Optional[str] = None
     metadata: Optional[dict] = None
+    # Lets a service report a recurring fault as one incident: a repeat bumps
+    # occurrences instead of adding a row, and it can close the incident itself
+    # once the fault clears. Used by the node agent's host watchdog, which polls
+    # on a timer and would otherwise append an identical event every cycle.
+    incident_key: Optional[str] = None
+    resolves_incident: bool = False
 
 
 @router.post("/ingest", dependencies=[Depends(verify_ingest_token)])
@@ -79,6 +85,8 @@ async def ingest_system_event(body: IngestEventRequest):
         client_id=body.client_id,
         conversation_id=body.conversation_id,
         metadata=body.metadata,
+        incident_key=body.incident_key,
+        resolves_incident=body.resolves_incident,
     )
 
 

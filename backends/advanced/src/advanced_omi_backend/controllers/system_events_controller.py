@@ -60,6 +60,8 @@ async def ingest_external_event(
     client_id: Optional[str],
     conversation_id: Optional[str],
     metadata: Optional[dict],
+    incident_key: Optional[str] = None,
+    resolves_incident: bool = False,
 ) -> dict[str, Any]:
     """Record an event submitted over HTTP by another service (token-gated route).
 
@@ -91,6 +93,11 @@ async def ingest_external_event(
         client_id=client_id,
         conversation_id=conversation_id,
         metadata=metadata or {},
+        # Namespaced for the same reason as source: the shared token authenticates
+        # "a trusted node", so an external key must not be able to close an
+        # incident opened by internal code.
+        incident_key=f"service:{incident_key[:180]}" if incident_key else None,
+        resolves_incident=bool(resolves_incident),
     )
     return {"status": "recorded"}
 

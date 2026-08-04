@@ -79,6 +79,35 @@ IP or `localhost` address Caddy serves a self-signed internal-CA cert, so browse
 
 ## Troubleshooting
 
+**HTTPS stops working after a Tailscale restart or re-login**:
+
+Two distinct faults, and the Caddy log tells you which:
+
+- `dial unix /var/run/tailscale/tailscaled.sock: connect: connection refused` — a
+  **stale socket mount**. Bind-mounting a unix socket pins an inode, and systemd's
+  `RuntimeDirectory=tailscale` deletes and recreates `/run/tailscale` on every
+  `tailscaled` restart, so the container keeps a deleted socket. Chronicle now
+  mounts the *directory* and installs a `RuntimeDirectoryPreserve=yes` drop-in
+  (`./services.py doctor --install-tailscaled-dropin`, needs root) so the directory
+  survives too. To recover an already-affected container, restart it — the engine
+  re-applies mounts on start, so no rebuild is needed.
+- `Access denied: cert access denied` — the **Tailscale operator is unset**. Caddy
+  fetches the cert as container-root, which rootless Podman maps to the host user,
+  so it only works when `OperatorUser` is that user. `tailscale login` silently
+  clears the pref, meaning re-authenticating a node breaks TLS. Fix with
+  `sudo tailscale set --operator=$USER`.
+
+Verify with SNI, never a bare connection — Caddy serves its own internal-CA
+certificate for `localhost` and returns 200 even while the real hostname is failing:
+
+```bash
+echo | openssl s_client -connect localhost:443 -servername <your-name>.ts.net \
+  2>/dev/null | openssl x509 -noout -issuer -enddate     # want issuer=Let's Encrypt
+```
+
+`./services.py doctor` checks all of the above, and the node agent's watchdog
+repairs the socket and operator faults automatically.
+
 **HTTPS not working**:
 - Check the Caddy containers are running: `docker compose ps` (look for `caddy`)
 - Confirm the served cert: `echo | openssl s_client -connect localhost:443 -servername <your-name> 2>/dev/null | openssl x509 -noout -issuer -enddate`
