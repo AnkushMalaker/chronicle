@@ -44,6 +44,7 @@ from pathlib import Path
 
 import requests
 import uvicorn
+from chronicle_setup import detect_cuda_version, detect_tailscale_info
 from dotenv import dotenv_values, set_key
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -53,8 +54,9 @@ from rich.console import Console
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from chronicle_setup import detect_cuda_version, detect_tailscale_info  # noqa: E402
-
+# Only genuinely repo-root modules belong below the sys.path insert; anything
+# installed (chronicle_setup) imports normally above, or isort reclassifies this
+# block differently depending on which files it is handed.
 import clients  # noqa: E402  (repo-root clients.py — native client components)
 import discovery  # noqa: E402  (repo-root discovery.py)
 import services  # noqa: E402  (repo-root services.py)
