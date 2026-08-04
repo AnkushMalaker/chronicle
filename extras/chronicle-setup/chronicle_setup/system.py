@@ -5,10 +5,12 @@ These all shell out to tools that may be absent (``tailscale``, ``openssl``,
 rather than raising, so setup keeps working on a host that has none of them.
 """
 
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -52,6 +54,30 @@ def detect_tailscale_info() -> Tuple[Optional[str], Optional[str]]:
         pass
 
     return dns_name, ip
+
+
+def detect_lan_ip() -> Optional[str]:
+    """Detect this machine's private LAN IPv4 address (e.g. "192.168.0.110").
+
+    Asks the kernel which source address it would use for an outbound packet
+    (no traffic is actually sent). Returns None unless the answer is an
+    RFC1918 address outside the Tailscale/CGNAT range (100.64.0.0/10) —
+    callers want an address that plain LAN devices can reach, not a tunnel.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("1.1.1.1", 53))
+            addr = ipaddress.ip_address(probe.getsockname()[0])
+    except OSError:
+        return None
+
+    if (
+        addr.is_private
+        and not addr.is_loopback
+        and addr not in ipaddress.ip_network("100.64.0.0/10")
+    ):
+        return str(addr)
+    return None
 
 
 def list_tailnet_peers(include_self: bool = True) -> list:

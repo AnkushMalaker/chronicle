@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, Optional
 from chronicle_setup import (
     ConfigManager,
     decide_cert_mode,
+    detect_lan_ip,
     detect_tailscale_info,
     list_tailnet_peers,
     mask_value,
@@ -1937,6 +1938,34 @@ class ChronicleSetup:
                             "TAILSCALE_IP", server_ip
                         )
 
+                        # Also serve the machine's LAN IP so devices that are on
+                        # the local network but not the tailnet can reach the
+                        # dashboard (Caddy falls back to its internal CA for the
+                        # IP address, so the browser shows a one-time warning).
+                        lan_ip = detect_lan_ip()
+                        if lan_ip and lan_ip != server_ip:
+                            caddyfile_content = caddyfile_content.replace(
+                                f"localhost {server_ip} {{",
+                                f"localhost {server_ip} {lan_ip} {{",
+                            )
+                            caddyfile_content = caddyfile_content.replace(
+                                f"https://{server_ip}:3443 {{",
+                                f"https://{server_ip}:3443 https://{lan_ip}:3443 {{",
+                            )
+                            # Clients connecting to a raw IP send no SNI, and
+                            # behind the container engine's port-forward Caddy
+                            # cannot infer the IP from the connection either;
+                            # default_sni routes SNI-less handshakes to the LAN
+                            # IP site instead of aborting with a TLS alert.
+                            caddyfile_content = (
+                                "{\n"
+                                f"    default_sni {lan_ip}\n"
+                                "}\n\n" + caddyfile_content
+                            )
+                            self.console.print(
+                                f"[blue][INFO][/blue] Also serving LAN address: {lan_ip}"
+                            )
+
                         # Static mode serves the shared host-issued cert in every site
                         # block (Chronicle + LangFuse). Caddy mode leaves the marker as
                         # a comment and obtains/renews certificates itself.
@@ -1965,9 +1994,10 @@ class ChronicleSetup:
                         # Configure webui-dev for same-origin API calls through Caddy
                         self.config["VITE_BACKEND_URL"] = ""
                         self.config["VITE_HMR_PORT"] = "443"
-                        self.config["VITE_ALLOWED_HOSTS"] = (
-                            f"localhost 127.0.0.1 {server_ip}"
-                        )
+                        allowed_hosts = f"localhost 127.0.0.1 {server_ip}"
+                        if lan_ip and lan_ip != server_ip:
+                            allowed_hosts += f" {lan_ip}"
+                        self.config["VITE_ALLOWED_HOSTS"] = allowed_hosts
 
                 except Exception as e:
                     self.console.print(
