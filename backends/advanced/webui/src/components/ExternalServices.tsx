@@ -504,9 +504,11 @@ export default function ExternalServices({
                   <div className="min-w-0">
                     <div className="font-medium text-gray-900 dark:text-gray-100">
                       {service.name}
-                      <span className="ml-2 text-xs text-gray-500 dark:text-gray-400">
-                        :{service.ports.join(', :')}
-                      </span>
+                      {service.ports.length > 0 && (
+                        <span className="ml-2 text-xs text-gray-500 dark:text-gray-400">
+                          :{service.ports.join(', :')}
+                        </span>
+                      )}
                     </div>
                     <div className="text-sm text-gray-600 dark:text-gray-400 truncate">
                       {service.description}

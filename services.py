@@ -16,7 +16,6 @@ import sys
 import time
 from pathlib import Path
 
-import clients
 import requests
 import yaml
 from chronicle_setup import (
@@ -36,6 +35,8 @@ from dotenv import dotenv_values, set_key
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
+
+import clients
 
 console = Console()
 
@@ -232,7 +233,10 @@ SERVICES = {
     "asr-services": {
         "path": "extras/asr-services",
         "compose_file": "docker-compose.yml",
-        "description": "Parakeet ASR Service",
+        # Provider-neutral: this compose hosts every local ASR provider. The
+        # displayed name comes from service_display_label(), which resolves the
+        # configured ASR_PROVIDER; this is only the fallback for an unset one.
+        "description": "Offline speech-to-text (ASR)",
         "ports": ["8767"],
         "health_endpoints": [
             ("asr", "ASR_PORT", "8767", "/health"),
@@ -372,21 +376,25 @@ STREAMING_ASR_PROVIDER_OPTIONS = {
         "service": "nemotron-stream-asr",
         "model": "stt-nemotron-stream",
         "label": "Nemotron 3.5 (local · 8772)",
+        "port_env": ("NEMOTRON_STREAM_PORT", "8772"),
     },
     "smallest": {
         "service": None,
         "model": "stt-smallest-stream",
         "label": "Smallest.ai PULSE (cloud)",
+        "port_env": None,
     },
     "deepgram": {
         "service": None,
         "model": "stt-deepgram-stream",
         "label": "Deepgram Nova 3 (cloud)",
+        "port_env": None,
     },
     "qwen3-asr": {
         "service": "qwen3-asr-bridge",
         "model": "stt-qwen3-asr-stream",
         "label": "Qwen3-ASR (local)",
+        "port_env": ("ASR_STREAM_PORT", "8769"),
     },
 }
 
@@ -471,6 +479,61 @@ def _asr_health_port(env_values: dict, default_port) -> str:
     return str(env_values.get("ASR_PORT", default_port)).strip("'\"")
 
 
+def service_env_values(service_name: str) -> dict:
+    """Read a service's ``.env``, anchored at the repo root (cwd-independent)."""
+    env_path = Path(__file__).parent / SERVICES[service_name]["path"] / ".env"
+    return dotenv_values(env_path) if env_path.exists() else {}
+
+
+def service_display_label(service_name: str, env_values: dict | None = None) -> str:
+    """Human label for a service, provider-aware where one compose hosts many.
+
+    ``asr-services`` is a multi-provider compose whose static description names
+    only one of them, so resolve the label from the configured ASR_PROVIDER.
+    Every consumer (Tailnet advertising, node agent → WebUI System page) goes
+    through here so the displayed name can't drift from the running provider.
+    """
+    service = SERVICES[service_name]
+    if service_name != "asr-services":
+        return service["description"]
+    if env_values is None:
+        env_values = service_env_values(service_name)
+    provider = (env_values.get("ASR_PROVIDER") or "").strip("'\"")
+    return _ASR_PROVIDER_LABELS.get(provider, service["description"])
+
+
+def service_display_ports(
+    service_name: str, env_values: dict | None = None
+) -> list[str]:
+    """Ports to display for a service, resolved from ``.env`` where dynamic.
+
+    For ``asr-services`` the static port list is only correct for providers that
+    bind ASR_PORT: nemotron serves from NEMOTRON_STREAM_PORT, and a streaming
+    lane can run its own container alongside a different batch provider. Returns
+    the ports of whichever lanes actually run a container on this node, so a
+    cloud-only selection yields an empty list rather than a phantom port.
+    """
+    service = SERVICES[service_name]
+    if service_name != "asr-services":
+        return service["ports"]
+    if env_values is None:
+        env_values = service_env_values(service_name)
+
+    ports: list[str] = []
+    batch = (env_values.get("ASR_PROVIDER") or "").strip("'\"")
+    if ASR_PROVIDER_TO_SERVICE.get(batch):
+        ports.append(_asr_health_port(env_values, service["ports"][0]))
+
+    streaming = active_streaming_asr_provider()
+    port_env = (STREAMING_ASR_PROVIDER_OPTIONS.get(streaming) or {}).get("port_env")
+    if port_env:
+        key, default = port_env
+        port = str(env_values.get(key, default)).strip("'\"")
+        if port not in ports:
+            ports.append(port)
+    return ports
+
+
 def _get_advertised_services() -> list[tuple[str, int, str]]:
     """Return list of (discovery_name, port, label) for configured services."""
     triples: list[tuple[str, int, str]] = []
@@ -482,9 +545,8 @@ def _get_advertised_services() -> list[tuple[str, int, str]]:
         if not endpoints:
             continue
         _label, port_env, default_port, _path = endpoints[0]
+        env_values = service_env_values(svc_name)
         if port_env:
-            env_path = Path(service["path"]) / ".env"
-            env_values = dotenv_values(env_path) if env_path.exists() else {}
             if svc_name == "asr-services" and port_env == "ASR_PORT":
                 port = int(_asr_health_port(env_values, default_port))
             else:
@@ -492,19 +554,9 @@ def _get_advertised_services() -> list[tuple[str, int, str]]:
         else:
             port = int(default_port)
 
-        # Derive display label
-        if svc_name == "asr-services":
-            env_path = Path(service["path"]) / ".env"
-            asr_provider = ""
-            if env_path.exists():
-                asr_provider = (
-                    dotenv_values(env_path).get("ASR_PROVIDER", "").strip("'\"")
-                )
-            label = _ASR_PROVIDER_LABELS.get(asr_provider, service["description"])
-        else:
-            label = service["description"]
-
-        triples.append((discovery_name, port, label))
+        triples.append(
+            (discovery_name, port, service_display_label(svc_name, env_values))
+        )
     return triples
 
 
@@ -1879,11 +1931,6 @@ def is_wsl2_host() -> bool:
     return "microsoft" in osrelease and Path(_FIREWALL_NETSH).exists()
 
 
-def _service_env_values(service_name: str) -> dict:
-    env_path = Path(SERVICES[service_name]["path"]) / ".env"
-    return dotenv_values(env_path) if env_path.exists() else {}
-
-
 def _firewall_specs(service_names) -> dict[str, tuple[int, str]]:
     """Desired rules for the given services: {rule_name: (port, proto)}.
 
@@ -1903,7 +1950,7 @@ def _firewall_specs(service_names) -> dict[str, tuple[int, str]]:
     for name in service_names:
         if name not in SERVICES:
             continue
-        env = _service_env_values(name)
+        env = service_env_values(name)
         if name == "backend":
             add(name, "api", env.get("BACKEND_PUBLIC_PORT") or 8000)
             add(name, "webui", env.get("WEBUI_PORT") or 5173)
@@ -2301,9 +2348,9 @@ def show_status():
     table.add_column("Description", style="dim")
     table.add_column("Ports", style="green")
 
-    for service_name, service_info in SERVICES.items():
+    for service_name in SERVICES:
         configured = "✅" if check_service_enabled(service_name) else "❌"
-        ports = ", ".join(service_info["ports"])
+        ports = ", ".join(service_display_ports(service_name))
 
         # Check runtime health
         status, detail = check_service_health(service_name)
@@ -2317,7 +2364,11 @@ def show_status():
             running = "[dim]— stopped[/dim]"
 
         table.add_row(
-            service_name, configured, running, service_info["description"], ports
+            service_name,
+            configured,
+            running,
+            service_display_label(service_name),
+            ports,
         )
 
     console.print(table)

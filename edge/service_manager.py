@@ -53,12 +53,13 @@ from rich.console import Console
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from chronicle_setup import detect_cuda_version, detect_tailscale_info  # noqa: E402
+
 import clients  # noqa: E402  (repo-root clients.py — native client components)
 import discovery  # noqa: E402  (repo-root discovery.py)
 import services  # noqa: E402  (repo-root services.py)
 import status  # noqa: E402  (repo-root status.py — restart-count helper)
 import updates  # noqa: E402  (repo-root updates.py — version + self-update)
-from chronicle_setup import detect_cuda_version, detect_tailscale_info  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -312,12 +313,14 @@ def _effective_health(name: str) -> tuple[str, str]:
 
 
 def _service_entry(name: str, public_host: str | None = None) -> dict:
-    service = services.SERVICES[name]
     health, detail = _effective_health(name)
     return {
         "name": name,
-        "description": service["description"],
-        "ports": service["ports"],
+        # Label and ports are resolved from the service's .env, not the static
+        # SERVICES entry: asr-services is one compose hosting many providers, so
+        # its description/ports name only whichever provider was hardcoded.
+        "description": services.service_display_label(name),
+        "ports": services.service_display_ports(name),
         "enabled": services.check_service_enabled(name),
         "health": health,
         "health_detail": detail,

@@ -15,7 +15,13 @@ from rich.console import Console
 from rich.table import Table
 
 # Import service definitions from services.py
-from services import SERVICES, check_service_enabled, compose_ps_json, container_engine
+from services import (
+    SERVICES,
+    check_service_enabled,
+    compose_ps_json,
+    container_engine,
+    service_display_label,
+)
 
 console = Console()
 
@@ -185,7 +191,7 @@ def show_quick_status():
     table.add_column("Health", justify="center")
     table.add_column("Description", style="dim")
 
-    for service_name, service_info in SERVICES.items():
+    for service_name in SERVICES:
         status = get_service_health(service_name)
 
         # Config status
@@ -233,7 +239,7 @@ def show_quick_status():
             container_icon,
             restart_text,
             health_icon,
-            service_info["description"],
+            service_display_label(service_name),
         )
 
     console.print(table)
@@ -275,7 +281,7 @@ def show_detailed_status():
     console.print("\n🏥 [bold]Chronicle Detailed Health Status[/bold]\n")
 
     # Get all service statuses
-    for service_name, service_info in SERVICES.items():
+    for service_name in SERVICES:
         status = get_service_health(service_name)
 
         # Service header
@@ -285,7 +291,7 @@ def show_detailed_status():
             header = f"📦 {service_name.upper()} (Not Configured)"
 
         console.print(f"\n[bold cyan]{header}[/bold cyan]")
-        console.print(f"[dim]{service_info['description']}[/dim]")
+        console.print(f"[dim]{service_display_label(service_name)}[/dim]")
 
         if not status["configured"]:
             console.print("[yellow]  ⚠️  Not configured (no .env file)[/yellow]")
