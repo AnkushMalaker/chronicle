@@ -26,7 +26,20 @@ import {
 import { useQueryClient } from '@tanstack/react-query';
 import { useQueueDashboard } from '../hooks/useQueue';
 import { queueApi, conversationsApi } from '../services/api';
-import { Button, Card, Checkbox, Modal, Select } from '../components/ui';
+import {
+  Alert,
+  Button,
+  Card,
+  Checkbox,
+  IconButton,
+  Label,
+  MetadataChip,
+  Modal,
+  Select,
+  StatCard,
+  StateBadge,
+} from '../components/ui';
+import type { StateTone } from '../components/ui';
 
 interface QueueStats {
   total_jobs: number;
@@ -39,10 +52,12 @@ interface QueueStats {
   timestamp: string;
 }
 
+// Priority is deliberately absent: the backend stubs every job's priority to the
+// constant "normal" ("RQ doesn't track priority in metadata"), so filtering on it
+// can only ever match everything or nothing.
 interface Filters {
   status: string;
   job_type: string;
-  priority: string;
 }
 
 interface StreamingSession {
@@ -122,18 +137,37 @@ interface EventRecord {
   metadata: Record<string, any>;
 }
 
-// Known event type colors — unknown types fall back to gray via getEventColor()
+// Known event type colors — unknown types fall back to neutral via getEventColor().
+// Event kind is descriptive, so these stay muted tints (same shape as the category
+// chips on the System Errors page) rather than solid accents.
 const EVENT_TYPE_COLORS: Record<string, string> = {
-  'conversation.complete': 'bg-green-100 text-green-700',
-  'transcript.batch': 'bg-blue-100 text-blue-700',
-  'memory.processed': 'bg-purple-100 text-purple-700',
-  'button.single_press': 'bg-orange-100 text-orange-700',
-  'button.double_press': 'bg-orange-100 text-orange-700',
-  'plugin_action': 'bg-indigo-100 text-indigo-700',
-  'wake_word.detected': 'bg-teal-100 text-teal-700',
+  'conversation.complete': 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300',
+  'transcript.batch': 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
+  'memory.processed': 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300',
+  'button.single_press': 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300',
+  'button.double_press': 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300',
+  'plugin_action': 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300',
+  'wake_word.detected': 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300',
 };
-const DEFAULT_EVENT_COLOR = 'bg-gray-100 text-gray-700';
+const DEFAULT_EVENT_COLOR = 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300';
 const getEventColor = (eventType: string) => EVENT_TYPE_COLORS[eventType] || DEFAULT_EVENT_COLOR;
+
+/** Panel heading inside a Card — the section title above a table or grid. */
+const SectionTitle = ({ children }: { children: React.ReactNode }) => (
+  <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100">{children}</h3>
+);
+
+/** Sub-heading for a group inside a panel. */
+const GroupTitle = ({ children, className = '' }: { children: React.ReactNode; className?: string }) => (
+  <h4 className={`text-sm font-medium text-gray-700 dark:text-gray-300 ${className}`}>{children}</h4>
+);
+
+/** Placeholder shown where a list has nothing to render. */
+const EmptyState = ({ children }: { children: React.ReactNode }) => (
+  <div className="rounded-lg border border-gray-200 bg-gray-50 py-8 text-center text-sm text-gray-500 dark:border-gray-700 dark:bg-gray-900/40 dark:text-gray-400">
+    {children}
+  </div>
+);
 
 const Queue: React.FC = () => {
   const queryClient = useQueryClient();
@@ -143,8 +177,7 @@ const Queue: React.FC = () => {
   const [loadingJobDetails, setLoadingJobDetails] = useState(false);
   const [filters, setFilters] = useState<Filters>({
     status: '',
-    job_type: '',
-    priority: ''
+    job_type: ''
   });
   const [pagination, setPagination] = useState({
     offset: 0,
@@ -208,8 +241,10 @@ const Queue: React.FC = () => {
   }, []);
 
   // React Query: SSE events invalidate ['queue'] automatically
+  // Sorted so the query key is canonical — expanding A then B and B then A hit
+  // the same cache entry instead of refetching.
   const expandedConversationIds = useMemo(
-    () => Array.from(expandedConversations),
+    () => Array.from(expandedConversations).sort(),
     [expandedConversations]
   );
   const { data: dashboardData, isLoading: loading, isFetching: refreshing } = useQueueDashboard(expandedConversationIds);
@@ -267,6 +302,13 @@ const Queue: React.FC = () => {
       events: dashboardData.events || [],
     };
   }, [dashboardData]);
+
+  // Job Type filter options come from the jobs actually loaded rather than a
+  // hardcoded list, which had drifted to four names that are not job types at all.
+  const jobTypeOptions = useMemo(
+    () => Array.from(new Set(jobs.map(j => j?.job_type).filter(Boolean))).sort(),
+    [jobs]
+  );
 
   // Auto-expand active conversations when data changes
   const prevAutoExpandedRef = useRef<Set<string>>(new Set());
@@ -377,7 +419,7 @@ const Queue: React.FC = () => {
   };
 
   const clearFilters = () => {
-    setFilters({ status: '', job_type: '', priority: '' });
+    setFilters({ status: '', job_type: '' });
     setPagination(prev => ({ ...prev, offset: 0 }));
   };
 
@@ -395,16 +437,18 @@ const Queue: React.FC = () => {
     }
   };
 
-  const getStatusColor = (status: string) => {
+  // Job status is a genuine state signal, so it renders as a StateBadge tone
+  // rather than hand-picked classes.
+  const getStatusTone = (status: string): StateTone => {
     switch (status) {
-      case 'queued': return 'text-yellow-600 bg-yellow-100';
-      case 'started': return 'text-blue-600 bg-blue-100';  // RQ standard
-      case 'finished': return 'text-green-600 bg-green-100';  // RQ standard
-      case 'failed': return 'text-red-600 bg-red-100';
-      case 'canceled': return 'text-gray-600 bg-gray-100';  // RQ standard (US spelling)
-      case 'deferred': return 'text-blue-600 bg-blue-100';
-      case 'scheduled': return 'text-blue-600 bg-blue-100';  // RQ standard, not "waiting"
-      default: return 'text-gray-600 bg-gray-100';
+      case 'queued': return 'warning';
+      case 'started': return 'info';  // RQ standard
+      case 'finished': return 'success';  // RQ standard
+      case 'failed': return 'danger';
+      case 'canceled': return 'neutral';  // RQ standard (US spelling)
+      case 'deferred': return 'info';
+      case 'scheduled': return 'info';  // RQ standard, not "waiting"
+      default: return 'neutral';
     }
   };
 
@@ -549,16 +593,22 @@ const Queue: React.FC = () => {
     return new Date(dateString).toLocaleString();
   };
 
+  // Short display names for the Jobs table. Keyed on the RQ job function names in
+  // advanced_omi_backend.workers; the full job_type stays available as a tooltip.
   const getJobTypeShort = (jobType: string) => {
     const typeMap: {[key: string]: string} = {
-      'open_conversation_job': 'Open Conv',
+      // Session / conversation lifecycle
       'stream_speech_detection_job': 'Speech Detect',
-      'enroll_speakers_job': 'Speaker Enroll',
+      'open_conversation_job': 'Open Conv',
+      'audio_streaming_persistence_job': 'Audio Persist',
+      // Post-conversation chain
+      'transcribe_full_audio_job': 'Transcribe',
+      'transcription_fallback_check_job': 'Fallback Check',
+      'recognise_speakers_job': 'Speakers',
       'check_enrolled_speakers_job': 'Check Speakers',
-      'audio_persistence_job': 'Audio Persist',
-      'process_transcription_job': 'Transcribe',
       'process_memory_job': 'Memory',
-      'crop_audio_job': 'Crop Audio'
+      'generate_title_summary_job': 'Title & Summary',
+      'dispatch_conversation_complete_event_job': 'Dispatch Event',
     };
     return typeMap[jobType] || jobType;
   };
@@ -652,8 +702,8 @@ const Queue: React.FC = () => {
         <div className="flex items-center space-x-3">
           <Layers className="w-6 h-6 text-blue-600 flex-shrink-0" />
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">Queue & Events</h1>
-            <p className="text-xs text-gray-500">
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Queue & Events</h1>
+            <p className="text-xs text-gray-500 dark:text-gray-400">
               Live updates via SSE
             </p>
           </div>
@@ -682,92 +732,35 @@ const Queue: React.FC = () => {
       {/* Stats Cards */}
       {stats && (
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
-          <Card raised>
-            <div className="flex items-center space-x-2">
-              <Layers className="w-5 h-5 text-gray-600" />
-              <div>
-                <p className="text-sm text-gray-600">Total</p>
-                <p className="text-xl font-semibold">{stats.total_jobs}</p>
-              </div>
-            </div>
-          </Card>
-
-          <Card raised>
-            <div className="flex items-center space-x-2">
-              <Clock className="w-5 h-5 text-yellow-600" />
-              <div>
-                <p className="text-sm text-gray-600">Queued</p>
-                <p className="text-xl font-semibold text-yellow-600">{stats.queued_jobs}</p>
-              </div>
-            </div>
-          </Card>
-
-          <Card raised>
-            <div className="flex items-center space-x-2">
-              <Play className={`w-5 h-5 text-blue-600 ${stats.started_jobs > 0 ? 'animate-pulse' : ''}`} />
-              <div>
-                <p className="text-sm text-gray-600">Started</p>
-                <p className="text-xl font-semibold text-blue-600">{stats.started_jobs}</p>
-              </div>
-            </div>
-          </Card>
-
-          <Card raised>
-            <div className="flex items-center space-x-2">
-              <CheckCircle className="w-5 h-5 text-green-600" />
-              <div>
-                <p className="text-sm text-gray-600">Finished</p>
-                <p className="text-xl font-semibold text-green-600">{stats.finished_jobs}</p>
-              </div>
-            </div>
-          </Card>
-
-          <Card raised>
-            <div className="flex items-center space-x-2">
-              <XCircle className="w-5 h-5 text-red-600" />
-              <div>
-                <p className="text-sm text-gray-600">Failed</p>
-                <p className="text-xl font-semibold text-red-600">{stats.failed_jobs}</p>
-              </div>
-            </div>
-          </Card>
-
-          <Card raised>
-            <div className="flex items-center space-x-2">
-              <StopCircle className="w-5 h-5 text-gray-600" />
-              <div>
-                <p className="text-sm text-gray-600">Canceled</p>
-                <p className="text-xl font-semibold text-gray-600">{stats.canceled_jobs}</p>
-              </div>
-            </div>
-          </Card>
-
-          <Card raised>
-            <div className="flex items-center space-x-2">
-              <Pause className="w-5 h-5 text-blue-600" />
-              <div>
-                <p className="text-sm text-gray-600">Deferred</p>
-                <p className="text-xl font-semibold text-blue-600">{stats.deferred_jobs}</p>
-              </div>
-            </div>
-          </Card>
+          <StatCard label="Total" value={stats.total_jobs} />
+          <StatCard label="Queued" value={stats.queued_jobs} tone="amber" />
+          <StatCard
+            label="Started"
+            tone="blue"
+            value={<span className={stats.started_jobs > 0 ? 'animate-pulse' : ''}>{stats.started_jobs}</span>}
+          />
+          <StatCard label="Finished" value={stats.finished_jobs} tone="green" />
+          <StatCard label="Failed" value={stats.failed_jobs} tone="red" />
+          <StatCard label="Canceled" value={stats.canceled_jobs} />
+          <StatCard label="Deferred" value={stats.deferred_jobs} tone="blue" />
         </div>
       )}
 
       {/* Streaming Status */}
       {streamingStatus && (
-        <div className="bg-white rounded-lg border overflow-hidden">
-          <div className="px-4 sm:px-6 py-4 border-b border-gray-200 flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
-            <h3 className="text-lg font-medium">Audio Streaming & Conversations</h3>
+        <Card raised padded={false} className="overflow-hidden">
+          <div className="px-4 sm:px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex flex-col gap-3 sm:flex-row sm:justify-between sm:items-center">
+            <SectionTitle>Audio Streaming &amp; Conversations</SectionTitle>
             <div className="flex flex-wrap items-center gap-2">
-              <button
-                onClick={cleanupOldSessions}
-                className="flex items-center space-x-2 px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 transition-colors text-sm"
+              <Button
+                variant="secondary"
+                size="md"
+                icon={<RotateCcw className="w-4 h-4" />}
                 title="Remove old sessions (>1 hour old)"
+                onClick={cleanupOldSessions}
               >
-                <RotateCcw className="w-4 h-4" />
-                <span>Cleanup Old Sessions</span>
-              </button>
+                Cleanup Old Sessions
+              </Button>
               {streamingStatus?.stream_health && Object.keys(streamingStatus.stream_health).length > 0 && (
                 <Button
                   variant="danger"
@@ -792,23 +785,24 @@ const Queue: React.FC = () => {
                   Remove All Streams ({Object.keys(streamingStatus.stream_health).length})
                 </Button>
               )}
-              <button
-                onClick={cleanupStuckWorkers}
-                className="flex items-center space-x-2 px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700 transition-colors text-sm"
+              <Button
+                variant="secondary"
+                size="md"
+                icon={<RotateCcw className="w-4 h-4" />}
                 title="Clean up stuck workers and pending messages"
+                onClick={cleanupStuckWorkers}
               >
-                <RotateCcw className="w-4 h-4" />
-                <span>Cleanup Stuck Workers{streamingStatus?.stream_health && Object.values(streamingStatus.stream_health).some((s: any) => s.total_pending > 0) && ` (${
+                Cleanup Stuck Workers{streamingStatus?.stream_health && Object.values(streamingStatus.stream_health).some((s: any) => s.total_pending > 0) && ` (${
                   Object.values(streamingStatus.stream_health).reduce((sum: number, s: any) => sum + (s.total_pending || 0), 0)
-                })`}</span>
-              </button>
+                })`}
+              </Button>
             </div>
           </div>
 
           <div className="p-6 space-y-6">
             {/* Stream Workers Section - Shows audio streams + listen jobs */}
             <div>
-              <h4 className="text-sm font-medium text-gray-700 mb-3">Stream Workers (Client Sessions)</h4>
+              <GroupTitle className="mb-3">Stream Workers (Client Sessions)</GroupTitle>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {streamingStatus?.stream_health && Object.entries(streamingStatus.stream_health).map(([streamKey, health]) => {
                   // Extract client_id from stream key (format: audio:stream:{client_id})
@@ -843,34 +837,34 @@ const Queue: React.FC = () => {
                     : [];
 
                   return (
-                    <div key={streamKey} className="p-4 bg-gray-50 rounded-lg border border-gray-200">
+                    <div key={streamKey} className="p-4 bg-gray-50 rounded-lg border border-gray-200 dark:bg-gray-900/40 dark:border-gray-700">
                       <div className="flex items-center justify-between mb-2">
-                        <span className="text-sm font-medium">{streamKey}</span>
-                        <span className="text-xs px-2 py-0.5 bg-green-100 text-green-700 rounded">Active</span>
+                        <span className="text-sm font-medium text-gray-900 dark:text-gray-100">{streamKey}</span>
+                        <StateBadge tone="success">Active</StateBadge>
                       </div>
 
                       <div className="space-y-2">
                         <div className="flex justify-between text-xs">
-                          <span className="text-gray-600">Stream Length:</span>
-                          <span className="font-medium">{health.stream_length}</span>
+                          <span className="text-gray-600 dark:text-gray-400">Stream Length:</span>
+                          <span className="font-medium text-gray-900 dark:text-gray-100">{health.stream_length}</span>
                         </div>
                         <div className="flex justify-between text-xs">
-                          <span className="text-gray-600">Age:</span>
-                          <span className="font-medium">{(health.stream_age_seconds || 0).toFixed(0)}s</span>
+                          <span className="text-gray-600 dark:text-gray-400">Age:</span>
+                          <span className="font-medium text-gray-900 dark:text-gray-100">{(health.stream_age_seconds || 0).toFixed(0)}s</span>
                         </div>
                         <div className="flex justify-between text-xs">
-                          <span className="text-gray-600">Pending:</span>
-                          <span className={`font-medium ${health.total_pending && health.total_pending > 0 ? 'text-yellow-600' : 'text-green-600'}`}>
+                          <span className="text-gray-600 dark:text-gray-400">Pending:</span>
+                          <span className={`font-medium ${health.total_pending && health.total_pending > 0 ? 'text-yellow-600 dark:text-yellow-400' : 'text-green-600 dark:text-green-400'}`}>
                             {health.total_pending}
                           </span>
                         </div>
                         {health.consumer_groups && health.consumer_groups.map((group) => (
-                          <div key={group.name} className="mt-2 pt-2 border-t border-gray-200">
-                            <div className="text-xs text-gray-600 mb-1">{group.name}:</div>
+                          <div key={group.name} className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+                            <div className="text-xs text-gray-600 dark:text-gray-400 mb-1">{group.name}:</div>
                             {(group.consumers || []).map((consumer) => (
                               <div key={consumer.name} className="flex justify-between text-xs pl-2">
-                                <span className="text-gray-700 truncate">{consumer.name}</span>
-                                <span className={consumer.pending > 0 ? 'text-yellow-600' : 'text-green-600'}>
+                                <span className="text-gray-700 dark:text-gray-300 truncate">{consumer.name}</span>
+                                <span className={consumer.pending > 0 ? 'text-yellow-600 dark:text-yellow-400' : 'text-green-600 dark:text-green-400'}>
                                   {consumer.pending} pending
                                 </span>
                               </div>
@@ -880,8 +874,8 @@ const Queue: React.FC = () => {
 
                         {/* Current Speech Detection Job */}
                         {listenJobs.length > 0 && (
-                          <div className="mt-2 pt-2 border-t border-gray-200">
-                            <div className="text-xs text-gray-600 mb-1">Current Speech Detection:</div>
+                          <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+                            <div className="text-xs text-gray-600 dark:text-gray-400 mb-1">Current Speech Detection:</div>
                             {listenJobs.map((job) => {
                               const runtime = job.started_at
                                 ? Math.floor((Date.now() - new Date(job.started_at).getTime()) / 1000)
@@ -890,51 +884,50 @@ const Queue: React.FC = () => {
                               const seconds = runtime % 60;
 
                               return (
-                                <div key={job.job_id} className="bg-white rounded p-2 space-y-1">
+                                <div key={job.job_id} className="bg-white dark:bg-gray-800 rounded p-2 space-y-1">
                                   <div className="flex items-center justify-between">
-                                    <div className="flex items-center space-x-1">
+                                    <div className="flex items-center space-x-1 text-gray-500 dark:text-gray-400">
                                       {getStatusIcon(job.status)}
-                                      <span className="text-gray-700 font-medium text-xs">{job.job_type}</span>
-                                      <span className={`px-1 py-0.5 rounded text-xs ${getStatusColor(job.status)}`}>
-                                        {job.status}
-                                      </span>
+                                      <span className="text-gray-700 dark:text-gray-300 font-medium text-xs">{job.job_type}</span>
+                                      <StateBadge tone={getStatusTone(job.status)}>{job.status}</StateBadge>
                                     </div>
-                                    <button
+                                    <IconButton
+                                      label="View job details"
+                                      className="flex-shrink-0"
                                       onClick={() => viewJobDetails(job.job_id)}
-                                      className="text-indigo-600 hover:text-indigo-900 flex-shrink-0"
                                     >
                                       <Eye className="w-3 h-3" />
-                                    </button>
+                                    </IconButton>
                                   </div>
 
                                   {/* Job metadata */}
-                                  <div className="text-xs text-gray-600 space-y-0.5 pl-4">
+                                  <div className="text-xs text-gray-600 dark:text-gray-400 space-y-0.5 pl-4">
                                     <div className="flex justify-between">
                                       <span>Job ID:</span>
-                                      <span className="font-mono text-gray-800">{job.job_id.substring(0, 12)}...</span>
+                                      <span className="font-mono text-gray-800 dark:text-gray-200">{job.job_id.substring(0, 12)}...</span>
                                     </div>
                                     {job.started_at && (
                                       <div className="flex justify-between">
                                         <span>Runtime:</span>
-                                        <span className="font-medium text-gray-800">{minutes}m {seconds}s</span>
+                                        <span className="font-medium text-gray-800 dark:text-gray-200">{minutes}m {seconds}s</span>
                                       </div>
                                     )}
                                     {job.created_at && (
                                       <div className="flex justify-between">
                                         <span>Created:</span>
-                                        <span className="text-gray-800">{new Date(job.created_at).toLocaleTimeString()}</span>
+                                        <span className="text-gray-800 dark:text-gray-200">{new Date(job.created_at).toLocaleTimeString()}</span>
                                       </div>
                                     )}
                                     {job.meta?.speech_detected_at && (
                                       <div className="flex justify-between">
                                         <span>Speech Detected:</span>
-                                        <span className="text-green-700 font-medium">{new Date(job.meta.speech_detected_at).toLocaleString()}</span>
+                                        <span className="text-green-700 dark:text-green-400 font-medium">{new Date(job.meta.speech_detected_at).toLocaleString()}</span>
                                       </div>
                                     )}
                                     {job.meta?.status && (
                                       <div className="flex justify-between">
                                         <span>Status:</span>
-                                        <span className="text-blue-700 font-medium">{job.meta.status.replace(/_/g, ' ')}</span>
+                                        <span className="text-blue-700 dark:text-blue-400 font-medium">{job.meta.status.replace(/_/g, ' ')}</span>
                                       </div>
                                     )}
                                   </div>
@@ -945,30 +938,30 @@ const Queue: React.FC = () => {
                                     if (!session) return null;
 
                                     return (
-                                      <div className="text-xs space-y-1 pl-4 mt-2 pt-2 border-t border-gray-200">
-                                        <div className="font-semibold text-gray-700 mb-1">Speech Detection Events:</div>
+                                      <div className="text-xs space-y-1 pl-4 mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+                                        <div className="font-semibold text-gray-700 dark:text-gray-300 mb-1">Speech Detection Events:</div>
                                         {session.last_event && (
                                           <div className="flex justify-between">
-                                            <span className="text-gray-600">Last Event:</span>
-                                            <span className="text-gray-800 font-mono text-xs">{session.last_event.split(':')[0]}</span>
+                                            <span className="text-gray-600 dark:text-gray-400">Last Event:</span>
+                                            <span className="text-gray-800 dark:text-gray-200 font-mono text-xs">{session.last_event.split(':')[0]}</span>
                                           </div>
                                         )}
                                         {session.speaker_check_status && (
                                           <div className="flex justify-between">
-                                            <span className="text-gray-600">Speaker Check:</span>
+                                            <span className="text-gray-600 dark:text-gray-400">Speaker Check:</span>
                                             <span className={`font-medium ${
-                                              session.speaker_check_status === 'enrolled' ? 'text-green-700' :
-                                              session.speaker_check_status === 'checking' ? 'text-blue-700' :
-                                              session.speaker_check_status === 'failed' ? 'text-red-700' :
-                                              session.speaker_check_status === 'timeout' ? 'text-yellow-700' :
-                                              'text-gray-700'
+                                              session.speaker_check_status === 'enrolled' ? 'text-green-700 dark:text-green-400' :
+                                              session.speaker_check_status === 'checking' ? 'text-blue-700 dark:text-blue-400' :
+                                              session.speaker_check_status === 'failed' ? 'text-red-700 dark:text-red-400' :
+                                              session.speaker_check_status === 'timeout' ? 'text-yellow-700 dark:text-yellow-400' :
+                                              'text-gray-700 dark:text-gray-300'
                                             }`}>{session.speaker_check_status}</span>
                                           </div>
                                         )}
                                         {session.identified_speakers && (
                                           <div className="flex justify-between">
-                                            <span className="text-gray-600">Speakers:</span>
-                                            <span className="text-green-700 font-medium">{session.identified_speakers}</span>
+                                            <span className="text-gray-600 dark:text-gray-400">Speakers:</span>
+                                            <span className="text-green-700 dark:text-green-400 font-medium">{session.identified_speakers}</span>
                                           </div>
                                         )}
                                       </div>
@@ -990,7 +983,7 @@ const Queue: React.FC = () => {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {/* Active Conversations - Grouped by conversation_id */}
               <div>
-                <h4 className="text-sm font-medium text-gray-700 mb-3">Active Conversations</h4>
+                <GroupTitle className="mb-3">Active Conversations</GroupTitle>
                 {(() => {
                   // Group all jobs by conversation_id with deduplication
                   const allJobsRaw = Object.values(conversationJobs).flat().filter(job => job != null);
@@ -1037,11 +1030,7 @@ const Queue: React.FC = () => {
                   });
 
                   if (conversationMap.size === 0) {
-                    return (
-                      <div className="text-center py-8 text-gray-500 text-sm bg-gray-50 rounded-lg border border-gray-200">
-                        No active conversations
-                      </div>
-                    );
+                    return <EmptyState>No active conversations</EmptyState>;
                   }
 
                   return (
@@ -1067,45 +1056,45 @@ const Queue: React.FC = () => {
                         const failedJobCount = jobs.filter(j => j.status === 'failed').length;
 
                         return (
-                          <div key={conversationId} className={`rounded-lg border overflow-hidden ${hasFailedJob ? 'bg-red-50 border-red-300' : 'bg-cyan-50 border-cyan-200'}`}>
+                          <div key={conversationId} className={`rounded-lg border overflow-hidden ${hasFailedJob ? 'bg-red-50 border-red-300 dark:bg-red-900/20 dark:border-red-800' : 'bg-cyan-50 border-cyan-200 dark:bg-cyan-900/20 dark:border-cyan-800'}`}>
                             <div
-                              className={`flex items-center justify-between p-3 cursor-pointer transition-colors ${hasFailedJob ? 'hover:bg-red-100' : 'hover:bg-cyan-100'}`}
+                              className={`flex items-center justify-between p-3 cursor-pointer transition-colors ${hasFailedJob ? 'hover:bg-red-100 dark:hover:bg-red-900/30' : 'hover:bg-cyan-100 dark:hover:bg-cyan-900/30'}`}
                               onClick={() => toggleConversationExpansion(conversationId)}
                             >
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center space-x-2">
                                   {isExpanded ? (
-                                    <ChevronDown className={`w-4 h-4 ${hasFailedJob ? 'text-red-600' : 'text-cyan-600'}`} />
+                                    <ChevronDown className={`w-4 h-4 ${hasFailedJob ? 'text-red-600 dark:text-red-400' : 'text-cyan-600 dark:text-cyan-400'}`} />
                                   ) : (
-                                    <ChevronRight className={`w-4 h-4 ${hasFailedJob ? 'text-red-600' : 'text-cyan-600'}`} />
+                                    <ChevronRight className={`w-4 h-4 ${hasFailedJob ? 'text-red-600 dark:text-red-400' : 'text-cyan-600 dark:text-cyan-400'}`} />
                                   )}
                                   {hasFailedJob ? (
-                                    <AlertTriangle className="w-4 h-4 text-red-600" />
+                                    <AlertTriangle className="w-4 h-4 text-red-600 dark:text-red-400" />
                                   ) : (
-                                    <Brain className="w-4 h-4 text-cyan-600 animate-pulse" />
+                                    <Brain className="w-4 h-4 text-cyan-600 dark:text-cyan-400 animate-pulse" />
                                   )}
-                                  <span className="text-sm font-medium text-gray-900">{clientId}</span>
+                                  <span className="text-sm font-medium text-gray-900 dark:text-gray-100">{clientId}</span>
                                   {hasFailedJob ? (
-                                    <span className="text-xs px-2 py-0.5 bg-red-200 text-red-800 rounded font-medium">
+                                    <StateBadge tone="danger">
                                       {failedJobCount} Error{failedJobCount > 1 ? 's' : ''}
-                                    </span>
+                                    </StateBadge>
                                   ) : (
-                                    <span className="text-xs px-2 py-0.5 bg-cyan-100 text-cyan-700 rounded">Active</span>
+                                    <StateBadge tone="info">Active</StateBadge>
                                   )}
                                   {speakers.length > 0 && (
-                                    <span className="text-xs px-2 py-0.5 bg-purple-100 text-purple-700 rounded">
+                                    <MetadataChip>
                                       {speakers.length} speaker{speakers.length > 1 ? 's' : ''}
-                                    </span>
+                                    </MetadataChip>
                                   )}
                                 </div>
-                                <div className="mt-1 text-xs text-gray-600 truncate">
+                                <div className="mt-1 text-xs text-gray-600 dark:text-gray-400 truncate">
                                   Conversation: {conversationId.substring(0, 8)}... •
                                   {createdAt && `Started: ${new Date(createdAt).toLocaleTimeString()} • `}
                                   Words: {wordCount}
                                   {lastUpdate && ` • Updated: ${new Date(lastUpdate).toLocaleTimeString()}`}
                                 </div>
                                 {transcript && (
-                                  <div className="mt-1 text-xs text-gray-700 italic truncate">
+                                  <div className="mt-1 text-xs text-gray-700 dark:text-gray-300 italic truncate">
                                     "{transcript.substring(0, 100)}{transcript.length > 100 ? '...' : ''}"
                                   </div>
                                 )}
@@ -1136,10 +1125,10 @@ const Queue: React.FC = () => {
 
                           {/* Expanded Jobs Section */}
                           {isExpanded && (
-                            <div className="border-t border-cyan-200 bg-white p-3">
+                            <div className="border-t border-cyan-200 dark:border-cyan-800 bg-white dark:bg-gray-800 p-3">
                               {/* Pipeline Timeline */}
                               <div className="mb-4">
-                                <h5 className="text-xs font-medium text-gray-700 mb-3">Pipeline Timeline:</h5>
+                                <h5 className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-3">Pipeline Timeline:</h5>
                                 {(() => {
                                   // Helper function to get display name from job type
                                   const getJobDisplayName = (jobType: string) => {
@@ -1190,7 +1179,7 @@ const Queue: React.FC = () => {
                                   const validTimes = jobTimes.filter(t => t !== null);
                                   if (validTimes.length === 0) {
                                     return (
-                                      <div className="text-xs text-gray-500 italic">No job timing data available</div>
+                                      <div className="text-xs text-gray-500 dark:text-gray-400 italic">No job timing data available</div>
                                     );
                                   }
 
@@ -1216,7 +1205,7 @@ const Queue: React.FC = () => {
                                   return (
                                     <div className="space-y-2">
                                       {/* Time axis */}
-                                      <div className="relative h-4 border-b border-gray-300">
+                                      <div className="relative h-4 border-b border-gray-300 dark:border-gray-600">
                                         {timeMarkers.map((marker, idx) => (
                                           <div
                                             key={idx}
@@ -1224,7 +1213,7 @@ const Queue: React.FC = () => {
                                             style={{ left: `${marker.percent}%`, transform: 'translateX(-50%)' }}
                                           >
                                             <div className="w-px h-2 bg-gray-400"></div>
-                                            <div className="text-xs text-gray-500 mt-0.5 whitespace-nowrap">
+                                            <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 whitespace-nowrap">
                                               {marker.time}
                                             </div>
                                           </div>
@@ -1253,10 +1242,10 @@ const Queue: React.FC = () => {
                                               </div>
 
                                               {/* Stage Name */}
-                                              <span className="text-xs text-gray-700 w-20 flex-shrink-0">{name}</span>
+                                              <span className="text-xs text-gray-700 dark:text-gray-300 w-20 flex-shrink-0">{name}</span>
 
                                               {/* Timeline Container */}
-                                              <div className="flex-1 relative h-6 bg-gray-100 rounded">
+                                              <div className="flex-1 relative h-6 bg-gray-100 dark:bg-gray-700 rounded">
                                                 {/* Job Bar */}
                                                 <div
                                                   className={`absolute h-6 rounded ${barColor} ${job.status === 'started' ? 'animate-pulse' : ''} flex items-center justify-center`}
@@ -1277,7 +1266,7 @@ const Queue: React.FC = () => {
                                       </div>
 
                                       {/* Total Duration */}
-                                      <div className="text-xs text-gray-600 text-right mt-2">
+                                      <div className="text-xs text-gray-600 dark:text-gray-400 text-right mt-2">
                                         Total: {formatDuration(totalDuration)}
                                       </div>
                                     </div>
@@ -1285,33 +1274,29 @@ const Queue: React.FC = () => {
                                 })()}
                               </div>
 
-                              <h5 className="text-xs font-medium text-gray-700 mb-2">Conversation Jobs:</h5>
+                              <h5 className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-2">Conversation Jobs:</h5>
                               {jobs.filter(j => j != null && j.job_id).length > 0 ? (
                                 <div className="space-y-1">
                                   {jobs
                                     .filter(j => j != null && j.job_id)
                                     .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
                                     .map((job, index) => (
-                                    <div key={job.job_id} className={`p-2 bg-gray-50 rounded border ${getJobTypeColor(job.job_type, job.status).borderColor}`} style={{ borderLeftWidth: '12px' }}>
+                                    <div key={job.job_id} className={`p-2 bg-gray-50 dark:bg-gray-900/40 rounded border ${getJobTypeColor(job.job_type, job.status).borderColor}`} style={{ borderLeftWidth: '12px' }}>
                                       <div
-                                        className="flex items-center justify-between cursor-pointer hover:bg-gray-100 transition-colors rounded px-1 py-0.5"
+                                        className="flex items-center justify-between cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors rounded px-1 py-0.5"
                                         onClick={() => toggleJobExpansion(job.job_id)}
                                       >
                                         <div className="flex-1 min-w-0">
                                           <div className="flex items-center space-x-2">
-                                            <span className="text-xs font-mono text-gray-500 flex-shrink-0">#{index + 1}</span>
+                                            <span className="text-xs font-mono text-gray-500 dark:text-gray-400 flex-shrink-0">#{index + 1}</span>
                                             <span className="flex-shrink-0">{getJobTypeIcon(job.job_type)}</span>
                                             <span className="flex-shrink-0">{getStatusIcon(job.status)}</span>
-                                            <span className="text-xs font-medium text-gray-900 truncate">{job.job_type}</span>
-                                            <span className={`text-xs px-1.5 py-0.5 rounded ${getStatusColor(job.status)}`}>
-                                              {job.status}
-                                            </span>
-                                            <span className="text-xs text-gray-500">{job.queue}</span>
+                                            <span className="text-xs font-medium text-gray-900 dark:text-gray-100 truncate">{job.job_type}</span>
+                                            <StateBadge tone={getStatusTone(job.status)}>{job.status}</StateBadge>
+                                            <span className="text-xs text-gray-500 dark:text-gray-400">{job.queue}</span>
                                             {/* Show memory count badge on collapsed card */}
                                             {!expandedJobs.has(job.job_id) && job.job_type === 'process_memory_job' && job.result?.memories_created !== undefined && (
-                                              <span className="text-xs px-1.5 py-0.5 bg-pink-100 text-pink-700 rounded">
-                                                {job.result.memories_created} memories
-                                              </span>
+                                              <MetadataChip>{job.result.memories_created} memories</MetadataChip>
                                             )}
                                           </div>
                                         </div>
@@ -1319,7 +1304,7 @@ const Queue: React.FC = () => {
 
                                       {/* Collapsible metadata section */}
                                       {expandedJobs.has(job.job_id) && (
-                                        <div className="mt-1 text-xs text-gray-600 space-y-0.5">
+                                        <div className="mt-1 text-xs text-gray-600 dark:text-gray-400 space-y-0.5">
                                           <div>
                                             {job.started_at && (
                                               <span>Started: {new Date(job.started_at).toLocaleTimeString()}</span>
@@ -1331,7 +1316,7 @@ const Queue: React.FC = () => {
 
                                           {/* Show job-specific metadata */}
                                           {job.meta && (
-                                            <div className="space-y-0.5 pl-2 border-l-2 border-gray-300">
+                                            <div className="space-y-0.5 pl-2 border-l-2 border-gray-300 dark:border-gray-600">
                                               {/* open_conversation_job metadata */}
                                               {job.job_type === 'open_conversation_job' && (
                                                 <>
@@ -1345,7 +1330,7 @@ const Queue: React.FC = () => {
                                                     <div>Idle: <span className="font-medium">{Math.floor(job.meta.inactivity_seconds)}s</span></div>
                                                   )}
                                                   {job.meta.transcript && (
-                                                    <div className="italic text-gray-500 truncate max-w-md">
+                                                    <div className="italic text-gray-500 dark:text-gray-400 truncate max-w-md">
                                                       "{job.meta.transcript.substring(0, 80)}..."
                                                     </div>
                                                   )}
@@ -1356,10 +1341,10 @@ const Queue: React.FC = () => {
                                               {job.job_type === 'transcribe_full_audio_job' && job.status === 'started' && job.meta?.batch_progress && (
                                                 <div className="mt-1">
                                                   <div className="flex items-center justify-between text-xs mb-1">
-                                                    <span className="text-blue-700">{job.meta.batch_progress.message}</span>
-                                                    <span className="text-blue-600 font-medium">{job.meta.batch_progress.percent}%</span>
+                                                    <span className="text-blue-700 dark:text-blue-400">{job.meta.batch_progress.message}</span>
+                                                    <span className="text-blue-600 dark:text-blue-400 font-medium">{job.meta.batch_progress.percent}%</span>
                                                   </div>
-                                                  <div className="w-full bg-blue-200 rounded-full h-1.5">
+                                                  <div className="w-full bg-blue-200 dark:bg-blue-900/40 rounded-full h-1.5">
                                                     <div className="bg-blue-600 h-1.5 rounded-full transition-all duration-300" style={{ width: `${job.meta.batch_progress.percent}%` }} />
                                                   </div>
                                                 </div>
@@ -1400,9 +1385,9 @@ const Queue: React.FC = () => {
                                                   )}
                                                   {job.meta.memory_details && job.meta.memory_details.length > 0 && (
                                                     <div className="mt-2">
-                                                      <div className="text-xs font-medium text-gray-700 mb-1">Memories Created:</div>
+                                                      <div className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Memories Created:</div>
                                                       {job.meta.memory_details.map((memory: any, idx: number) => (
-                                                        <div key={idx} className="text-xs bg-pink-50 p-2 rounded mb-1">
+                                                        <div key={idx} className="text-xs bg-pink-50 dark:bg-pink-900/20 text-gray-700 dark:text-gray-300 p-2 rounded mb-1">
                                                           "{memory.text}"
                                                         </div>
                                                       ))}
@@ -1413,7 +1398,7 @@ const Queue: React.FC = () => {
 
                                               {/* Show conversation_id if present */}
                                               {job.meta.conversation_id && (
-                                                <div className="font-mono text-gray-500">
+                                                <div className="font-mono text-gray-500 dark:text-gray-400">
                                                   Conv: {job.meta.conversation_id.substring(0, 8)}...
                                                 </div>
                                               )}
@@ -1421,20 +1406,21 @@ const Queue: React.FC = () => {
                                           )}
                                         </div>
                                       )}
-                                      <button
+                                      <IconButton
+                                        label="View job details"
+                                        className="ml-2 flex-shrink-0"
                                         onClick={(e) => {
                                           e.stopPropagation();
                                           viewJobDetails(job.job_id);
                                         }}
-                                        className="ml-2 text-indigo-600 hover:text-indigo-900 flex-shrink-0"
                                       >
                                         <Eye className="w-3 h-3" />
-                                      </button>
+                                      </IconButton>
                                     </div>
                                   ))}
                                 </div>
                               ) : (
-                                <div className="text-xs text-gray-500 italic">No jobs found for this conversation</div>
+                                <div className="text-xs text-gray-500 dark:text-gray-400 italic">No jobs found for this conversation</div>
                               )}
                             </div>
                           )}
@@ -1448,23 +1434,24 @@ const Queue: React.FC = () => {
 
               {/* Completed Conversations - Grouped by conversation_id */}
               <div>
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-sm font-medium text-gray-700">Completed Conversations</h4>
+                <div className="flex items-center justify-between mb-3 gap-2">
+                  <GroupTitle>Completed Conversations</GroupTitle>
                   <div className="flex items-center space-x-2">
-                    <label className="text-xs text-gray-600">Time range:</label>
-                    <select
+                    <Label htmlFor="completed-conv-range" className="whitespace-nowrap text-xs">Time range:</Label>
+                    <Select
+                      id="completed-conv-range"
+                      className="w-auto py-1 text-xs"
                       value={completedConvTimeRange}
                       onChange={(e) => {
                         setCompletedConvTimeRange(Number(e.target.value));
                         setCompletedConvPage(1); // Reset to first page
                       }}
-                      className="text-xs border border-gray-300 rounded px-2 py-1"
                     >
                       <option value={1}>Last 1 hour</option>
                       <option value={6}>Last 6 hours</option>
                       <option value={24}>Last 24 hours</option>
                       <option value={168}>Last 7 days</option>
-                    </select>
+                    </Select>
                   </div>
                 </div>
                 {(() => {
@@ -1513,11 +1500,7 @@ const Queue: React.FC = () => {
                   });
 
                   if (conversationMap.size === 0) {
-                    return (
-                      <div className="text-center py-8 text-gray-500 text-sm bg-gray-50 rounded-lg border border-gray-200">
-                        No completed conversations
-                      </div>
-                    );
+                    return <EmptyState>No completed conversations</EmptyState>;
                   }
 
                   // Convert to array and filter by time range
@@ -1545,11 +1528,7 @@ const Queue: React.FC = () => {
                   const paginatedConversations = conversationsArray.slice(startIndex, endIndex);
 
                   if (conversationsArray.length === 0) {
-                    return (
-                      <div className="text-center py-8 text-gray-500 text-sm bg-gray-50 rounded-lg border border-gray-200">
-                        No completed conversations in the selected time range
-                      </div>
-                    );
+                    return <EmptyState>No completed conversations in the selected time range</EmptyState>;
                   }
 
                   return (
@@ -1582,25 +1561,25 @@ const Queue: React.FC = () => {
                         const failedJobCount = jobs.filter(j => j.status === 'failed').length;
 
                         // Determine status styling
-                        let bgColor = 'bg-yellow-50 border-yellow-200';
-                        let hoverColor = 'hover:bg-yellow-100';
-                        let iconColor = 'text-yellow-600';
-                        let statusBadge = 'bg-yellow-100 text-yellow-700';
+                        let bgColor = 'bg-yellow-50 border-yellow-200 dark:bg-yellow-900/20 dark:border-yellow-800';
+                        let hoverColor = 'hover:bg-yellow-100 dark:hover:bg-yellow-900/30';
+                        let iconColor = 'text-yellow-600 dark:text-yellow-400';
+                        let statusTone: StateTone = 'warning';
                         let statusText = 'Processing';
                         let StatusIcon = Clock;
 
                         if (hasFailedJob) {
-                          bgColor = 'bg-red-50 border-red-300';
-                          hoverColor = 'hover:bg-red-100';
-                          iconColor = 'text-red-600';
-                          statusBadge = 'bg-red-200 text-red-800';
+                          bgColor = 'bg-red-50 border-red-300 dark:bg-red-900/20 dark:border-red-800';
+                          hoverColor = 'hover:bg-red-100 dark:hover:bg-red-900/30';
+                          iconColor = 'text-red-600 dark:text-red-400';
+                          statusTone = 'danger';
                           statusText = `${failedJobCount} Error${failedJobCount > 1 ? 's' : ''}`;
                           StatusIcon = AlertTriangle;
                         } else if (allComplete) {
-                          bgColor = 'bg-green-50 border-green-200';
-                          hoverColor = 'hover:bg-green-100';
-                          iconColor = 'text-green-600';
-                          statusBadge = 'bg-green-100 text-green-700';
+                          bgColor = 'bg-green-50 border-green-200 dark:bg-green-900/20 dark:border-green-800';
+                          hoverColor = 'hover:bg-green-100 dark:hover:bg-green-900/30';
+                          iconColor = 'text-green-600 dark:text-green-400';
+                          statusTone = 'success';
                           statusText = 'Complete';
                           StatusIcon = CheckCircle;
                         }
@@ -1611,7 +1590,7 @@ const Queue: React.FC = () => {
                               className={`flex items-center justify-between p-3 cursor-pointer transition-colors ${hoverColor}`}
                               onClick={() => toggleConversationExpansion(conversationId)}
                             >
-                              <div className="flex-1">
+                              <div className="flex-1 min-w-0">
                                 <div className="flex items-center space-x-2">
                                   {isExpanded ? (
                                     <ChevronDown className={`w-4 h-4 ${iconColor}`} />
@@ -1619,17 +1598,15 @@ const Queue: React.FC = () => {
                                     <ChevronRight className={`w-4 h-4 ${iconColor}`} />
                                   )}
                                   <StatusIcon className={`w-4 h-4 ${iconColor}`} />
-                                  <span className="text-sm font-medium text-gray-900">{clientId}</span>
-                                  <span className={`text-xs px-2 py-0.5 rounded font-medium ${statusBadge}`}>
-                                    {statusText}
-                                  </span>
+                                  <span className="text-sm font-medium text-gray-900 dark:text-gray-100">{clientId}</span>
+                                  <StateBadge tone={statusTone}>{statusText}</StateBadge>
                                   {speakers.length > 0 && (
-                                    <span className="text-xs px-2 py-0.5 bg-purple-100 text-purple-700 rounded">
+                                    <MetadataChip>
                                       {speakers.length} speaker{speakers.length > 1 ? 's' : ''}
-                                    </span>
+                                    </MetadataChip>
                                   )}
                                 </div>
-                                <div className="mt-1 text-xs text-gray-600">
+                                <div className="mt-1 text-xs text-gray-600 dark:text-gray-400">
                                   Conversation: {conversationId.substring(0, 8)}... •
                                   Words: {wordCount}
                                   {createdAt && (
@@ -1640,23 +1617,23 @@ const Queue: React.FC = () => {
                                 {allComplete ? (
                                   <>
                                     {title ? (
-                                      <div className="mt-1 text-sm font-medium text-gray-900">
+                                      <div className="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">
                                         {title}
                                       </div>
                                     ) : transcript ? (
-                                      <div className="mt-1 text-xs text-gray-700 italic truncate">
+                                      <div className="mt-1 text-xs text-gray-700 dark:text-gray-300 italic truncate">
                                         "{transcript.substring(0, 100)}{transcript.length > 100 ? '...' : ''}"
                                       </div>
                                     ) : null}
                                     {summary && (
-                                      <div className="mt-1 text-xs text-gray-700 italic">
+                                      <div className="mt-1 text-xs text-gray-700 dark:text-gray-300 italic">
                                         {summary}
                                       </div>
                                     )}
                                   </>
                                 ) : (
                                   transcript && (
-                                    <div className="mt-1 text-xs text-gray-700 italic truncate">
+                                    <div className="mt-1 text-xs text-gray-700 dark:text-gray-300 italic truncate">
                                       "{transcript.substring(0, 100)}{transcript.length > 100 ? '...' : ''}"
                                     </div>
                                   )
@@ -1666,12 +1643,12 @@ const Queue: React.FC = () => {
 
                             {/* Expanded Jobs Section */}
                             {isExpanded && (
-                              <div className={`border-t bg-white p-3 ${
-                                allComplete ? 'border-green-200' : 'border-yellow-200'
+                              <div className={`border-t bg-white dark:bg-gray-800 p-3 ${
+                                allComplete ? 'border-green-200 dark:border-green-800' : 'border-yellow-200 dark:border-yellow-800'
                               }`}>
                                 {/* Pipeline Timeline */}
                                 <div className="mb-4">
-                                  <h5 className="text-xs font-medium text-gray-700 mb-3">Pipeline Timeline:</h5>
+                                  <h5 className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-3">Pipeline Timeline:</h5>
                                   {(() => {
                                     // Helper function to get display name from job type
                                     const getJobDisplayName = (jobType: string) => {
@@ -1722,7 +1699,7 @@ const Queue: React.FC = () => {
                                     const validTimes = jobTimes.filter(t => t !== null);
                                     if (validTimes.length === 0) {
                                       return (
-                                        <div className="text-xs text-gray-500 italic">No job timing data available</div>
+                                        <div className="text-xs text-gray-500 dark:text-gray-400 italic">No job timing data available</div>
                                       );
                                     }
 
@@ -1748,7 +1725,7 @@ const Queue: React.FC = () => {
                                     return (
                                       <div className="space-y-2">
                                         {/* Time axis */}
-                                        <div className="relative h-4 border-b border-gray-300">
+                                        <div className="relative h-4 border-b border-gray-300 dark:border-gray-600">
                                           {timeMarkers.map((marker, idx) => (
                                             <div
                                               key={idx}
@@ -1756,7 +1733,7 @@ const Queue: React.FC = () => {
                                               style={{ left: `${marker.percent}%`, transform: 'translateX(-50%)' }}
                                             >
                                               <div className="w-px h-2 bg-gray-400"></div>
-                                              <div className="text-xs text-gray-500 mt-0.5 whitespace-nowrap">
+                                              <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 whitespace-nowrap">
                                                 {marker.time}
                                               </div>
                                             </div>
@@ -1785,10 +1762,10 @@ const Queue: React.FC = () => {
                                                 </div>
 
                                                 {/* Stage Name */}
-                                                <span className="text-xs text-gray-700 w-20 flex-shrink-0">{name}</span>
+                                                <span className="text-xs text-gray-700 dark:text-gray-300 w-20 flex-shrink-0">{name}</span>
 
                                                 {/* Timeline Container */}
-                                                <div className="flex-1 relative h-6 bg-gray-100 rounded">
+                                                <div className="flex-1 relative h-6 bg-gray-100 dark:bg-gray-700 rounded">
                                                   {/* Job Bar */}
                                                   <div
                                                     className={`absolute h-6 rounded ${barColor} ${job.status === 'started' ? 'animate-pulse' : ''} flex items-center justify-center`}
@@ -1811,7 +1788,7 @@ const Queue: React.FC = () => {
                                         </div>
 
                                         {/* Total Duration */}
-                                        <div className="text-xs text-gray-600 text-right mt-2">
+                                        <div className="text-xs text-gray-600 dark:text-gray-400 text-right mt-2">
                                           Total: {formatDuration(totalDuration)}
                                         </div>
                                       </div>
@@ -1819,48 +1796,45 @@ const Queue: React.FC = () => {
                                   })()}
                                 </div>
 
-                                <h5 className="text-xs font-medium text-gray-700 mb-2">Conversation Jobs:</h5>
+                                <h5 className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-2">Conversation Jobs:</h5>
                                 {jobs.filter(j => j != null && j.job_id).length > 0 ? (
                                   <div className="space-y-1">
                                     {jobs
                                       .filter(j => j != null && j.job_id)
                                       .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
                                       .map((job, index) => (
-                                      <div key={job.job_id} className={`p-2 bg-gray-50 rounded border ${getJobTypeColor(job.job_type, job.status).borderColor}`} style={{ borderLeftWidth: '12px' }}>
+                                      <div key={job.job_id} className={`p-2 bg-gray-50 dark:bg-gray-900/40 rounded border ${getJobTypeColor(job.job_type, job.status).borderColor}`} style={{ borderLeftWidth: '12px' }}>
                                         <div className="flex items-center justify-between">
                                           <div
-                                            className="flex-1 flex items-center space-x-2 cursor-pointer hover:bg-gray-100 transition-colors rounded px-1 py-0.5"
+                                            className="flex-1 flex items-center space-x-2 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors rounded px-1 py-0.5"
                                             onClick={() => toggleJobExpansion(job.job_id)}
                                           >
-                                            <span className="text-xs font-mono text-gray-500 flex-shrink-0">#{index + 1}</span>
+                                            <span className="text-xs font-mono text-gray-500 dark:text-gray-400 flex-shrink-0">#{index + 1}</span>
                                             <span className="flex-shrink-0">{getJobTypeIcon(job.job_type)}</span>
                                             <span className="flex-shrink-0">{getStatusIcon(job.status)}</span>
-                                            <span className="text-xs font-medium text-gray-900 truncate">{job.job_type}</span>
-                                            <span className={`text-xs px-1.5 py-0.5 rounded ${getStatusColor(job.status)}`}>
-                                              {job.status}
-                                            </span>
-                                            <span className="text-xs text-gray-500">{job.queue || job.data?.queue || 'unknown'}</span>
+                                            <span className="text-xs font-medium text-gray-900 dark:text-gray-100 truncate">{job.job_type}</span>
+                                            <StateBadge tone={getStatusTone(job.status)}>{job.status}</StateBadge>
+                                            <span className="text-xs text-gray-500 dark:text-gray-400">{job.queue || job.data?.queue || 'unknown'}</span>
                                             {/* Show memory count badge on collapsed card */}
                                             {!expandedJobs.has(job.job_id) && job.job_type === 'process_memory_job' && job.result?.memories_created !== undefined && (
-                                              <span className="text-xs px-1.5 py-0.5 bg-pink-100 text-pink-700 rounded">
-                                                {job.result.memories_created} memories
-                                              </span>
+                                              <MetadataChip>{job.result.memories_created} memories</MetadataChip>
                                             )}
                                           </div>
-                                          <button
+                                          <IconButton
+                                            label="View job details"
+                                            className="ml-2 flex-shrink-0"
                                             onClick={(e) => {
                                               e.stopPropagation();
                                               viewJobDetails(job.job_id);
                                             }}
-                                            className="ml-2 text-indigo-600 hover:text-indigo-900 flex-shrink-0"
                                           >
                                             <Eye className="w-3 h-3" />
-                                          </button>
+                                          </IconButton>
                                         </div>
 
                                         {/* Collapsible metadata section */}
                                         {expandedJobs.has(job.job_id) && (
-                                          <div className="mt-1 text-xs text-gray-600 space-y-0.5 pl-4">
+                                          <div className="mt-1 text-xs text-gray-600 dark:text-gray-400 space-y-0.5 pl-4">
                                             <div>
                                               {job.started_at && (
                                                 <span>Started: {new Date(job.started_at).toLocaleTimeString()}</span>
@@ -1872,7 +1846,7 @@ const Queue: React.FC = () => {
 
                                             {/* Show job-specific metadata */}
                                             {job.meta && (
-                                              <div className="space-y-0.5 pl-2 border-l-2 border-gray-300">
+                                              <div className="space-y-0.5 pl-2 border-l-2 border-gray-300 dark:border-gray-600">
                                                 {/* open_conversation_job metadata */}
                                                 {job.job_type === 'open_conversation_job' && (
                                                   <>
@@ -1886,7 +1860,7 @@ const Queue: React.FC = () => {
                                                       <div>Idle: <span className="font-medium">{Math.floor(job.meta.inactivity_seconds)}s</span></div>
                                                     )}
                                                     {job.meta.transcript && (
-                                                      <div className="italic text-gray-500 truncate max-w-md">
+                                                      <div className="italic text-gray-500 dark:text-gray-400 truncate max-w-md">
                                                         "{job.meta.transcript.substring(0, 80)}..."
                                                       </div>
                                                     )}
@@ -1931,7 +1905,7 @@ const Queue: React.FC = () => {
 
                                                 {/* Show conversation_id if present */}
                                                 {job.meta.conversation_id && (
-                                                  <div className="font-mono text-gray-500">
+                                                  <div className="font-mono text-gray-500 dark:text-gray-400">
                                                     Conv: {job.meta.conversation_id.substring(0, 8)}...
                                                   </div>
                                                 )}
@@ -1943,7 +1917,7 @@ const Queue: React.FC = () => {
                                     ))}
                                   </div>
                                 ) : (
-                                  <div className="text-xs text-gray-500 italic">No jobs found for this conversation</div>
+                                  <div className="text-xs text-gray-500 dark:text-gray-400 italic">No jobs found for this conversation</div>
                                 )}
                               </div>
                             )}
@@ -1954,23 +1928,21 @@ const Queue: React.FC = () => {
 
                       {/* Pagination Controls */}
                       {totalPages > 1 && (
-                        <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-200">
-                          <div className="text-xs text-gray-600">
+                        <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+                          <div className="text-xs text-gray-600 dark:text-gray-400">
                             Showing {startIndex + 1}-{Math.min(endIndex, totalConversations)} of {totalConversations} conversations
                           </div>
                           <div className="flex items-center space-x-2">
                             <Button
-                              variant="primary"
                               onClick={() => setCompletedConvPage(Math.max(1, completedConvPage - 1))}
                               disabled={completedConvPage === 1}
                             >
                               Previous
                             </Button>
-                            <span className="text-xs text-gray-600">
+                            <span className="text-xs text-gray-600 dark:text-gray-400">
                               Page {completedConvPage} of {totalPages}
                             </span>
                             <Button
-                              variant="primary"
                               onClick={() => setCompletedConvPage(Math.min(totalPages, completedConvPage + 1))}
                               disabled={completedConvPage === totalPages}
                             >
@@ -1985,13 +1957,13 @@ const Queue: React.FC = () => {
               </div>
             </div>
           </div>
-        </div>
+        </Card>
       )}
 
       {/* Events */}
-      <div className="bg-white rounded-lg border overflow-hidden">
+      <Card raised padded={false} className="overflow-hidden">
         <div
-          className="px-6 py-4 border-b border-gray-200 flex justify-between items-center cursor-pointer"
+          className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center cursor-pointer"
           onClick={() => {
             const next = !eventsExpanded;
             setEventsExpanded(next);
@@ -1999,9 +1971,9 @@ const Queue: React.FC = () => {
           }}
         >
           <div className="flex items-center space-x-2">
-            <Zap className="w-5 h-5 text-purple-600" />
-            <h3 className="text-lg font-medium">Events</h3>
-            <span className="text-xs text-gray-500">
+            <Zap className="w-5 h-5 text-purple-600 dark:text-purple-400" />
+            <SectionTitle>Events</SectionTitle>
+            <span className="text-xs text-gray-500 dark:text-gray-400">
               {(() => {
                 const includes = Object.entries(eventFilters).filter(([, v]) => v === 'include').map(([k]) => k);
                 const excludes = Object.entries(eventFilters).filter(([, v]) => v === 'exclude').map(([k]) => k);
@@ -2016,7 +1988,11 @@ const Queue: React.FC = () => {
           </div>
           <div className="flex items-center space-x-3">
             {eventsExpanded && events.length > 0 && (
-              <button
+              <Button
+                variant="ghost"
+                icon={<Trash2 className="w-3.5 h-3.5" />}
+                title="Clear all events"
+                className="text-red-600 hover:bg-red-50 hover:text-red-700 dark:text-red-400 dark:hover:bg-red-900/30 dark:hover:text-red-300"
                 onClick={(e) => {
                   e.stopPropagation();
                   queueApi.clearEvents().then(() => {
@@ -2024,19 +2000,18 @@ const Queue: React.FC = () => {
                     invalidateQueue();
                   });
                 }}
-                className="inline-flex items-center px-2 py-1 rounded text-xs text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors"
-                title="Clear all events"
               >
-                <Trash2 className="w-3.5 h-3.5 mr-1" />
                 Clear
-              </button>
+              </Button>
             )}
-            {eventsExpanded ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
+            {eventsExpanded
+              ? <ChevronDown className="w-4 h-4 text-gray-500 dark:text-gray-400" />
+              : <ChevronRight className="w-4 h-4 text-gray-500 dark:text-gray-400" />}
           </div>
         </div>
 
         {eventsExpanded && [...new Set(events.map(e => e.event))].sort().length > 0 && (
-          <div className="px-6 py-2 border-b border-gray-100 flex flex-wrap items-center gap-2">
+          <div className="px-6 py-2 border-b border-gray-100 dark:border-gray-700 flex flex-wrap items-center gap-2">
             {[...new Set(events.map(e => e.event))].sort().map(eventType => {
               const state = eventFilters[eventType];
               return (
@@ -2045,10 +2020,10 @@ const Queue: React.FC = () => {
                   onClick={() => cycleEventFilter(eventType)}
                   className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border cursor-pointer transition-colors ${
                     state === 'include'
-                      ? 'bg-blue-100 text-blue-700 border-blue-400'
+                      ? 'bg-blue-100 text-blue-700 border-blue-400 dark:bg-blue-900/40 dark:text-blue-300 dark:border-blue-600'
                       : state === 'exclude'
-                      ? 'bg-red-100 text-red-700 border-red-400 line-through'
-                      : 'bg-gray-100 text-gray-500 border-gray-300'
+                      ? 'bg-red-100 text-red-700 border-red-400 line-through dark:bg-red-900/40 dark:text-red-300 dark:border-red-600'
+                      : 'bg-gray-100 text-gray-500 border-gray-300 dark:bg-gray-700/60 dark:text-gray-400 dark:border-gray-600'
                   }`}
                 >
                   {eventType}
@@ -2058,7 +2033,7 @@ const Queue: React.FC = () => {
             {Object.keys(eventFilters).length > 0 && (
               <button
                 onClick={() => setEventFilters({})}
-                className="inline-flex items-center px-2 py-0.5 rounded text-xs text-gray-400 hover:text-gray-600 transition-colors"
+                className="inline-flex items-center px-2 py-0.5 rounded text-xs text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors"
               >
                 Clear
               </button>
@@ -2079,24 +2054,24 @@ const Queue: React.FC = () => {
 
               if (filtered.length === 0) {
                 return (
-                  <div className="px-6 py-8 text-center text-gray-500 text-sm">
+                  <div className="px-6 py-8 text-center text-gray-500 dark:text-gray-400 text-sm">
                     No events recorded yet. Events are logged when system actions like conversation.complete, memory.processed, or button presses occur.
                   </div>
                 );
               }
 
               return (
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
+                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                  <thead className="bg-gray-50 dark:bg-gray-700">
                     <tr>
-                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
-                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Event</th>
-                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">User</th>
-                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Plugins Triggered</th>
-                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Time</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Event</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">User</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Plugins Triggered</th>
+                      <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase">Status</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-200">
+                  <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
                     {filtered.map((evt, idx) => {
                       const pluginsExecuted = evt.plugins_executed || [];
                       // A plugin can intentionally no-op (e.g. wake word armed on a
@@ -2108,8 +2083,8 @@ const Queue: React.FC = () => {
                       const allSkipped = pluginsExecuted.length > 0 && ranPlugins.length === 0;
 
                       return (
-                        <tr key={idx} className="hover:bg-gray-50">
-                          <td className="px-4 py-2 text-xs text-gray-600 whitespace-nowrap">
+                        <tr key={idx} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                          <td className="px-4 py-2 text-xs text-gray-600 dark:text-gray-400 whitespace-nowrap">
                             {new Date(evt.timestamp * 1000).toLocaleTimeString()}
                           </td>
                           <td className="px-4 py-2">
@@ -2117,42 +2092,38 @@ const Queue: React.FC = () => {
                               {evt.event}
                             </span>
                           </td>
-                          <td className="px-4 py-2 text-xs text-gray-600 font-mono">
+                          <td className="px-4 py-2 text-xs text-gray-600 dark:text-gray-400 font-mono">
                             {(evt.user_id || '').length > 12 ? `${evt.user_id.slice(-8)}` : evt.user_id}
                           </td>
-                          <td className="px-4 py-2 text-xs text-gray-700">
+                          <td className="px-4 py-2 text-xs text-gray-700 dark:text-gray-300">
                             {pluginsExecuted.length > 0
                               ? pluginsExecuted.map(p => p.plugin_id).join(', ')
-                              : <span className="text-gray-400">none</span>
+                              : <span className="text-gray-400 dark:text-gray-500">none</span>
                             }
                           </td>
                           <td className="px-4 py-2">
                             <div className="flex items-center space-x-2">
                               {pluginsExecuted.length === 0 ? (
-                                <span className="text-xs text-gray-400">no plugins ran</span>
+                                <span className="text-xs text-gray-400 dark:text-gray-500">no plugins ran</span>
                               ) : allSkipped ? (
-                                <span className="text-xs text-gray-500">Skipped</span>
+                                <span className="text-xs text-gray-500 dark:text-gray-400">Skipped</span>
                               ) : allSuccess ? (
-                                <span className="flex items-center space-x-1 text-xs text-green-600">
+                                <span className="flex items-center space-x-1 text-xs text-green-600 dark:text-green-400">
                                   <CheckCircle className="w-3.5 h-3.5" />
                                   <span>OK</span>
                                 </span>
                               ) : anyFailure ? (
-                                <span className="flex items-center space-x-1 text-xs text-red-600">
+                                <span className="flex items-center space-x-1 text-xs text-red-600 dark:text-red-400">
                                   <XCircle className="w-3.5 h-3.5" />
                                   <span>Error</span>
                                 </span>
                               ) : (
-                                <span className="text-xs text-gray-500">partial</span>
+                                <span className="text-xs text-gray-500 dark:text-gray-400">partial</span>
                               )}
                               {pluginsExecuted.length > 0 && (
-                                <button
-                                  onClick={() => setSelectedEvent(evt)}
-                                  className="text-gray-400 hover:text-gray-600 p-0.5 rounded hover:bg-gray-100"
-                                  title="View details"
-                                >
+                                <IconButton label="View event details" onClick={() => setSelectedEvent(evt)}>
                                   <Eye className="w-3.5 h-3.5" />
-                                </button>
+                                </IconButton>
                               )}
                             </div>
                           </td>
@@ -2165,15 +2136,18 @@ const Queue: React.FC = () => {
             })()}
           </div>
         )}
-      </div>
+      </Card>
 
       {/* Filters */}
       <Card raised>
-        <h3 className="text-lg font-medium mb-4">Filters</h3>
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="mb-4">
+          <SectionTitle>Filters</SectionTitle>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
+            <Label htmlFor="filter-status" className="mb-1">Status</Label>
             <Select
+              id="filter-status"
               value={filters.status}
               onChange={(e) => setFilters({ ...filters, status: e.target.value })}
             >
@@ -2188,29 +2162,16 @@ const Queue: React.FC = () => {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Job Type</label>
+            <Label htmlFor="filter-job-type" className="mb-1">Job Type</Label>
             <Select
+              id="filter-job-type"
               value={filters.job_type}
               onChange={(e) => setFilters({ ...filters, job_type: e.target.value })}
             >
               <option value="">All Types</option>
-              <option value="process_audio_files">Audio File Processing</option>
-              <option value="process_single_audio_file">Single Audio File</option>
-              <option value="reprocess_transcript">Reprocess Transcript</option>
-              <option value="reprocess_memory">Reprocess Memory</option>
-            </Select>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Priority</label>
-            <Select
-              value={filters.priority}
-              onChange={(e) => setFilters({ ...filters, priority: e.target.value })}
-            >
-              <option value="">All Priorities</option>
-              <option value="high">High</option>
-              <option value="normal">Normal</option>
-              <option value="low">Low</option>
+              {jobTypeOptions.map(jobType => (
+                <option key={jobType} value={jobType}>{getJobTypeShort(jobType)}</option>
+              ))}
             </Select>
           </div>
 
@@ -2218,123 +2179,108 @@ const Queue: React.FC = () => {
             <Button variant="primary" size="md" icon={<Filter className="w-4 h-4" />} onClick={applyFilters}>
               Apply
             </Button>
-            <button
-              onClick={clearFilters}
-              className="flex items-center space-x-1 px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
-            >
-              <X className="w-4 h-4" />
-              <span>Clear</span>
-            </button>
+            <Button size="md" icon={<X className="w-4 h-4" />} onClick={clearFilters}>
+              Clear
+            </Button>
           </div>
         </div>
       </Card>
 
           {/* Jobs Table */}
-      <div className="bg-white rounded-lg border overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-          <h3 className="text-lg font-medium">Jobs</h3>
+      <Card raised padded={false} className="overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
+          <SectionTitle>Jobs</SectionTitle>
           {jobs.length > 0 && (
-            <button
+            <Button
+              variant="ghost"
+              icon={<Trash2 className="w-3.5 h-3.5" />}
+              title="Clear finished and failed jobs"
+              className="text-red-600 hover:bg-red-50 hover:text-red-700 dark:text-red-400 dark:hover:bg-red-900/30 dark:hover:text-red-300"
               onClick={() => {
                 queueApi.clearJobs().then(() => {
                   invalidateQueue();
                 });
               }}
-              className="inline-flex items-center px-2 py-1 rounded text-xs text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors"
-              title="Clear finished and failed jobs"
             >
-              <Trash2 className="w-3.5 h-3.5 mr-1" />
               Clear
-            </button>
+            </Button>
           )}
         </div>
 
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+          <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+            <thead className="bg-gray-50 dark:bg-gray-700">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Date</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Conversation ID</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Job ID</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Type</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Duration</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase whitespace-nowrap">Actions</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase whitespace-nowrap">Date</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase whitespace-nowrap">Conversation ID</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase whitespace-nowrap">Job ID</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase whitespace-nowrap">Type</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase whitespace-nowrap">Status</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase whitespace-nowrap">Duration</th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase whitespace-nowrap">Actions</th>
               </tr>
             </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
+            <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
               {jobs
                 .filter((job) => {
                   if (filters.status && job.status !== filters.status) return false;
                   if (filters.job_type && job.job_type !== filters.job_type) return false;
-                  if (filters.priority && job.meta?.priority !== filters.priority) return false;
                   return true;
                 })
                 .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).map((job) => (
-                <tr key={job.job_id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 text-sm text-gray-500 whitespace-nowrap">
+                <tr key={job.job_id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                  <td className="px-4 py-3 text-sm text-gray-500 dark:text-gray-400 whitespace-nowrap">
                     {new Date(job.created_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                   </td>
                   <td className="px-4 py-3 max-w-xs">
-                    <div className="text-xs font-mono text-gray-600 truncate" title={job.meta?.conversation_id || 'N/A'}>
+                    <div className="text-xs font-mono text-gray-600 dark:text-gray-400 truncate" title={job.meta?.conversation_id || 'N/A'}>
                       {job.meta?.conversation_id ? job.meta.conversation_id.substring(0, 8) : '—'}
                     </div>
                   </td>
-                  <td className="px-4 py-3 max-w-xs">
-                    <div className="text-xs font-mono text-gray-900 truncate" title={job.job_id}>
+                  <td className="px-4 py-3 max-w-[14rem]">
+                    <div className="text-xs font-mono text-gray-900 dark:text-gray-100 truncate" title={job.job_id}>
                       {job.job_id}
                     </div>
                   </td>
-                  <td className="px-4 py-3 whitespace-nowrap">
-                    <div className="text-sm text-gray-900">{getJobTypeShort(job.job_type)}</div>
+                  <td className="px-4 py-3 max-w-[12rem]">
+                    <div className="text-sm text-gray-900 dark:text-gray-100 truncate" title={job.job_type}>
+                      {getJobTypeShort(job.job_type)}
+                    </div>
                   </td>
                   <td className="px-4 py-3 whitespace-nowrap">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getStatusColor(job.status)}`}>
+                    <StateBadge tone={getStatusTone(job.status)}>
                       {getStatusIcon(job.status)}
                       <span className="ml-1">{job.status.charAt(0).toUpperCase() + job.status.slice(1)}</span>
-                    </span>
+                    </StateBadge>
                   </td>
                   <td className="px-4 py-3 whitespace-nowrap">
-                    <div className="text-sm text-gray-700 font-mono">
+                    <div className="text-sm text-gray-700 dark:text-gray-300 font-mono">
                       {formatDuration(job)}
                     </div>
                   </td>
                   <td className="px-4 py-3 text-sm font-medium whitespace-nowrap">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1">
                       {job.status === 'failed' && (
-                        <button
-                          onClick={() => retryJob(job.job_id)}
-                          className="text-blue-600 hover:text-blue-900"
-                          title="Retry job"
-                        >
+                        <IconButton label="Retry job" onClick={() => retryJob(job.job_id)}>
                           <RotateCcw className="w-4 h-4" />
-                        </button>
+                        </IconButton>
                       )}
-                      <button
-                        onClick={() => viewJobDetails(job.job_id)}
-                        className="text-indigo-600 hover:text-indigo-900"
+                      <IconButton
+                        label="View details"
                         disabled={loadingJobDetails}
-                        title="View details"
+                        onClick={() => viewJobDetails(job.job_id)}
                       >
                         <Eye className="w-4 h-4" />
-                      </button>
+                      </IconButton>
                       {(job.status === 'queued' || job.status === 'started') && (
-                        <button
-                          onClick={() => cancelJob(job.job_id)}
-                          className="text-red-600 hover:text-red-900"
-                          title="Cancel job"
-                        >
+                        <IconButton danger label="Cancel job" onClick={() => cancelJob(job.job_id)}>
                           <StopCircle className="w-4 h-4" />
-                        </button>
+                        </IconButton>
                       )}
                       {job.status === 'finished' && (
-                        <button
-                          onClick={() => cancelJob(job.job_id)}
-                          className="text-gray-400 hover:text-gray-600"
-                          title="Delete job"
-                        >
+                        <IconButton danger label="Delete job" onClick={() => cancelJob(job.job_id)}>
                           <Trash2 className="w-4 h-4" />
-                        </button>
+                        </IconButton>
                       )}
                     </div>
                   </td>
@@ -2346,29 +2292,21 @@ const Queue: React.FC = () => {
 
         {/* Pagination */}
         {pagination.total > pagination.limit && (
-          <div className="bg-white px-4 py-3 border-t border-gray-200 flex items-center justify-between">
-            <div className="text-sm text-gray-700">
+          <div className="px-4 py-3 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between">
+            <div className="text-sm text-gray-700 dark:text-gray-300">
               Showing {pagination.offset + 1} to {Math.min(pagination.offset + pagination.limit, pagination.total)} of {pagination.total} results
             </div>
             <div className="flex space-x-2">
-              <button
-                onClick={prevPage}
-                disabled={pagination.offset === 0}
-                className="px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
-              >
+              <Button size="md" onClick={prevPage} disabled={pagination.offset === 0}>
                 Previous
-              </button>
-              <button
-                onClick={nextPage}
-                disabled={!pagination.has_more}
-                className="px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
-              >
+              </Button>
+              <Button size="md" onClick={nextPage} disabled={!pagination.has_more}>
                 Next
-              </button>
+              </Button>
             </div>
           </div>
         )}
-      </div>
+      </Card>
       {/* Old Jobs Table and Pagination - Removed in favor of session-based view above */}
 
       {/* Job Details Modal */}
@@ -2393,46 +2331,46 @@ const Queue: React.FC = () => {
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700">Job ID</label>
-                    <p className="text-sm text-gray-900 font-mono">{selectedJob.job_id}</p>
+                    <Label>Job ID</Label>
+                    <p className="text-sm text-gray-900 dark:text-gray-100 font-mono">{selectedJob.job_id}</p>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700">Status</label>
-                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getStatusColor(selectedJob.status)}`}>
+                    <Label>Status</Label>
+                    <StateBadge tone={getStatusTone(selectedJob.status)}>
                       {getStatusIcon(selectedJob.status)}
                       <span className="ml-1">{selectedJob.status.charAt(0).toUpperCase() + selectedJob.status.slice(1)}</span>
-                    </span>
+                    </StateBadge>
                   </div>
                   {selectedJob.description && (
                     <div className="col-span-2">
-                      <label className="block text-sm font-medium text-gray-700">Description</label>
-                      <p className="text-sm text-gray-900">{selectedJob.description}</p>
+                      <Label>Description</Label>
+                      <p className="text-sm text-gray-900 dark:text-gray-100">{selectedJob.description}</p>
                     </div>
                   )}
                   {selectedJob.func_name && (
                     <div className="col-span-2">
-                      <label className="block text-sm font-medium text-gray-700">Function Name</label>
-                      <p className="text-sm text-gray-900 font-mono">{selectedJob.func_name}</p>
+                      <Label>Function Name</Label>
+                      <p className="text-sm text-gray-900 dark:text-gray-100 font-mono">{selectedJob.func_name}</p>
                     </div>
                   )}
                   <div>
-                    <label className="block text-sm font-medium text-gray-700">Created</label>
-                    <p className="text-sm text-gray-900">{selectedJob.created_at ? formatDate(selectedJob.created_at) : '-'}</p>
+                    <Label>Created</Label>
+                    <p className="text-sm text-gray-900 dark:text-gray-100">{selectedJob.created_at ? formatDate(selectedJob.created_at) : '-'}</p>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700">Started</label>
-                    <p className="text-sm text-gray-900">{selectedJob.started_at ? formatDate(selectedJob.started_at) : '-'}</p>
+                    <Label>Started</Label>
+                    <p className="text-sm text-gray-900 dark:text-gray-100">{selectedJob.started_at ? formatDate(selectedJob.started_at) : '-'}</p>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700">Ended</label>
-                    <p className="text-sm text-gray-900">{selectedJob.ended_at ? formatDate(selectedJob.ended_at) : '-'}</p>
+                    <Label>Ended</Label>
+                    <p className="text-sm text-gray-900 dark:text-gray-100">{selectedJob.ended_at ? formatDate(selectedJob.ended_at) : '-'}</p>
                   </div>
                 </div>
 
                 {selectedJob.args && selectedJob.args.length > 0 && (
                   <div>
-                    <label className="block text-sm font-medium text-gray-700">Arguments</label>
-                    <pre className="text-xs text-gray-900 bg-gray-50 p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words">
+                    <Label>Arguments</Label>
+                    <pre className="text-xs text-gray-900 dark:text-gray-100 bg-gray-50 dark:bg-gray-900 p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words">
                       {JSON.stringify(selectedJob.args, null, 2)}
                     </pre>
                   </div>
@@ -2440,8 +2378,8 @@ const Queue: React.FC = () => {
 
                 {selectedJob.kwargs && Object.keys(selectedJob.kwargs).length > 0 && (
                   <div>
-                    <label className="block text-sm font-medium text-gray-700">Keyword Arguments</label>
-                    <pre className="text-xs text-gray-900 bg-gray-50 p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words">
+                    <Label>Keyword Arguments</Label>
+                    <pre className="text-xs text-gray-900 dark:text-gray-100 bg-gray-50 dark:bg-gray-900 p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words">
                       {JSON.stringify(selectedJob.kwargs, null, 2)}
                     </pre>
                   </div>
@@ -2449,8 +2387,8 @@ const Queue: React.FC = () => {
 
                 {selectedJob.error_message && (
                   <div>
-                    <label className="block text-sm font-medium text-gray-700">Error</label>
-                    <pre className="text-xs text-red-600 bg-red-50 p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words">
+                    <Label>Error</Label>
+                    <pre className="text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words">
                       {selectedJob.error_message}
                     </pre>
                   </div>
@@ -2458,8 +2396,8 @@ const Queue: React.FC = () => {
 
                 {selectedJob.result && (
                   <div>
-                    <label className="block text-sm font-medium text-gray-700">Result</label>
-                    <pre className="text-xs text-gray-900 bg-green-50 p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words">
+                    <Label>Result</Label>
+                    <pre className="text-xs text-gray-900 dark:text-gray-100 bg-green-50 dark:bg-green-900/20 p-2 rounded overflow-auto max-h-64 whitespace-pre-wrap break-words">
                       {JSON.stringify(selectedJob.result, null, 2)}
                     </pre>
                   </div>
@@ -2468,11 +2406,11 @@ const Queue: React.FC = () => {
                 {/* Formatted Job Metadata - Job-specific displays */}
                 {selectedJob.meta && Object.keys(selectedJob.meta).length > 0 && (
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">Job Metadata</label>
+                    <Label className="mb-2">Job Metadata</Label>
 
                     {/* open_conversation_job formatted metadata */}
                     {selectedJob.func_name?.includes('open_conversation_job') && (
-                      <div className="bg-blue-50 p-3 rounded mb-3 space-y-2">
+                      <div className="bg-blue-50 dark:bg-blue-900/20 p-3 rounded mb-3 space-y-2">
                         {selectedJob.meta.word_count !== undefined && (
                           <div className="text-sm">
                             <span className="font-medium">Word Count:</span> {selectedJob.meta.word_count}
@@ -2506,7 +2444,7 @@ const Queue: React.FC = () => {
                         {selectedJob.meta.transcript && (
                           <div className="mt-2">
                             <div className="text-sm font-medium mb-1">Transcript:</div>
-                            <div className="text-sm italic text-gray-700 bg-white p-2 rounded border border-gray-200 max-h-32 overflow-y-auto">
+                            <div className="text-sm italic text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 p-2 rounded border border-gray-200 dark:border-gray-700 max-h-32 overflow-y-auto">
                               "{selectedJob.meta.transcript}"
                             </div>
                           </div>
@@ -2516,7 +2454,7 @@ const Queue: React.FC = () => {
 
                     {/* process_memory_job formatted metadata */}
                     {selectedJob.func_name?.includes('process_memory_job') && selectedJob.meta.memory_details && selectedJob.meta.memory_details.length > 0 && (
-                      <div className="bg-pink-50 p-3 rounded mb-3 space-y-2">
+                      <div className="bg-pink-50 dark:bg-pink-900/20 p-3 rounded mb-3 space-y-2">
                         <div className="text-sm">
                           <span className="font-medium">Memories Created:</span> {selectedJob.meta.memories_created || selectedJob.meta.memory_details.length}
                         </div>
@@ -2529,7 +2467,7 @@ const Queue: React.FC = () => {
                           <div className="text-sm font-medium mb-1">Memory Details:</div>
                           <div className="space-y-1">
                             {selectedJob.meta.memory_details.map((mem: any, idx: number) => (
-                              <div key={idx} className="text-xs bg-pink-100 p-2 rounded border border-pink-200">
+                              <div key={idx} className="text-xs bg-pink-100 dark:bg-pink-900/30 text-gray-800 dark:text-gray-200 p-2 rounded border border-pink-200 dark:border-pink-800">
                                 {mem.text}
                               </div>
                             ))}
@@ -2540,7 +2478,7 @@ const Queue: React.FC = () => {
 
                     {/* stream_speech_detection_job formatted metadata */}
                     {selectedJob.func_name?.includes('stream_speech_detection_job') && (
-                      <div className="bg-yellow-50 p-3 rounded mb-3 space-y-2">
+                      <div className="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded mb-3 space-y-2">
                         {selectedJob.meta.speech_detected_at && (
                           <div className="text-sm">
                             <span className="font-medium">Speech Detected At:</span> {new Date(selectedJob.meta.speech_detected_at).toLocaleString()}
@@ -2561,7 +2499,7 @@ const Queue: React.FC = () => {
 
                     {/* transcribe_full_audio_job formatted metadata */}
                     {selectedJob.func_name?.includes('transcribe_full_audio_job') && (selectedJob.meta.title || selectedJob.meta.summary) && (
-                      <div className="bg-purple-50 p-3 rounded mb-3 space-y-2">
+                      <div className="bg-purple-50 dark:bg-purple-900/20 p-3 rounded mb-3 space-y-2">
                         {selectedJob.meta.title && (
                           <div className="text-sm">
                             <span className="font-medium">Title:</span> {selectedJob.meta.title}
@@ -2592,10 +2530,10 @@ const Queue: React.FC = () => {
 
                     {/* Raw JSON metadata (collapsible) */}
                     <details className="mt-2">
-                      <summary className="text-sm font-medium text-gray-700 cursor-pointer hover:text-gray-900">
+                      <summary className="text-sm font-medium text-gray-700 dark:text-gray-300 cursor-pointer hover:text-gray-900 dark:hover:text-gray-100">
                         Raw Metadata JSON
                       </summary>
-                      <pre className="text-xs text-gray-900 bg-blue-50 p-2 rounded overflow-auto max-h-64 mt-2 whitespace-pre-wrap break-words">
+                      <pre className="text-xs text-gray-900 dark:text-gray-100 bg-blue-50 dark:bg-blue-900/20 p-2 rounded overflow-auto max-h-64 mt-2 whitespace-pre-wrap break-words">
                         {JSON.stringify(selectedJob.meta, null, 2)}
                       </pre>
                     </details>
@@ -2623,37 +2561,37 @@ const Queue: React.FC = () => {
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700">Time</label>
-                  <p className="text-sm text-gray-900">{new Date(selectedEvent.timestamp * 1000).toLocaleString()}</p>
+                  <Label>Time</Label>
+                  <p className="text-sm text-gray-900 dark:text-gray-100">{new Date(selectedEvent.timestamp * 1000).toLocaleString()}</p>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700">Event</label>
+                  <Label>Event</Label>
                   <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${getEventColor(selectedEvent.event)}`}>
                     {selectedEvent.event}
                   </span>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-gray-700">User</label>
-                  <p className="text-sm text-gray-900 font-mono">{selectedEvent.user_id}</p>
+                  <Label>User</Label>
+                  <p className="text-sm text-gray-900 dark:text-gray-100 font-mono">{selectedEvent.user_id}</p>
                 </div>
                 {selectedEvent.metadata?.client_id && (
                   <div>
-                    <label className="block text-sm font-medium text-gray-700">Client</label>
-                    <p className="text-sm text-gray-900 font-mono">{selectedEvent.metadata.client_id}</p>
+                    <Label>Client</Label>
+                    <p className="text-sm text-gray-900 dark:text-gray-100 font-mono">{selectedEvent.metadata.client_id}</p>
                   </div>
                 )}
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Plugin Results</label>
+                <Label className="mb-2">Plugin Results</Label>
                 <div className="space-y-2">
                   {(selectedEvent.plugins_executed || []).map((p, i) => {
                     const skipped = !!p.data?.skipped;
-                    const tone = skipped
-                      ? { card: 'bg-gray-50 border-gray-200', badge: 'bg-gray-100 text-gray-600', text: 'text-gray-700', label: 'Skipped' }
+                    const tone: { card: string; badge: StateTone; text: string; label: string } = skipped
+                      ? { card: 'bg-gray-50 border-gray-200 dark:bg-gray-900/40 dark:border-gray-700', badge: 'neutral', text: 'text-gray-700 dark:text-gray-300', label: 'Skipped' }
                       : p.success
-                        ? { card: 'bg-green-50 border-green-200', badge: 'bg-green-100 text-green-700', text: 'text-green-800', label: 'OK' }
-                        : { card: 'bg-red-50 border-red-200', badge: 'bg-red-100 text-red-700', text: 'text-red-800', label: 'Error' };
+                        ? { card: 'bg-green-50 border-green-200 dark:bg-green-900/20 dark:border-green-800', badge: 'success', text: 'text-green-800 dark:text-green-300', label: 'OK' }
+                        : { card: 'bg-red-50 border-red-200 dark:bg-red-900/20 dark:border-red-800', badge: 'danger', text: 'text-red-800 dark:text-red-300', label: 'Error' };
                     // Show the plugin's structured output minus the skip flags we
                     // already render via the badge/detail.
                     const { skipped: _s, skip_reason: _r, detail, ...restData } = p.data || {};
@@ -2661,15 +2599,13 @@ const Queue: React.FC = () => {
                       <div key={i} className={`p-3 rounded-lg border ${tone.card}`}>
                         <div className="flex items-center space-x-2 mb-1">
                           {skipped
-                            ? <MinusCircle className="w-4 h-4 text-gray-500" />
+                            ? <MinusCircle className="w-4 h-4 text-gray-500 dark:text-gray-400" />
                             : p.success
-                              ? <CheckCircle className="w-4 h-4 text-green-600" />
-                              : <XCircle className="w-4 h-4 text-red-600" />
+                              ? <CheckCircle className="w-4 h-4 text-green-600 dark:text-green-400" />
+                              : <XCircle className="w-4 h-4 text-red-600 dark:text-red-400" />
                           }
-                          <span className="text-sm font-medium">{p.plugin_id}</span>
-                          <span className={`text-xs px-1.5 py-0.5 rounded ${tone.badge}`}>
-                            {tone.label}
-                          </span>
+                          <span className="text-sm font-medium text-gray-900 dark:text-gray-100">{p.plugin_id}</span>
+                          <StateBadge tone={tone.badge}>{tone.label}</StateBadge>
                         </div>
                         {(p.message || detail) && (
                           <p className={`text-sm ml-6 ${tone.text}`}>
@@ -2677,7 +2613,7 @@ const Queue: React.FC = () => {
                           </p>
                         )}
                         {Object.keys(restData).length > 0 && (
-                          <pre className="text-xs text-gray-700 bg-white/60 border border-gray-200 rounded p-2 mt-2 ml-6 overflow-auto max-h-40 whitespace-pre-wrap break-words">
+                          <pre className="text-xs text-gray-700 dark:text-gray-300 bg-white/60 dark:bg-gray-900/50 border border-gray-200 dark:border-gray-700 rounded p-2 mt-2 ml-6 overflow-auto max-h-40 whitespace-pre-wrap break-words">
                             {JSON.stringify(restData, null, 2)}
                           </pre>
                         )}
@@ -2689,10 +2625,10 @@ const Queue: React.FC = () => {
 
               {selectedEvent.metadata && Object.keys(selectedEvent.metadata).length > 0 && (
                 <details>
-                  <summary className="text-sm font-medium text-gray-700 cursor-pointer hover:text-gray-900">
+                  <summary className="text-sm font-medium text-gray-700 dark:text-gray-300 cursor-pointer hover:text-gray-900 dark:hover:text-gray-100">
                     Raw Metadata
                   </summary>
-                  <pre className="text-xs text-gray-900 bg-gray-50 p-2 rounded overflow-auto max-h-40 mt-2 whitespace-pre-wrap break-words">
+                  <pre className="text-xs text-gray-900 dark:text-gray-100 bg-gray-50 dark:bg-gray-900 p-2 rounded overflow-auto max-h-40 mt-2 whitespace-pre-wrap break-words">
                     {JSON.stringify(selectedEvent.metadata, null, 2)}
                   </pre>
                 </details>
@@ -2744,12 +2680,9 @@ const Queue: React.FC = () => {
           }
         >
             <div className="space-y-4">
-              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
-                <div className="flex items-center">
-                  <AlertTriangle className="w-5 h-5 text-yellow-600 mr-2" />
-                  <span className="text-sm text-yellow-800">This will permanently remove jobs from the database</span>
-                </div>
-              </div>
+              <Alert tone="warning" icon={<AlertTriangle className="w-5 h-5 flex-shrink-0" />}>
+                This will permanently remove jobs from the database
+              </Alert>
 
               <div className="space-y-3">
                 <div>
@@ -2761,14 +2694,15 @@ const Queue: React.FC = () => {
                       onChange={() => setFlushSettings(prev => ({ ...prev, flush_all: false }))}
                       className="text-blue-600"
                     />
-                    <span className="text-sm font-medium">Flush old inactive jobs (recommended)</span>
+                    <span className="text-sm font-medium text-gray-900 dark:text-gray-100">Flush old inactive jobs (recommended)</span>
                   </label>
 
                   {!flushSettings.flush_all && (
                     <div className="ml-6 mt-2 space-y-2">
                       <div>
-                        <label className="block text-xs text-gray-600 mb-1">Remove jobs older than:</label>
+                        <Label htmlFor="flush-older-than" className="mb-1 text-xs font-normal text-gray-600 dark:text-gray-400">Remove jobs older than:</Label>
                         <Select
+                          id="flush-older-than"
                           value={flushSettings.older_than_hours}
                           onChange={(e) => setFlushSettings(prev => ({ ...prev, older_than_hours: parseInt(e.target.value) }))}
                         >
@@ -2782,8 +2716,10 @@ const Queue: React.FC = () => {
                       </div>
 
                       <div>
-                        <label className="block text-xs text-gray-600 mb-1">Job statuses to remove:</label>
-                        <div className="space-y-1">
+                        <span className="mb-1 block text-xs text-gray-600 dark:text-gray-400">Job statuses to remove:</span>
+                        {/* Checkbox renders an inline-flex label, so the group needs
+                            an explicit flex column — space-y-* alone does not separate them. */}
+                        <div className="flex flex-col items-start gap-1">
                           {['finished', 'failed', 'canceled'].map(status => (
                             <Checkbox
                               key={status}
@@ -2819,30 +2755,30 @@ const Queue: React.FC = () => {
                       onChange={() => setFlushSettings(prev => ({ ...prev, flush_all: true }))}
                       className="text-red-600"
                     />
-                    <span className="text-sm font-medium text-red-600">Flush ALL jobs (DANGER!)</span>
+                    <span className="text-sm font-medium text-red-600 dark:text-red-400">Flush ALL jobs (DANGER!)</span>
                   </label>
 
                   {flushSettings.flush_all && (
                     <div className="ml-6 mt-2 space-y-2">
-                      <div className="bg-red-50 border border-red-200 rounded p-2">
-                        <p className="text-xs text-red-800">
+                      <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded p-2">
+                        <p className="text-xs text-red-800 dark:text-red-300">
                           ⚠️ This will flush queued, started, deferred, scheduled, and canceled jobs.
                           {!flushSettings.include_failed && !flushSettings.include_finished &&
                             " Failed and finished jobs preserved for debugging."}
                         </p>
                       </div>
 
-                      <div className="space-y-1">
+                      <div className="flex flex-col items-start gap-1">
                         <Checkbox
                           checked={flushSettings.include_failed}
                           onChange={(e) => setFlushSettings(prev => ({ ...prev, include_failed: e.target.checked }))}
-                          label={<span className="text-xs text-gray-700">Also flush failed jobs</span>}
+                          label={<span className="text-xs">Also flush failed jobs</span>}
                         />
 
                         <Checkbox
                           checked={flushSettings.include_finished}
                           onChange={(e) => setFlushSettings(prev => ({ ...prev, include_finished: e.target.checked }))}
-                          label={<span className="text-xs text-gray-700">Also flush finished jobs</span>}
+                          label={<span className="text-xs">Also flush finished jobs</span>}
                         />
                       </div>
                     </div>
@@ -2852,31 +2788,31 @@ const Queue: React.FC = () => {
 
               {/* Preview (dry run) of exactly what this flush would remove */}
               {flushPreview && (
-                <div className="mt-2 border rounded-lg overflow-hidden">
-                  <div className="px-3 py-2 bg-gray-50 border-b text-xs font-medium text-gray-700 flex justify-between items-center">
+                <div className="mt-2 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
+                  <div className="px-3 py-2 bg-gray-50 dark:bg-gray-900/40 border-b border-gray-200 dark:border-gray-700 text-xs font-medium text-gray-700 dark:text-gray-300 flex justify-between items-center">
                     <span>
                       {flushPreview.total_matched} job{flushPreview.total_matched === 1 ? '' : 's'} will be removed
                       {typeof flushPreview.redis_keys_matched === 'number' &&
                         ` + ${flushPreview.redis_keys_matched} Redis key${flushPreview.redis_keys_matched === 1 ? '' : 's'}`}
                     </span>
                     {!!flushPreview.skipped_session_level && (
-                      <span className="text-gray-500">{flushPreview.skipped_session_level} session-level skipped</span>
+                      <span className="text-gray-500 dark:text-gray-400">{flushPreview.skipped_session_level} session-level skipped</span>
                     )}
                   </div>
                   {flushPreview.jobs.length === 0 ? (
-                    <div className="px-3 py-4 text-center text-xs text-gray-500">Nothing matches these settings.</div>
+                    <div className="px-3 py-4 text-center text-xs text-gray-500 dark:text-gray-400">Nothing matches these settings.</div>
                   ) : (
-                    <div className="max-h-48 overflow-y-auto divide-y divide-gray-100">
+                    <div className="max-h-48 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-700">
                       {flushPreview.jobs.map((job: any) => (
                         <div key={job.job_id} className="px-3 py-1.5 text-xs flex items-center justify-between">
                           <div className="min-w-0 truncate">
-                            <span className="font-medium text-gray-800">{job.job_type}</span>
-                            <span className="text-gray-400 ml-2 font-mono">{job.job_id?.substring(0, 8)}</span>
-                            {job.client_id && <span className="text-gray-500 ml-2">{job.client_id}</span>}
+                            <span className="font-medium text-gray-800 dark:text-gray-200">{job.job_type}</span>
+                            <span className="text-gray-400 dark:text-gray-500 ml-2 font-mono">{job.job_id?.substring(0, 8)}</span>
+                            {job.client_id && <span className="text-gray-500 dark:text-gray-400 ml-2">{job.client_id}</span>}
                           </div>
                           <div className="flex items-center space-x-2 flex-shrink-0 ml-2">
-                            <span className={`px-1.5 py-0.5 rounded ${getStatusColor(job.status)}`}>{job.status}</span>
-                            {typeof job.age_hours === 'number' && <span className="text-gray-500">{job.age_hours}h</span>}
+                            <StateBadge tone={getStatusTone(job.status)}>{job.status}</StateBadge>
+                            {typeof job.age_hours === 'number' && <span className="text-gray-500 dark:text-gray-400">{job.age_hours}h</span>}
                           </div>
                         </div>
                       ))}
