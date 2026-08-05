@@ -83,6 +83,11 @@ def _effective_source_status(
 ) -> str:
     if source.status != "online":
         return source.status
+    # Immich is polled by Chronicle on a schedule; it does not send the frequent
+    # heartbeats expected from live ScreenPipe capture agents.  Its last_seen_at
+    # therefore means "last successful sync", not "last heartbeat".
+    if source.provider == "immich":
+        return "online"
     checked_at = _as_utc(now or utcnow())
     if source.last_seen_at is None:
         return "offline"
