@@ -94,6 +94,9 @@ Chat is always **agentic / tool-calling**. The chat LLM is given a `search_memor
 ## API Endpoints
 
 - `GET /api/memories/search?query={query}&limit={limit}` — runs the agentic vault search and returns the synthesized answer plus the notes the read agent consulted.
+- `GET /api/memories/people/suggestions` — ranks conservative deterministic duplicate-person candidates for review; it never merges automatically.
+- `POST /api/memories/people/identity` — records or clears a symmetric `distinct_from` decision in two People notes, with optional stale-revision protection.
+- `POST /api/memories/people/merge/preview` and `POST /api/memories/people/merge` — preview and apply a locked deterministic merge. A `distinct_from` decision blocks preview.
 - Other `/api/memories/*` management endpoints operate over the vault notes.
 
 ## Vault sync to Obsidian (separate feature)

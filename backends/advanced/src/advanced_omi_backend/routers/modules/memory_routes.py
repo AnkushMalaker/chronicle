@@ -5,13 +5,23 @@ Handles memory CRUD operations, search, and debug functionality.
 """
 
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_active_user, current_superuser
 from advanced_omi_backend.controllers import memory_controller
+from advanced_omi_backend.services.memory.person_merge import (
+    PersonMergeError,
+    PersonMergeStale,
+)
+from advanced_omi_backend.services.memory.person_merge_actions import (
+    apply_person_merge,
+    get_person_suggestions,
+    preview_person_merge,
+    set_people_distinct,
+)
 from advanced_omi_backend.users import User
 
 logger = logging.getLogger(__name__)
@@ -24,6 +34,37 @@ class AddMemoryRequest(BaseModel):
 
     content: str
     source_id: Optional[str] = None
+
+
+class PersonMergePreviewRequest(BaseModel):
+    """Local state supplied by an Obsidian or automation client."""
+
+    source_name: str
+    target_name: str
+    source_hash: Optional[str] = None
+    target_hash: Optional[str] = None
+
+
+class PersonMergeApplyRequest(BaseModel):
+    """Apply the exact server-side plan previously shown to the user."""
+
+    source_name: str
+    target_name: str
+    plan_token: str
+
+
+class PersonIdentityDecisionRequest(BaseModel):
+    """A durable user decision about whether two person notes are distinct."""
+
+    person_a: str
+    person_b: str
+    decision: Literal["distinct", "clear_distinct"]
+    revision: Optional[str] = None
+
+
+def _person_merge_http_error(error: PersonMergeError) -> HTTPException:
+    status = 409 if isinstance(error, PersonMergeStale) else 422
+    return HTTPException(status_code=status, detail=str(error))
 
 
 @router.get("")
@@ -107,6 +148,70 @@ async def add_memory(
     return await memory_controller.add_memory(
         request.content, current_user, request.source_id
     )
+
+
+@router.post("/people/merge/preview")
+async def preview_people_merge(
+    request: PersonMergePreviewRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Preview a deterministic person merge without changing the vault."""
+    try:
+        return await preview_person_merge(
+            current_user.user_id,
+            request.source_name,
+            request.target_name,
+            request.source_hash,
+            request.target_hash,
+        )
+    except PersonMergeError as error:
+        raise _person_merge_http_error(error) from error
+
+
+@router.post("/people/merge")
+async def merge_people(
+    request: PersonMergeApplyRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Apply a previously previewed deterministic person merge."""
+    try:
+        return await apply_person_merge(
+            current_user.user_id,
+            request.source_name,
+            request.target_name,
+            request.plan_token,
+        )
+    except PersonMergeError as error:
+        raise _person_merge_http_error(error) from error
+
+
+@router.get("/people/suggestions")
+async def get_people_suggestions(
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(current_active_user),
+):
+    """Return deterministic duplicate-person candidates for user review."""
+    return {
+        "suggestions": await get_person_suggestions(current_user.user_id, limit),
+    }
+
+
+@router.post("/people/identity")
+async def set_people_identity(
+    request: PersonIdentityDecisionRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Persist or clear a symmetric distinct-person annotation."""
+    try:
+        return await set_people_distinct(
+            current_user.user_id,
+            request.person_a,
+            request.person_b,
+            distinct=request.decision == "distinct",
+            revision=request.revision,
+        )
+    except PersonMergeError as error:
+        raise _person_merge_http_error(error) from error
 
 
 @router.delete("/{memory_id}")
