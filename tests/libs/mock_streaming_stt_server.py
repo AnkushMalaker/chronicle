@@ -6,7 +6,7 @@ This server mimics Deepgram's streaming transcription API with nested JSON respo
 that match the extraction paths used in the config (e.g., channel.alternatives[0].transcript).
 
 Architecture:
-- Async WebSocket server on 0.0.0.0:9999
+- Async WebSocket server on 0.0.0.0:8879
 - Sends interim results every 10 audio chunks
 - Sends final results on CloseStream with >2s duration and >5 words (speech detection thresholds)
 
@@ -265,7 +265,7 @@ if __name__ == "__main__":
         "--host", default="0.0.0.0", help="Server host (default: 0.0.0.0)"
     )
     parser.add_argument(
-        "--port", type=int, default=9999, help="Server port (default: 9999)"
+        "--port", type=int, default=8879, help="Server port (default: 8879)"
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 

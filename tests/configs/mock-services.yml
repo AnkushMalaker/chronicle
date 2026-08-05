@@ -59,7 +59,7 @@ models:
   description: Mock STT for testing (batch)
   model_provider: mock
   model_type: stt
-  model_url: http://host.docker.internal:9999
+  model_url: http://host.docker.internal:8879
   name: mock-stt
   operations:
     stt_transcribe:
@@ -78,7 +78,7 @@ models:
   description: Mock STT for testing (streaming)
   model_provider: mock
   model_type: stt_stream
-  model_url: ws://host.docker.internal:9999
+  model_url: ws://host.docker.internal:8879
   name: mock-stt-stream
   operations:
     chunk_header:

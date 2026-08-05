@@ -69,7 +69,7 @@ models:
     model_type: stt_stream
     model_provider: mock
     api_family: mock
-    model_url: ws://host.docker.internal:9999
+    model_url: ws://host.docker.internal:8879
     api_key: mock-key-not-used
     operations:
       start:
