@@ -61,6 +61,8 @@ It is per-user (keyed by the MongoDB ObjectId `user_id`) and organized into note
 
 These are ordinary Markdown files — readable, editable, and grep-able. Because the vault is the system of record, memories survive as durable text rather than as opaque vector rows.
 
+If an Immich photo library is configured (`IMMICH_URL`/`IMMICH_API_KEY`, offered by the setup wizard), the `person_photos` cron job (`services/person_photos.py`) matches each `People/<name>.md` note against Immich's people API, stores the person's face-crop thumbnail content-addressed under the vault's `_media/` directory, and embeds a small photo at the top of the note.
+
 ## Write path: the memory agent
 
 Memory extraction runs as part of the post-conversation RQ pipeline. After a conversation closes, `memory_extraction_job` calls `memory_service.add_memory()`, which invokes the **write agent** (`_add_memory_agent` in `providers/chronicle.py`).

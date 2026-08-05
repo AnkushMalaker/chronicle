@@ -54,6 +54,7 @@ Chronicle includes an **interactive setup wizard** for easy configuration. The w
 - Memory configuration (agentic Markdown vault — Chronicle's single memory provider)
 - Network configuration and HTTPS setup
 - Optional services (speaker recognition, Parakeet ASR)
+- Immich photo library integration (photo discovery + person photos in the vault)
 
 ### Quick Start
 ```bash
@@ -128,7 +129,11 @@ All test operations are managed through a simple Makefile interface:
 cd tests
 
 # Full test workflow (recommended)
-make test              # Start containers + run all tests
+make test              # Start containers + run all tests (profile: mock, no credentials)
+
+# Same suite against real backing services (see tests/profiles.yml)
+make test PROFILE=deepgram-openai          # real Deepgram STT + real OpenAI LLM
+make test PROFILE=deepgram-openai-speaker  # ...plus the real speaker service
 
 # Or step by step
 make start             # Start test containers (with health checks)
@@ -588,6 +593,7 @@ tailscale ip -4
 
 ### Testing Strategy
 - **Makefile-Based**: All test operations through simple `make` commands (`make test`, `make start`, `make stop`)
+- **One suite, N service profiles**: tests are never selected by whether an API key is present. `tests/profiles.yml` declares which backing services are real for a run; stubs replay recorded real responses from `tests/cassettes/`, so the same assertions hold with or without credentials. Do not add a tag or a skip to work around a missing key — record a cassette (`make record-cassettes`) or fix the stub.
 - **Log Preservation**: Container logs always saved before cleanup (never lose debugging info)
 - **End-to-End Integration**: Robot Framework validates complete audio processing pipeline
 - **Environment Flexibility**: Tests work with both local .env files and CI environment variables
@@ -634,6 +640,7 @@ For detailed technical documentation, see:
 - **[@docs/podman.md](docs/podman.md)**: Running with Podman instead of Docker (engine selection, rootless/GPU setup)
 - **[@docs/screenpipe.md](docs/screenpipe.md)**: ScreenPipe capture-node architecture, services, desktop controls, and troubleshooting
 - **[@docs/audio-pipeline-architecture.md](docs/audio-pipeline-architecture.md)**: Audio pipeline design
+- **[@docs/backend/compose-stack.md](docs/backend/compose-stack.md)**: Backend compose services, shared mounts, and profiles
 - **[@docs/backend/auth.md](docs/backend/auth.md)**: Authentication architecture
 - **[@docs/backend/memories.md](docs/backend/memories.md)**: Memory system documentation
 - **[@docs/backend/plugin-development-guide.md](docs/backend/plugin-development-guide.md)**: Plugin development guide
