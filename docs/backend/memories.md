@@ -103,6 +103,11 @@ Chat is always **agentic / tool-calling**. The chat LLM is given a `search_memor
 
 The vault is designed to be edited and viewed directly. The optional **vault sync** feature (in the cross-platform desktop tray, `extras/chronicle-tray/`) syncs `data/conversation_docs/` to an Obsidian vault via Syncthing, so you can browse and hand-edit your memory notes in Obsidian. Human edits made in Obsidian sync back into the vault. This sync is independent of the memory provider itself — the vault on the backend remains the source of truth.
 
+The optional [Chronicle Companion](../obsidian-companion.md) plugin adds explicit,
+deterministic maintenance actions such as merging duplicate people. The UI previews and
+confirms the action, while the backend performs the locked mutation; no LLM participates
+in execution.
+
 ## What was removed
 
 For historical context, the previous architecture used **FalkorDB** hybrid search (vector + BM25 + entity-graph BFS over ConvDoc/ConvChunk/ConvEntity nodes and a knowledge graph), plus alternative providers (OpenMemory MCP, Graphiti) and Qdrant/Mem0 vector storage. **All of these have been removed.** There is now a single `chronicle` provider backed entirely by the Markdown vault; the `falkordb` container and `FALKORDB_*` environment variables no longer exist.

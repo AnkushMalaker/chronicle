@@ -21,6 +21,7 @@ day-to-day operation, and use [AGENTS.md](../AGENTS.md) for development conventi
 
 - [Authentication](backend/auth.md): user identity, JWTs, and protected endpoints
 - [Memory system](backend/memories.md): agentic Markdown vault and retrieval
+- [Obsidian companion](obsidian-companion.md): deterministic vault maintenance from Obsidian and agent skills
 - [Audio durability](backend/audio-durability.md): raw-audio write path and its state machine
 - [Data archive and memory rebuild](backend/data-archive.md): full export/import and clean vault reconstruction
 - [Plugin configuration](backend/plugin-configuration.md): configuration and secret boundaries

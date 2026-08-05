@@ -1,0 +1,119 @@
+.chronicle-merge-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--size-4-2) var(--size-4-4);
+  margin: var(--size-4-4) 0;
+}
+
+.chronicle-merge-stat {
+  min-width: 0;
+}
+
+.chronicle-merge-stat-value {
+  display: block;
+  color: var(--text-normal);
+  font-size: var(--font-ui-large);
+  font-weight: var(--font-semibold);
+}
+
+.chronicle-merge-stat-label,
+.chronicle-merge-path,
+.chronicle-merge-help {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.chronicle-merge-list {
+  max-height: 18rem;
+  overflow-y: auto;
+  margin-top: var(--size-4-3);
+}
+
+.chronicle-merge-person {
+  width: 100%;
+  padding: var(--size-4-3);
+  border-radius: var(--radius-s);
+  text-align: left;
+}
+
+.chronicle-merge-person:hover,
+.chronicle-merge-person:focus-visible {
+  background: var(--background-modifier-hover);
+}
+
+.chronicle-merge-conflicts {
+  margin: var(--size-4-3) 0;
+  padding-left: var(--size-4-5);
+  color: var(--text-warning);
+}
+
+.chronicle-merge-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--size-4-2);
+  margin-top: var(--size-4-5);
+}
+
+.chronicle-identity-comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--size-4-3);
+  margin: var(--size-4-4) 0;
+}
+
+.chronicle-identity-header,
+.chronicle-identity-navigation {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+}
+
+.chronicle-identity-header {
+  justify-content: space-between;
+}
+
+.chronicle-identity-header p {
+  margin: 0;
+}
+
+.chronicle-identity-person {
+  min-width: 0;
+  padding: var(--size-4-3);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+}
+
+.chronicle-identity-person h3 {
+  margin: 0 0 var(--size-4-1);
+}
+
+.chronicle-identity-person ul,
+.chronicle-identity-evidence ul {
+  padding-left: var(--size-4-5);
+}
+
+.chronicle-identity-evidence {
+  padding: var(--size-4-3);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+}
+
+.chronicle-identity-evidence-title {
+  font-weight: var(--font-semibold);
+}
+
+.chronicle-identity-actions,
+.chronicle-canonical-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--size-4-2);
+  margin-top: var(--size-4-5);
+}
+
+@media (max-width: 480px) {
+  .chronicle-merge-summary,
+  .chronicle-identity-comparison {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "id": "chronicle-companion",
+  "name": "Chronicle Companion",
+  "version": "0.1.0",
+  "minAppVersion": "1.11.4",
+  "description": "Safe, deterministic maintenance actions for a synced Chronicle memory vault.",
+  "author": "Chronicle",
+  "isDesktopOnly": false
+}
