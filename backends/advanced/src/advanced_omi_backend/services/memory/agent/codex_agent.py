@@ -29,11 +29,13 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from ..vault_templates import CONVERSATION_TEMPLATE, PERSON_TEMPLATE, TOPIC_TEMPLATE
+from . import codex_quota
 from .memory_agent import MemoryAgentResult, _for_prompt, _get_prompt
 
 logger = logging.getLogger("memory_service.agent.codex")
@@ -228,6 +230,22 @@ class CodexMemoryAgent:
             )
         binary = detail
 
+        quota_payload, quota_block = await asyncio.to_thread(
+            self._check_quota, conversation_id
+        )
+        if quota_block:
+            from .memory_agent import MemoryAgent
+
+            return await MemoryAgent(self.root).run(
+                transcript,
+                conversation_id,
+                date=date,
+                duration_minutes=duration_minutes,
+                title=title,
+                vault_summary=vault_summary,
+                guidance=guidance,
+            )
+
         date = date or datetime.now(timezone.utc).isoformat()
         system_prompt = await _get_prompt(
             CODEX_AGENT_SYSTEM_PROMPT_ID,
@@ -279,6 +297,9 @@ class CodexMemoryAgent:
                 "chronicle.memory.executor": "codex",
                 "chronicle.memory.sandbox_mode": sandbox_mode,
                 "chronicle.memory.transcript_chars": len(transcript),
+                **codex_quota.quota_span_attributes(
+                    quota_payload, str(settings.get("limit_id") or "")
+                ),
                 "langfuse.observation.input": json.dumps(
                     {
                         "conversation_id": conversation_id,
@@ -316,6 +337,11 @@ class CodexMemoryAgent:
                 )
                 span.set_attribute("chronicle.memory.error_count", len(result.errors))
                 span.set_attribute("chronicle.memory.truncated", result.truncated)
+                # Mirrored onto the agent span for at-a-glance filtering; the
+                # ingestable copy lives on the child codex_turn span (see
+                # _record_usage_span for why it cannot live here).
+                for key, value in result.usage.items():
+                    span.set_attribute(f"chronicle.memory.usage.{key}", value)
                 span.set_attribute(
                     "langfuse.observation.output",
                     json.dumps(
@@ -401,6 +427,7 @@ class CodexMemoryAgent:
                 model or "default",
                 timeout,
             )
+            started_ns = time.time_ns()
             try:
                 proc = subprocess.run(
                     cmd,
@@ -428,8 +455,11 @@ class CodexMemoryAgent:
             except OSError as e:
                 errors.append(f"codex exec failed to start: {e}")
 
-            command_count, turn_count, event_errors = self._parse_events(stdout)
+            ended_ns = time.time_ns()
+
+            command_count, turn_count, event_errors, usage = self._parse_events(stdout)
             errors.extend(event_errors)
+            self._record_usage_span(usage, model, started_ns, ended_ns)
 
             summary = ""
             try:
@@ -458,21 +488,108 @@ class CodexMemoryAgent:
             tool_calls=command_count,
             removed=removed,
             errors=errors,
+            usage=usage,
             truncated=failed,
         )
         logger.info(
             "codex agent done: conv=%s turns=%d commands=%d touched=%d removed=%d "
-            "errors=%d%s — %s",
+            "errors=%d tokens=in:%d/cached:%d/out:%d%s — %s",
             conversation_id,
             result.rounds,
             command_count,
             len(touched),
             len(removed),
             len(errors),
+            usage.get("input_tokens", 0),
+            usage.get("input_cached_tokens", 0),
+            usage.get("output_tokens", 0),
             " (FAILED)" if failed else "",
             summary[:160],
         )
         return result
+
+    @staticmethod
+    def _check_quota(conversation_id: str) -> tuple[Optional[dict], bool]:
+        """Return the quota snapshot and whether this run should yield the budget.
+
+        Chronicle's background recording shares one account-wide weekly budget with
+        the user's interactive Codex sessions, and is the cheaper consumer to give
+        up: a yielded run still records the conversation via the direct (metered
+        API) executor, while a blocked interactive session is stuck for days.
+
+        Fails OPEN — an unreadable quota yields ``False`` and the run proceeds. The
+        probe is an optimisation over Codex's own limit error, not a correctness
+        gate, so a broken probe must not stop memory extraction entirely.
+        """
+        settings = _codex_settings()
+        threshold = settings.get("max_used_percent")
+        if threshold is None:
+            return None, False
+        try:
+            threshold = int(threshold)
+        except (TypeError, ValueError):
+            logger.warning("ignoring non-numeric memory.codex.max_used_percent")
+            return None, False
+
+        limit_id = str(settings.get("limit_id") or "")
+        payload = codex_quota.read_rate_limits()
+        used = codex_quota.bucket_used_percent(payload, limit_id)
+        if used is None:
+            logger.debug("codex quota unknown for conv=%s; proceeding", conversation_id)
+            return payload, False
+        if used < threshold:
+            return payload, False
+
+        logger.warning(
+            "codex quota %d%% used (>= %d%% budget for Chronicle) — recording conv=%s "
+            "via the direct memory agent instead, leaving the remainder for "
+            "interactive use",
+            used,
+            threshold,
+            conversation_id,
+        )
+        return payload, True
+
+    @staticmethod
+    def _record_usage_span(
+        usage: Dict[str, int], model: str, started_ns: int, ended_ns: int
+    ) -> None:
+        """Emit the model call as a child LLM span carrying the run's token usage.
+
+        Deliberately NOT on the parent ``codex_memory_agent`` span: current Langfuse
+        drops usage from spans whose ``gen_ai.operation.name`` is ``invoke_agent`` or
+        ``agent_step`` (it assumes the agent span duplicates usage from child
+        model-call spans) and would ingest the tokens as zero without erroring. Older
+        Langfuse — including 3.x — has no such guard, so putting usage on the agent
+        span works today and silently breaks on upgrade. A child model-call span is
+        correct under both.
+
+        Created after the subprocess returns, since usage is only known then, with
+        explicit timestamps so it still spans the real call window.
+        """
+        if not usage:
+            return
+        try:
+            from advanced_omi_backend.observability.otel_setup import get_tracer
+
+            tracer = get_tracer("chronicle.memory.codex")
+            if tracer is None:
+                return
+            attributes = {
+                "openinference.span.kind": "LLM",
+                "gen_ai.operation.name": "chat",
+                "gen_ai.system": "openai",
+                "gen_ai.provider.name": "openai_codex_cli",
+                "gen_ai.request.model": model or "codex-default",
+                "gen_ai.response.model": model or "codex-default",
+                **{f"gen_ai.usage.{k}": v for k, v in usage.items()},
+            }
+            span = tracer.start_span(
+                "codex_turn", attributes=attributes, start_time=started_ns
+            )
+            span.end(end_time=ended_ns)
+        except Exception:  # noqa: BLE001 - telemetry must never fail the run
+            logger.debug("failed to record codex usage span", exc_info=True)
 
     def _snapshot(self) -> Dict[str, str]:
         """Vault-relative ``*.md`` contents (same shape the provider's audit diff uses)."""
@@ -489,11 +606,17 @@ class CodexMemoryAgent:
         return snapshot
 
     @staticmethod
-    def _parse_events(stdout: str) -> tuple[int, int, List[str]]:
-        """Tolerantly scan the ``--json`` JSONL stream for counts and errors."""
+    def _parse_events(stdout: str) -> tuple[int, int, List[str], Dict[str, int]]:
+        """Tolerantly scan the ``--json`` JSONL stream for counts, errors, and usage.
+
+        ``turn.completed`` carries the turn's token ``usage``; it is the only place
+        the CLI reports what a run actually cost, so it is summed across turns and
+        translated into Langfuse's usage-detail key names.
+        """
         commands = 0
         turns = 0
         errors: List[str] = []
+        usage: Dict[str, int] = {}
         for line in stdout.splitlines():
             line = line.strip()
             if not line.startswith("{"):
@@ -509,10 +632,42 @@ class CodexMemoryAgent:
                 commands += 1
             elif etype == "turn.completed":
                 turns += 1
+                for key, value in CodexMemoryAgent._turn_usage(event).items():
+                    usage[key] = usage.get(key, 0) + value
             elif etype == "turn.failed":
                 turns += 1
                 failure = event.get("error") or {}
                 errors.append(f"codex turn failed: {failure.get('message', failure)}")
             elif etype == "error":
                 errors.append(f"codex error: {event.get('message', event)}")
-        return commands, turns, errors
+        return commands, turns, errors, usage
+
+    @staticmethod
+    def _turn_usage(event: dict) -> Dict[str, int]:
+        """Map one ``turn.completed`` event's ``usage`` to Langfuse usage details.
+
+        Tolerant by design: the CLI's field names are not a stable contract, so an
+        absent or oddly-shaped block yields ``{}`` rather than failing the run.
+        """
+        raw = event.get("usage")
+        if not isinstance(raw, dict):
+            return {}
+        # Codex reports cached input tokens *inside* input_tokens, which is what
+        # Langfuse's normaliser assumes (it derives uncached input as
+        # input_tokens - input_cached_tokens), so both pass through unchanged.
+        # Caveat on Langfuse 3.x: it instead adds the two, so the rollup `usage.input`
+        # and `total` over-count cached tokens there. `usageDetails.input` is right
+        # on both.
+        field_map = {
+            "input_tokens": "input_tokens",
+            "cached_input_tokens": "input_cached_tokens",
+            "output_tokens": "output_tokens",
+            "reasoning_output_tokens": "output_reasoning_tokens",
+        }
+        usage: Dict[str, int] = {}
+        for source, target in field_map.items():
+            value = raw.get(source)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            usage[target] = int(value)
+        return usage

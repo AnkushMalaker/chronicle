@@ -570,6 +570,16 @@ memory:
     # danger-full-access instead.
     sandbox_mode: workspace-write
     timeout_seconds: 900            # per-run wall clock before the run is failed
+    # Share of the ChatGPT weekly Codex budget Chronicle may consume before it
+    # yields. At/over this, background recording falls back to the direct (metered
+    # API) executor so the remainder stays available for interactive Codex use.
+    # Read live from `account/rateLimits/read`; null disables the check. An
+    # unreadable quota fails open (the run proceeds).
+    max_used_percent: 80
+    # Which metered bucket to check. Models meter against different buckets — e.g.
+    # `codex` vs `codex_bengalfox` (GPT-5.3-Codex-Spark) — so set this when `model`
+    # above draws on a non-default bucket. Empty uses the account's default view.
+    limit_id: ""
   extraction:
     enabled: true
     prompt: |
