@@ -61,6 +61,15 @@ STREAMING_RECONNECT_ATTEMPTS = 5
 # ride out brief network blips (producer emits chunks every 0.25s when healthy).
 STREAM_IDLE_TIMEOUT_SECONDS = 300
 
+# How recently a still-ACTIVE session must have appended for its stream to count as
+# resumed rather than merely quiet. A healthy producer emits a chunk every 0.25s.
+STREAM_RESUME_MAX_AGE_SECONDS = 10.0
+
+# Entries read from the tail when probing for the producer's end marker. The marker is
+# the last thing finalize_session appends, so 1 would normally do; a small window keeps
+# the probe correct if a chunk raced in behind it.
+STREAM_TAIL_PROBE_ENTRIES = 5
+
 
 def _is_connection_error(e: Exception) -> bool:
     """Check if exception indicates WebSocket connection death."""
@@ -285,28 +294,61 @@ class StreamingTranscriptionConsumer:
 
         return streams
 
-    async def _stream_has_fresh_entries(
-        self, stream_name: str, max_age_seconds: float = 10.0
-    ) -> bool:
-        """True if the stream's newest entry is younger than ``max_age_seconds``.
+    async def _session_resumed(self, stream_name: str, session_id: str) -> bool:
+        """True if a stream that carries a completion flag is still being written to.
 
-        Used to distinguish a genuinely-finished stream from one a reconnecting
-        device has resumed writing to. A live producer emits a chunk every ~0.25s,
-        so a last entry within 10s means audio is actively flowing. Redis stream IDs
-        are ``<ms>-<seq>``, so the timestamp comes free from the entry id — no need
-        to decode the payload. Errors return False (treat as not-fresh → safe skip).
+        Answering this wrong in the permissive direction is expensive: clearing the
+        flag revokes the handshake ``open_conversation_job`` is blocked on, and no
+        replacement signal ever arrives, so the conversation stalls for that job's
+        full 30s wait before finishing without it.
+
+        Recency alone cannot answer it. ``finalize_session`` flushes the residual
+        audio and appends the end marker as its *last* act, so at the exact moment
+        the flag is set the newest entry is milliseconds old — a closing session is
+        indistinguishable from a resuming one by age. Two causal facts decide it
+        instead:
+
+        - **Session status.** ``producer._append_owned_message`` appends inside a
+          WATCH/MULTI whose precondition is ``status == "active"``, so a session that
+          has left ACTIVE can never receive another entry. Its stream is frozen, and
+          whatever sits at the tail is its own closing flush.
+        - **The end marker.** It is appended (while still ACTIVE) strictly before the
+          consumer can read it and set the flag, so its presence proves the producer
+          finished even if the FINALIZING status write has not landed yet.
+
+        Only when neither says "finished" does recency get to speak, and there it
+        answers the question it is actually good at: whether audio is flowing now, or
+        the consumer gave up on a stream that has been silent for a long time.
+
+        Errors return False — declining to re-attach costs a resumed session its
+        streaming transcription, but wrongly re-attaching corrupts the handshake for
+        every conversation on the session.
         """
         try:
-            entries = await self.redis_client.xrevrange(stream_name, count=1)
+            if await self.store.get_status(session_id) != SessionStatus.ACTIVE:
+                return False
+
+            entries = await self.redis_client.xrevrange(
+                stream_name, count=STREAM_TAIL_PROBE_ENTRIES
+            )
             if not entries:
                 return False
+            if any(
+                fields.get(b"end_marker") or fields.get("end_marker")
+                for _, fields in entries
+            ):
+                return False
+
+            # Redis stream ids are ``<ms>-<seq>``, so age comes free from the id.
             entry_id = entries[0][0]
             if isinstance(entry_id, bytes):
                 entry_id = entry_id.decode()
             entry_ms = int(entry_id.split("-")[0])
-            return (time.time() * 1000 - entry_ms) < (max_age_seconds * 1000)
+            return (time.time() * 1000 - entry_ms) < (
+                STREAM_RESUME_MAX_AGE_SECONDS * 1000
+            )
         except Exception as e:  # noqa: BLE001 — best-effort liveness probe
-            logger.debug(f"Freshness check failed for {stream_name}: {e}")
+            logger.debug(f"Resume probe failed for {stream_name}: {e}")
             return False
 
     async def setup_consumer_group(self, stream_name: str):
@@ -1200,19 +1242,21 @@ class StreamingTranscriptionConsumer:
                     session_id = stream_name.replace("audio:stream:", "")
                     completion_key = f"transcription:complete:{session_id}"
                     if await self.redis_client.exists(completion_key):
-                        # session_id is stable across reconnects, so the flag may be
-                        # stale: a device reconnected onto the same stream after the
-                        # prior connection's provider stream closed. Producer.init_session
-                        # clears the flag on (re)connect, but a backend-only restart
-                        # leaves THIS worker's old process_stream task alive, and it can
-                        # set the flag (idle-timeout exit) AFTER init_session cleared it
-                        # — re-poisoning the resumed stream until the 5-min TTL.
-                        # Self-heal: if fresh audio is flowing into a "completed" stream,
-                        # the session resumed — drop the flag and re-attach.
-                        if await self._stream_has_fresh_entries(stream_name):
+                        # The flag can outlive the provider stream it describes: a
+                        # process_stream task that exits on its idle heartbeat sets it
+                        # while the session is still ACTIVE, and the device may resume
+                        # sending afterwards. Discovery would then skip that live stream
+                        # until the 5-min TTL, starving it of transcription.
+                        #
+                        # Self-heal, but only for a session that can still produce. The
+                        # flag is also the handshake open_conversation_job waits on, so
+                        # clearing it for a session that has finished stalls that job for
+                        # its full 30s wait (see _session_resumed).
+                        if await self._session_resumed(stream_name, session_id):
                             logger.info(
-                                f"Stream {stream_name} marked complete but has fresh "
-                                f"audio — session resumed, clearing flag and re-attaching"
+                                f"Stream {stream_name} marked complete but its session "
+                                f"is still active and producing — clearing flag and "
+                                f"re-attaching"
                             )
                             await self.redis_client.delete(completion_key)
                         else:
