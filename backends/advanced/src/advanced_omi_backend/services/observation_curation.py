@@ -24,6 +24,7 @@ from advanced_omi_backend.services.memory.agent.codex_agent import (
     codex_executor_available,
 )
 from advanced_omi_backend.services.memory.vault_manager import ConvDocVaultManager
+from advanced_omi_backend.services.memory.vault_media import promote_image_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -392,30 +393,6 @@ async def _immich_image(
         return response.content, content_type
 
 
-def _promote_image_bytes(data: bytes, content_type: str, root: Path) -> tuple[str, str]:
-    if not data or not content_type:
-        raise ValueError("cannot promote empty image data")
-    suffixes = {
-        "image/jpeg": ".jpg",
-        "image/png": ".png",
-        "image/webp": ".webp",
-        "image/heic": ".heic",
-        "image/avif": ".avif",
-    }
-    suffix = suffixes.get(content_type)
-    if suffix is None:
-        raise ValueError("unsupported vault image type")
-    digest = hashlib.sha256(data).hexdigest()
-    media_dir = root / "_media"
-    media_dir.mkdir(parents=True, exist_ok=True)
-    target = media_dir / f"{digest}{suffix}"
-    if not target.exists():
-        temporary = target.with_suffix(target.suffix + ".part")
-        temporary.write_bytes(data)
-        os.replace(temporary, target)
-    return target.relative_to(root).as_posix(), digest
-
-
 def _write_media_provenance(
     root: Path,
     digest: str,
@@ -566,7 +543,7 @@ async def apply_curation_decision(
                 raise ValueError("agent selected an invalid Immich candidate")
             asset_id = immich_item.metadata.get("asset_id")
             data, content_type = await _immich_image(str(asset_id), "original")
-            promoted, digest = _promote_image_bytes(data, content_type, root)
+            promoted, digest = promote_image_bytes(data, content_type, root)
             immich_item.promoted_path = promoted
             immich_item.content_hash = digest
             immich_item.state = "promoted"
@@ -582,7 +559,7 @@ async def apply_curation_decision(
         elif retain_image:
             if not item.media_data or not item.media_content_type:
                 raise ValueError("selected ScreenPipe image is unavailable")
-            promoted, digest = _promote_image_bytes(
+            promoted, digest = promote_image_bytes(
                 item.media_data, item.media_content_type, root
             )
             item.content_hash = digest
