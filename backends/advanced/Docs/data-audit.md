@@ -135,6 +135,36 @@ records by `clip_id` + `conversation_id` + source times. Helpers live in
 the Data Audit toolbar (exports selected rows; modal also lists/downloads/
 deletes server-side exports).
 
+### Contents preview (verify before shipping)
+
+`POST /export/preview` (same body minus `sensitivity_policy`) is a synchronous
+dry-run: it returns the exact clips the settings would produce — boundaries,
+durations, and the sliced transcript each manifest record would carry —
+without writing any audio. Preview and job share one code path
+(`utils/export_planning.plan_conversation_clips`), so the preview cannot drift
+from the export. Unanalyzed conversations are reported skipped
+(`not analyzed`) rather than analyzed inline; the export job still runs VAD
+for them.
+
+The modal's **Dataset contents** panel renders this plan live (auto-refreshing
+as params or screen withholdings change): per-clip play (gapless player over
+the clip's range), the transcript slice (a `no transcript` badge marks clips
+an annotator would receive silent), and an include checkbox per clip. Unticked
+clips are passed to `/export` as `dropped_ranges`
+(`{conversation_id: [[start, end], …]}`) and carved out exactly like privacy
+ranges but accounted separately (`params.curated`, per-conversation and total
+`dropped_seconds`): one bucket means "too sensitive to share", the other "not
+worth annotating".
+
+### Export history
+
+The listing joins the on-disk `export.json` metadata to mark conversations a
+previous export actually shipped (skipped ones don't count): each row carries
+`last_export` (chipped `exported` in the table), and the `exported=never|exported`
+filter scopes a curation session to un-shipped audio. Reading history from the
+export directories means deleting an export naturally un-marks its
+conversations — no second source of truth.
+
 ## Privacy screen (shareability gate)
 
 Before sharing audio + transcripts with an outside annotator, the export can

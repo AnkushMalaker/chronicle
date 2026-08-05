@@ -843,6 +843,9 @@ export interface AuditConversation {
   analyzed: boolean
   speech_fraction: number | null
   derived_operation: 'split' | 'merge' | null
+  // Most recent annotation export that shipped this conversation (null = never
+  // exported) — lets curation sessions skip audio already sent to annotators.
+  last_export: { export_id: string; created_at: string } | null
   audio_archived: boolean
   audio_archived_at: string | null
   archive_reason: string | null
@@ -1049,6 +1052,42 @@ export interface ExportRecord {
     zip_bytes?: number
   }
   zip_ready: boolean
+}
+
+// One clip the export would produce, as returned by the preview dry-run.
+export interface ExportPreviewClip {
+  clip_index: number
+  clip_id: string
+  start: number
+  end: number
+  duration_seconds: number
+  // The sliced transcript this clip's manifest record would carry ('' = no
+  // transcript covers the clip).
+  text: string
+  segment_count: number
+}
+
+export interface ExportPreviewConversation {
+  conversation_id: string
+  title: string | null
+  client_id: string | null
+  created_at: string | null
+  skipped_reason?: string
+  clips?: ExportPreviewClip[]
+  sample_rate?: number
+  clip_seconds?: number
+  excluded_seconds?: number
+}
+
+export interface ExportPreviewResult {
+  conversations: ExportPreviewConversation[]
+  totals: {
+    conversation_count: number
+    exported_conversations: number
+    clip_count: number
+    total_clip_seconds: number
+    excluded_seconds: number
+  }
 }
 
 // One transcript segment flagged by the privacy screen as too sensitive to share.
@@ -1776,9 +1815,28 @@ export const dataAuditApi = {
       policy: policy ?? null,
     }),
 
+  // Dry-run of the export: the exact clips (boundaries + sliced transcripts)
+  // the current settings would produce, without writing any audio. Runs the
+  // same plan computation as the export job, so what it shows is what ships.
+  previewExport: (
+    conversationIds: string[],
+    params?: {
+      mode?: 'clips' | 'full'
+      pad_seconds?: number
+      speech_threshold?: number
+      merge_gap_seconds?: number
+      excluded_ranges?: Record<string, number[][]>
+    }
+  ) =>
+    api.post<ExportPreviewResult>('/api/data-audit/export/preview', {
+      conversation_ids: conversationIds,
+      ...params,
+    }),
+
   // Enqueue an annotation-dataset export (speech-cropped clips + manifest).
   // `excluded_ranges` (conversation_id → withheld [start,end] ranges from the
-  // privacy screen) are carved out of the exported audio + transcript.
+  // privacy screen) and `dropped_ranges` (clips unticked in the preview) are
+  // carved out of the exported audio + transcript.
   // Returns { job_id, export_id, status }.
   startExport: (
     conversationIds: string[],
@@ -1788,6 +1846,7 @@ export const dataAuditApi = {
       speech_threshold?: number
       merge_gap_seconds?: number
       excluded_ranges?: Record<string, number[][]>
+      dropped_ranges?: Record<string, number[][]>
       sensitivity_policy?: string | null
     }
   ) =>
