@@ -45,6 +45,9 @@ INITIAL_DELAY_SECS = 20
 
 # Redis keys for last-known state.
 _HEALTH_KEY = "system:health:last"  # hash: "{node}/{service}" -> health
+# Reserved field in that hash; "local/..." and "{node}/..." keys can't collide with it.
+_AGENT_KEY = "node-agent"
+_AGENT_INCIDENT = "node-agent-unreachable"
 _SEEN_FAILED_KEY = "system:health:seen_failed_jobs"  # set of job ids
 _CONFIG_SEEN_KEY = "system:health:config_issues"  # set of issue keys
 _WORKER_HEALTH_FIELD = "internal/workers-fleet"
@@ -121,8 +124,44 @@ def _bad_severity(health: str | None, detail: str) -> str | None:
 
 async def _poll_external_services(redis) -> None:
     data = await get_external_services()
+
+    # An unreachable agent is itself a reportable fault, not merely an absence of
+    # data. The agent runs natively on the host and is the only thing that sees
+    # host-level faults — dead container DNS, a logged-out Tailscale, a stale
+    # socket mount. Returning silently here meant the failure mode this poller
+    # exists to catch produced no signal at all. Reported as a transition, like
+    # every other state below, so a persistent outage does not spam the ledger.
+    agent_state = "reachable" if data.get("available") else "unreachable"
+    prev_agent = await redis.hget(_HEALTH_KEY, _AGENT_KEY)
+    if prev_agent != agent_state:
+        await redis.hset(_HEALTH_KEY, _AGENT_KEY, agent_state)
+        if agent_state == "unreachable":
+            await record_event(
+                severity="warning",
+                category="service",
+                source="node-agent",
+                title="Node agent unreachable",
+                detail=(
+                    "The service manager could not be reached "
+                    f"({data.get('reason') or 'unknown'}). Host-level checks are not "
+                    "running, so DNS, Tailscale and certificate faults will go "
+                    "unreported until it returns."
+                ),
+                incident_key=_AGENT_INCIDENT,
+            )
+        else:
+            await record_event(
+                severity="info",
+                category="service",
+                source="node-agent",
+                title="Node agent reachable",
+                detail="The service manager is responding again.",
+                incident_key=_AGENT_INCIDENT,
+                resolves_incident=True,
+            )
+
     if not data.get("available"):
-        return  # agent unreachable/unconfigured → unknown, don't fabricate transitions
+        return  # no per-service data to reconcile; don't fabricate transitions
 
     for svc in data.get("services", []) or []:
         if not svc.get("enabled", True):
