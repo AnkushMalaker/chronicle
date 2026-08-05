@@ -238,6 +238,23 @@ always sent). Both Linux and macOS expose **View Logs** for the
 current Chronicle desktop process. System-service history remains in the native
 service manager:
 
+### Updating the recorder (prebuilt, no toolchain)
+
+The fork's CI publishes prebuilt recorder CLIs (linux-x86_64 and macos-aarch64)
+under the rolling `chronicle-latest` prerelease on `AnkushMalaker/screenpipe` on
+every push to its `chronicle` branch, with a `manifest.json` carrying the fork
+commit and per-asset sha256s. The tray's **Update recorder…** consumes it:
+download → sha256 verify → swap into `~/.local/lib/screenpipe-cli-chronicle/current/`
+→ repoint the `screenpipe` symlink → restart the service. The prior build stays
+in `previous/`, so **Revert recorder update** is a directory swap. Headless
+nodes can run the same flow with
+`uv run --project extras/chronicle-tray python -m chronicle_tray.recorder_update check|install|revert`.
+`install-local.sh` / `install-cli-local.sh` in the fork remain the build-from-source
+path for recorder development. macOS caveat: the CLI is ad-hoc signed, so its
+CDHash changes each build and TCC re-prompts for Screen Recording after an
+update — same as a local rebuild; only an Apple Developer certificate would
+remove that.
+
 ```bash
 systemctl --user status screenpipe.service chronicle-screenpipe.service chronicle-desktop.service
 journalctl --user -u screenpipe.service -u chronicle-screenpipe.service -u chronicle-desktop.service
