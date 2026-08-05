@@ -125,7 +125,7 @@ export const conversationsApi = {
     query: string,
     limit?: number,
     offset?: number,
-    fields?: Array<'title' | 'summary' | 'speakers'>,
+    fields?: Array<'id' | 'title' | 'summary' | 'speakers'>,
   ) =>
     api.get('/api/conversations/search', {
       params: { q: query, limit, offset, fields },

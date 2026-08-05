@@ -4,7 +4,8 @@ import { useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft, Calendar, User, Trash2, RefreshCw, MoreVertical,
   RotateCcw, Zap, Download, Scissors,
-  Save, X, Pencil, Clock, Database, Layers, Star, BarChart3, Hash, AudioLines, ChevronRight
+  Save, X, Pencil, Clock, Database, Layers, Star, BarChart3, Hash, AudioLines, ChevronRight,
+  Check, Copy
 } from 'lucide-react'
 import { annotationsApi, speakerApi, systemApi, BACKEND_URL } from '../services/api'
 import {
@@ -109,7 +110,17 @@ export default function ConversationDetail() {
   const [reprocessingMemory, setReprocessingMemory] = useState(false)
   const [reprocessingSpeakers, setReprocessingSpeakers] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [idCopyStatus, setIdCopyStatus] = useState<'idle' | 'copied' | 'error'>('idle')
+  const idCopyResetTimer = useRef<number | null>(null)
   const toggleStarMutation = useToggleStar()
+
+  useEffect(() => {
+    return () => {
+      if (idCopyResetTimer.current !== null) {
+        window.clearTimeout(idCopyResetTimer.current)
+      }
+    }
+  }, [])
 
   const handleToggleStar = async () => {
     if (!id) return
@@ -171,6 +182,45 @@ export default function ConversationDetail() {
     const mins = Math.floor(seconds / 60)
     const secs = Math.floor(seconds % 60)
     return `${mins}:${secs.toString().padStart(2, '0')}`
+  }
+
+  const handleCopyConversationId = async () => {
+    const conversationId = conversation?.conversation_id
+    if (!conversationId) return
+
+    let copied = false
+    if (window.isSecureContext && navigator.clipboard) {
+      try {
+        await navigator.clipboard.writeText(conversationId)
+        copied = true
+      } catch {
+        // Fall through to the selection-based copy path below.
+      }
+    }
+
+    if (!copied) {
+      const textArea = document.createElement('textarea')
+      textArea.value = conversationId
+      textArea.setAttribute('readonly', '')
+      textArea.style.position = 'fixed'
+      textArea.style.left = '-9999px'
+      document.body.appendChild(textArea)
+      textArea.select()
+
+      try {
+        copied = document.execCommand('copy')
+      } catch {
+        copied = false
+      } finally {
+        textArea.remove()
+      }
+    }
+
+    setIdCopyStatus(copied ? 'copied' : 'error')
+    if (idCopyResetTimer.current !== null) {
+      window.clearTimeout(idCopyResetTimer.current)
+    }
+    idCopyResetTimer.current = window.setTimeout(() => setIdCopyStatus('idle'), 2000)
   }
 
   // Action handlers
@@ -646,11 +696,43 @@ export default function ConversationDetail() {
                 <dd className="text-right">
                   <button
                     type="button"
-                    onClick={() => navigator.clipboard?.writeText(conversation.conversation_id || '')}
-                    title={`${conversation.conversation_id} — click to copy`}
-                    className="font-mono text-xs text-gray-900 dark:text-gray-100 hover:text-gray-600 dark:hover:text-gray-300 rounded focus:outline-none focus-visible:ring-1 focus-visible:ring-gray-400"
+                    onClick={handleCopyConversationId}
+                    title={
+                      idCopyStatus === 'copied'
+                        ? 'Conversation ID copied'
+                        : idCopyStatus === 'error'
+                          ? 'Unable to copy conversation ID'
+                          : `${conversation.conversation_id} — copy ID`
+                    }
+                    aria-label={
+                      idCopyStatus === 'copied'
+                        ? 'Conversation ID copied'
+                        : idCopyStatus === 'error'
+                          ? 'Unable to copy conversation ID'
+                          : `Copy conversation ID ${conversation.conversation_id}`
+                    }
+                    className={`inline-flex min-h-8 items-center justify-end gap-1 rounded px-1.5 py-1 font-mono text-xs transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-gray-400 ${
+                      idCopyStatus === 'copied'
+                        ? 'text-green-700 dark:text-green-400'
+                        : idCopyStatus === 'error'
+                          ? 'text-red-700 dark:text-red-400'
+                          : 'text-gray-900 hover:bg-gray-200/70 hover:text-gray-600 dark:text-gray-100 dark:hover:bg-gray-700 dark:hover:text-gray-300'
+                    }`}
                   >
-                    {conversation.conversation_id?.slice(0, 8)}…
+                    <span aria-live="polite">
+                      {idCopyStatus === 'copied'
+                        ? 'Copied'
+                        : idCopyStatus === 'error'
+                          ? 'Copy failed'
+                          : `${conversation.conversation_id?.slice(0, 8)}…`}
+                    </span>
+                    {idCopyStatus === 'copied' ? (
+                      <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                    ) : idCopyStatus === 'error' ? (
+                      <X className="h-3.5 w-3.5" aria-hidden="true" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                    )}
                   </button>
                 </dd>
               </div>
