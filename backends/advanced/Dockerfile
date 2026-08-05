@@ -22,7 +22,7 @@ COPY pyproject.toml uv.lock ./
 
 # Build a project .venv from the lockfile (includes git deps like Graphiti)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --extra deepgram --extra galileo --extra benchmark --no-install-project
+    uv sync --frozen --no-dev --extra galileo --extra benchmark --no-install-project
 
 
 # ============================================
@@ -138,7 +138,7 @@ WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --extra deepgram --extra galileo --extra benchmark --group test --no-install-project && \
+    uv sync --frozen --extra galileo --extra benchmark --group test --no-install-project && \
     rm /bin/uv /bin/uvx
 
 ENV VIRTUAL_ENV=/app/.venv

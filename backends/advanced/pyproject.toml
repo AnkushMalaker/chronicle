@@ -40,10 +40,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-deepgram = [
-    "deepgram-sdk>=4.0.0",
-]
-
 local-audio = [
     "easy-audio-interfaces[local-audio]>=0.7.1",
 ]
