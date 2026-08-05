@@ -28,6 +28,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterator, List
 
+from ..person_merge import PersonMergeService
 from ..vault_lock import VaultLockTimeout, vault_note_lock
 from ..vault_scaffold import write_category
 from .edit_engine import Edit, EditError, apply_edits
@@ -406,20 +407,22 @@ class VaultTools:
             # keeps its final content and the merge never loses facts unrecorded.
             old_content = old_fp.read_text(encoding="utf-8")
             if new_fp.exists():
-                # Merge case — a plain move would clobber the target. Migrate the old
-                # note's facts into the target *before* deleting it (non-lossy by
-                # construction — never rely on a follow-up edit_note that may not come),
-                # rewrite backlinks, then remove the old note.
-                migrated = self._migrate_person_facts(old_content, new_fp, old_rel)
-                n = self._rewrite_backlinks_python(old_name, new_name)
-                old_fp.unlink()
-                self.touched.add(new_rel)
+                # Merge case — delegate to the same deterministic operation exposed to
+                # Obsidian and automation clients. The caller already owns the vault
+                # lock, so use its locked implementation directly.
+                service = PersonMergeService(self.root)
+                preview = service.preview(old_name, new_name)
+                result = service.apply_preview_locked(preview)
+                for rel, after in result.after.items():
+                    if after is not None:
+                        self.touched.add(rel)
                 self._record_removal(old_rel, new_rel, old_content)
                 return (
                     f"'{new_name}' already existed — merged into People/{new_name}.md: "
-                    f"migrated {migrated} fact bullet(s), rewrote {n} backlink(s), and "
-                    f"deleted People/{old_name}.md. Review People/{new_name}.md and use "
-                    f"edit_note to de-duplicate any overlapping facts."
+                    f"migrated {preview.facts_to_add} fact bullet(s), skipped "
+                    f"{preview.duplicate_facts_skipped} duplicate(s), rewrote "
+                    f"{preview.backlink_occurrences} backlink(s), added '{old_name}' as "
+                    f"an alias, and deleted People/{old_name}.md."
                 )
             self.touched.add(new_rel)
             if self._notesmd:

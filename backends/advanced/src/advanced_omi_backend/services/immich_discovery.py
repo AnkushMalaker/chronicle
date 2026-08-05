@@ -47,6 +47,13 @@ def _asset_time(asset: dict[str, Any]) -> datetime | None:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Restore UTC stripped by MongoDB before serializing times for Immich."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def select_candidates(
     assets: list[dict[str, Any]], limit: int = _DAILY_LIMIT
 ) -> list[dict[str, Any]]:
@@ -105,9 +112,8 @@ async def scan_immich_memories() -> dict[str, Any]:
         DeviceInputItem.source_id == source_id,
         sort=[("captured_at", -1)],
     )
-    since = (
-        newest.captured_at if newest else utcnow() - timedelta(days=2)
-    ) - timedelta(hours=48)
+    newest_at = _as_utc(newest.captured_at) if newest else utcnow() - timedelta(days=2)
+    since = newest_at - timedelta(hours=48)
     page: int | None = 1
     assets: list[dict[str, Any]] = []
     async with httpx.AsyncClient(

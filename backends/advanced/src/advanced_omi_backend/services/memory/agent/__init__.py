@@ -1,22 +1,31 @@
-"""Chronicle memory agent: a tool-calling agent that maintains the markdown vault."""
+"""Chronicle memory agent package.
 
-from .codex_agent import CodexMemoryAgent, codex_executor_available
-from .memory_agent import MemoryAgent, MemoryAgentResult, search_vault
-from .vault_tools import (
-    VAULT_SEARCH_TOOL_SCHEMAS,
-    VAULT_TOOL_SCHEMAS,
-    VaultToolError,
-    VaultTools,
-)
+Public symbols are loaded lazily so low-level deterministic vault helpers can import
+``agent.section_edit`` without initializing the LLM agents (or creating cycles with
+``vault_tools``).
+"""
 
-__all__ = [
-    "CodexMemoryAgent",
-    "codex_executor_available",
-    "MemoryAgent",
-    "MemoryAgentResult",
-    "search_vault",
-    "VaultTools",
-    "VaultToolError",
-    "VAULT_TOOL_SCHEMAS",
-    "VAULT_SEARCH_TOOL_SCHEMAS",
-]
+from importlib import import_module
+
+_EXPORTS = {
+    "CodexMemoryAgent": (".codex_agent", "CodexMemoryAgent"),
+    "codex_executor_available": (".codex_agent", "codex_executor_available"),
+    "MemoryAgent": (".memory_agent", "MemoryAgent"),
+    "MemoryAgentResult": (".memory_agent", "MemoryAgentResult"),
+    "search_vault": (".memory_agent", "search_vault"),
+    "VaultTools": (".vault_tools", "VaultTools"),
+    "VaultToolError": (".vault_tools", "VaultToolError"),
+    "VAULT_TOOL_SCHEMAS": (".vault_tools", "VAULT_TOOL_SCHEMAS"),
+    "VAULT_SEARCH_TOOL_SCHEMAS": (".vault_tools", "VAULT_SEARCH_TOOL_SCHEMAS"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str):
+    if name not in _EXPORTS:
+        raise AttributeError(name)
+    module_name, attribute = _EXPORTS[name]
+    value = getattr(import_module(module_name, __name__), attribute)
+    globals()[name] = value
+    return value

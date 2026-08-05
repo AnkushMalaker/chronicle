@@ -96,11 +96,19 @@ Chat is always **agentic / tool-calling**. The chat LLM is given a `search_memor
 ## API Endpoints
 
 - `GET /api/memories/search?query={query}&limit={limit}` — runs the agentic vault search and returns the synthesized answer plus the notes the read agent consulted.
+- `GET /api/memories/people/suggestions` — ranks conservative deterministic duplicate-person candidates for review; it never merges automatically.
+- `POST /api/memories/people/identity` — records or clears a symmetric `distinct_from` decision in two People notes, with optional stale-revision protection.
+- `POST /api/memories/people/merge/preview` and `POST /api/memories/people/merge` — preview and apply a locked deterministic merge. A `distinct_from` decision blocks preview.
 - Other `/api/memories/*` management endpoints operate over the vault notes.
 
 ## Vault sync to Obsidian (separate feature)
 
 The vault is designed to be edited and viewed directly. The optional **vault sync** feature (in the cross-platform desktop tray, `extras/chronicle-tray/`) syncs `data/conversation_docs/` to an Obsidian vault via Syncthing, so you can browse and hand-edit your memory notes in Obsidian. Human edits made in Obsidian sync back into the vault. This sync is independent of the memory provider itself — the vault on the backend remains the source of truth.
+
+The optional [Chronicle Companion](../obsidian-companion.md) plugin adds explicit,
+deterministic maintenance actions such as merging duplicate people. The UI previews and
+confirms the action, while the backend performs the locked mutation; no LLM participates
+in execution.
 
 ## What was removed
 

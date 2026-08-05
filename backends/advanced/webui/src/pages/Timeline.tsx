@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Activity, AppWindow, ArrowDownUp, CalendarDays, Copy, Image, Link2, Monitor, RefreshCw } from 'lucide-react'
-import { deviceInputApi, DeviceInputItem } from '../services/api'
+import { deviceInputApi, DeviceInputItem, DeviceInputSource } from '../services/api'
 import { timeAgo } from '../utils/timeAgo'
 import { Button, Card, IconButton } from '../components/ui'
 
@@ -120,8 +120,18 @@ function formatDuration(item: DeviceInputItem) {
   return `${minutes}m ${seconds % 60}s`
 }
 
-function sourceStatusLabel(status: string) {
-  return status.charAt(0).toUpperCase() + status.slice(1)
+function sourceStatusLabel(source: DeviceInputSource) {
+  if (source.provider === 'immich') {
+    if (source.status === 'online') return 'Connected'
+    if (source.status === 'offline') return 'Disconnected'
+  }
+  return source.status.charAt(0).toUpperCase() + source.status.slice(1)
+}
+
+function sourceSeenLabel(source: DeviceInputSource) {
+  if (!source.last_seen_at) return ''
+  const event = source.provider === 'immich' ? 'synced' : 'seen'
+  return ` · ${event} ${timeAgo(source.last_seen_at)}`
 }
 
 function observationReviewLabel(curation: DeviceInputItem['curation']) {
@@ -221,7 +231,7 @@ export default function Timeline() {
               <div className="min-w-0">
                 <div className="truncate font-medium text-gray-900 dark:text-gray-100">{source.name}</div>
                 <div className="text-xs text-gray-500 dark:text-gray-400">{source.provider} · {source.platform}</div>
-                <div className={`mt-1 text-xs ${source.status === 'online' ? 'text-green-600 dark:text-green-400' : source.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'}`}>{sourceStatusLabel(source.status)}{source.last_seen_at ? ` · seen ${timeAgo(source.last_seen_at)}` : ''}</div>
+                <div className={`mt-1 text-xs ${source.status === 'online' ? 'text-green-600 dark:text-green-400' : source.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'}`}>{sourceStatusLabel(source)}{sourceSeenLabel(source)}</div>
               </div>
             </Card>
           ))}

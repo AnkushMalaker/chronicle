@@ -53,6 +53,7 @@ class MemoryCause(str, Enum):
     SPEAKER_REPROCESS = "speaker_reprocess"  # re-ran diarization
     ANNOTATION_APPLY = "annotation_apply"  # user applied annotation corrections
     OBSIDIAN_SYNC = "obsidian_sync"  # inbound human edit via Syncthing
+    OBSIDIAN_ACTION = "obsidian_action"  # explicit semantic action from Obsidian
     DELETE_ALL = "delete_all"  # bulk vault wipe
 
 
@@ -73,6 +74,7 @@ _CAUSE_KIND = {
     MemoryCause.SPEAKER_REPROCESS: "reprocess",
     MemoryCause.ANNOTATION_APPLY: "reprocess",
     MemoryCause.OBSIDIAN_SYNC: "human",
+    MemoryCause.OBSIDIAN_ACTION: "human",
     MemoryCause.DELETE_ALL: "bulk",
 }
 
@@ -84,6 +86,7 @@ _CAUSE_LABEL = {
     MemoryCause.SPEAKER_REPROCESS: "Speaker reprocess",
     MemoryCause.ANNOTATION_APPLY: "Annotation applied",
     MemoryCause.OBSIDIAN_SYNC: "Human · Obsidian",
+    MemoryCause.OBSIDIAN_ACTION: "Obsidian action",
     MemoryCause.DELETE_ALL: "Bulk delete",
 }
 
@@ -132,7 +135,7 @@ def actor_for(cause: Optional[str], agent_mode: bool, operation: Optional[str]) 
     if agent_mode:
         return "agent"
     c = _as_cause(cause)
-    if c == MemoryCause.OBSIDIAN_SYNC:
+    if c in (MemoryCause.OBSIDIAN_SYNC, MemoryCause.OBSIDIAN_ACTION):
         return "human_external"
     if c == MemoryCause.AUTO_EXTRACTION:
         return "system"
