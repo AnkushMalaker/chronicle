@@ -19,6 +19,7 @@ day-to-day operation, and use [AGENTS.md](../AGENTS.md) for development conventi
 
 ## Backend
 
+- [Compose stack](backend/compose-stack.md): the backend's containers, shared mounts, and profiles
 - [Authentication](backend/auth.md): user identity, JWTs, and protected endpoints
 - [Memory system](backend/memories.md): agentic Markdown vault and retrieval
 - [Audio durability](backend/audio-durability.md): raw-audio write path and its state machine
