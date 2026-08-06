@@ -1,5 +1,5 @@
 import { Radio, Zap, Archive, Settings, Monitor, Mic } from 'lucide-react'
-import { useRecording } from '../contexts/RecordingContext'
+import { useRecording, isLoopbackDevice, isMacOS } from '../contexts/RecordingContext'
 import { Button } from '../components/ui'
 import SimplifiedControls from '../components/audio/SimplifiedControls'
 import StatusDisplay from '../components/audio/StatusDisplay'
@@ -101,19 +101,34 @@ export default function LiveRecord() {
           {recording.audioSource === 'mic'
             ? 'Microphone only'
             : recording.audioSource === 'meeting'
-              ? recording.supportsDisplayAudio
-                ? 'Mic + tab audio (you\'ll be asked to select a tab)'
-                : 'Mic + system audio (captured from a monitor device)'
-              : recording.supportsDisplayAudio
-                ? 'Browser tab audio only (no microphone)'
-                : 'System audio only (captured from a monitor device)'}
+              ? recording.monitorDeviceId
+                ? 'Mic + system audio (from the loopback device below)'
+                : 'Mic + tab audio (you\'ll be asked to select a tab)'
+              : recording.monitorDeviceId
+                ? 'System audio only (from the loopback device below)'
+                : 'Browser tab audio only (no microphone)'}
         </span>
       </div>
 
-      {/* Firefox/Zen: getDisplayMedia can't deliver audio, so system audio comes
-          from a PipeWire/PulseAudio "Monitor of …" loopback input instead */}
-      {recording.audioSource !== 'mic' && !recording.supportsDisplayAudio && (() => {
-        const monitors = recording.availableDevices.filter(d => /monitor/i.test(d.label))
+      {/* Optional loopback capture. Chromium shares tab audio straight from the picker,
+          so this stays hidden there; Firefox ignores `audio: true` (bugzilla #1541425) and
+          needs a loopback input — a PipeWire/PulseAudio monitor on Linux, or a driver the
+          user installed on macOS, which has no built-in equivalent. Choosing one here
+          skips the share picker entirely and captures the whole output instead of one tab. */}
+      {recording.audioSource !== 'mic' && (() => {
+        // Labels are blank until an audio permission is granted, so an empty list
+        // means "not probed yet" — not "this machine has no loopback device".
+        const labelsKnown = recording.availableDevices.some(d => d.label)
+        const loopbacks = recording.availableDevices.filter(d => isLoopbackDevice(d.label))
+        // A macOS Aggregate Device can be named anything, so once we know the labels
+        // and found no known driver, offer every input rather than a dead end.
+        const options = loopbacks.length > 0
+          ? loopbacks
+          : (isMacOS && labelsKnown ? recording.availableDevices : [])
+        // On Chromium the share picker handles this, so stay out of the way unless
+        // the browser needs a loopback or the user already has one to choose from.
+        const relevant = recording.likelyLacksDisplayAudio || recording.monitorDeviceId || loopbacks.length > 0
+        if (!relevant) return null
         return (
           <div className="mb-4 space-y-2">
             <div className="flex items-center gap-2">
@@ -121,7 +136,7 @@ export default function LiveRecord() {
               <label className="text-sm font-medium text-gray-700 dark:text-gray-300 flex-shrink-0">
                 System audio:
               </label>
-              {monitors.length > 0 ? (
+              {options.length > 0 ? (
                 <select
                   value={recording.monitorDeviceId ?? ''}
                   onChange={(e) => recording.setMonitorDeviceId(e.target.value || null)}
@@ -133,13 +148,19 @@ export default function LiveRecord() {
                     ${recording.isRecording ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
                   `}
                 >
-                  <option value="">Choose "Monitor of …" output device</option>
-                  {monitors.map((device) => (
+                  <option value="">
+                    {isMacOS ? 'Choose loopback input (e.g. BlackHole)' : 'Choose "Monitor of …" output device'}
+                  </option>
+                  {options.map((device) => (
                     <option key={device.deviceId} value={device.deviceId}>
                       {device.label}
                     </option>
                   ))}
                 </select>
+              ) : labelsKnown ? (
+                <span className="text-sm text-orange-600 dark:text-orange-400">
+                  No loopback input found on this machine.
+                </span>
               ) : (
                 <Button variant="secondary" size="sm" onClick={() => recording.requestDeviceAccess()}>
                   Load audio devices…
@@ -147,10 +168,29 @@ export default function LiveRecord() {
               )}
             </div>
             <p className="text-xs text-gray-500 dark:text-gray-400">
-              Firefox-based browsers (like Zen) can't share tab audio, so system audio is recorded from a
-              PipeWire/PulseAudio "Monitor of …" loopback device — no share dialog will appear. Pick the
-              monitor of the output you're actually listening through (headphones vs speakers each have
-              their own); it captures everything playing through that output.
+              {recording.monitorDeviceId
+                ? 'Selected — the share picker will be skipped and everything playing through this output is recorded. Clear it to share a single tab instead.'
+                : 'Leave unset to pick a browser tab from the share dialog instead.'}{' '}
+              {recording.likelyLacksDisplayAudio && (
+                <>
+                  {isMacOS ? (
+                    <>
+                      Firefox can't share tab audio (bugzilla #1541425) and macOS has no built-in loopback input, so
+                      this needs a virtual audio driver. <strong>Simplest fix: use a Chromium browser</strong>, where
+                      tab audio works with no setup. To stay in Firefox: <code>brew install --cask blackhole-2ch</code>,
+                      build a Multi-Output Device in Audio MIDI Setup so you can still hear the meeting, then select
+                      BlackHole above.
+                    </>
+                  ) : (
+                    <>
+                      Firefox can't share tab audio, so pick the "Monitor of …" entry for the output you're actually
+                      listening through — headphones and speakers each have their own.
+                    </>
+                  )}{' '}
+                  If browser capture still doesn't work, use the Chronicle tray's ScreenPipe recorder instead; it
+                  captures the meeting outside Firefox.
+                </>
+              )}
             </p>
           </div>
         )
@@ -177,7 +217,7 @@ export default function LiveRecord() {
             <option value="">System Default</option>
             {recording.availableDevices
               // In Firefox meeting mode, monitor devices belong in the System audio selector
-              .filter(d => recording.supportsDisplayAudio || recording.audioSource === 'mic' || !/monitor/i.test(d.label))
+              .filter(d => recording.audioSource === 'mic' || !isLoopbackDevice(d.label))
               .map((device) => (
               <option key={device.deviceId} value={device.deviceId}>
                 {device.label || `Microphone (${device.deviceId.slice(0, 8)}...)`}

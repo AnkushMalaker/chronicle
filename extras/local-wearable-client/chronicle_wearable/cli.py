@@ -50,8 +50,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Unified config lives in the repository-root .env (shared with the tray and
-# vault sync), same as chronicle_wearable.backend.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+# vault sync), same as chronicle_wearable.backend. parents[3]: this module is
+# inside the chronicle_wearable package, two levels below extras/.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(_REPO_ROOT / ".env")
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "devices.yml")

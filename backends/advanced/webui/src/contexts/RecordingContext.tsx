@@ -7,10 +7,23 @@ import { setActiveWakeClientId } from '../hooks/useWakeFeedback'
 
 const log = import.meta.env.DEV ? console.log.bind(console) : () => {}
 
-// Firefox-based browsers (incl. Zen, LibreWolf) don't implement audio capture in
-// getDisplayMedia — their share picker has no "Share audio" option, so meeting/tab
-// modes can never get sound from it (bugzilla #1541425).
-export const supportsDisplayAudio = !/firefox/i.test(navigator.userAgent)
+// Firefox currently ignores `audio: true` in getDisplayMedia — its share picker has
+// no "Share audio" option (bugzilla #1541425).
+// This is a HINT for UI copy only: never gate capture on it. We always try the picker
+// and check whether an audio track actually came back, so the browser decides — a UA
+// gate would lock out Chromium forks that sniff as Firefox, and would keep blocking
+// Firefox on the day #1541425 ships.
+export const likelyLacksDisplayAudio = /firefox/i.test(navigator.userAgent)
+
+// macOS has no built-in loopback input at all: Linux gets PipeWire/PulseAudio
+// "Monitor of …" devices for free, but on macOS the user must install a virtual
+// audio driver (BlackHole, Loopback, Soundflower) before system audio is capturable.
+export const isMacOS = /mac/i.test(navigator.userAgent)
+
+// Inputs that carry system audio rather than a real microphone. Linux names them
+// "Monitor of …"; macOS/Windows virtual drivers use their own product names.
+export const isLoopbackDevice = (label: string) =>
+  /monitor of|loopback|blackhole|soundflower|stereo mix|what ?u ?hear/i.test(label)
 
 export type RecordingStep = 'idle' | 'mic' | 'display-audio' | 'websocket' | 'audio-start' | 'streaming' | 'stopping' | 'error'
 export type RecordingMode = 'batch' | 'streaming'
@@ -62,7 +75,7 @@ export interface RecordingContextType {
   // Utilities
   formatDuration: (seconds: number) => string
   canAccessMicrophone: boolean
-  supportsDisplayAudio: boolean
+  likelyLacksDisplayAudio: boolean
 }
 
 const RecordingContext = createContext<RecordingContextType | undefined>(undefined)
@@ -278,30 +291,31 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   }, [canAccessMicrophone, selectedDeviceId, isRecording, cleanup, refreshDevices, audioSource])
 
   // Step 1b: Get display/tab audio (meeting mode only)
-  const getDisplayAudio = useCallback(async (): Promise<MediaStream> => {
+  // Returns null (rather than throwing) when the picker yields no audio, so the
+  // caller can fall back to a loopback input instead of dead-ending the recording.
+  const getDisplayAudio = useCallback(async (): Promise<MediaStream | null> => {
     log('Step 1b: Requesting display/tab audio')
 
-    if (!supportsDisplayAudio) {
-      throw new Error(
-        'This browser (Firefox-based) cannot capture tab/screen audio — its share dialog has no "Share audio" option. ' +
-        'Either use a Chromium-based browser for Meeting/Tab mode, or switch to Mic mode and pick a "Monitor of …" ' +
-        'device in the Microphone dropdown to record system audio.'
-      )
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,   // Required for picker to show
+        audio: true,   // Request audio track
+      })
+    } catch (e) {
+      // Picker cancelled, or the browser exposes no display capture at all.
+      log('getDisplayMedia unavailable or dismissed:', e)
+      return null
     }
-
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,   // Required for picker to show
-      audio: true,   // Request audio track
-    })
 
     // Stop video track — we only need audio. Chrome keeps audio alive.
     stream.getVideoTracks().forEach(t => t.stop())
 
+    // Firefox lands here: it grants the share but silently drops `audio: true`.
     if (stream.getAudioTracks().length === 0) {
-      throw new Error(
-        'No audio shared. Share a browser tab (not a window) and enable "Also share tab audio" in the picker — ' +
-        'on Linux, window and screen sharing never include audio.'
-      )
+      stream.getTracks().forEach(t => t.stop())
+      log('Share produced no audio track')
+      return null
     }
 
     displayStreamRef.current = stream
@@ -326,9 +340,16 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     log('Step 1b (Firefox): Capturing system audio via monitor device')
 
     if (!monitorDeviceId) {
+      // Reached only after the share picker already failed to produce audio.
       throw new Error(
-        'No system-audio device selected. In the "System audio" dropdown, choose the "Monitor of …" entry ' +
-        'matching the output you\'re listening through (e.g. your headphones), then start again.'
+        isMacOS
+          ? 'No system audio captured. Share a browser tab (not a window or whole screen) with "Share tab audio" ' +
+            'ticked — macOS blocks window and screen audio at the OS level. Firefox can\'t share tab audio at all ' +
+            '(bugzilla #1541425), so there use a Chromium browser, or install a loopback driver such as BlackHole ' +
+            'and pick it in the "System audio" dropdown.'
+          : 'No system audio captured. Share a browser tab with "Share tab audio" ticked (window and screen shares ' +
+            'never carry audio), or pick the "Monitor of …" entry matching the output you\'re listening through ' +
+            'in the "System audio" dropdown.'
       )
     }
 
@@ -337,8 +358,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     if (!target) {
       throw new Error(
         'The selected system-audio device is no longer available (output disconnected, or the browser reset ' +
-        'device IDs — grant persistent microphone permission to prevent that). Re-select a "Monitor of …" ' +
-        'device in the System audio dropdown.'
+        'device IDs — grant persistent microphone permission to prevent that). Re-select a loopback device ' +
+        'in the System audio dropdown.'
       )
     }
 
@@ -705,13 +726,14 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       audioContextRef.current = audioContext
       log(`AudioContext created, sample rate: ${audioContext.sampleRate}Hz`)
 
-      // Step 1b: Get display/tab audio if needed. Firefox-based browsers can't
-      // deliver audio via getDisplayMedia, so capture a monitor device instead.
+      // Step 1b: Get display/tab audio if needed. Try the share picker first and
+      // fall back to a loopback input only if it produced no audio track — feature
+      // detection, not UA sniffing, so Chromium keeps its one-click tab share.
+      // Skip the picker outright when the user has already chosen a loopback device.
       if (needsDisplayAudio) {
         setCurrentStep('display-audio')
-        if (supportsDisplayAudio) {
-          await getDisplayAudio()
-        } else {
+        const shared = monitorDeviceId ? null : await getDisplayAudio()
+        if (!shared) {
           await getMonitorAudio()
         }
       }
@@ -750,7 +772,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       }))
       cleanup()
     }
-  }, [getMicrophoneAccess, getDisplayAudio, getMonitorAudio, audioSource, connectWebSocket, sendAudioStartMessage, startAudioStreaming, cleanup])
+  }, [getMicrophoneAccess, getDisplayAudio, getMonitorAudio, monitorDeviceId, audioSource, connectWebSocket, sendAudioStartMessage, startAudioStreaming, cleanup])
 
   // Stop recording function
   const stopRecording = useCallback(() => {
@@ -837,7 +859,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     debugStats,
     formatDuration,
     canAccessMicrophone,
-    supportsDisplayAudio
+    likelyLacksDisplayAudio
   }), [
     currentStep, isRecording, recordingDuration, error, mode, liveTranscript,
     startRecording, stopRecording, setMode,

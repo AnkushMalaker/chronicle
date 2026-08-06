@@ -93,6 +93,10 @@ class BLEManager:
         self._scan_interval = self.config.get("scan_interval", 10)
         self._connecting = False  # Guard against concurrent _connect() calls
         self._running_task: Optional[asyncio.Task] = None
+        # Strong refs to fire-and-forget futures: a task whose only reference
+        # is the future it awaits forms a cycle the GC collects mid-await
+        # ("Task was destroyed but it is pending"), silently killing the loop.
+        self._background_futures: set = set()
 
         # Backoff state for connection failures
         self._backoff_seconds: float = 0  # 0 = no backoff active
@@ -123,9 +127,15 @@ class BLEManager:
         except Exception as e:
             logger.error("Failed to save last_connected: %s", e)
 
+    def _spawn(self, coro) -> None:
+        """Schedule background work, holding a reference until it completes."""
+        future = self.bg.run_coro(coro)
+        self._background_futures.add(future)
+        future.add_done_callback(self._background_futures.discard)
+
     def start_scanning(self) -> None:
         """Begin the scan-connect loop."""
-        self.bg.run_coro(self._scan_loop())
+        self._spawn(self._scan_loop())
 
     async def _scan_loop(self) -> None:
         """Continuously scan and auto-connect when a target is set."""
@@ -279,7 +289,7 @@ class BLEManager:
         """Request connection to a device (called from UI thread)."""
         self._target_mac = mac
         # Trigger an immediate scan+connect attempt
-        self.bg.run_coro(self._immediate_connect(mac))
+        self._spawn(self._immediate_connect(mac))
 
     async def _immediate_connect(self, mac: str) -> None:
         """Scan once and connect immediately if device is found."""
@@ -306,4 +316,4 @@ class BLEManager:
 
     def request_scan(self) -> None:
         """Trigger an immediate scan (called from UI thread)."""
-        self.bg.run_coro(self._do_scan())
+        self._spawn(self._do_scan())
