@@ -596,7 +596,7 @@ memory:
   backends:
     direct: {}
     codex:
-      model: "gpt-5.6-terra"        # Codex model used for vault writes
+      model: "gpt-5.6-luna"         # Codex model used for routine vault writes
       reasoning_effort: low         # keep routine ingestion economical; raise for quality evals
       # codex --sandbox. workspace-write (writes confined to the vault dir) needs
       # bubblewrap, which cannot run nested inside the rootless-podman containers —
@@ -927,6 +927,12 @@ cron_jobs:
     description: "Reconcile changed current-day capture evidence into semantic episodes"
     enabled: true
     schedule: "*/30 * * * *"
+
+observation_curation:
+  codex:
+    model: gpt-5.6-luna
+    reasoning_effort: low
+    timeout_seconds: 600
 
 timeline:
   window_minutes: 20

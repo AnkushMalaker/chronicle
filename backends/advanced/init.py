@@ -1353,7 +1353,7 @@ class ChronicleSetup:
         )
 
         codex_config = {
-            "model": "gpt-5.6-terra",
+            "model": "gpt-5.6-luna",
             "reasoning_effort": "low",
             "sandbox_mode": "workspace-write",
             "timeout_seconds": 900,

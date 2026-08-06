@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from advanced_omi_backend.config_loader import load_config
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import (
     DeviceInputItem,
@@ -32,6 +33,29 @@ _OPEN_CURATION_INTERVAL = timedelta(minutes=15)
 _AUDIO_LOOKBACK = timedelta(minutes=35)
 _IMMICH_MARGIN = timedelta(minutes=30)
 _CODEX_TIMEOUT_SECONDS = 600
+_CODEX_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+
+
+def _observation_codex_settings(settings: Any = None) -> dict[str, Any]:
+    if settings is None:
+        section = load_config().get("observation_curation", {})
+        settings = section.get("codex", {})
+    model = str(settings.get("model") or "").strip()
+    if not model:
+        raise ValueError(
+            "observation_curation.codex.model must be explicitly configured"
+        )
+    reasoning = str(settings.get("reasoning_effort") or "").strip().lower()
+    if reasoning and reasoning not in _CODEX_REASONING_EFFORTS:
+        allowed = ", ".join(sorted(_CODEX_REASONING_EFFORTS))
+        raise ValueError(
+            f"observation_curation.codex.reasoning_effort must be one of {allowed}"
+        )
+    timeout = int(settings.get("timeout_seconds", _CODEX_TIMEOUT_SECONDS))
+    if timeout <= 0:
+        raise ValueError("observation_curation.codex.timeout_seconds must be positive")
+    return {"model": model, "reasoning_effort": reasoning, "timeout_seconds": timeout}
+
 
 _DECISION_SCHEMA = {
     "type": "object",
@@ -264,6 +288,7 @@ async def run_codex_observation_agent(
     immich: list[dict[str, Any]],
     duplicate_candidates: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    settings = _observation_codex_settings()
     available, detail = codex_executor_available()
     if not available:
         raise RuntimeError(detail)
@@ -307,6 +332,11 @@ async def run_codex_observation_agent(
             "--output-last-message",
             str(output_path),
         ]
+        command.extend(["-m", settings["model"]])
+        if settings["reasoning_effort"]:
+            command.extend(
+                ["-c", f'model_reasoning_effort="{settings["reasoning_effort"]}"']
+            )
         if item.media_data:
             suffix = Path(item.media_filename or "preview.jpg").suffix or ".jpg"
             image_path = workspace / f"preview{suffix}"
@@ -335,7 +365,8 @@ async def run_codex_observation_agent(
             stderr=asyncio.subprocess.PIPE,
         )
         _, stderr = await asyncio.wait_for(
-            process.communicate(prompt.encode("utf-8")), timeout=_CODEX_TIMEOUT_SECONDS
+            process.communicate(prompt.encode("utf-8")),
+            timeout=settings["timeout_seconds"],
         )
         if process.returncode != 0:
             raise RuntimeError(

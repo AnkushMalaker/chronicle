@@ -10,10 +10,26 @@ from advanced_omi_backend.routers.modules.device_input_routes import (
 )
 from advanced_omi_backend.services.observation_curation import (
     _append_vault_observation,
+    _observation_codex_settings,
     apply_curation_decision,
     observation_revision,
     safe_note_path,
 )
+
+
+def test_observation_codex_requires_explicit_model():
+    with pytest.raises(ValueError, match="model must be explicitly configured"):
+        _observation_codex_settings({})
+
+
+def test_observation_codex_uses_luna_low_profile():
+    assert _observation_codex_settings(
+        {"model": " gpt-5.6-luna ", "reasoning_effort": "LOW", "timeout_seconds": 42}
+    ) == {
+        "model": "gpt-5.6-luna",
+        "reasoning_effort": "low",
+        "timeout_seconds": 42,
+    }
 
 
 def observation(**overrides):
