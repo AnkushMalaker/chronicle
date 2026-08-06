@@ -87,3 +87,18 @@ def test_incomplete_window_coverage_is_rejected():
     result.covered_window_ids = []
     with pytest.raises(ValueError, match="exact evidence window set"):
         validate_agent_result(result, _manifest())
+
+
+def test_empty_accounting_is_rejected_when_evidence_exists():
+    result = TimelineAgentResult(
+        covered_window_ids=["window:one"], episodes=[], unassigned_intervals=[]
+    )
+    with pytest.raises(ValueError, match="accounts for no evidence intervals"):
+        validate_agent_result(result, _manifest())
+
+
+def test_unavailable_representative_image_is_dropped_without_losing_episode():
+    result = _result()
+    result.episodes[0].representative_evidence_id = "observation:one"
+    validate_agent_result(result, _manifest())
+    assert result.episodes[0].representative_evidence_id is None

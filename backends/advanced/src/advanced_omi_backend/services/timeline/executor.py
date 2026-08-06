@@ -13,6 +13,8 @@ def validate_agent_result(
         raise ValueError("agent result does not cover the exact evidence window set")
     if len(result.covered_window_ids) != len(set(result.covered_window_ids)):
         raise ValueError("agent result contains duplicate covered windows")
+    if manifest.evidence and not result.episodes and not result.unassigned_intervals:
+        raise ValueError("agent result accounts for no evidence intervals")
 
     evidence = {item.evidence_id: item for item in manifest.evidence}
     for index, episode in enumerate(result.episodes):
@@ -38,8 +40,14 @@ def validate_agent_result(
                 raise ValueError(f"episode {index} assertion has unbound evidence")
         if episode.representative_evidence_id:
             representative = evidence.get(episode.representative_evidence_id)
-            if representative is None or not representative.image_filename:
-                raise ValueError(f"episode {index} representative image is unavailable")
+            if (
+                episode.representative_evidence_id not in episode.evidence_ids
+                or representative is None
+                or not representative.image_filename
+            ):
+                # A thumbnail is optional decoration. Drop a bad selection without
+                # discarding otherwise valid semantic boundaries and citations.
+                episode.representative_evidence_id = None
         if episode.parent_episode_index is not None:
             if episode.parent_episode_index >= len(result.episodes):
                 raise ValueError(f"episode {index} parent index is out of range")

@@ -147,6 +147,9 @@ Rules:
 - Every important boundary/assertion must cite supplied evidence IDs.
 - Every episode must include at least one supplied evidence ID; otherwise leave the
   interval unassigned instead of creating an ungrounded episode.
+- Never return both `episodes` and `unassigned_intervals` empty when evidence exists.
+- `representative_evidence_id` is optional and, when set, must name image evidence
+  already cited by that episode. Use null when no suitable image is available.
 - Never invent an evidence ID. Include every window ID exactly once in covered_window_ids.
 - Salience is display value, not confidence.
 - Express optional episode metadata as short string key/value entries in `attributes`.
