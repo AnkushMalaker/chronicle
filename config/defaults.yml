@@ -934,7 +934,7 @@ timeline:
   max_text_chars_per_window: 30000
   max_anchor_images_per_window: 4
   executor: codex
-  prompt_version: timeline-episodes-v3
+  prompt_version: timeline-episodes-v4
   codex:
     model: null
     reasoning_effort: medium

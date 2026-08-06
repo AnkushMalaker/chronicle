@@ -128,13 +128,48 @@ def test_episode_without_overlapping_citation_is_rejected():
         validate_agent_result(result, manifest)
 
 
-def test_episode_end_requires_nearby_cited_boundary_support():
+def test_unsupported_episode_end_is_deterministically_bounded_to_cited_evidence():
     manifest = _manifest()
     manifest.evidence[0].ended_at = manifest.started_at + timedelta(minutes=5)
     result = _result()
 
-    with pytest.raises(ValueError, match="ending boundary"):
+    validate_agent_result(result, manifest)
+
+    assert result.episodes[0].ended_at == manifest.evidence[0].ended_at
+
+
+def test_unsupported_episode_start_is_deterministically_bounded_to_cited_evidence():
+    manifest = _manifest()
+    manifest.evidence[0].started_at = manifest.started_at + timedelta(minutes=3)
+    result = _result()
+    result.episodes[0].started_at = manifest.started_at
+
+    validate_agent_result(result, manifest)
+
+    assert result.episodes[0].started_at == manifest.evidence[0].started_at
+
+
+def test_point_only_citation_cannot_be_repaired_into_a_positive_episode():
+    manifest = _manifest()
+    manifest.evidence[0].started_at = manifest.started_at + timedelta(minutes=3)
+    manifest.evidence[0].ended_at = manifest.evidence[0].started_at
+    result = _result()
+    result.episodes[0].started_at = manifest.started_at
+
+    with pytest.raises(ValueError, match="positive cited interval"):
         validate_agent_result(result, manifest)
+
+
+def test_naive_agent_timestamps_are_interpreted_as_utc():
+    manifest = _manifest()
+    result = _result()
+    result.episodes[0].started_at = result.episodes[0].started_at.replace(tzinfo=None)
+    result.episodes[0].ended_at = result.episodes[0].ended_at.replace(tzinfo=None)
+
+    validate_agent_result(result, manifest)
+
+    assert result.episodes[0].started_at.tzinfo == timezone.utc
+    assert result.episodes[0].ended_at.tzinfo == timezone.utc
 
 
 def test_every_evidence_interval_must_be_semantically_accounted_for():

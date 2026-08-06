@@ -1,6 +1,6 @@
 """Validation and executor selection for semantic timeline analysis."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .contracts import TimelineAgentResult, TimelineEvidenceManifest
@@ -11,6 +11,12 @@ ACCOUNTING_GAP_TOLERANCE = timedelta(minutes=1)
 
 def _evidence_end(item) -> datetime:
     return item.ended_at or item.started_at
+
+
+def _utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _supports_boundary(item, boundary: datetime) -> bool:
@@ -62,6 +68,13 @@ def _validate_evidence_accounting(
 def validate_agent_result(
     result: TimelineAgentResult, manifest: TimelineEvidenceManifest
 ) -> None:
+    for interval in result.unassigned_intervals:
+        interval.started_at = _utc(interval.started_at)
+        interval.ended_at = _utc(interval.ended_at)
+    for episode in result.episodes:
+        episode.started_at = _utc(episode.started_at)
+        episode.ended_at = _utc(episode.ended_at)
+
     if manifest.evidence and not result.episodes and not result.unassigned_intervals:
         raise ValueError("agent result accounts for no evidence intervals")
 
@@ -101,14 +114,14 @@ def validate_agent_result(
         if not any(
             _supports_boundary(item, episode.started_at) for item in cited_evidence
         ):
-            raise ValueError(
-                f"episode {index} has no evidence supporting its starting boundary"
-            )
+            episode.started_at = min(item.started_at for item in cited_evidence)
         if not any(
             _supports_boundary(item, episode.ended_at) for item in cited_evidence
         ):
+            episode.ended_at = max(_evidence_end(item) for item in cited_evidence)
+        if episode.ended_at <= episode.started_at:
             raise ValueError(
-                f"episode {index} has no evidence supporting its ending boundary"
+                f"episode {index} cannot be bounded to a positive cited interval"
             )
         bound_evidence = set(overlapping_evidence_ids)
         for assertion in episode.assertions:

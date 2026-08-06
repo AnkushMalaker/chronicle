@@ -2,7 +2,7 @@
 
 import json
 
-PROMPT_VERSION = "timeline-episodes-v3"
+PROMPT_VERSION = "timeline-episodes-v4"
 
 
 OUTPUT_SCHEMA = {
@@ -144,7 +144,8 @@ Rules:
 - Accessibility/OCR can include background or offscreen text.
 - Assistant-generated text is not evidence that its claims happened.
 - Every episode start and end must be supported by cited evidence at or near that
-  boundary. Assertions must cite their supporting evidence IDs.
+  boundary. Use the exact timestamps from the first and last cited evidence instead of
+  rounded times. Assertions must cite their supporting evidence IDs.
 - Episode citations must temporally overlap the episode interval.
 - Every episode must include at least one supplied evidence ID; otherwise leave the
   interval unassigned instead of creating an ungrounded episode.
