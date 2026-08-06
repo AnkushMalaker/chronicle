@@ -3,6 +3,11 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from omegaconf import OmegaConf
+
+from advanced_omi_backend.config_loader import load_config
+
+from .codex_executor import CodexTimelineExecutor
 from .contracts import TimelineAgentResult, TimelineEvidenceManifest, UnassignedInterval
 
 BOUNDARY_SUPPORT_TOLERANCE = timedelta(minutes=2)
@@ -129,26 +134,20 @@ def _fill_unassigned_evidence(
 def validate_agent_result(
     result: TimelineAgentResult, manifest: TimelineEvidenceManifest
 ) -> None:
+    bounded_unassigned: list[UnassignedInterval] = []
     for interval in result.unassigned_intervals:
-        interval.started_at = _utc(interval.started_at)
-        interval.ended_at = _utc(interval.ended_at)
+        interval.started_at = max(_utc(interval.started_at), manifest.started_at)
+        interval.ended_at = min(_utc(interval.ended_at), manifest.ended_at)
+        if interval.ended_at > interval.started_at:
+            bounded_unassigned.append(interval)
+    result.unassigned_intervals = bounded_unassigned
     for episode in result.episodes:
         episode.started_at = _utc(episode.started_at)
         episode.ended_at = _utc(episode.ended_at)
 
-    if manifest.evidence and not result.episodes and not result.unassigned_intervals:
-        raise ValueError("agent result accounts for no evidence intervals")
-
     for index, interval in enumerate(result.unassigned_intervals):
         if interval.ended_at <= interval.started_at:
             raise ValueError(f"unassigned interval {index} must have positive duration")
-        if (
-            interval.started_at < manifest.started_at
-            or interval.ended_at > manifest.ended_at
-        ):
-            raise ValueError(
-                f"unassigned interval {index} lies outside the analyzed range"
-            )
 
     evidence = {item.evidence_id: item for item in manifest.evidence}
     for index, episode in enumerate(result.episodes):
@@ -215,10 +214,6 @@ def validate_agent_result(
 
 
 def settings_dict() -> dict[str, Any]:
-    from omegaconf import OmegaConf
-
-    from advanced_omi_backend.config_loader import load_config
-
     value = load_config().get("timeline", {})
     converted = OmegaConf.to_container(value, resolve=True)
     return converted if isinstance(converted, dict) else {}
@@ -229,6 +224,5 @@ def build_executor():
     executor = str(settings.get("executor") or "codex")
     if executor != "codex":
         raise ValueError(f"unsupported timeline executor: {executor}")
-    from .codex_executor import CodexTimelineExecutor
 
     return CodexTimelineExecutor(settings.get("codex") or {})

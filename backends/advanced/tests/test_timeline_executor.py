@@ -82,10 +82,15 @@ def test_invented_evidence_is_rejected():
         validate_agent_result(_result("observation:invented"), _manifest())
 
 
-def test_empty_accounting_is_rejected_when_evidence_exists():
+def test_empty_accounting_is_materialized_as_unassigned_evidence():
     result = TimelineAgentResult(episodes=[], unassigned_intervals=[])
-    with pytest.raises(ValueError, match="accounts for no evidence intervals"):
-        validate_agent_result(result, _manifest())
+    manifest = _manifest()
+
+    validate_agent_result(result, manifest)
+
+    assert len(result.unassigned_intervals) == 1
+    assert result.unassigned_intervals[0].started_at == manifest.evidence[0].started_at
+    assert result.unassigned_intervals[0].ended_at == manifest.evidence[0].ended_at
 
 
 def test_unavailable_representative_image_is_dropped_without_losing_episode():
@@ -195,7 +200,7 @@ def test_unexplained_evidence_is_materialized_as_an_unassigned_interval():
     )
 
 
-def test_unassigned_intervals_must_be_positive_and_inside_manifest():
+def test_unassigned_intervals_outside_manifest_are_discarded():
     manifest = _manifest()
     result = _result()
     result.unassigned_intervals.append(
@@ -206,5 +211,6 @@ def test_unassigned_intervals_must_be_positive_and_inside_manifest():
         )
     )
 
-    with pytest.raises(ValueError, match="unassigned interval 0 lies outside"):
-        validate_agent_result(result, manifest)
+    validate_agent_result(result, manifest)
+
+    assert result.unassigned_intervals == []
