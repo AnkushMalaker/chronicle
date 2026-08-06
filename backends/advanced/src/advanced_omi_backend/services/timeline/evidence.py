@@ -111,6 +111,9 @@ def _device_item(row: DeviceInputItem) -> TimelineEvidenceItem:
         metadata={
             **metadata,
             "source_kind": row.kind,
+            "observation_scope": (
+                "coarse_application_session" if row.kind == "observation" else None
+            ),
             "sample_count": len(row.samples),
             "sample_fingerprints": [
                 sample.get("content_fingerprint") for sample in row.samples[-12:]
@@ -145,15 +148,25 @@ def _device_items(row: DeviceInputItem) -> list[TimelineEvidenceItem]:
     """
 
     base = _device_item(row)
-    if (
-        row.kind not in {"activity", "observation"}
-        or base.kind == "meeting"
-        or row.ended_at is None
-    ):
+    if row.kind not in {"activity", "observation"} or base.kind == "meeting":
         return [base]
 
     start = utc(row.captured_at)
-    end = utc(row.ended_at)
+    provisional = row.ended_at is None
+    if provisional:
+        supported_markers = [
+            marker
+            for source in (*row.samples, *row.frame_candidates)
+            if (marker := _timestamp(source.get("captured_at"))) is not None
+            and marker >= start
+        ]
+        end = max(supported_markers, default=start)
+        if end > start:
+            base.ended_at = end
+            base.metadata["provisional_end"] = True
+            base.metadata["provisional_end_source"] = "latest_screen_marker"
+    else:
+        end = utc(row.ended_at)
     if end <= start:
         return [base]
 

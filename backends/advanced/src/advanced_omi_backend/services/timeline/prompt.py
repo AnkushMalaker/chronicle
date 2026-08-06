@@ -2,7 +2,7 @@
 
 import json
 
-PROMPT_VERSION = "timeline-episodes-v5"
+PROMPT_VERSION = "timeline-episodes-v6"
 
 
 OUTPUT_SCHEMA = {
@@ -136,6 +136,12 @@ You may keep compact working notes under work/. Write only the final JSON to
 
 Rules:
 - Windows are coverage units, never mandatory episode boundaries. Merge across them.
+- A screen observation is a coarse application session, not a claim that exactly one
+  semantic event occurred. Keep it whole when finer boundaries are unsupported; never
+  manufacture periodic sub-events from its sparse samples.
+- Do not merge distinct foreground applications, games, or participant contexts merely
+  because they are adjacent. Use separate episodes, or a parent session with supported
+  child events, when the evidence distinguishes them.
 - Episodes may overlap; long passive media and simultaneous foreground work can coexist.
 - Use quiet, idle, ambient, or unknown episodes when evidence genuinely supports them.
 - `output` audio/transcripts are media or system content, never the user's statements.

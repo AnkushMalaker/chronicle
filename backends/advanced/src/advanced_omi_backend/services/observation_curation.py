@@ -131,7 +131,12 @@ def safe_note_path(root: Path, requested: str | None, captured_at: datetime) -> 
 
 async def _related_context(
     item: DeviceInputItem,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[str],
+]:
     start = _as_utc(item.captured_at)
     end = _as_utc(item.ended_at or utcnow())
     conversations = await Conversation.find(
@@ -162,8 +167,6 @@ async def _related_context(
             }
         )
         related_ids.append(conversation.conversation_id)
-    item.related_conversation_ids = sorted(set(related_ids))
-
     immich = await DeviceInputItem.find(
         DeviceInputItem.user_id == item.user_id,
         DeviceInputItem.kind == "immich_memory",
@@ -202,7 +205,56 @@ async def _related_context(
         }
         for candidate in duplicate_rows
     ]
-    return audio, immich_context, duplicates
+    return audio, immich_context, duplicates, sorted(set(related_ids))
+
+
+def _curation_revision_query(item: DeviceInputItem) -> dict[str, Any]:
+    """Match only the observation state evaluated by the curation agent.
+
+    Samples, lifecycle, and related conversations form ``observation_revision``. The
+    conditional write keeps a decision from becoming final if any of those inputs
+    changed while the agent was running. Other ingestion-owned fields are deliberately
+    absent from the update document and can never be replaced by a stale Beanie model.
+    """
+
+    return {
+        "_id": item.id,
+        "curation": "curating",
+        "lifecycle": item.lifecycle,
+        "samples": item.samples,
+        "related_conversation_ids": item.related_conversation_ids,
+    }
+
+
+async def _apply_curation_fields(
+    item: DeviceInputItem,
+    fields: dict[str, Any],
+    *,
+    unset: tuple[str, ...] = (),
+) -> bool:
+    update: dict[str, Any] = {"$set": fields}
+    if unset:
+        update["$unset"] = {field: "" for field in unset}
+    collection = DeviceInputItem.get_pymongo_collection()
+    result = await collection.update_one(_curation_revision_query(item), update)
+    if result.matched_count:
+        return True
+    # Ingestion sets curation back to pending when it appends a sample or closes an
+    # observation. Only restore a claim that is still ours; never overwrite that newer
+    # pending state or another completed decision.
+    await collection.update_one(
+        {"_id": item.id, "curation": "curating"},
+        {"$set": {"curation": "pending"}},
+    )
+    return False
+
+
+async def _claim_curation(item: DeviceInputItem) -> bool:
+    result = await DeviceInputItem.get_pymongo_collection().update_one(
+        {"_id": item.id, "curation": "pending"},
+        {"$set": {"curation": "curating"}},
+    )
+    return bool(result.matched_count)
 
 
 async def run_codex_observation_agent(
@@ -312,7 +364,6 @@ async def _queue_alternative(item: DeviceInputItem, frame_id: int) -> bool:
             "preview_index": 2,
         },
     ).insert()
-    item.metadata = {**item.metadata, "alternative_preview_requested": True}
     return True
 
 
@@ -476,16 +527,24 @@ def _append_vault_observation(
 async def apply_curation_decision(
     item: DeviceInputItem, decision: dict[str, Any], revision: str
 ) -> bool:
-    item.agent_reason = str(decision.get("reason") or "")
+    agent_reason = str(decision.get("reason") or "")
     action = decision["decision"]
     if action == "alternative_preview":
         frame_id = decision.get("alternative_frame_id")
         if isinstance(frame_id, int) and await _queue_alternative(item, frame_id):
-            item.curation = "pending"
-            await item.save()
+            await _apply_curation_fields(
+                item,
+                {
+                    "agent_reason": agent_reason,
+                    "curation": "pending",
+                    "metadata.alternative_preview_requested": True,
+                },
+            )
             return False
         action = "discard"
 
+    updates: dict[str, Any] = {"agent_reason": agent_reason}
+    unset: tuple[str, ...] = ()
     if action == "duplicate":
         target_id = decision.get("duplicate_observation_id")
         try:
@@ -499,20 +558,24 @@ async def apply_curation_decision(
             or str(target.id) == str(item.id)
         ):
             raise ValueError("agent selected an invalid duplicate observation")
-        item.duplicate_of = str(target.id)
-        item.curation = "duplicate"
+        updates["duplicate_of"] = str(target.id)
+        updates["curation"] = "duplicate"
         if item.lifecycle == "closed":
-            item.media_data = None
-            item.media_filename = None
-            item.media_content_type = None
-            item.content_hash = None
+            unset = (
+                "media_data",
+                "media_filename",
+                "media_content_type",
+                "content_hash",
+            )
     elif action == "discard":
-        item.curation = "discarded"
+        updates["curation"] = "discarded"
         if item.lifecycle == "closed":
-            item.media_data = None
-            item.media_filename = None
-            item.media_content_type = None
-            item.content_hash = None
+            unset = (
+                "media_data",
+                "media_filename",
+                "media_content_type",
+                "content_hash",
+            )
     else:
         retain_image = bool(decision.get("retain_image")) or action == "promote_image"
         immich_item_id = decision.get("immich_item_id") if retain_image else None
@@ -522,9 +585,14 @@ async def apply_curation_decision(
             and not item.metadata.get("source_media_available")
         ):
             await _queue_source_media(item)
-            item.metadata = {**item.metadata, "promotion_pending": True}
-            item.curation = "pending"
-            await item.save()
+            await _apply_curation_fields(
+                item,
+                {
+                    "agent_reason": agent_reason,
+                    "curation": "pending",
+                    "metadata.promotion_pending": True,
+                },
+            )
             return False
         root = ConvDocVaultManager().user_root(item.user_id)
         root.mkdir(parents=True, exist_ok=True)
@@ -562,8 +630,8 @@ async def apply_curation_decision(
             promoted, digest = promote_image_bytes(
                 item.media_data, item.media_content_type, root
             )
-            item.content_hash = digest
-            item.promoted_path = promoted
+            updates["content_hash"] = digest
+            updates["promoted_path"] = promoted
             provenance_path = _write_media_provenance(
                 root,
                 digest,
@@ -573,7 +641,7 @@ async def apply_curation_decision(
                 source_media_id=str(item.metadata.get("preview_frame_id") or ""),
             )
         path = _append_vault_observation(item, decision, revision, root, promoted)
-        item.vault_paths = sorted(
+        updates["vault_paths"] = sorted(
             set(
                 [
                     *item.vault_paths,
@@ -582,13 +650,12 @@ async def apply_curation_decision(
                 ]
             )
         )
-        item.curation = "promoted" if promoted else "linked"
+        updates["curation"] = "promoted" if promoted else "linked"
         if promoted:
-            item.state = "promoted"
-    item.curation_revision = revision
-    item.curated_at = utcnow()
-    await item.save()
-    return True
+            updates["state"] = "promoted"
+    updates["curation_revision"] = revision
+    updates["curated_at"] = utcnow()
+    return await _apply_curation_fields(item, updates, unset=unset)
 
 
 async def process_observation_curation() -> dict[str, Any]:
@@ -601,8 +668,8 @@ async def process_observation_curation() -> dict[str, Any]:
     failed = 0
     now = utcnow()
     for item in pending:
-        revision = observation_revision(item)
-        if item.curation_revision == revision:
+        initial_revision = observation_revision(item)
+        if item.curation_revision == initial_revision:
             continue
         if (
             item.lifecycle == "open"
@@ -617,10 +684,23 @@ async def process_observation_curation() -> dict[str, Any]:
             await _ensure_preview_retry(item)
             waiting += 1
             continue
-        item.curation = "curating"
-        await item.save()
+        if not await _claim_curation(item):
+            continue
         try:
-            audio, immich, duplicate_candidates = await _related_context(item)
+            audio, immich, duplicate_candidates, related_ids = await _related_context(
+                item
+            )
+            if related_ids:
+                await DeviceInputItem.get_pymongo_collection().update_one(
+                    {"_id": item.id, "curation": "curating"},
+                    {"$addToSet": {"related_conversation_ids": {"$each": related_ids}}},
+                )
+            current = await DeviceInputItem.get(item.id)
+            if current is None or current.curation != "curating":
+                waiting += 1
+                continue
+            item = current
+            revision = observation_revision(item)
             root = ConvDocVaultManager().user_root(item.user_id)
             decision = await run_codex_observation_agent(
                 item, root, audio, immich, duplicate_candidates
@@ -630,15 +710,20 @@ async def process_observation_curation() -> dict[str, Any]:
         except Exception as exc:
             available, _ = codex_executor_available()
             if not available:
-                item.curation = "pending"
+                next_curation = "pending"
                 waiting += 1
                 logger.info("observation %s awaits Codex: %s", item.id, exc)
             else:
-                item.curation = "failed"
-                item.agent_reason = str(exc)[:2000]
+                next_curation = "failed"
                 failed += 1
                 logger.exception("observation %s curation failed", item.id)
-            await item.save()
+            await _apply_curation_fields(
+                item,
+                {
+                    "curation": next_curation,
+                    "agent_reason": str(exc)[:2000],
+                },
+            )
     return {
         "pending": len(pending),
         "processed": processed,

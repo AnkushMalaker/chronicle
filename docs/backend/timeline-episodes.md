@@ -4,6 +4,13 @@ Chronicle's Timeline is a revisioned semantic view of capture evidence. It does 
 ScreenPipe transport chunks, backend audio batches, or observation lifecycles as
 user-visible boundaries.
 
+A ScreenPipe observation is deliberately a coarse, continuous application session. A
+two-hour game window can remain one observation while the semantic timeline represents
+it as one gaming session or several independently supported events. Sparse samples do
+not justify invented sub-boundaries. Chronicle retains the observation's source, time
+range, and local frame identifiers so a future bounded context request can obtain more
+resolution from ScreenPipe without mirroring its frame database.
+
 ## Audio storage and cadence
 
 ScreenPipe's approximately 30-second audio files are transport and retry units. The

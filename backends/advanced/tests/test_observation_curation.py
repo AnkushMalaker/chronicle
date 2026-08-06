@@ -10,6 +10,7 @@ from advanced_omi_backend.routers.modules.device_input_routes import (
 )
 from advanced_omi_backend.services.observation_curation import (
     _append_vault_observation,
+    apply_curation_decision,
     observation_revision,
     safe_note_path,
 )
@@ -93,3 +94,102 @@ def test_vault_append_is_revision_idempotent(tmp_path):
     content = (tmp_path / path).read_text(encoding="utf-8")
     assert content.count("<!-- observation:") == 1
     assert "[[Conversations/conversation-1]]" in content
+
+
+class _UpdateResult:
+    def __init__(self, matched_count: int):
+        self.matched_count = matched_count
+
+
+class _ObservationCollection:
+    def __init__(self, document):
+        self.document = document
+
+    async def update_one(self, query, update):
+        if any(self.document.get(key) != value for key, value in query.items()):
+            return _UpdateResult(0)
+        for key, value in update.get("$set", {}).items():
+            target = self.document
+            parts = key.split(".")
+            for part in parts[:-1]:
+                target = target.setdefault(part, {})
+            target[parts[-1]] = value
+        for key in update.get("$unset", {}):
+            self.document.pop(key, None)
+        return _UpdateResult(1)
+
+
+@pytest.mark.asyncio
+async def test_stale_curation_cannot_overwrite_newer_observation_lifecycle(monkeypatch):
+    stale = observation(
+        metadata={"app_name": "steam_app_1466860", "frame_count": 261},
+        samples=[sample("2026-07-23T10:05:00Z").model_dump(mode="json")],
+        curation="curating",
+    )
+    live = stale.model_dump(by_alias=True)
+    live.update(
+        {
+            "lifecycle": "closed",
+            "ended_at": datetime(2026, 7, 23, 10, 40, tzinfo=timezone.utc),
+            "curation": "pending",
+            "samples": [
+                *live["samples"],
+                sample("2026-07-23T10:40:00Z", "b" * 64).model_dump(mode="json"),
+            ],
+        }
+    )
+    live["metadata"] = {**live["metadata"], "frame_count": 632}
+    collection = _ObservationCollection(live)
+    monkeypatch.setattr(DeviceInputItem, "get_pymongo_collection", lambda: collection)
+
+    async def replace_document(item):
+        collection.document = item.model_dump(by_alias=True)
+        return item
+
+    monkeypatch.setattr(DeviceInputItem, "save", replace_document)
+
+    applied = await apply_curation_decision(
+        stale,
+        {"decision": "discard", "reason": "Routine gameplay"},
+        observation_revision(stale),
+    )
+
+    assert applied is False
+    assert collection.document["lifecycle"] == "closed"
+    assert collection.document["ended_at"] == datetime(
+        2026, 7, 23, 10, 40, tzinfo=timezone.utc
+    )
+    assert collection.document["metadata"]["frame_count"] == 632
+    assert len(collection.document["samples"]) == 2
+    assert collection.document["curation"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_current_curation_updates_only_curation_owned_fields(monkeypatch):
+    item = observation(
+        metadata={"app_name": "steam_app_1466860", "frame_count": 261},
+        samples=[sample("2026-07-23T10:05:00Z").model_dump(mode="json")],
+        curation="curating",
+    )
+    live = item.model_dump(by_alias=True)
+    # Frame counters and candidate metadata are ingestion-owned and intentionally do
+    # not change the semantic curation revision.
+    live["metadata"] = {**live["metadata"], "frame_count": 632}
+    collection = _ObservationCollection(live)
+    monkeypatch.setattr(DeviceInputItem, "get_pymongo_collection", lambda: collection)
+
+    async def replace_document(document):
+        collection.document = document.model_dump(by_alias=True)
+        return document
+
+    monkeypatch.setattr(DeviceInputItem, "save", replace_document)
+
+    applied = await apply_curation_decision(
+        item,
+        {"decision": "discard", "reason": "Routine gameplay"},
+        observation_revision(item),
+    )
+
+    assert applied is True
+    assert collection.document["metadata"]["frame_count"] == 632
+    assert collection.document["curation"] == "discarded"

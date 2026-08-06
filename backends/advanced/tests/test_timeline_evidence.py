@@ -126,6 +126,20 @@ def test_same_window_on_different_browser_pages_is_not_compacted():
     assert len(_coalesce_application_evidence(rows)) == 2
 
 
+def test_adjacent_distinct_games_remain_separate_evidence():
+    start = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    aoe = _app_item("aoe", "rainbow", start)
+    aoe.metadata.update(
+        {"app_name": "steam_app_1466860", "window_name": "Age of Empires IV"}
+    )
+    rematch = _app_item("rematch", "rainbow", start + timedelta(seconds=10))
+    rematch.metadata.update({"app_name": "steam_app_2138720", "window_name": "REMATCH"})
+
+    compacted = _coalesce_application_evidence([aoe, rematch])
+
+    assert [item.evidence_id for item in compacted] == ["aoe", "rematch"]
+
+
 def test_stale_observation_is_split_at_unsupported_liveness_gap():
     start = datetime(2026, 8, 5, 10, tzinfo=timezone.utc)
     end = start + timedelta(days=1)
@@ -168,6 +182,40 @@ def test_stale_observation_is_split_at_unsupported_liveness_gap():
     assert "second" in (items[1].excerpt or "")
     assert "first" not in (items[1].excerpt or "")
     assert [item.image_filename is not None for item in items] == [False, True]
+
+
+def test_open_observation_uses_latest_marker_as_provisional_end():
+    start = datetime(2026, 8, 6, 19, tzinfo=timezone.utc)
+    latest = start + timedelta(minutes=18)
+    row = SimpleNamespace(
+        id="open-game",
+        user_id="user",
+        source_id="rainbow",
+        kind="observation",
+        source_item_id="observation:open-game",
+        captured_at=start,
+        ended_at=None,
+        metadata={"app_name": "steam_app_1466860", "window_name": "Age of Empires IV"},
+        samples=[
+            {"captured_at": start.isoformat(), "text": "match loading"},
+            {"captured_at": latest.isoformat(), "text": "victory"},
+        ],
+        frame_candidates=[],
+        content_hash=None,
+        curation_revision=None,
+        media_data=None,
+        curation="pending",
+        media_content_type=None,
+        lifecycle="open",
+    )
+
+    items = _device_items(row)
+
+    assert len(items) == 1
+    assert items[0].started_at == start
+    assert items[0].ended_at == latest
+    assert items[0].metadata["provisional_end"] is True
+    assert items[0].metadata["observation_scope"] == "coarse_application_session"
 
 
 def test_audio_from_multiple_sources_remains_separate():
