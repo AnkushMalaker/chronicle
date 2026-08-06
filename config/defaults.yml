@@ -910,6 +910,10 @@ timeline:
   codex:
     model: null
     reasoning_effort: medium
+    # Reuse the memory agent's container-aware sandbox choice. Rootless Podman
+    # deployments set that to danger-full-access because the container itself is
+    # the isolation boundary and nested bubblewrap cannot start there.
+    sandbox_mode: ${memory.codex.sandbox_mode}
     timeout_seconds: 1800
     max_used_percent: 80
     retry_hours: 6

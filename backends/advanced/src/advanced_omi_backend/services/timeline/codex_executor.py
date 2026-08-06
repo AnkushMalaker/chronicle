@@ -48,6 +48,7 @@ class CodexTimelineExecutor:
         available, detail = codex_executor_available()
         if not available:
             raise RuntimeError(detail)
+        sandbox_mode = str(self.settings.get("sandbox_mode") or "workspace-write")
         schema_path = workspace / "output-schema.json"
         output_path = workspace / "timeline-result.json"
         schema_path.write_text(json.dumps(OUTPUT_SCHEMA), encoding="utf-8")
@@ -65,7 +66,7 @@ class CodexTimelineExecutor:
             "--color",
             "never",
             "--sandbox",
-            "workspace-write",
+            sandbox_mode,
             "--cd",
             str(workspace),
             "--output-schema",
