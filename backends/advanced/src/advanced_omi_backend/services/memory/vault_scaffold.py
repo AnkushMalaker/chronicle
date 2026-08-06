@@ -36,12 +36,101 @@ category the first time the agent needs one.
 
 import logging
 import re
-from pathlib import Path
+import unicodedata
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Dict, List
 
 from .vault_templates import SPINE_TEMPLATES
 
 logger = logging.getLogger("memory_service.vault.scaffold")
+
+
+class VaultPathError(ValueError):
+    """A vault path would escape its root or traverse a symbolic link."""
+
+
+def safe_vault_relative_path(path: str | Path) -> str:
+    """Return a portable vault-relative path or reject unsafe path syntax.
+
+    This is intentionally less restrictive than the memory agent's note-path
+    contract: scaffold files legitimately live three levels deep under
+    ``Templates/Bases``. It only establishes the common security boundary: no
+    absolute/drive-qualified paths, traversal, empty components, backslashes, or
+    control characters. Unicode and ordinary spaces remain valid.
+    """
+    if not isinstance(path, (str, Path)):
+        raise VaultPathError("Vault paths must be strings or Path objects.")
+    raw = str(path)
+    if not raw:
+        raise VaultPathError("Vault paths must not be empty.")
+    if "\\" in raw:
+        raise VaultPathError("Vault paths must use '/' separators.")
+    if any(ord(character) < 32 or ord(character) == 127 for character in raw):
+        raise VaultPathError("Vault paths must not contain control characters.")
+
+    posix = PurePosixPath(raw)
+    windows = PureWindowsPath(raw)
+    raw_parts = raw.split("/")
+    if (
+        posix.is_absolute()
+        or windows.is_absolute()
+        or bool(windows.drive)
+        or any(part in ("", ".", "..") for part in raw_parts)
+    ):
+        raise VaultPathError(f"Unsafe vault-relative path: {raw!r}.")
+    return posix.as_posix()
+
+
+def confined_vault_path(vault_root: Path, relative_path: str | Path) -> Path:
+    """Resolve a lexical child path without allowing symlink traversal.
+
+    The returned path remains lexical (rather than the resolved target) so callers
+    preserve the user's filename casing. Every existing component, including a
+    broken leaf link, is checked before the final resolved-boundary assertion.
+    """
+    root = Path(vault_root).absolute()
+    if root.is_symlink():
+        raise VaultPathError(f"Vault root must not be a symbolic link: {root}.")
+    if not root.is_dir():
+        raise VaultPathError(f"Vault root is not a directory: {root}.")
+
+    rel = Path(safe_vault_relative_path(relative_path))
+    resolved_root = root.resolve(strict=True)
+    current = root
+    for part in rel.parts:
+        current = current / part
+        if current.is_symlink():
+            raise VaultPathError(
+                f"Vault path must not traverse a symbolic link: {rel.as_posix()!r}."
+            )
+
+    resolved_target = (root / rel).resolve(strict=False)
+    if not resolved_target.is_relative_to(resolved_root):
+        raise VaultPathError(f"Vault path escapes its root: {rel.as_posix()!r}.")
+    return root / rel
+
+
+def validate_category_name(category: str) -> str:
+    """Normalize a safe category title for paths, YAML strings, and wikilinks."""
+    if not isinstance(category, str):
+        raise VaultPathError("Category names must be strings.")
+    cleaned = unicodedata.normalize("NFC", category.strip())
+    if not cleaned:
+        raise VaultPathError("Category names must not be empty.")
+    safe = safe_vault_relative_path(cleaned)
+    if len(PurePosixPath(safe).parts) != 1:
+        raise VaultPathError(
+            "Category names must be one plain title without path separators."
+        )
+    if not any(character.isalnum() for character in safe) or any(
+        not (character.isalnum() or character in " _-") for character in safe
+    ):
+        raise VaultPathError(
+            "Category names may contain only Unicode letters/numbers, spaces, "
+            "hyphens, and underscores."
+        )
+    return safe
+
 
 # Folder (relative to the vault root) that holds templates and bases. Notes under it are
 # scaffolding, never captured content — enumeration skips the whole subtree.
@@ -200,7 +289,10 @@ def build_category_files(category: str, properties: List[str]) -> Dict[str, str]
     a root ``<Category>.md`` hub — mirroring the spine layout so the new category behaves
     exactly like People/Conversations/Topics.
     """
-    valid_props = [p for p in properties if _PROP_LINE.match(p)]
+    category = validate_category_name(category)
+    valid_props = [
+        prop for prop in properties if isinstance(prop, str) and _PROP_LINE.match(prop)
+    ]
     prop_block = "".join(f"{p}:\n" for p in valid_props)
     template = (
         "---\n"
@@ -224,16 +316,28 @@ def write_category(vault_root: Path, category: str, properties: List[str]) -> Li
 
 
 def _write_files(root: Path, files: Dict[str, str]) -> List[str]:
+    root = Path(root).absolute()
     root.mkdir(parents=True, exist_ok=True)
+    # Preflight the complete set before writing any file. Organic category creation
+    # must be all-or-nothing with respect to path safety; otherwise a malicious name
+    # could create one file outside the vault before a later path is rejected.
+    targets = [
+        (safe_vault_relative_path(rel), confined_vault_path(root, rel), content)
+        for rel, content in files.items()
+    ]
     created: List[str] = []
-    for rel, content in files.items():
-        fp = root / rel
+    for rel, fp, content in targets:
         if fp.exists():
             continue
         try:
             fp.parent.mkdir(parents=True, exist_ok=True)
+            # Re-check after mkdir so an existing/broken link in a newly reached
+            # component is never followed by write_text().
+            fp = confined_vault_path(root, rel)
             fp.write_text(content, encoding="utf-8")
             created.append(rel)
+        except VaultPathError:
+            raise
         except Exception as e:  # noqa: BLE001 - scaffold is best-effort, never fatal
             logger.warning("Failed to seed scaffold file %s: %s", fp, e)
     if created:

@@ -45,6 +45,13 @@ from ruamel.yaml import YAML
 SERVICE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SERVICE_DIR.parent.parent
 
+# Match the Pi executor's conservative fallbacks without baking one machine's
+# served context into every model selected by the wizard.
+DEFAULT_PI_CONTEXT_WINDOW = 32768
+DEFAULT_PI_MAX_TOKENS = 4096
+PI_PROMPT_HEADROOM_TOKENS = 1024
+MANAGED_LLAMACPP_REGISTRY_MODELS = {"llamacpp-llm", "qwen36-llm"}
+
 
 class ChronicleSetup:
     def __init__(self, args=None):
@@ -775,7 +782,7 @@ class ChronicleSetup:
                 existing_choice = "2"
             elif existing_llm == "openai-llm":
                 existing_choice = "1"
-            elif existing_llm == "llamacpp-llm":
+            elif existing_llm in MANAGED_LLAMACPP_REGISTRY_MODELS:
                 existing_choice = "5"
 
             self.print_section("LLM Provider Configuration")
@@ -972,17 +979,26 @@ class ChronicleSetup:
             self.console.print(
                 "[blue][INFO][/blue] llama.cpp selected (Chronicle-managed)"
             )
-            # Update config.yml to use llama.cpp models
-            self.config_manager.update_config_defaults(
-                {"llm": "llamacpp-llm", "embedding": "llamacpp-embed"}
+            # Preserve the concrete Qwen registry identity on reruns. Other local
+            # llama.cpp choices use the generic entry, whose exact served identity is
+            # synchronized later by extras/llm-services/init.py.
+            current_llm = str(
+                self.config_manager.get_config_defaults().get("llm") or ""
             )
-            # Re-sync the llamacpp-llm/-embed entries from defaults.yml. config.yml
-            # model entries override defaults *by name*, so a stale copy (e.g. one
-            # predating the LLM_BASE_URL templating) would shadow the default and
-            # silently ignore the endpoint chosen below. Re-syncing guarantees
-            # model_url follows LLM_BASE_URL (and restores the discovery_* keys).
+            registry_llm = (
+                current_llm
+                if current_llm in MANAGED_LLAMACPP_REGISTRY_MODELS
+                else "llamacpp-llm"
+            )
+            self.config_manager.update_config_defaults(
+                {"llm": registry_llm, "embedding": "llamacpp-embed"}
+            )
+            # Re-sync the selected LLM and embedding entries from defaults.yml.
+            # config.yml model entries override defaults *by name*, so a stale copy
+            # would otherwise shadow endpoint/discovery fixes. The local-service
+            # wizard subsequently reapplies its exact upstream identity and context.
             synced = self.config_manager.sync_models_from_defaults(
-                ["llamacpp-llm", "llamacpp-embed"]
+                [registry_llm, "llamacpp-embed"]
             )
             if synced:
                 self.console.print(
@@ -1004,7 +1020,7 @@ class ChronicleSetup:
                 self.console.print(
                     f"[green]✅[/green] LLM_BASE_URL = {self.args.llm_base_url}"
                 )
-            self.console.print("[blue][INFO][/blue] Set defaults.llm: llamacpp-llm")
+            self.console.print(f"[blue][INFO][/blue] Set defaults.llm: {registry_llm}")
             self.console.print(
                 "[blue][INFO][/blue] Set defaults.embedding: llamacpp-embed"
             )
@@ -1256,83 +1272,263 @@ class ChronicleSetup:
 
         Chronicle's agentic Markdown vault is currently the only memory provider,
         so there is no provider choice to make — we just ensure config.yml/.env
-        record it, then choose how the memory agent executes.
+        record it, then choose the write and search agent backends.
         """
         self.config_manager.update_memory_config({"provider": "chronicle"})
         self.console.print(
             "[green][SUCCESS][/green] Memory: Chronicle agentic vault (config.yml + .env)"
         )
-        self.setup_memory_executor()
+        self.setup_memory_agents()
 
-    def setup_memory_executor(self):
-        """Choose how the memory agent runs: the built-in LLM tool loop (metered
-        API calls) or the OpenAI Codex CLI on a ChatGPT subscription."""
-        self.print_section("Memory agent executor")
+    def setup_memory_agents(self):
+        """Choose independent backends for vault writes and searches."""
+        self.print_section("Memory agent backends")
         self.console.print(
-            "[blue][INFO][/blue] The memory agent records each conversation into "
-            "your vault. It can run through the configured LLM (per-call API usage) "
-            "or through the OpenAI Codex CLI, which bills against a ChatGPT "
-            "subscription instead of API keys."
+            "[blue][INFO][/blue] Chronicle can use different agent backends to "
+            "write conversations into the vault and to search it. Direct uses the "
+            "configured LLM API, Codex uses a ChatGPT subscription for writes, and "
+            "Pi can run either job through any configured model, including a local "
+            "OpenAI-compatible model."
         )
         self.console.print()
 
-        existing = (
-            self.config_manager.get_memory_config().get("agent_executor") or "direct"
+        memory_config = self.config_manager.get_memory_config()
+        existing_agents = memory_config.get("agents") or {}
+        if not isinstance(existing_agents, dict):
+            existing_agents = {}
+        existing_write = existing_agents.get("write") or {}
+        existing_search = existing_agents.get("search") or {}
+        if not isinstance(existing_write, dict):
+            existing_write = {}
+        if not isinstance(existing_search, dict):
+            existing_search = {}
+        recovery_backend = (
+            existing_write["recovery_backend"]
+            if "recovery_backend" in existing_write
+            else "direct"
         )
-        choices = {
-            "1": "Direct LLM tool loop (uses the configured LLM's API)",
-            "2": "Codex CLI (uses your ChatGPT subscription)",
+        if recovery_backend not in (None, "direct", "codex", "pi"):
+            raise ValueError(
+                "memory.agents.write.recovery_backend must be direct, codex, pi, "
+                f"or null; got {recovery_backend!r}"
+            )
+
+        write_backend = str(existing_write.get("backend") or "direct").lower()
+        write_choices = {
+            "1": "Direct LLM tool loop (uses the configured LLM API)",
+            "2": "Codex CLI (writes only; uses your ChatGPT subscription)",
+            "3": "Pi agent (local or remote model from Chronicle's model registry)",
         }
-        choice = self.prompt_choice(
-            "How should the memory agent run?",
-            choices,
-            "2" if str(existing).lower() == "codex" else "1",
+        write_choice = self.prompt_choice(
+            "Which backend should write memories?",
+            write_choices,
+            {"direct": "1", "codex": "2", "pi": "3"}.get(write_backend, "1"),
+        )
+        selected_write = {"1": "direct", "2": "codex", "3": "pi"}[write_choice]
+
+        search_backend = str(existing_search.get("backend") or "direct").lower()
+        search_choices = {
+            "1": "Direct retrieval agent (uses the configured LLM API)",
+            "2": "Pi agent (local or remote model from Chronicle's model registry)",
+        }
+        search_choice = self.prompt_choice(
+            "Which backend should search memories?",
+            search_choices,
+            {"direct": "1", "pi": "2"}.get(search_backend, "1"),
+        )
+        selected_search = {"1": "direct", "2": "pi"}[search_choice]
+
+        existing_backends = memory_config.get("backends") or {}
+        if not isinstance(existing_backends, dict):
+            existing_backends = {}
+        existing_codex = existing_backends.get("codex") or {}
+        existing_pi = existing_backends.get("pi") or {}
+        if not isinstance(existing_codex, dict):
+            existing_codex = {}
+        if not isinstance(existing_pi, dict):
+            existing_pi = {}
+
+        configured_llm = str(
+            self.config_manager.get_config_defaults().get("llm") or "qwen36-llm"
         )
 
-        if choice != "2":
-            self.config_manager.update_memory_config({"agent_executor": "direct"})
-            self.console.print(
-                "[green][SUCCESS][/green] Memory agent: direct LLM loop "
-                "(memory.agent_executor: direct)"
-            )
-            return
+        codex_config = {
+            "model": "gpt-5.6-terra",
+            "reasoning_effort": "low",
+            "sandbox_mode": "workspace-write",
+            "timeout_seconds": 900,
+            "max_used_percent": 80,
+            "limit_id": "",
+            **existing_codex,
+        }
+        pi_config = {
+            "model": configured_llm,
+            "timeout_seconds": 900,
+            "thinking": "off",
+            **existing_pi,
+        }
+        if not str(pi_config.get("model") or "").strip():
+            pi_config["model"] = configured_llm
 
-        codex_home = Path(
-            os.environ.get("CODEX_HOME") or (Path.home() / ".codex")
-        ).expanduser()
-        auth_file = codex_home / "auth.json"
-        if not shutil.which("codex"):
-            self.console.print(
-                "[yellow][WARNING][/yellow] No `codex` CLI found on this host. The "
-                "containers ship their own binary, but you still need subscription "
-                "auth: install Codex and run `codex login` (ChatGPT sign-in), then "
-                "re-run init."
+        if "pi" in (selected_write, selected_search, recovery_backend):
+            effective_models = self._effective_model_registry()
+            llm_models = sorted(
+                name
+                for name, model in effective_models.items()
+                if str(model.get("model_type") or "").lower() == "llm"
+                and str(model.get("api_family") or "").lower() == "openai"
             )
-        if auth_file.is_file():
+            if llm_models:
+                self.console.print(
+                    "[blue][INFO][/blue] Available OpenAI-compatible LLM registry entries: "
+                    + ", ".join(llm_models)
+                )
+            pi_model = self.prompt_value(
+                "Chronicle model registry entry for Pi",
+                str(pi_config.get("model") or configured_llm),
+            ).strip()
+            if not pi_model:
+                raise ValueError("Pi requires a Chronicle model registry entry")
+            selected_model = effective_models.get(pi_model)
+            if selected_model is None:
+                raise ValueError(
+                    f"Pi model registry entry '{pi_model}' does not exist in the "
+                    "effective defaults.yml + config.yml registry"
+                )
+            if str(selected_model.get("model_type") or "").lower() != "llm":
+                raise ValueError(f"Pi model registry entry '{pi_model}' is not an LLM")
+            if str(selected_model.get("api_family") or "").lower() != "openai":
+                raise ValueError(
+                    f"Pi model registry entry '{pi_model}' is not OpenAI-compatible"
+                )
+
+            previous_model = str(existing_pi.get("model") or "").strip()
+            model_changed = bool(previous_model and previous_model != pi_model)
+            if "context_window" not in existing_pi or model_changed:
+                context_window = self._pi_context_window(selected_model)
+                pi_config["context_window"] = context_window
+            else:
+                context_window = int(pi_config["context_window"])
+            if "max_tokens" not in existing_pi or model_changed:
+                pi_config["max_tokens"] = self._pi_max_tokens(context_window)
+            pi_config["model"] = pi_model
             self.console.print(
-                f"[green]✅[/green] Found Codex subscription auth at {auth_file}"
+                "[green][SUCCESS][/green] Pi will use model registry entry: "
+                f"{pi_model}. No Pi auth directory or host login is required; the "
+                "backend resolves the model URL/key and creates isolated runtime config."
             )
-        else:
+
+        if "codex" in (selected_write, recovery_backend):
+            codex_home = Path(
+                os.environ.get("CODEX_HOME") or (Path.home() / ".codex")
+            ).expanduser()
+            auth_file = codex_home / "auth.json"
+            if not shutil.which("codex"):
+                self.console.print(
+                    "[yellow][WARNING][/yellow] No `codex` CLI found on this host. "
+                    "The containers ship their own binary, but you still need "
+                    "subscription auth: install Codex and run `codex login` "
+                    "(ChatGPT sign-in), then re-run init."
+                )
+            if auth_file.is_file():
+                self.console.print(
+                    f"[green]✅[/green] Found Codex subscription auth at {auth_file}"
+                )
+            else:
+                self.console.print(
+                    f"[yellow][WARNING][/yellow] No Codex auth at {auth_file} — "
+                    "the configured Codex write backend is unavailable and Chronicle "
+                    "readiness will fail until `codex login` has been run on this host."
+                )
+            # CODEX_HOME is read-write because Codex rotates refresh tokens. Pi does
+            # not use this mount or require a host-side auth directory.
+            self.config["CODEX_HOME_DIR"] = str(codex_home)
+            # bubblewrap cannot run nested inside the rootless-podman containers;
+            # the container is the isolation boundary.
+            codex_config["sandbox_mode"] = "danger-full-access"
+
+        # Replace the agent/backend subtrees and remove the obsolete flat executor
+        # keys. This is an active-development schema change, not a compatibility
+        # layer: only the nested shape is written back.
+        full_config = self.config_manager.get_full_config()
+        saved_memory = full_config.setdefault("memory", {})
+        saved_memory.pop("agent_executor", None)
+        saved_memory.pop("codex", None)
+        saved_memory.pop("pi", None)
+        saved_memory["agents"] = {
+            "write": {
+                "backend": selected_write,
+                "recovery_backend": recovery_backend,
+            },
+            "search": {"backend": selected_search},
+        }
+        saved_memory["backends"] = {
+            "direct": {},
+            "codex": codex_config,
+            "pi": pi_config,
+        }
+        llm_operations = full_config.get("llm_operations")
+        removed_legacy_operation = False
+        if llm_operations is not None:
+            if not isinstance(llm_operations, dict):
+                raise ValueError("llm_operations must be a mapping")
+            removed_legacy_operation = (
+                llm_operations.pop("memory_agent", None) is not None
+            )
+        self.config_manager.save_full_config(full_config)
+
+        recovery_label = "disabled" if recovery_backend is None else recovery_backend
+        if removed_legacy_operation:
             self.console.print(
-                f"[yellow][WARNING][/yellow] No Codex auth at {auth_file} — until "
-                "`codex login` has been run on this host, the backend automatically "
-                "falls back to the direct LLM loop."
+                "[yellow][WARNING][/yellow] Removed obsolete "
+                "llm_operations.memory_agent; memory_write and memory_search now "
+                "use their explicit configuration (or the current defaults)."
             )
-        # The compose files mount CODEX_HOME_DIR at /codex-home inside the backend
-        # and workers containers (CODEX_HOME env) — read-write, because codex
-        # rotates the refresh tokens in auth.json.
-        self.config["CODEX_HOME_DIR"] = str(codex_home)
-        # danger-full-access: codex's own sandbox (bubblewrap) cannot run nested
-        # inside the rootless-podman containers; the container is the boundary.
-        self.config_manager.update_memory_config(
-            {
-                "agent_executor": "codex",
-                "codex": {"sandbox_mode": "danger-full-access"},
-            }
-        )
         self.console.print(
-            "[green][SUCCESS][/green] Memory agent: Codex CLI "
-            f"(memory.agent_executor: codex; {codex_home} mounted into the containers)"
+            "[green][SUCCESS][/green] Memory agents configured: "
+            f"write={selected_write} (recovery={recovery_label}), "
+            f"search={selected_search}"
+        )
+
+    def _effective_model_registry(self) -> Dict[str, Dict[str, Any]]:
+        """Return the same name-based defaults+user model view used at runtime."""
+        defaults_path = REPO_ROOT / "config" / "defaults.yml"
+        defaults: Dict[str, Any] = {}
+        if defaults_path.is_file():
+            yaml = YAML(typ="safe")
+            with defaults_path.open("r", encoding="utf-8") as handle:
+                defaults = yaml.load(handle) or {}
+
+        effective: Dict[str, Dict[str, Any]] = {}
+        for source in (defaults, self.config_manager.get_full_config()):
+            for model in source.get("models", []) or []:
+                if isinstance(model, dict) and model.get("name"):
+                    # Runtime config_loader uses whole-entry replacement by name.
+                    effective[str(model["name"])] = dict(model)
+        return effective
+
+    @staticmethod
+    def _pi_context_window(model: Dict[str, Any]) -> int:
+        """Use a model-declared context, falling back to Pi's safe generic window."""
+        model_params = model.get("model_params") or {}
+        raw = model.get("context_window")
+        if raw in (None, "") and isinstance(model_params, dict):
+            raw = model_params.get("context_window")
+        try:
+            context_window = int(raw)
+        except (TypeError, ValueError):
+            return DEFAULT_PI_CONTEXT_WINDOW
+        if context_window <= PI_PROMPT_HEADROOM_TOKENS:
+            return DEFAULT_PI_CONTEXT_WINDOW
+        return context_window
+
+    @staticmethod
+    def _pi_max_tokens(context_window: int) -> int:
+        """Keep most context for prompts/tools while allowing larger-context models more output."""
+        return min(
+            DEFAULT_PI_MAX_TOKENS,
+            context_window // 4,
+            context_window - PI_PROMPT_HEADROOM_TOKENS,
         )
 
     def setup_optional_services(self):

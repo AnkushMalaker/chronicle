@@ -39,6 +39,7 @@ from advanced_omi_backend.services.memory.audit import (
     UpdateStrategy,
     memory_provenance,
 )
+from advanced_omi_backend.services.memory.telemetry import text_payload
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
 from advanced_omi_backend.users import get_user_by_id
@@ -289,7 +290,7 @@ async def process_memory_job(
         )
         return {"success": False, "error": "Conversation too short"}
 
-    set_trace_io(input={"transcript": full_conversation})
+    set_trace_io(input={"transcript": text_payload(full_conversation)})
 
     # Check primary speakers filter (reuse `user` from above — no duplicate DB call)
     if user and user.primary_speakers:

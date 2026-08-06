@@ -316,7 +316,7 @@ def init_otel() -> None:
                 from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
                     OTLPSpanExporter,
                 )
-                from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+                from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
                 langfuse_host = os.getenv("LANGFUSE_HOST", "")
                 langfuse_public_key = os.getenv("LANGFUSE_PUBLIC_KEY", "")
@@ -331,7 +331,7 @@ def init_otel() -> None:
                     headers={"Authorization": auth_header},
                 )
                 tracer_provider.add_span_processor(
-                    SimpleSpanProcessor(langfuse_exporter)
+                    BatchSpanProcessor(langfuse_exporter)
                 )
                 backends.append("Langfuse")
             except ImportError:
@@ -435,6 +435,26 @@ def get_tracer(name: str = "chronicle"):
     return _tracer_provider.get_tracer(name)
 
 
+def force_flush_otel(timeout_millis: int = 5000) -> bool:
+    """Best-effort export of completed spans, primarily for forked RQ jobs.
+
+    RQ work-horses terminate with ``os._exit()``, which bypasses Python/OTEL atexit
+    hooks. A job-completion flush therefore keeps Langfuse's batched exporter reliable
+    without putting synchronous network exports on every vault-tool mutation.
+    """
+
+    if not _otel_initialised or _tracer_provider is None:
+        return True
+    try:
+        flushed = _tracer_provider.force_flush(timeout_millis=timeout_millis)
+        if not flushed:
+            logger.warning("OTEL force flush did not complete before job exit")
+        return bool(flushed)
+    except Exception:
+        logger.warning("OTEL force flush failed at job completion", exc_info=True)
+        return False
+
+
 def set_span_attrs(**kwargs: Any) -> None:
     """Set attributes on the current active span.
 
@@ -529,17 +549,22 @@ def traced_job(name: str, **static_attrs: Any):
 
             try:
                 from opentelemetry import trace
-
-                # Extract conversation_id from first positional arg
-                conv_id = args[0] if args else kwargs.get("conversation_id")
-                attrs = _map_attrs(static_attrs)
-                if conv_id:
-                    attrs["gen_ai.conversation.id"] = str(conv_id)
-
-                with tracer.start_as_current_span(name, attributes=attrs) as span:
-                    return await func(*args, **kwargs)
             except ImportError:
                 return await func(*args, **kwargs)
+
+            # Extract conversation_id from first positional arg
+            conv_id = args[0] if args else kwargs.get("conversation_id")
+            attrs = _map_attrs(static_attrs)
+            if conv_id:
+                attrs["gen_ai.conversation.id"] = str(conv_id)
+
+            try:
+                with tracer.start_as_current_span(name, attributes=attrs):
+                    return await func(*args, **kwargs)
+            finally:
+                # The span context manager ends the root observation before this
+                # runs, so the batch includes the complete job tree.
+                force_flush_otel()
 
         return wrapper
 

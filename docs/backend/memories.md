@@ -4,7 +4,7 @@
 
 This document explains how Chronicle stores and retrieves memories.
 
-Chronicle has **one** memory provider: `chronicle`. It is an **agentic Markdown vault** — a directory of Obsidian-style notes that is the single source of truth for memories. There is no separate vector database, no embeddings, and no hybrid search index. Memories are plain Markdown files; both writing and reading are driven by tool-calling LLM agents.
+Chronicle has **one** memory provider: `chronicle`. It is an **agentic Markdown vault** — a directory of Obsidian-style notes that is the single source of truth for memories. There is no separate vector database, no embeddings, and no hybrid search index. Memories are plain Markdown files; writing and reading each have an independently selectable agent backend.
 
 **Code References**:
 - **Provider**: `src/advanced_omi_backend/services/memory/providers/chronicle.py`
@@ -19,7 +19,7 @@ Conversation transcript
         │
         ▼ memory_extraction_job → memory_service.add_memory()
 ┌─────────────────────────────┐
-│  Write agent (_add_memory_  │   tool-calling LLM
+│  Write agent (_add_memory_  │   direct / Codex / Pi
 │  agent)                     │   • record conversation note
 │                             │   • surgically edit People/
 │                             │     Topics/Category notes
@@ -33,7 +33,7 @@ Conversation transcript
                ▲
                │ ripgrep (grep / glob / read_note tools)
 ┌──────────────┴──────────────┐
-│  Read agent (_search_vault_ │   tool-calling LLM
+│  Read agent (_search_vault_ │   direct / Pi
 │  grep)                      │   • greps the vault
 │                             │   • reads relevant notes
 │                             │   • synthesizes an answer
@@ -63,11 +63,57 @@ These are ordinary Markdown files — readable, editable, and grep-able. Because
 
 If an Immich photo library is configured (`IMMICH_URL`/`IMMICH_API_KEY`, offered by the setup wizard), the `person_photos` cron job (`services/person_photos.py`) matches each `People/<name>.md` note against Immich's people API, stores the person's face-crop thumbnail content-addressed under the vault's `_media/` directory, and embeds a small photo at the top of the note.
 
+## Agent backends
+
+The write and search paths are selected independently under `memory.agents`:
+
+| Backend | Write | Search | Model/auth source |
+|---|---:|---:|---|
+| `direct` | Yes | Yes | Built-in tool-calling loop using the model resolved by `llm_operations.memory_write` or `memory_search`. |
+| `codex` | Yes | No | Codex CLI and ChatGPT subscription auth from the `CODEX_HOME` mount. |
+| `pi` | Yes | Yes | Pi CLI using a Chronicle model-registry entry; local llama.cpp, Ollama, and remote OpenAI-compatible models all use the same path. |
+
+Writes also declare `recovery_backend`. It defaults to `direct`, so a failed Codex or
+Pi run gets one direct-agent recovery attempt. When direct is already the primary,
+the recovery attempt uses `defaults.fallback_llm`. Set it to `null` to disable agent
+recovery. The setup wizard preserves an explicitly configured value on reruns rather
+than silently resetting it to `direct`.
+
+Codex subscription authentication is also a readiness requirement when Codex is the
+configured primary writer. A recovery backend handles a write attempt that fails after
+the service is ready; it does not make an unauthenticated Codex primary ready. Run
+`codex login` in the host `CODEX_HOME` before starting that configuration.
+
+Pi is installed in the backend image and runs non-interactively with isolated runtime
+configuration. Chronicle resolves `memory.backends.pi.model` through its model
+registry, including the upstream model ID, URL, and API key. No host-side Pi login,
+`~/.pi` directory, auth volume, or hand-written `models.json` is required. The shipped
+default is Pi 0.83.0 on Node 22.19.0.
+
+The Pi process is not given Pi's built-in shell or filesystem tools. Chronicle disables
+them and loads a generated extension containing only the canonical vault tool schemas;
+calls cross a short-lived, bearer-authenticated loopback gateway into `VaultTools`.
+The search extension receives only the read-only search schemas.
+
+Write loops are bounded at 32 model/tool rounds. Pi additionally enforces an atomic
+128-call write cap at the gateway. Search is bounded at 6 tool rounds and 24 calls.
+When that tool budget is exhausted, the direct backend gets exactly one completion with
+no tool schemas so it can synthesize from evidence already in its conversation. Pi gets
+one fresh, isolated no-tool process only when it has already read note evidence; that
+process receives the selected evidence but no Chronicle extension or Pi built-in tools.
+Neither final-synthesis path can perform another vault operation. A
+truncated, stalled, timed-out, or process-failed write retains every audited partial
+mutation but is not reported as complete: Chronicle invokes the configured recovery
+backend even when the partial run already produced a valid conversation note. New
+People and Topic notes are also checked at the tool boundary for every canonical
+section and aggregation embed, so a smaller local model gets a recoverable tool error
+instead of silently leaving a malformed long-lived note.
+
 ## Write path: the memory agent
 
 Memory extraction runs as part of the post-conversation RQ pipeline. After a conversation closes, `memory_extraction_job` calls `memory_service.add_memory()`, which invokes the **write agent** (`_add_memory_agent` in `providers/chronicle.py`).
 
-The write agent is a **tool-calling LLM**. Given the conversation transcript and metadata, it:
+Given the conversation transcript and metadata, the selected write backend:
 
 1. Records the conversation as a new `Conversations/<conversation_id>.md` note.
 2. **Surgically edits** existing People / Topics / Category notes — adding or updating facts in place rather than blindly appending — and creates new notes when a person/topic/category is seen for the first time.
@@ -76,7 +122,8 @@ This is LLM-driven extraction: the agent decides what is worth remembering and w
 
 ## Read path: the retrieval agent
 
-Search is served by the **read agent** (`_search_vault_grep`), a read-only tool-calling LLM that operates over the vault with three tools:
+Search is served by the **read agent** (`_search_vault_grep`). Both the direct and Pi
+search backends are read-only and operate over the vault with three tools:
 
 - `grep` — full-text ripgrep across the notes
 - `glob` — find notes by path/name pattern
@@ -92,6 +139,34 @@ There is no vector similarity score — relevance comes from the agent's reasoni
 ## Chat integration
 
 Chat is always **agentic / tool-calling**. The chat LLM is given a `search_memories` tool; when it needs context about the user it calls that tool, which runs the same agentic vault search and returns the synthesized answer plus the cited note paths. The chat model then incorporates that into its reply.
+
+## Langfuse tracing
+
+When Chronicle's existing `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, and
+`LANGFUSE_SECRET_KEY` variables are configured, memory work is exported to the same
+local Langfuse OTLP endpoint as the rest of the pipeline. A write trace shows primary
+and recovery attempts, the selected executor, model calls, canonical vault-tool calls,
+deterministic fallback, latency, token usage, and completion state. A search trace shows
+the executor, rounds, tool calls, notes-read count, cap recovery, warnings, usage, and
+whether the final answer was usable. Pi's Node subprocess emits equivalent manual model
+usage spans, so it is visible beside Direct and Codex rather than becoming a telemetry
+blind spot. Langfuse OTLP export is batched, keeping network export off the vault-tool
+mutation path even when an agent emits many tool observations. Chronicle explicitly
+flushes the completed trace tree before a forked RQ work-horse exits.
+
+Chronicle's manual memory spans are metadata-only by default: they retain lengths and
+SHA-256 fingerprints but omit transcripts, queries, answers, note paths/bodies, tool
+arguments, and raw provider errors. Set `LANGFUSE_MEMORY_CAPTURE_CONTENT=true` only
+when Langfuse is trusted and local and that personal content is useful for a bounded
+debugging session. Content-bearing fields are length-limited; API keys, model endpoints,
+and Pi gateway tokens are never emitted by the memory tracer.
+
+The Direct executor also has native child spans from Chronicle's global OpenInference
+OpenAI instrumentation. Those spans have independent privacy controls and include model
+inputs/outputs by default. Set both `OPENINFERENCE_HIDE_INPUTS=true` and
+`OPENINFERENCE_HIDE_OUTPUTS=true` to redact them; because instrumentation is global,
+those settings apply to every OpenAI-client call in Chronicle, not only memory. Pi and
+Codex subprocess spans use the memory-specific content toggle above.
 
 ## API Endpoints
 
@@ -116,4 +191,69 @@ For historical context, the previous architecture used **FalkorDB** hybrid searc
 
 ## Configuration
 
-The memory provider is `chronicle` and requires only an LLM (for the write and read agents) and the vault directory. LLM selection follows the standard backend LLM configuration (`LLM_PROVIDER`, `OPENAI_API_KEY`/`OPENAI_MODEL` or Ollama settings) in `config/config.yml` and `.env`. No vector store, embedding model, or graph database needs to be configured.
+The setup wizard asks for write and search backends separately. This nested structure
+is the only supported configuration shape:
+
+```yaml
+memory:
+  provider: chronicle
+  timeout_seconds: 1200
+  agents:
+    write:
+      backend: pi
+      recovery_backend: direct
+    search:
+      backend: pi
+  backends:
+    direct: {}
+    codex:
+      model: gpt-5.6-terra
+      reasoning_effort: low
+      sandbox_mode: workspace-write
+      timeout_seconds: 900
+      max_used_percent: 80
+      limit_id: ""
+    pi:
+      model: qwen36-llm       # Chronicle model-registry entry, not upstream model ID
+      timeout_seconds: 900
+      context_window: 65536
+      max_tokens: 4096        # capped generally; leaves most context for prompts/tools
+      thinking: off
+
+llm_operations:
+  memory_write:
+    reasoning_effort: none      # Qwen thinking off; lowest supported OpenAI effort
+    max_tokens: 8000
+  memory_search:
+    reasoning_effort: none
+    max_tokens: 8000
+```
+
+The Pi model may be any OpenAI-compatible LLM entry in the effective registry formed by
+`config/defaults.yml` plus name-based overrides from `config/config.yml`. The wizard
+rejects missing entries, embeddings, and non-OpenAI API families. For the local Qwen
+service, setup selects `qwen36-llm`, records llama.cpp's exact upstream Hugging Face
+identity, and records the context actually selected for that service. API credentials,
+when a selected registry model needs them, continue to come from the model definition's
+environment-variable reference.
+No vector store, embedding model, or graph database is part of memory storage or
+retrieval.
+
+Pi limits are derived per selected model rather than pinning every backend to one
+machine's context profile. The wizard uses a declared `context_window` (including the
+context written by local llama.cpp setup), otherwise a conservative 32K fallback. New
+output limits are one quarter of the context up to 4096 tokens, leaving most of the
+window for Pi's system prompt, tool schemas, transcript, and multi-round results.
+Existing explicit Pi limits are preserved on rerun.
+
+The built-in Qwen 3.6 27B profile serves a 64K context with one parallel slot, flash
+attention, Q8_0 K/V cache, and Jinja chat templates. It also disables llama.cpp's
+automatic multimodal-projector download: Chronicle's memory workload is text-only, so
+loading its projector wastes memory. On the A30, 64K Q8 KV used 19,482 MiB with the
+auto-loaded projector and 18,344 MiB with the text-only profile, freeing about 1.1 GiB;
+32K Q8 used 18,234 MiB with the projector. Prompt processing stayed near 667
+tokens/second. Audited memory prompts reached roughly 15K tokens, making the old 8K
+profile invalid for real conversations. Other local models retain llama.cpp's safer
+automatic flash-attention, F16 KV-cache, and projector defaults. Increase the served
+context before raising output limits or enabling thinking, and validate changes with
+the benchmark harness.

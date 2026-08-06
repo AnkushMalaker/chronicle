@@ -18,6 +18,7 @@ Frontmatter is edited as text via ``edit_note`` — never through notesmd-cli's
 """
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -29,8 +30,21 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List
 
 from ..person_merge import PersonMergeService
+from ..telemetry import (
+    current_memory_attempt,
+    memory_span,
+    set_observation_io,
+    set_safe_span_attributes,
+    text_payload,
+)
 from ..vault_lock import VaultLockTimeout, vault_note_lock
-from ..vault_scaffold import write_category
+from ..vault_scaffold import (
+    VaultPathError,
+    confined_vault_path,
+    safe_vault_relative_path,
+    validate_category_name,
+    write_category,
+)
 from .edit_engine import Edit, EditError, apply_edits
 from .section_edit import SectionEditError, apply_section_edit
 
@@ -50,12 +64,18 @@ def _safe_relpath(path: str) -> str:
     Whitespace around components is stripped — a title like ``"TailScale "`` would
     otherwise mint a trailing-space file/folder name that breaks Windows and Syncthing.
     """
-    p = path.strip().lstrip("/")
-    if ".." in Path(p).parts:
-        raise VaultToolError(f"Invalid path '{path}': must stay inside the vault.")
+    if not isinstance(path, str):
+        raise VaultToolError("Note paths must be strings.")
+    p = path.strip()
     if not p.endswith(".md"):
         p += ".md"
-    parts = list(Path(p).parts)
+    try:
+        safe = safe_vault_relative_path(p)
+    except VaultPathError as exc:
+        raise VaultToolError(
+            f"Invalid path '{path}': must stay inside the vault."
+        ) from exc
+    parts = list(Path(safe).parts)
     if len(parts) > 2:
         raise VaultToolError(
             f"Invalid path '{path}': notes live at <Folder>/<Title>.md, one folder "
@@ -67,7 +87,13 @@ def _safe_relpath(path: str) -> str:
     stem = parts[-1][: -len(".md")].strip()
     if not stem or any(not d for d in dirs):
         raise VaultToolError(f"Invalid path '{path}': empty folder or note title.")
-    return str(Path(*dirs, stem + ".md"))
+    normalized = str(Path(*dirs, stem + ".md"))
+    try:
+        return safe_vault_relative_path(normalized)
+    except VaultPathError as exc:
+        raise VaultToolError(
+            f"Invalid path '{path}': must stay inside the vault."
+        ) from exc
 
 
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
@@ -131,15 +157,78 @@ def _assert_no_new_section_dupes(rel: str, before: str, after: str) -> None:
         )
 
 
+_NEW_NOTE_SCHEMA = {
+    "People": {
+        "sections": ("about", "conversations", "mentions"),
+        "embed": "![[Conversations.base#Person]]",
+    },
+    "Topics": {
+        "sections": ("about", "conversations"),
+        "embed": "![[Conversations.base#Topic]]",
+    },
+}
+
+
+def _assert_new_note_schema(rel: str, content: str) -> None:
+    """Reject incomplete new People/Topic notes at the mutation boundary.
+
+    Local models sometimes emit only ``## About`` even though the canonical template
+    is in their prompt. Accepting that write leaves a permanently malformed note and
+    gives the agent no signal to repair it. A tool error is recoverable in the same
+    agent turn, so require the stable spine sections and aggregation embed up front.
+    """
+    parts = Path(rel).parts
+    if len(parts) != 2:
+        return
+    schema = _NEW_NOTE_SCHEMA.get(parts[0])
+    if schema is None:
+        return
+
+    counts = _section_counts(content)
+    missing = [name for name in schema["sections"] if counts.get(name, 0) == 0]
+    embed = schema["embed"]
+    if not missing and embed in content:
+        return
+
+    problems: List[str] = []
+    if missing:
+        problems.append(
+            "missing section(s) "
+            + ", ".join(f"'## {name.title()}'" for name in missing)
+        )
+    if embed not in content:
+        problems.append(f"missing exact embed {embed!r}")
+    template_name = "Person" if parts[0] == "People" else "Topic"
+    raise VaultToolError(
+        f"Refusing to create '{rel}': {'; '.join(problems)}. Read and fill the "
+        f"canonical Templates/{template_name} Template.md, preserving every required "
+        "section and embed."
+    )
+
+
 class VaultTools:
     """Filesystem-scoped tool implementations for one user's vault."""
 
-    def __init__(self, vault_root: Path):
-        self.root = Path(vault_root)
+    def __init__(self, vault_root: Path, *, trace_context: Any = None):
+        self.root = Path(vault_root).absolute()
         self.root.mkdir(parents=True, exist_ok=True)
+        if self.root.is_symlink():
+            raise VaultToolError(
+                f"Vault root must not be a symbolic link: {self.root}."
+            )
+        self._resolved_root = self.root.resolve(strict=True)
         self._rg = shutil.which("rg")
         self._notesmd = os.getenv("NOTESMD_CLI_BIN") or shutil.which("notesmd-cli")
+        # Pi dispatches through a loopback HTTP server on fresh request threads.
+        # Retaining the caller's immutable OTEL context keeps those tool spans under
+        # the Pi agent rather than creating unrelated root traces. Context variables
+        # do not cross those request threads, so retain the attempt label as well.
+        self._trace_context = trace_context
+        self._trace_attempt = current_memory_attempt()
         self.touched: set = set()  # vault-relative paths created/edited this run
+        # Unlike ``touched``, this is monotonic: editing the same note twice must
+        # still mark both tool observations as mutating.
+        self._mutation_count = 0
         # Notes retired by a rename/merge this run. Each entry is
         # {"old_path", "new_path", "before"} — the audit step turns these into
         # ``rename`` ledger entries so a note vanishing is never invisible.
@@ -165,6 +254,39 @@ class VaultTools:
 
     # --- path helpers -------------------------------------------------------
 
+    def _assert_root_safe(self) -> None:
+        """Fail if the vault root was replaced or redirected after construction."""
+        if (
+            self.root.is_symlink()
+            or not self.root.is_dir()
+            or self.root.resolve(strict=True) != self._resolved_root
+        ):
+            raise VaultToolError("Vault root changed or became a symbolic link.")
+
+    def _confined_path(self, rel: str) -> Path:
+        self._assert_root_safe()
+        try:
+            return confined_vault_path(self.root, rel)
+        except VaultPathError as exc:
+            raise VaultToolError(str(exc)) from exc
+
+    def _safe_audit_path(self, rel: str, *, require_exists: bool) -> str:
+        """Validate a path before it enters ``touched``/``removed`` audit data."""
+        try:
+            safe = safe_vault_relative_path(rel)
+        except VaultPathError as exc:
+            raise VaultToolError(f"Unsafe vault audit path {rel!r}: {exc}") from exc
+        target = self._confined_path(safe)
+        if require_exists and not target.is_file():
+            raise VaultToolError(
+                f"Vault audit path does not name a regular file: {safe!r}."
+            )
+        return Path(safe).as_posix()
+
+    def _mark_touched(self, rel: str) -> None:
+        self.touched.add(self._safe_audit_path(rel, require_exists=True))
+        self._mutation_count += 1
+
     def _resolve_ci(self, rel: str) -> str:
         """Map a vault-relative path onto an existing file matching case-insensitively.
 
@@ -175,12 +297,18 @@ class VaultTools:
         against what is already on disk makes the agent reuse the existing note
         instead, so two notes never differ only by case.
         """
+        self._assert_root_safe()
         current = self.root
         resolved: List[str] = []
         parts = Path(rel).parts
         for i, part in enumerate(parts):
-            if (current / part).exists():
-                current = current / part
+            exact = current / part
+            if exact.is_symlink():
+                raise VaultToolError(
+                    f"Vault path must not traverse a symbolic link: {rel!r}."
+                )
+            if exact.exists():
+                current = exact
                 resolved.append(part)
                 continue
             match = None
@@ -192,6 +320,10 @@ class VaultTools:
                 )
             if match:
                 current = current / match
+                if current.is_symlink():
+                    raise VaultToolError(
+                        f"Vault path must not traverse a symbolic link: {rel!r}."
+                    )
                 resolved.append(match)
             else:
                 resolved.extend(parts[i:])  # no match: keep requested casing onward
@@ -199,10 +331,33 @@ class VaultTools:
         return str(Path(*resolved)) if resolved else rel
 
     def _abs(self, path: str) -> Path:
-        return self.root / self._resolve_ci(_safe_relpath(path))
+        rel = self._resolve_ci(_safe_relpath(path))
+        return self._confined_path(rel)
 
     def _all_md(self) -> List[Path]:
-        return list(self.root.rglob("*.md"))
+        """Return regular Markdown files, rejecting any symlink in the vault tree."""
+        self._assert_root_safe()
+        paths: List[Path] = []
+        for path in self.root.rglob("*"):
+            rel = path.relative_to(self.root).as_posix()
+            if path.is_symlink():
+                raise VaultToolError(
+                    f"Vault contains a symbolic link and cannot be mutated safely: {rel!r}."
+                )
+            self._confined_path(rel)
+            if path.is_file() and path.suffix == ".md":
+                paths.append(path)
+        return paths
+
+    def _markdown_hashes(self) -> Dict[str, str]:
+        """Fingerprint all safe Markdown files for external-tool audit diffs."""
+        hashes: Dict[str, str] = {}
+        for path in self._all_md():
+            rel = self._safe_audit_path(
+                path.relative_to(self.root).as_posix(), require_exists=True
+            )
+            hashes[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return hashes
 
     # --- search (ripgrep) ---------------------------------------------------
 
@@ -216,6 +371,7 @@ class VaultTools:
         head_limit: int = _GREP_MAX_LINES,
     ) -> str:
         """ripgrep over the vault. Returns text (paths / `path:line:text` / `path:count`)."""
+        self._assert_root_safe()
         if not self._rg:
             raise VaultToolError(
                 "ripgrep (rg) is not installed in this environment; cannot search."
@@ -264,6 +420,7 @@ class VaultTools:
 
     def glob(self, pattern: str) -> str:
         """Find notes by filename pattern (e.g. ``People/*.md``). Returns paths."""
+        self._assert_root_safe()
         if self._rg:
             proc = subprocess.run(
                 [self._rg, "--files", "--glob", pattern],
@@ -276,7 +433,7 @@ class VaultTools:
         else:
             out = "\n".join(
                 str(p.relative_to(self.root))
-                for p in self.root.rglob("*.md")
+                for p in self._all_md()
                 if Path(str(p.relative_to(self.root))).match(pattern)
             )
         return out or "No files found."
@@ -307,7 +464,7 @@ class VaultTools:
                 raise VaultToolError(str(e))
             _assert_no_new_section_dupes(path, content, new_content)
             fp.write_text(new_content, encoding="utf-8")
-            self.touched.add(self._resolve_ci(_safe_relpath(path)))
+            self._mark_touched(self._resolve_ci(_safe_relpath(path)))
         return f"Edited {path} ({len(edits)} replacement(s))."
 
     def edit_section(
@@ -334,13 +491,13 @@ class VaultTools:
                 raise VaultToolError(str(e))
             _assert_no_new_section_dupes(path, content, new_content)
             fp.write_text(new_content, encoding="utf-8")
-            self.touched.add(self._resolve_ci(_safe_relpath(path)))
+            self._mark_touched(self._resolve_ci(_safe_relpath(path)))
         return f"Edited {path} ({operation} under '{target}')."
 
     def write_note(self, path: str, content: str, overwrite: bool = False) -> str:
         with self._locked():
             rel = self._resolve_ci(_safe_relpath(path))
-            fp = self.root / rel
+            fp = self._confined_path(rel)
             if fp.exists() and not overwrite:
                 raise VaultToolError(
                     f"Note '{rel}' already exists. Use edit_note to modify it, or pass "
@@ -369,9 +526,12 @@ class VaultTools:
                 )
             before = fp.read_text(encoding="utf-8") if existed else ""
             _assert_no_new_section_dupes(rel, before, content)
+            if not existed:
+                _assert_new_note_schema(rel, content)
             fp.parent.mkdir(parents=True, exist_ok=True)
+            fp = self._confined_path(rel)
             fp.write_text(content, encoding="utf-8")
-            self.touched.add(rel)
+            self._mark_touched(rel)
         return f"{'Overwrote' if existed else 'Wrote'} {rel} ({len(content)} chars)."
 
     def create_category(self, name: str, properties: List[str] | None = None) -> str:
@@ -380,19 +540,26 @@ class VaultTools:
         ``name`` should be the plural category name (e.g. ``"Places"``); ``properties`` the
         short, reusable frontmatter keys its notes carry (e.g. ``["location", "type"]``).
         """
+        try:
+            category = validate_category_name(name)
+        except VaultPathError as exc:
+            raise VaultToolError(f"Invalid category name {name!r}: {exc}") from exc
         with self._locked():
-            created = write_category(self.root, name, properties or [])
-        for rel in created:
-            self.touched.add(rel)
+            try:
+                created = write_category(self.root, category, properties or [])
+            except VaultPathError as exc:
+                raise VaultToolError(str(exc)) from exc
+            for rel in created:
+                self._mark_touched(rel)
         if created:
             return (
-                f"Created category '{name}' ({', '.join(created)}). Now file notes under "
-                f'{name}/<Title>.md with categories: ["[[{name}]]"], using '
-                f"Templates/{name} Template.md as the shape."
+                f"Created category '{category}' ({', '.join(created)}). Now file notes under "
+                f'{category}/<Title>.md with categories: ["[[{category}]]"], using '
+                f"Templates/{category} Template.md as the shape."
             )
         return (
-            f"Category '{name}' already exists. File notes under {name}/<Title>.md and read "
-            f"Templates/{name} Template.md for its schema."
+            f"Category '{category}' already exists. File notes under "
+            f"{category}/<Title>.md and read Templates/{category} Template.md for its schema."
         )
 
     def rename_person(self, old_name: str, new_name: str) -> str:
@@ -403,6 +570,11 @@ class VaultTools:
                 raise VaultToolError(
                     f"Person note 'People/{old_name}.md' does not exist."
                 )
+            # Both merge implementations scan and rewrite backlinks across the
+            # complete vault. Reject a symlink anywhere before handing paths to
+            # PersonMergeService or notesmd-cli, neither of which is a confinement
+            # boundary on its own.
+            self._all_md()
             # Snapshot the retiring note before it moves/unlinks so the audit ledger
             # keeps its final content and the merge never loses facts unrecorded.
             old_content = old_fp.read_text(encoding="utf-8")
@@ -415,7 +587,7 @@ class VaultTools:
                 result = service.apply_preview_locked(preview)
                 for rel, after in result.after.items():
                     if after is not None:
-                        self.touched.add(rel)
+                        self._mark_touched(rel)
                 self._record_removal(old_rel, new_rel, old_content)
                 return (
                     f"'{new_name}' already existed — merged into People/{new_name}.md: "
@@ -424,25 +596,50 @@ class VaultTools:
                     f"{preview.backlink_occurrences} backlink(s), added '{old_name}' as "
                     f"an alias, and deleted People/{old_name}.md."
                 )
-            self.touched.add(new_rel)
             if self._notesmd:
+                before_cli = self._markdown_hashes()
                 try:
                     self._move_cli(old_rel, new_rel)
-                    self._record_removal(old_rel, new_rel, old_content)
-                    return f"Renamed People/{old_name} -> People/{new_name} (backlinks rewritten)."
                 except Exception as e:  # noqa: BLE001
                     logger.warning("notesmd-cli move failed (%s); using python", e)
+                    # A failed external command may still have rewritten some
+                    # backlinks before returning non-zero. Snapshot again before
+                    # deciding whether the Python fallback is safe, and retain
+                    # those mutations in the audit set: the fallback will see the
+                    # already-rewritten text as unchanged and cannot rediscover it.
+                    after_failed_cli = self._markdown_hashes()
+                    if not old_fp.is_file() or new_fp.exists():
+                        raise VaultToolError(
+                            "notesmd-cli failed after partially moving the person note; "
+                            "refusing a second rename"
+                        ) from e
+                    for rel, digest in after_failed_cli.items():
+                        if before_cli.get(rel) != digest:
+                            self._mark_touched(rel)
+                else:
+                    # Once the external move succeeds, all validation/audit failures
+                    # fail closed; retrying a Python rename against an already-moved
+                    # source would compound a partial result.
+                    after_cli = self._markdown_hashes()
+                    for rel, digest in after_cli.items():
+                        if before_cli.get(rel) != digest:
+                            self._mark_touched(rel)
+                    self._record_removal(old_rel, new_rel, old_content)
+                    return f"Renamed People/{old_name} -> People/{new_name} (backlinks rewritten)."
             n = self._rewrite_backlinks_python(old_name, new_name)
             old_fp.rename(new_fp)
+            self._mark_touched(new_rel)
             self._record_removal(old_rel, new_rel, old_content)
         return f"Renamed People/{old_name} -> People/{new_name} ({n} backlink(s) rewritten)."
 
     def _record_removal(self, old_rel: str, new_rel: str, before: str) -> None:
         """Queue a rename/merge removal for the audit ledger and clear any prior
         ``touched`` entry for the vanished path (it no longer exists to re-read)."""
-        self.touched.discard(old_rel)
+        old_safe = self._safe_audit_path(old_rel, require_exists=False)
+        new_safe = self._safe_audit_path(new_rel, require_exists=True)
+        self.touched.discard(old_safe)
         self.removed.append(
-            {"old_path": old_rel, "new_path": new_rel, "before": before}
+            {"old_path": old_safe, "new_path": new_safe, "before": before}
         )
 
     def _migrate_person_facts(
@@ -507,6 +704,7 @@ class VaultTools:
             )
             if new != text:
                 fp.write_text(new, encoding="utf-8")
+                self._mark_touched(fp.relative_to(self.root).as_posix())
                 changed += 1
         return changed
 
@@ -514,6 +712,43 @@ class VaultTools:
 
     def dispatch(self, name: str, args: Dict[str, Any]) -> str:
         """Run a tool by name; always returns a string for the tool message."""
+        serialized_args = json.dumps(
+            args, ensure_ascii=False, sort_keys=True, default=str
+        )
+        mutations_before = self._mutation_count
+        with memory_span(
+            f"memory_tool.{name}",
+            parent_context=self._trace_context,
+            attributes={
+                "openinference.span.kind": "TOOL",
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": name,
+                "chronicle.memory.tool.name": name,
+                "chronicle.memory.tool.argument_keys": sorted(str(key) for key in args),
+                "chronicle.memory.attempt": self._trace_attempt,
+            },
+        ) as span:
+            set_observation_io(
+                span,
+                input={"arguments": text_payload(serialized_args)},
+            )
+            result = self._dispatch(name, args)
+            set_safe_span_attributes(
+                span,
+                {
+                    "chronicle.memory.success": True,
+                    "chronicle.memory.tool.result_chars": len(result),
+                    "chronicle.memory.tool.mutated": self._mutation_count
+                    > mutations_before,
+                    "chronicle.memory.tool.mutation_count": self._mutation_count
+                    - mutations_before,
+                },
+            )
+            set_observation_io(span, output={"result": text_payload(result)})
+            return result
+
+    def _dispatch(self, name: str, args: Dict[str, Any]) -> str:
+        """Untraced canonical dispatch; :meth:`dispatch` owns the observation."""
         if name == "grep":
             return self.grep(
                 args["pattern"],

@@ -123,6 +123,9 @@ def get_service_info() -> dict:
         "service_type": None,
         "service_initialized": False,
         "memory_provider": None,
+        "write_agent_backend": None,
+        "write_recovery_backend": None,
+        "search_agent_backend": None,
     }
 
     if _memory_service is not None:
@@ -131,5 +134,9 @@ def get_service_info() -> dict:
         info["service_initialized"] = _memory_service._initialized
 
         info["memory_provider"] = _memory_service.provider_identifier
+        config = _memory_service.config
+        info["write_agent_backend"] = config.write_agent_backend
+        info["write_recovery_backend"] = config.write_recovery_backend
+        info["search_agent_backend"] = config.search_agent_backend
 
     return info

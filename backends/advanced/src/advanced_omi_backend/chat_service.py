@@ -767,10 +767,15 @@ def get_chat_service() -> ChatService:
     return _chat_service
 
 
-async def cleanup_chat_service():
-    """Cleanup chat service resources."""
+def reset_chat_service() -> None:
+    """Discard cached dependencies so the next request uses reloaded configuration."""
     global _chat_service
     if _chat_service:
         _chat_service._initialized = False
         _chat_service = None
-        logger.info("Chat service cleaned up")
+        logger.info("Chat service reset")
+
+
+async def cleanup_chat_service():
+    """Cleanup chat service resources."""
+    reset_chat_service()

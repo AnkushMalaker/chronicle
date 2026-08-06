@@ -42,10 +42,13 @@ class MemoryConfig:
     extraction_prompt: str = None
     extraction_enabled: bool = True
     timeout_seconds: int = 1200
-    # How the memory agent executes: "direct" = built-in tool-calling loop (metered
-    # API calls via the model registry); "codex" = OpenAI Codex CLI operating on the
-    # vault directory (ChatGPT subscription). See agent/codex_agent.py.
-    agent_executor: str = "direct"
+    # Agent backends are independent for write and search.  The write recovery
+    # backend is invoked only when the primary backend fails to create a valid
+    # conversation note; ``None`` skips agent recovery and uses the deterministic
+    # source-preserving note fallback immediately.
+    write_agent_backend: str = "direct"
+    write_recovery_backend: Optional[str] = "direct"
+    search_agent_backend: str = "direct"
 
 
 def load_config_yml() -> Dict[str, Any]:
@@ -96,6 +99,22 @@ def build_memory_config_from_env() -> MemoryConfig:
         # Determine memory provider from registry
         reg = get_models_registry()
         mem_settings = reg.memory if reg else {}
+        legacy_memory_keys = sorted(
+            {"agent_executor", "codex", "pi"}.intersection(mem_settings)
+        )
+        if legacy_memory_keys:
+            raise ValueError(
+                "Obsolete flat memory configuration found: "
+                + ", ".join(f"memory.{key}" for key in legacy_memory_keys)
+                + ". Run ./wizard.sh to replace it with memory.agents and "
+                "memory.backends; Chronicle will not guess a new executor."
+            )
+        if "memory_agent" in getattr(reg, "llm_operations", {}):
+            raise ValueError(
+                "Obsolete llm_operations.memory_agent configuration found. Run "
+                "./wizard.sh to replace the memory-agent schema with memory_write "
+                "and memory_search; Chronicle will not silently change its model."
+            )
         memory_provider = (mem_settings.get("provider") or "chronicle").lower()
 
         # Map legacy provider names to current names
@@ -138,13 +157,52 @@ def build_memory_config_from_env() -> MemoryConfig:
         )
 
         # Get memory extraction settings from registry
-        extraction_cfg = mem_settings.get("extraction") or {}
+        extraction_cfg = mem_settings.get("extraction")
+        if extraction_cfg is None:
+            extraction_cfg = {}
+        if not isinstance(extraction_cfg, dict):
+            raise ValueError("memory.extraction must be a mapping")
         extraction_enabled = bool(extraction_cfg.get("enabled", True))
         extraction_prompt = extraction_cfg.get("prompt") if extraction_enabled else None
 
         # Timeouts/tunables from registry.memory
         timeout_seconds = int(mem_settings.get("timeout_seconds", 1200))
-        agent_executor = str(mem_settings.get("agent_executor") or "direct").lower()
+        agents_cfg = mem_settings.get("agents")
+        if agents_cfg is None:
+            agents_cfg = {}
+        if not isinstance(agents_cfg, dict):
+            raise ValueError("memory.agents must be a mapping")
+        write_cfg = agents_cfg.get("write")
+        search_cfg = agents_cfg.get("search")
+        if write_cfg is None:
+            write_cfg = {}
+        if search_cfg is None:
+            search_cfg = {}
+        if not isinstance(write_cfg, dict) or not isinstance(search_cfg, dict):
+            raise ValueError("memory.agents.write/search must be mappings")
+
+        write_agent_backend = str(write_cfg.get("backend") or "direct").lower()
+        raw_recovery = write_cfg.get("recovery_backend", "direct")
+        write_recovery_backend = (
+            str(raw_recovery).lower() if raw_recovery not in (None, "") else None
+        )
+        search_agent_backend = str(search_cfg.get("backend") or "direct").lower()
+
+        write_backends = {"direct", "codex", "pi"}
+        search_backends = {"direct", "pi"}
+        if write_agent_backend not in write_backends:
+            raise ValueError(f"Unsupported memory write backend: {write_agent_backend}")
+        if (
+            write_recovery_backend is not None
+            and write_recovery_backend not in write_backends
+        ):
+            raise ValueError(
+                f"Unsupported memory write recovery backend: {write_recovery_backend}"
+            )
+        if search_agent_backend not in search_backends:
+            raise ValueError(
+                f"Unsupported memory search backend: {search_agent_backend}"
+            )
 
         memory_logger.info(
             f"🔧 Memory config: Provider={memory_provider_enum.value}, "
@@ -159,7 +217,9 @@ def build_memory_config_from_env() -> MemoryConfig:
             extraction_prompt=extraction_prompt,
             extraction_enabled=extraction_enabled,
             timeout_seconds=timeout_seconds,
-            agent_executor=agent_executor,
+            write_agent_backend=write_agent_backend,
+            write_recovery_backend=write_recovery_backend,
+            search_agent_backend=search_agent_backend,
         )
 
     except ImportError:

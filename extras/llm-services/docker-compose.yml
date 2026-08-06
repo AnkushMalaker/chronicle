@@ -1,8 +1,11 @@
 services:
   llama-cpp-llm:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    # A30/Qwen memory profile was validated against b10290 (commit c8e03ce).
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda-b10290
     ports:
-      - "${LLM_PORT:-8083}:8080"
+      # Loopback is the safe default. Same-host Chronicle containers reach this
+      # service directly as llama-cpp-llm:8080 on chronicle-network.
+      - "${LLM_BIND_HOST:-127.0.0.1}:${LLM_PORT:-8083}:8080"
     volumes:
       - ./models:/models:ro
       - ./cache:/cache
@@ -16,8 +19,17 @@ services:
       LLM_MODEL_PATH: /models/${LLM_MODEL_FILE:-model.gguf}
       LLAMA_CACHE: /cache
       HF_TOKEN: ${HF_TOKEN:-}
+      # Optional application auth. If set, configure the same LLAMA_API_KEY in
+      # the backend environment; config/defaults.yml forwards it to the client.
+      LLAMA_API_KEY: ${LLAMA_API_KEY:-}
       LLAMA_ARG_CTX_SIZE: ${CTX_SIZE:-8192}
       LLAMA_ARG_N_GPU_LAYERS: ${N_GPU_LAYERS:--1}
+      LLAMA_ARG_N_PARALLEL: ${LLAMA_ARG_N_PARALLEL:-1}
+      LLAMA_ARG_FLASH_ATTN: ${LLAMA_ARG_FLASH_ATTN:-auto}
+      LLAMA_ARG_JINJA: ${LLAMA_ARG_JINJA:-true}
+      LLAMA_ARG_CACHE_TYPE_K: ${LLAMA_ARG_CACHE_TYPE_K:-f16}
+      LLAMA_ARG_CACHE_TYPE_V: ${LLAMA_ARG_CACHE_TYPE_V:-f16}
+      LLAMA_ARG_MMPROJ_AUTO: ${LLAMA_ARG_MMPROJ_AUTO:-true}
       LLAMA_ARG_HOST: "0.0.0.0"
     entrypoint:
       - /bin/sh
@@ -35,9 +47,9 @@ services:
       - chronicle-network
 
   llama-cpp-embed:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda-b10290
     ports:
-      - "${EMBED_PORT:-8082}:8080"
+      - "${EMBED_BIND_HOST:-127.0.0.1}:${EMBED_PORT:-8082}:8080"
     volumes:
       - ./models:/models:ro
       - ./cache:/cache
@@ -48,6 +60,7 @@ services:
       LLM_MODEL_PATH: /models/${EMBED_MODEL_FILE:-embed-model.gguf}
       LLAMA_CACHE: /cache
       HF_TOKEN: ${HF_TOKEN:-}
+      LLAMA_API_KEY: ${LLAMA_API_KEY:-}
       LLAMA_ARG_CTX_SIZE: ${EMBED_CTX_SIZE:-2048}
       LLAMA_ARG_N_GPU_LAYERS: ${N_GPU_LAYERS:--1}
       LLAMA_ARG_EMBEDDINGS: "true"

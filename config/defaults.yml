@@ -76,12 +76,13 @@ models:
     thinking: true  # gemma/qwen-class thinking model — controls thinking via chat template
     model_name: glm-4.7-flash
     # Empty LLM_BASE_URL → resolve a tailnet-advertised chronicle-llm live (with /v1
-    # appended); else the host-local default. An explicit URL always wins.
+    # appended); else use container DNS on the shared chronicle-network. This avoids
+    # requiring a host-wide published inference port for a same-machine deployment.
     model_url: ${oc.env:LLM_BASE_URL,''}
     discovery_service: chronicle-llm
     discovery_path: /v1
-    discovery_default: http://host.docker.internal:8083/v1
-    api_key: no-key
+    discovery_default: http://llama-cpp-llm:8080/v1
+    api_key: ${oc.env:LLAMA_API_KEY,no-key}
     model_params:
       temperature: 0.2
       max_tokens: 2000
@@ -94,6 +95,9 @@ models:
     api_family: openai
     thinking: true  # Qwen3-class thinking model — controls thinking via chat template
     model_name: qwen3.6-27b
+    # Validated on a 24GB A30 with Q8_0 KV cache: the full 64K context keeps
+    # audited memory prompts (observed near 15K tokens) comfortably in-window.
+    context_window: 65536
     # Served by the same llama.cpp container as llamacpp-llm above, which hosts one
     # model at a time — selecting this one means LLM_HF_REPO points at the Qwen GGUF.
     # Dense 27B: ~16.8GB of weights must stay resident, so it wants a 24GB GPU with
@@ -101,8 +105,8 @@ models:
     model_url: ${oc.env:LLM_BASE_URL,''}
     discovery_service: chronicle-llm
     discovery_path: /v1
-    discovery_default: http://host.docker.internal:8083/v1
-    api_key: no-key
+    discovery_default: http://llama-cpp-llm:8080/v1
+    api_key: ${oc.env:LLAMA_API_KEY,no-key}
     model_params:
       temperature: 0.2
       max_tokens: 2000
@@ -152,8 +156,8 @@ models:
     model_provider: llamacpp
     api_family: openai
     model_name: nomic-embed-text-v1.5
-    model_url: http://host.docker.internal:8082/v1
-    api_key: no-key
+    model_url: http://llama-cpp-embed:8080/v1
+    api_key: ${oc.env:LLAMA_API_KEY,no-key}
     embedding_dimensions: 768
     model_output: vector
 
@@ -576,31 +580,50 @@ memory:
   # Chronicle's agentic Markdown vault is the only memory provider.
   provider: chronicle
   timeout_seconds: 1200
-  # How the memory agent executes vault writes:
-  #   direct — built-in tool-calling loop via the configured LLM (metered API calls)
-  #   codex  — OpenAI Codex CLI running on the vault directory (uses a ChatGPT
-  #            subscription; needs the codex binary + auth in CODEX_HOME — the
-  #            wizard mounts ~/.codex into the containers)
-  agent_executor: direct
-  codex:
-    model: "gpt-5.6-terra"          # faster/lower-cost Codex model for read-heavy vault work
-    reasoning_effort: low           # keep routine ingestion economical; raise for quality evals
-    # codex --sandbox. workspace-write (writes confined to the vault dir) needs
-    # bubblewrap, which cannot run nested inside the rootless-podman containers —
-    # there the container is the isolation boundary and the wizard sets
-    # danger-full-access instead.
-    sandbox_mode: workspace-write
-    timeout_seconds: 900            # per-run wall clock before the run is failed
-    # Share of the ChatGPT weekly Codex budget Chronicle may consume before it
-    # yields. At/over this, background recording falls back to the direct (metered
-    # API) executor so the remainder stays available for interactive Codex use.
-    # Read live from `account/rateLimits/read`; null disables the check. An
-    # unreadable quota fails open (the run proceeds).
-    max_used_percent: 80
-    # Which metered bucket to check. Models meter against different buckets — e.g.
-    # `codex` vs `codex_bengalfox` (GPT-5.3-Codex-Spark) — so set this when `model`
-    # above draws on a non-default bucket. Empty uses the account's default view.
-    limit_id: ""
+  # Writing and retrieval are independent so a deployment can, for example, use Pi
+  # with a local model for ingestion and the lightweight direct loop for searches.
+  # Recovery is explicit. The default retries once through `direct`; `pi`, `codex`,
+  # or null can be selected instead. When direct is both primary and recovery, that
+  # recovery attempt uses defaults.fallback_llm.
+  agents:
+    write:
+      backend: direct
+      recovery_backend: direct
+    search:
+      backend: direct
+  # Backend definitions are shared by the write/search selectors above. `direct`
+  # uses the model resolved by the corresponding llm_operations entry.
+  backends:
+    direct: {}
+    codex:
+      model: "gpt-5.6-terra"        # Codex model used for vault writes
+      reasoning_effort: low         # keep routine ingestion economical; raise for quality evals
+      # codex --sandbox. workspace-write (writes confined to the vault dir) needs
+      # bubblewrap, which cannot run nested inside the rootless-podman containers —
+      # there the container is the isolation boundary and the wizard sets
+      # danger-full-access instead.
+      sandbox_mode: workspace-write
+      timeout_seconds: 900          # per-run wall clock before the run is failed
+      # Share of the ChatGPT weekly Codex budget Chronicle may consume before it
+      # yields. At/over this, background recording recovers through the direct
+      # backend so the remainder stays available for interactive Codex use.
+      # Read live from `account/rateLimits/read`; null disables the check. An
+      # unreadable quota fails open (the run proceeds).
+      max_used_percent: 80
+      # Which metered bucket to check. Models meter against different buckets — e.g.
+      # `codex` vs `codex_bengalfox` (GPT-5.3-Codex-Spark) — so set this when `model`
+      # above draws on a non-default bucket. Empty uses the account's default view.
+      limit_id: ""
+    pi:
+      # Chronicle model-registry entry. The adapter resolves its provider, upstream
+      # model id, base URL, and API key, then writes an isolated Pi models.json.
+      model: qwen36-llm
+      timeout_seconds: 900
+      context_window: 65536
+      # Keep most of the window for Pi's system prompt, tool schemas, transcript,
+      # and multi-round tool results. The local Qwen setup serves this 64K profile.
+      max_tokens: 4096
+      thinking: off
   extraction:
     enabled: true
     prompt: |
@@ -682,12 +705,17 @@ llm_operations:
     temperature: 0.1
     max_tokens: 2000
     response_format: json
-  # Vault memory agent (tool-calling loop that writes notes). Reasoning models
-  # spend completion tokens on reasoning before emitting any tool call or text,
-  # so the budget must cover reasoning + a full note body — too small a cap
-  # returns an empty message (finish_reason=length) and no vault writes.
-  memory_agent:
-    reasoning_effort: low
+  # Vault write agent. Reasoning models spend completion tokens before emitting a
+  # tool call or note body, so this budget must cover both. Keep thinking disabled
+  # by default: the validated Qwen profile ran with thinking disabled, while `none`
+  # normalizes safely to the lowest supported effort for OpenAI reasoning models.
+  memory_write:
+    reasoning_effort: none
+    max_tokens: 8000
+  # Vault retrieval agent. This is separate so reads can use a cheaper/faster model
+  # or a different agent backend without changing ingestion.
+  memory_search:
+    reasoning_effort: none
     max_tokens: 8000
   title_summary:
     temperature: 0.3

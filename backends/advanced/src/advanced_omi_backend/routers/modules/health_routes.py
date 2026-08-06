@@ -576,6 +576,12 @@ async def readiness_check():
         )
         if not fleet["healthy"]:
             raise RuntimeError(fleet.get("detail") or "Worker fleet unavailable")
+        memory_service = get_memory_service()
+        memory_ready = await asyncio.wait_for(
+            memory_service.test_connection(), timeout=2.0
+        )
+        if not memory_ready:
+            raise RuntimeError("Memory service configuration is unavailable")
         return JSONResponse(
             content={"status": "ready", "timestamp": int(time.time())}, status_code=200
         )

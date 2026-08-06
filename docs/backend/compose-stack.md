@@ -28,6 +28,23 @@ activates the right profiles. See [init-system.md](../init-system.md) and
 The stack joins the external `chronicle-network` bridge so other Chronicle compose
 projects (speaker recognition, ASR, wake word) can reach it by container name.
 
+## Local llama.cpp network boundary
+
+`extras/llm-services` publishes its host convenience ports on `127.0.0.1` by
+default. The backend and workers do not use those published ports: both compose
+projects join `chronicle-network`, so the in-container endpoints are
+`http://llama-cpp-llm:8080/v1` and `http://llama-cpp-embed:8080/v1`. This keeps the
+unauthenticated llama.cpp API off LAN/public interfaces while preserving Pi, Direct,
+and embedding access.
+
+`LLM_BIND_HOST` and `EMBED_BIND_HOST` are explicit escape hatches for a deployment
+that genuinely needs host-interface publication. Any non-loopback bind must also set
+`LLAMA_API_KEY` to the same value in `extras/llm-services/.env` and
+`backends/advanced/.env`; the shipped model definitions forward that key to the
+OpenAI-compatible client. Do not persist a `100.x` Tailnet address as a bind target:
+it can change. Tailscale remains the authenticated ingress to Chronicle itself, not
+to the raw model server.
+
 ## The shared backend image
 
 `chronicle-backend`, `workers`, and `annotation-cron` are the *same image* under the
@@ -37,7 +54,10 @@ identical — in particular `CHRONICLE_BUILD_VERSION`, which `services.py` expor
 reports from `/version`. A mismatch means whichever service builds last wins, and the
 reported version silently belongs to another build.
 
-All three build the `prod` stage, which omits test dependencies.
+All three build the `prod` stage, which omits test dependencies. The shared image also
+ships both optional CLI agent backends: the pinned Codex binary and Pi 0.83.0 with its
+compatible Node 22.19.0 runtime. The Dockerfile installs Pi once in a fetcher stage and
+copies the same installation into the `prod` and `dev` targets.
 
 ## Shared mounts
 
@@ -51,9 +71,14 @@ The three backend containers mount the same set:
 | `../../discovery.py` | service-discovery module (read-only) |
 | `./data`, `./data/audio_chunks`, `./data/debug_dir` | audio, vault, and debug artifacts on the host |
 | `./benchmark` (backend only) | LongMemEval benchmark harness |
-| `${CODEX_HOME_DIR:-./data/codex-home} → /codex-home` | Codex CLI auth for the optional codex memory-agent executor; the wizard points it at the host's `~/.codex`, and it is read-write because Codex rotates its tokens |
+| `${CODEX_HOME_DIR:-./data/codex-home} → /codex-home` | Codex CLI auth when `memory.agents.write.backend: codex`; the wizard points it at the host's `~/.codex`, and it is read-write because Codex rotates its tokens |
 
 Dependency or Dockerfile changes still require a rebuild.
+
+Pi does not need a corresponding mount. When a write or search agent selects `pi`,
+the backend resolves the configured Chronicle model entry and creates isolated Pi
+configuration for that invocation. In particular, selecting a local
+OpenAI-compatible model does not require a Pi login or a persistent `~/.pi` volume.
 
 ### The Tailscale socket directory
 

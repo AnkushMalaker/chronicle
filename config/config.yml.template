@@ -416,6 +416,32 @@ models:
 memory:
   provider: chronicle
   timeout_seconds: 1200
+  agents:
+    write:
+      # direct | codex | pi
+      backend: direct
+      # One explicit agent recovery attempt; null skips directly to the
+      # deterministic source-preserving conversation note.
+      recovery_backend: direct
+    search:
+      # direct | pi
+      backend: direct
+  backends:
+    direct: {}
+    codex:
+      model: gpt-5.6-terra
+      reasoning_effort: low
+      sandbox_mode: workspace-write
+      timeout_seconds: 900
+      max_used_percent: 80
+      limit_id: ''
+    pi:
+      # Chronicle model-registry name, not the upstream API model string.
+      model: qwen36-llm
+      timeout_seconds: 900
+      context_window: 65536
+      max_tokens: 4096
+      thinking: off
   extraction:
     enabled: true
     prompt: 'Extract important information from this conversation and return a JSON

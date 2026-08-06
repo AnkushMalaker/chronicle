@@ -43,6 +43,7 @@ get_existing_stream_provider = _wizard.get_existing_stream_provider
 select_llm_provider = _wizard.select_llm_provider
 select_setup_type = _wizard.select_setup_type
 derive_langfuse_public_url = _wizard.derive_langfuse_public_url
+infer_source_mode = _wizard._infer_source_mode
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +147,18 @@ def test_select_llm_provider_defaults_to_ollama_for_local_llm():
     config = {"defaults": {"llm": "local-llm"}}
     result = _select_llm_with_eof(config)
     assert result == "ollama"
+
+
+def test_select_llm_provider_treats_qwen_as_managed_llamacpp():
+    """Qwen's concrete registry alias remains llama.cpp on wizard reruns."""
+    config = {"defaults": {"llm": "qwen36-llm"}}
+    result = _select_llm_with_eof(config)
+    assert result == "llamacpp"
+
+
+def test_local_llamacpp_uses_private_container_dns_on_rerun():
+    assert _wizard.LOCAL_LLAMACPP_BASE_URL == "http://llama-cpp-llm:8080/v1"
+    assert infer_source_mode(_wizard.LOCAL_LLAMACPP_BASE_URL) == "local"
 
 
 def test_select_llm_provider_none_config():

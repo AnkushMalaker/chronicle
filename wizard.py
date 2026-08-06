@@ -70,6 +70,7 @@ def get_existing_stream_provider(config_yml: dict):
 # directory. Each init.py locates its own files from __file__, so running from the
 # root does not change which .env a service writes.
 REPO_ROOT = Path(__file__).resolve().parent
+LOCAL_LLAMACPP_BASE_URL = "http://llama-cpp-llm:8080/v1"
 
 
 def setup_command(script_path: str) -> list:
@@ -889,6 +890,7 @@ def _infer_source_mode(current):
             "127.0.0.1",
             "172.17.0.1",
             "speaker-service",
+            "llama-cpp-llm",
         )
     ):
         return "local"
@@ -1427,6 +1429,7 @@ def select_llm_provider(
         "openai-llm": "1",
         "local-llm": "2",
         "llamacpp-llm": "3",
+        "qwen36-llm": "3",
     }
     default_choice = llm_to_choice.get(existing_llm, "1")
 
@@ -1975,7 +1978,9 @@ def main():
         )
         llm_remote = src["mode"] != "local"
         if src["mode"] == "local":
-            llm_base_url = "http://host.docker.internal:8083/v1"
+            # Both compose projects join the external chronicle-network. Use
+            # container DNS so llama.cpp's published host port can stay loopback-only.
+            llm_base_url = LOCAL_LLAMACPP_BASE_URL
         elif src["mode"] in ("own", "tailnet"):
             # Discovered/picked URLs are bare host:port → ensure the OpenAI /v1 path.
             u = src["url"].rstrip("/")

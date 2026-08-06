@@ -1,3 +1,7 @@
+# Pi 0.83 requires Node >=22.19. Keep the runtime version explicit instead of
+# inheriting whichever Node happens to be present in a Python base image.
+ARG NODE_VERSION=22.19.0
+
 # ============================================
 # Builder stage - install dependencies
 # ============================================
@@ -43,11 +47,11 @@ RUN git clone ${NOTESMD_REPO} /src \
 
 
 # ============================================
-# Codex CLI fetcher - optional memory-agent executor
+# Codex CLI fetcher - optional memory-agent backend
 # ============================================
-# Static musl binary used when config.yml sets memory.agent_executor: codex (vault
-# recording on a ChatGPT subscription). Auth is NOT baked in — it comes from the
-# CODEX_HOME volume mount (see docker-compose.yml / the setup wizard).
+# Static musl binary used when the memory write agent selects the Codex backend
+# (ChatGPT subscription). Auth is NOT baked in — it comes from the CODEX_HOME volume
+# mount (see docker-compose.yml / the setup wizard). Codex is not a search backend.
 FROM debian:bookworm-slim AS codex-fetcher
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -60,6 +64,19 @@ RUN case "${TARGETARCH:-amd64}" in \
     && curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${triple}.tar.gz" \
        | tar -xz -C /tmp \
     && install -m 0755 "/tmp/codex-${triple}" /usr/local/bin/codex
+
+
+# ============================================
+# Pi CLI fetcher - local/OpenAI-compatible memory-agent backend
+# ============================================
+# Install once, then copy only Node and the self-contained global package into both
+# final stages. Pi 0.83.0 declares Node >=22.19.0. It does not need an auth volume for
+# Chronicle: the runtime writes an ephemeral models.json for the resolved model.
+FROM node:${NODE_VERSION}-bookworm-slim AS pi-fetcher
+ARG PI_VERSION=0.83.0
+RUN npm install --global --prefix /opt/pi --omit=dev --ignore-scripts --no-audit --no-fund \
+      "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    && npm cache clean --force
 
 
 # ============================================
@@ -79,8 +96,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # notesmd-cli on PATH so the memory agent auto-detects it (shutil.which).
 COPY --from=notesmd-builder /out/notesmd-cli /usr/local/bin/notesmd-cli
-# Codex CLI on PATH for the optional codex memory-agent executor.
+# Codex CLI on PATH for the optional Codex memory-write backend.
 COPY --from=codex-fetcher /usr/local/bin/codex /usr/local/bin/codex
+# Pi CLI and its compatible Node runtime. npm itself is not needed at runtime.
+COPY --from=pi-fetcher /usr/local/bin/node /usr/local/bin/node
+COPY --from=pi-fetcher /usr/local/LICENSE /usr/local/LICENSE.node
+COPY --from=pi-fetcher /opt/pi /opt/pi
 
 WORKDIR /app
 
@@ -89,7 +110,7 @@ COPY --from=builder /app/.venv /app/.venv
 
 # Source layout + venv defaults for runtime shells and commands
 ENV VIRTUAL_ENV=/app/.venv
-ENV PATH="/app/.venv/bin:${PATH}"
+ENV PATH="/app/.venv/bin:/opt/pi/bin:${PATH}"
 ENV PYTHONPATH=/app/src:/app
 
 # Code version baked at build time (git describe locally via services.py, the
@@ -129,8 +150,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # notesmd-cli on PATH so the memory agent auto-detects it (shutil.which).
 COPY --from=notesmd-builder /out/notesmd-cli /usr/local/bin/notesmd-cli
-# Codex CLI on PATH for the optional codex memory-agent executor.
+# Codex CLI on PATH for the optional Codex memory-write backend.
 COPY --from=codex-fetcher /usr/local/bin/codex /usr/local/bin/codex
+# Pi CLI and its compatible Node runtime. npm itself is not needed at runtime.
+COPY --from=pi-fetcher /usr/local/bin/node /usr/local/bin/node
+COPY --from=pi-fetcher /usr/local/LICENSE /usr/local/LICENSE.node
+COPY --from=pi-fetcher /opt/pi /opt/pi
 
 WORKDIR /app
 
@@ -142,7 +167,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     rm /bin/uv /bin/uvx
 
 ENV VIRTUAL_ENV=/app/.venv
-ENV PATH="/app/.venv/bin:${PATH}"
+ENV PATH="/app/.venv/bin:/opt/pi/bin:${PATH}"
 ENV PYTHONPATH=/app/src:/app
 
 # Copy application code

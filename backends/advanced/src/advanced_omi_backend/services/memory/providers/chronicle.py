@@ -28,10 +28,23 @@ from ..conversation_note import (
     canonicalize_conversation_note,
     write_source_fallback_conversation_note,
 )
+from ..telemetry import (
+    memory_attempt,
+    memory_span,
+    set_observation_io,
+    set_safe_span_attributes,
+    text_payload,
+)
 from ..vault_manager import ConvDocVaultManager
 from ..vault_scaffold import is_scaffold_note, seed_vault_scaffold
 
 memory_logger = logging.getLogger("memory_service")
+
+
+def _safe_exception_diagnostic(exc: BaseException) -> str:
+    """Return a useful diagnostic without persisting arbitrary provider text."""
+
+    return type(exc).__name__
 
 
 class MemoryService(MemoryServiceBase):
@@ -54,33 +67,92 @@ class MemoryService(MemoryServiceBase):
     async def initialize(self) -> None:
         if self._initialized:
             return
+        self._validate_configured_backends()
         # Vault-only: the agent generates + writes notes via its own tool-calling
         # LLM, and search greps the vault. No external index to connect to.
         self._initialized = True
         memory_logger.info("✅ Chronicle memory service initialized (agentic vault).")
 
-    def _agent_class(self):
-        """The write-agent executor: the built-in tool loop, or the Codex CLI.
+    def _validate_configured_backends(self) -> None:
+        """Resolve executors and model contracts before reporting readiness."""
+        # A missing Pi/Codex runtime must not silently turn an experiment into a
+        # different backend. Recovery remains available for a runtime that disappears
+        # after this check, inside `_run_agent_with_note_guarantee`.
+        write_backend = (
+            getattr(self.config, "write_agent_backend", "direct") or "direct"
+        ).lower()
+        write_class = self._write_agent_class(write_backend)
+        if write_backend == "pi":
+            from ..agent.pi_agent import validate_pi_executor_config
 
-        Falls back to the direct agent (with a warning) when Codex is configured but
-        the CLI/auth is unavailable, so memory jobs keep flowing.
+            validate_pi_executor_config("memory_write")
+        elif write_backend == "codex":
+            from ..agent.codex_agent import validate_codex_executor_config
+
+            validate_codex_executor_config()
+
+        recovery_backend = getattr(self.config, "write_recovery_backend", "direct")
+        if recovery_backend:
+            recovery_backend = recovery_backend.lower()
+            recovery_class = self._write_agent_class(recovery_backend)
+            if recovery_backend == "pi":
+                from ..agent.pi_agent import validate_pi_executor_config
+
+                validate_pi_executor_config(
+                    "memory_write", force_fallback=recovery_class is write_class
+                )
+            elif recovery_backend == "codex":
+                from ..agent.codex_agent import validate_codex_executor_config
+
+                validate_codex_executor_config()
+
+        search_backend = (
+            getattr(self.config, "search_agent_backend", "direct") or "direct"
+        ).lower()
+        if search_backend == "pi":
+            from ..agent.pi_agent import validate_pi_executor_config
+
+            validate_pi_executor_config("memory_search")
+        elif search_backend != "direct":
+            raise ValueError(f"Unsupported memory search backend: {search_backend}")
+
+    def _write_agent_class(self, backend: Optional[str] = None):
+        """Resolve one configured write backend to its agent implementation.
+
+        Configuration errors are deliberately loud. The explicitly configured
+        recovery backend handles failed note creation; availability is not a reason
+        to change the primary backend implicitly.
         """
         # Lazy import: circular dependency (agent → memory_agent → llm_client →
         # services.memory.config → service_factory → this module)
         from ..agent import MemoryAgent
 
-        if (getattr(self.config, "agent_executor", "direct") or "direct") == "codex":
+        name = (
+            backend or getattr(self.config, "write_agent_backend", "direct") or "direct"
+        ).lower()
+        if name == "direct":
+            return MemoryAgent
+        if name == "codex":
             from ..agent.codex_agent import CodexMemoryAgent, codex_executor_available
 
             available, detail = codex_executor_available()
             if available:
                 return CodexMemoryAgent
-            memory_logger.warning(
-                "memory.agent_executor is 'codex' but the executor is unavailable "
-                "(%s) — using the direct LLM agent",
-                detail,
+            raise RuntimeError(
+                "memory write backend 'codex' is unavailable: " f"{detail}"
             )
-        return MemoryAgent
+        if name == "pi":
+            from ..agent.pi_agent import PiMemoryAgent, pi_executor_available
+
+            available, detail = pi_executor_available()
+            if available:
+                return PiMemoryAgent
+            raise RuntimeError("memory write backend 'pi' is unavailable: " f"{detail}")
+        raise ValueError(f"Unsupported memory write backend: {name}")
+
+    def _recovery_agent_class(self):
+        backend = getattr(self.config, "write_recovery_backend", "direct")
+        return self._write_agent_class(backend) if backend else None
 
     # =========================================================================
     # ADD MEMORY
@@ -100,15 +172,58 @@ class MemoryService(MemoryServiceBase):
         source_duration_minutes: Optional[float] = None,
         source_title: Optional[str] = None,
     ) -> Tuple[bool, List[str]]:
-        await self._ensure_initialized()
-        return await self._add_memory_agent(
-            transcript,
-            source_id,
-            user_id,
-            source_date=source_date,
-            source_duration_minutes=source_duration_minutes,
-            source_title=source_title,
-        )
+        write_backend = (
+            getattr(self.config, "write_agent_backend", "direct") or "direct"
+        ).lower()
+        recovery_backend = getattr(self.config, "write_recovery_backend", None)
+        with memory_span(
+            "memory_write",
+            attributes={
+                "openinference.span.kind": "CHAIN",
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.conversation.id": source_id,
+                "session.id": source_id,
+                "langfuse.session.id": source_id,
+                "chronicle.user_id": str(user_id),
+                "langfuse.user.id": str(user_id),
+                "chronicle.client_id": client_id,
+                "chronicle.pipeline.stage": "memory_write",
+                "chronicle.memory.operation": "write",
+                "chronicle.memory.primary_backend": write_backend,
+                "chronicle.memory.recovery_backend": recovery_backend or "none",
+                "chronicle.memory.transcript_chars": len(transcript or ""),
+            },
+        ) as span:
+            set_observation_io(
+                span,
+                input={
+                    "conversation_id": source_id,
+                    "transcript": text_payload(transcript),
+                    "title": text_payload(source_title),
+                    "duration_minutes": source_duration_minutes,
+                },
+            )
+            await self._ensure_initialized()
+            success, touched = await self._add_memory_agent(
+                transcript,
+                source_id,
+                user_id,
+                source_date=source_date,
+                source_duration_minutes=source_duration_minutes,
+                source_title=source_title,
+            )
+            set_safe_span_attributes(
+                span,
+                {
+                    "chronicle.memory.success": success,
+                    "chronicle.memory.touched_count": len(touched),
+                },
+            )
+            set_observation_io(
+                span,
+                output={"success": success, "touched_count": len(touched)},
+            )
+            return success, touched
 
     async def _add_memory_agent(
         self,
@@ -139,7 +254,7 @@ class MemoryService(MemoryServiceBase):
         seed_vault_scaffold(user_root)  # idempotent: .base + hub notes
         existing_before = self._vault_note_set(user_root)
         result = await self._run_agent_with_note_guarantee(
-            self._agent_class(),
+            None,
             user_root,
             transcript,
             source_id,
@@ -176,6 +291,17 @@ class MemoryService(MemoryServiceBase):
                 source_id,
             )
             return False, result.touched
+        if result.truncated or result.stalled:
+            reason = (
+                "truncated LLM response" if result.truncated else "stalled retry loop"
+            )
+            memory_logger.error(
+                "❌ add_memory(agent) %s: source and partial mutations were preserved, "
+                "but no agent completed deliberately (%s)",
+                source_id,
+                reason,
+            )
+            return False, result.touched
         memory_logger.info(
             "✅ add_memory(agent) %s: touched=%d rounds=%d tools=%d errors=%d (%.2fs) — %s",
             source_id,
@@ -200,77 +326,187 @@ class MemoryService(MemoryServiceBase):
         source_duration_minutes: Optional[float] = None,
         source_title: Optional[str] = None,
     ):
-        """Retry when the exact conversation note is absent or fails validation."""
+        """Recover when the primary fails or its conversation note is invalid."""
         trusted_date = source_date or datetime.now(timezone.utc).isoformat()
-        result = await agent_class(user_root).run(
-            transcript,
-            source_id,
-            date=trusted_date,
-            duration_minutes=source_duration_minutes,
-            title=source_title,
-            guidance=guidance,
-        )
+        before_primary = self._vault_note_set(user_root)
+        with memory_attempt("primary"):
+            try:
+                # Resolve inside the guarantee so a runtime that disappears after
+                # service initialization (binary/auth removed, invalidated mount, etc.)
+                # still takes the explicitly configured recovery path.
+                if agent_class is None:
+                    agent_class = self._write_agent_class()
+                result = await agent_class(user_root).run(
+                    transcript,
+                    source_id,
+                    date=trusted_date,
+                    duration_minutes=source_duration_minutes,
+                    title=source_title,
+                    guidance=guidance,
+                )
+            except Exception as exc:  # noqa: BLE001 - recovery backend handles it
+                # Lazy import: circular dependency (agent → memory_agent →
+                # llm_client → back into providers), same as _write_agent_class.
+                from ..agent.memory_agent import MemoryAgentResult
+
+                diagnostic = _safe_exception_diagnostic(exc)
+                memory_logger.error(
+                    "Primary memory write backend failed for %s (%s); trying the "
+                    "configured recovery path",
+                    source_id,
+                    diagnostic,
+                )
+                after_primary = self._vault_note_set(user_root)
+                touched = sorted(
+                    path
+                    for path, content in after_primary.items()
+                    if before_primary.get(path) != content
+                )
+                removed = [
+                    {"old_path": path, "new_path": "", "before": content}
+                    for path, content in sorted(before_primary.items())
+                    if path not in after_primary
+                ]
+                result = MemoryAgentResult(
+                    conversation_id=source_id,
+                    rounds=0,
+                    touched=touched,
+                    summary="",
+                    removed=removed,
+                    errors=[f"primary write backend failed ({diagnostic})"],
+                    truncated=True,
+                )
         note_name = Path(source_id).name
         expected_note = user_root / "Conversations" / f"{note_name}.md"
-        if self._canonicalize_conversation_note(
+        primary_note_valid = self._canonicalize_conversation_note(
             expected_note,
             source_id,
             trusted_date,
             source_duration_minutes,
             source_title,
-        ):
+        )
+        primary_incomplete = bool(result.truncated or result.stalled)
+        if primary_note_valid and not primary_incomplete:
+            result.touched = list(
+                dict.fromkeys((*result.touched, f"Conversations/{note_name}.md"))
+            )
             return result
 
+        recovery_resolution_error = None
+        with memory_attempt("recovery"):
+            try:
+                recovery_class = self._recovery_agent_class()
+            except Exception as exc:  # noqa: BLE001 - deterministic fallback guaranteed
+                recovery_class = None
+                recovery_resolution_error = _safe_exception_diagnostic(exc)
+                memory_logger.error(
+                    "Memory recovery backend could not be resolved for %s (%s); "
+                    "writing the source-preserving conversation note",
+                    source_id,
+                    recovery_resolution_error,
+                )
+        failure_description = (
+            "stopped before deliberate completion"
+            if primary_incomplete and primary_note_valid
+            else f"did not create a valid Conversations/{note_name}.md note"
+        )
         memory_logger.warning(
-            "Memory agent did not create Conversations/%s.md; retrying with the "
-            "configured fallback LLM",
-            note_name,
+            "Memory write backend %s%s",
+            failure_description,
+            (
+                "; trying the configured recovery backend"
+                if recovery_class
+                else "; using the source-preserving fallback path"
+            ),
         )
-        recovery_guidance = (f"{guidance}\n\n" if guidance else "") + (
-            "RECOVERY REQUIREMENT: the previous attempt did not create the required "
-            f"conversation note. You MUST write it at exactly Conversations/{note_name}.md "
-            f"using conversation_id {source_id}. Do not alter or abbreviate the ID. "
-            "The Summary and Key Facts sections MUST contain substantive text. For a "
-            "short or low-information transcript, summarize the exact utterance rather "
-            "than leaving either section blank."
-        )
+        if primary_incomplete and primary_note_valid:
+            recovery_requirement = (
+                "RECOVERY REQUIREMENT: the previous attempt stopped before deliberate "
+                "completion. Inspect the existing conversation and linked notes, then "
+                "finish recording any transcript facts it missed. Do not duplicate facts."
+            )
+        else:
+            recovery_requirement = (
+                "RECOVERY REQUIREMENT: the previous attempt did not create the required "
+                f"conversation note. You MUST write it at exactly "
+                f"Conversations/{note_name}.md using conversation_id {source_id}. Do "
+                "not alter or abbreviate the ID. The Summary and Key Facts sections "
+                "MUST contain substantive text. For a short or low-information "
+                "transcript, summarize the exact utterance rather than leaving either "
+                "section blank."
+            )
+        recovery_guidance = (
+            f"{guidance}\n\n" if guidance else ""
+        ) + recovery_requirement
         # The recovery pass is best-effort: it may fail outright (no
         # defaults.fallback_llm configured, fallback unreachable, ...). The note
         # guarantee must survive that — degrade to an empty recovery result and
         # let the source-preserving fallback note below do its job, rather than
         # failing the whole memory job with nothing recorded.
-        try:
-            recovery = await agent_class(user_root, force_fallback=True).run(
-                transcript,
-                source_id,
-                date=trusted_date,
-                duration_minutes=source_duration_minutes,
-                title=source_title,
-                guidance=recovery_guidance,
-            )
-        except Exception as exc:  # noqa: BLE001 - degrade, never lose the note
-            # Lazy import: circular dependency (agent → memory_agent → llm_client →
-            # back into providers), same as _agent_class above.
-            from ..agent.memory_agent import MemoryAgentResult
+        with memory_attempt("recovery"):
+            if recovery_class is None:
+                from ..agent.memory_agent import MemoryAgentResult
 
-            memory_logger.error(
-                "Memory-agent recovery pass failed for %s (%s); falling back to "
-                "the source-preserving conversation note",
-                source_id,
-                exc,
-            )
-            recovery = MemoryAgentResult(
-                conversation_id=source_id,
-                rounds=0,
-                touched=[],
-                summary="",
-                errors=[f"recovery pass failed: {exc}"],
-            )
+                recovery = MemoryAgentResult(
+                    conversation_id=source_id,
+                    rounds=0,
+                    touched=[],
+                    summary="",
+                    errors=(
+                        [f"recovery backend unavailable: {recovery_resolution_error}"]
+                        if recovery_resolution_error is not None
+                        else []
+                    ),
+                )
+            else:
+                try:
+                    recovery = await recovery_class(
+                        user_root,
+                        # Reusing the direct runtime means retrying through its configured
+                        # fallback model. Switching runtimes already supplies an independent
+                        # recovery path, so use that runtime's primary model.
+                        force_fallback=recovery_class is agent_class,
+                    ).run(
+                        transcript,
+                        source_id,
+                        date=trusted_date,
+                        duration_minutes=source_duration_minutes,
+                        title=source_title,
+                        guidance=recovery_guidance,
+                    )
+                except Exception as exc:  # noqa: BLE001 - never lose the note
+                    # Lazy import: circular dependency (agent → memory_agent →
+                    # llm_client → providers), same as _write_agent_class above.
+                    from ..agent.memory_agent import MemoryAgentResult
+
+                    diagnostic = _safe_exception_diagnostic(exc)
+                    memory_logger.error(
+                        "Memory-agent recovery pass failed for %s (%s); falling back "
+                        "to the source-preserving conversation note",
+                        source_id,
+                        diagnostic,
+                    )
+                    recovery = MemoryAgentResult(
+                        conversation_id=source_id,
+                        rounds=0,
+                        touched=[],
+                        summary="",
+                        errors=[f"recovery pass failed ({diagnostic})"],
+                        truncated=True,
+                    )
         recovery.rounds += result.rounds
         recovery.tool_calls += result.tool_calls
         recovery.touched = list(dict.fromkeys((*result.touched, *recovery.touched)))
         recovery.removed = [*result.removed, *recovery.removed]
         recovery.errors = [*result.errors, *recovery.errors]
+        if recovery_class is None:
+            # No agent completed the interrupted work. The deterministic note path
+            # preserves the source but must not make an incomplete primary look like
+            # a deliberate semantic completion.
+            recovery.truncated = recovery.truncated or result.truncated
+            recovery.stalled = recovery.stalled or result.stalled
+        for key, value in result.usage.items():
+            recovery.usage[key] = recovery.usage.get(key, 0) + value
         recovery_valid = self._canonicalize_conversation_note(
             expected_note,
             source_id,
@@ -278,20 +514,50 @@ class MemoryService(MemoryServiceBase):
             source_duration_minutes,
             source_title,
         )
-        if not recovery_valid:
+        recovery_incomplete = bool(recovery.truncated or recovery.stalled)
+        if not recovery_valid or recovery_incomplete:
             memory_logger.warning(
-                "Both memory-agent attempts produced an invalid note for %s; "
-                "writing a source-preserving fallback",
+                "Memory-agent attempts did not produce a complete valid note for %s; "
+                "writing the deterministic source-preserving fallback",
                 source_id,
             )
-            write_source_fallback_conversation_note(
-                expected_note,
-                transcript=transcript,
-                conversation_id=source_id,
-                date=trusted_date,
-                duration_minutes=source_duration_minutes,
-                title=source_title,
-            )
+            with memory_attempt("fallback"):
+                with memory_span(
+                    "memory_write.source_fallback",
+                    attributes={
+                        "openinference.span.kind": "CHAIN",
+                        "chronicle.memory.operation": "write_source_fallback",
+                        "chronicle.memory.attempt": "fallback",
+                        "gen_ai.conversation.id": source_id,
+                    },
+                ) as span:
+                    set_observation_io(
+                        span,
+                        input={
+                            "conversation_id": source_id,
+                            "transcript": text_payload(transcript),
+                            "title": text_payload(source_title),
+                        },
+                    )
+                    write_source_fallback_conversation_note(
+                        expected_note,
+                        transcript=transcript,
+                        conversation_id=source_id,
+                        date=trusted_date,
+                        duration_minutes=source_duration_minutes,
+                        title=source_title,
+                    )
+                    set_safe_span_attributes(
+                        span,
+                        {
+                            "chronicle.memory.success": True,
+                            "chronicle.memory.touched_count": 1,
+                        },
+                    )
+                    set_observation_io(
+                        span,
+                        output={"written": True, "touched_count": 1},
+                    )
             recovery.touched = list(
                 dict.fromkeys((*recovery.touched, f"Conversations/{note_name}.md"))
             )
@@ -356,7 +622,7 @@ class MemoryService(MemoryServiceBase):
             conv_note.unlink()
 
         result = await self._run_agent_with_note_guarantee(
-            self._agent_class(),
+            None,
             user_root,
             transcript,
             source_id,
@@ -384,6 +650,17 @@ class MemoryService(MemoryServiceBase):
             memory_logger.error(
                 "❌ reprocess_memory(agent) %s: required conversation note was not created",
                 source_id,
+            )
+            return False, result.touched
+        if result.truncated or result.stalled:
+            reason = (
+                "truncated LLM response" if result.truncated else "stalled retry loop"
+            )
+            memory_logger.error(
+                "❌ reprocess_memory(agent) %s: source and partial mutations were "
+                "preserved, but no agent completed deliberately (%s)",
+                source_id,
+                reason,
             )
             return False, result.touched
         memory_logger.info(
@@ -532,11 +809,36 @@ class MemoryService(MemoryServiceBase):
         one MemoryEntry per note the agent read (capped), with the synthesised answer
         as the top entry so chat gets both the conclusion and the supporting notes.
         """
-        # Lazy import: circular dependency (agent → memory_agent → llm_client →
-        # services.memory.config → service_factory → this module)
-        from ..agent import search_vault
+        from ..agent.memory_agent import is_search_failure_answer
 
-        result = await search_vault(query, self.vault.user_root(user_id))
+        result, backend = await self._run_search_agent(query, user_id, limit)
+
+        if result.errors:
+            memory_logger.warning(
+                "Vault search backend=%s completed with %d error(s) (user: %s)",
+                backend,
+                len(result.errors),
+                user_id,
+            )
+        if result.warnings:
+            memory_logger.info(
+                "Vault search backend=%s completed with %d warning(s) (user: %s)",
+                backend,
+                len(result.warnings),
+                user_id,
+            )
+
+        # Terminal sentinels are internal audit state, not user memory. Returning one
+        # as a score-1 answer (or returning notes from an empty synthesis) contaminates
+        # chat context with a failed search. Explicit evidence-based abstentions remain
+        # ordinary nonempty answers and still flow through.
+        if not result.answer.strip() or is_search_failure_answer(result.answer):
+            memory_logger.warning(
+                "Vault search backend=%s returned no usable answer (user: %s)",
+                backend,
+                user_id,
+            )
+            return []
 
         results: List[MemoryEntry] = []
         if result.answer:
@@ -570,9 +872,92 @@ class MemoryService(MemoryServiceBase):
             )
         memory_logger.info(
             f"🔍 vault search: '{query}' -> {len(result.notes)} note(s) read, "
-            f"{result.rounds} round(s) (user: {user_id})"
+            f"{result.rounds} round(s), backend={backend} (user: {user_id})"
         )
         return results[:limit]
+
+    async def _run_search_agent(self, query: str, user_id: str, limit: int):
+        """Run and trace one configured retrieval backend without exposing note text."""
+        from ..agent.memory_agent import is_search_failure_answer
+
+        backend = (
+            getattr(self.config, "search_agent_backend", "direct") or "direct"
+        ).lower()
+        with memory_span(
+            "memory_search",
+            attributes={
+                "openinference.span.kind": "CHAIN",
+                "gen_ai.operation.name": "invoke_agent",
+                "chronicle.pipeline.stage": "memory_search",
+                "chronicle.memory.operation": "search",
+                "chronicle.memory.backend": backend,
+                "chronicle.memory.limit": limit,
+                "chronicle.user_id": str(user_id),
+                "langfuse.user.id": str(user_id),
+                "chronicle.memory.query_chars": len(query),
+            },
+        ) as span:
+            set_observation_io(
+                span,
+                input={"query": text_payload(query), "limit": limit},
+            )
+            if backend == "direct":
+                # Lazy import: circular dependency (agent → memory_agent →
+                # llm_client → services.memory.config → service_factory → here)
+                from ..agent import search_vault
+
+                result = await search_vault(
+                    query,
+                    self.vault.user_root(user_id),
+                    operation="memory_search",
+                )
+            elif backend == "pi":
+                from ..agent.pi_agent import search_vault_with_pi
+
+                result = await search_vault_with_pi(
+                    query,
+                    self.vault.user_root(user_id),
+                    operation="memory_search",
+                )
+            else:
+                raise ValueError(f"Unsupported memory search backend: {backend}")
+
+            usable_answer = bool(
+                result.answer.strip()
+            ) and not is_search_failure_answer(result.answer)
+            set_safe_span_attributes(
+                span,
+                {
+                    "chronicle.memory.success": usable_answer and not result.truncated,
+                    "chronicle.memory.usable_answer": usable_answer,
+                    "chronicle.memory.rounds": result.rounds,
+                    "chronicle.memory.tool_calls": result.tool_calls,
+                    "chronicle.memory.notes_read_count": len(result.notes),
+                    "chronicle.memory.error_count": len(result.errors),
+                    "chronicle.memory.warning_count": len(result.warnings),
+                    "chronicle.memory.final_synthesis_used": result.final_synthesis_used,
+                    "chronicle.memory.truncated": result.truncated,
+                    **{
+                        f"chronicle.memory.usage.{key}": value
+                        for key, value in result.usage.items()
+                    },
+                },
+            )
+            set_observation_io(
+                span,
+                output={
+                    "answer": text_payload(result.answer),
+                    "usable_answer": usable_answer,
+                    "rounds": result.rounds,
+                    "tool_calls": result.tool_calls,
+                    "notes_read_count": len(result.notes),
+                    "error_count": len(result.errors),
+                    "warning_count": len(result.warnings),
+                    "final_synthesis_used": result.final_synthesis_used,
+                    "truncated": result.truncated,
+                },
+            )
+            return result, backend
 
     # =========================================================================
     # CRUD
@@ -749,13 +1134,62 @@ class MemoryService(MemoryServiceBase):
         previous_transcript: Optional[str] = None,
     ) -> Tuple[bool, List[str]]:
         """Delete the stale conversation note and re-record from the transcript."""
-        await self._ensure_initialized()
-        return await self._reprocess_memory_agent(
-            transcript, source_id, user_id, transcript_diff
-        )
+        write_backend = (
+            getattr(self.config, "write_agent_backend", "direct") or "direct"
+        ).lower()
+        recovery_backend = getattr(self.config, "write_recovery_backend", None)
+        with memory_span(
+            "memory_write",
+            attributes={
+                "openinference.span.kind": "CHAIN",
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.conversation.id": source_id,
+                "session.id": source_id,
+                "langfuse.session.id": source_id,
+                "chronicle.user_id": str(user_id),
+                "langfuse.user.id": str(user_id),
+                "chronicle.client_id": client_id,
+                "chronicle.pipeline.stage": "memory_write",
+                "chronicle.memory.operation": "reprocess",
+                "chronicle.memory.primary_backend": write_backend,
+                "chronicle.memory.recovery_backend": recovery_backend or "none",
+                "chronicle.memory.transcript_chars": len(transcript or ""),
+                "chronicle.memory.reprocess": True,
+                "chronicle.memory.transcript_diff_count": len(transcript_diff or []),
+            },
+        ) as span:
+            set_observation_io(
+                span,
+                input={
+                    "conversation_id": source_id,
+                    "transcript": text_payload(transcript),
+                    "previous_transcript": text_payload(previous_transcript),
+                    "transcript_diff_count": len(transcript_diff or []),
+                },
+            )
+            await self._ensure_initialized()
+            success, touched = await self._reprocess_memory_agent(
+                transcript, source_id, user_id, transcript_diff
+            )
+            set_safe_span_attributes(
+                span,
+                {
+                    "chronicle.memory.success": success,
+                    "chronicle.memory.touched_count": len(touched),
+                },
+            )
+            set_observation_io(
+                span,
+                output={"success": success, "touched_count": len(touched)},
+            )
+            return success, touched
 
     async def test_connection(self) -> bool:
-        return True  # vault-only: nothing external to probe
+        try:
+            self._validate_configured_backends()
+            return True
+        except (RuntimeError, ValueError):
+            return False
 
     def shutdown(self) -> None:
         self._initialized = False

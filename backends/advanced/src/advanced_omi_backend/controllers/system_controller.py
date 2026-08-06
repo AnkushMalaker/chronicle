@@ -23,6 +23,7 @@ from dotenv import set_key as dotenv_set_key
 from fastapi import HTTPException
 from ruamel.yaml import YAML
 
+from advanced_omi_backend.chat_service import reset_chat_service
 from advanced_omi_backend.client_manager import get_client_manager
 from advanced_omi_backend.config import CleanupSettings, get_cleanup_settings
 from advanced_omi_backend.config import (
@@ -52,7 +53,10 @@ from advanced_omi_backend.model_registry import (
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.observability.otel_setup import is_langfuse_enabled
 from advanced_omi_backend.openai_factory import create_openai_client
-from advanced_omi_backend.services.memory import get_memory_service
+from advanced_omi_backend.services.memory import (
+    get_memory_service,
+    reset_memory_service,
+)
 from advanced_omi_backend.services.plugin_service import (
     _get_plugins_dir,
     discover_plugins,
@@ -1023,6 +1027,257 @@ async def get_speaker_service_status():
 
 # Memory Configuration Management Functions
 
+_MEMORY_WRITE_BACKENDS = {"direct", "codex", "pi"}
+_MEMORY_SEARCH_BACKENDS = {"direct", "pi"}
+_OBSOLETE_MEMORY_ROOT_KEYS = {"agent_executor", "codex", "pi"}
+_CODEX_SANDBOX_MODES = {"read-only", "workspace-write", "danger-full-access"}
+_CODEX_REASONING_EFFORTS = {
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+}
+_PI_THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+_PI_COMPAT_BOOLEAN_FIELDS = {
+    "supportsDeveloperRole",
+    "supportsReasoningEffort",
+    "supportsStore",
+    "supportsStrictMode",
+    "supportsUsageInStreaming",
+}
+_PI_COMPAT_FIELDS = _PI_COMPAT_BOOLEAN_FIELDS | {
+    "maxTokensField",
+    "thinkingFormat",
+}
+_PI_THINKING_FORMATS = {
+    "ant-ling",
+    "chat-template",
+    "deepseek",
+    "openai",
+    "openrouter",
+    "qwen",
+    "qwen-chat-template",
+    "string-thinking",
+    "together",
+    "zai",
+}
+
+
+def _positive_memory_int(value, *, field: str, default: int) -> int:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        raise ValueError(f"{field} must be a positive integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{field} must be a positive integer")
+    return parsed
+
+
+def _validate_memory_mapping(memory_section: dict) -> None:
+    """Validate selectors plus the model-facing Pi contract before saving YAML."""
+    obsolete_keys = sorted(set(memory_section) & _OBSOLETE_MEMORY_ROOT_KEYS)
+    if obsolete_keys:
+        raise ValueError(
+            "Obsolete root memory key(s): "
+            + ", ".join(obsolete_keys)
+            + ". Run the setup wizard or configure memory.agents and "
+            "memory.backends."
+        )
+
+    provider = str(memory_section.get("provider") or "chronicle").lower()
+    if provider != "chronicle":
+        raise ValueError(f"Unsupported memory provider: {provider}")
+
+    agents = memory_section.get("agents")
+    backends = memory_section.get("backends")
+    if agents is None:
+        agents = {}
+    if backends is None:
+        backends = {}
+    if not isinstance(agents, dict):
+        raise ValueError("memory.agents must be a mapping")
+    if not isinstance(backends, dict):
+        raise ValueError("memory.backends must be a mapping")
+    write = agents.get("write")
+    search = agents.get("search")
+    if write is None:
+        write = {}
+    if search is None:
+        search = {}
+    if not isinstance(write, dict) or not isinstance(search, dict):
+        raise ValueError("memory.agents.write/search must be mappings")
+
+    write_backend = str(write.get("backend") or "direct").lower()
+    raw_recovery = write.get("recovery_backend", "direct")
+    recovery_backend = (
+        str(raw_recovery).lower() if raw_recovery not in (None, "") else None
+    )
+    search_backend = str(search.get("backend") or "direct").lower()
+    if write_backend not in _MEMORY_WRITE_BACKENDS:
+        raise ValueError(f"Unsupported memory write backend: {write_backend}")
+    if recovery_backend is not None and recovery_backend not in _MEMORY_WRITE_BACKENDS:
+        raise ValueError(
+            f"Unsupported memory write recovery backend: {recovery_backend}"
+        )
+    if search_backend not in _MEMORY_SEARCH_BACKENDS:
+        raise ValueError(f"Unsupported memory search backend: {search_backend}")
+
+    if "codex" in {write_backend, recovery_backend}:
+        codex = backends.get("codex")
+        if codex is None:
+            codex = {}
+        if not isinstance(codex, dict):
+            raise ValueError("memory.backends.codex must be a mapping")
+        _positive_memory_int(
+            codex.get("timeout_seconds"),
+            field="memory.backends.codex.timeout_seconds",
+            default=900,
+        )
+        sandbox = codex.get("sandbox_mode")
+        if sandbox in (None, ""):
+            sandbox = "workspace-write"
+        if not isinstance(sandbox, str) or sandbox not in _CODEX_SANDBOX_MODES:
+            raise ValueError(
+                "memory.backends.codex.sandbox_mode must be one of "
+                + ", ".join(sorted(_CODEX_SANDBOX_MODES))
+            )
+        model = codex.get("model")
+        if model is not None and not isinstance(model, str):
+            raise ValueError("memory.backends.codex.model must be a string")
+        reasoning = codex.get("reasoning_effort")
+        if reasoning is not None:
+            if not isinstance(reasoning, str):
+                raise ValueError(
+                    "memory.backends.codex.reasoning_effort must be a string"
+                )
+            reasoning = reasoning.strip().lower()
+            if reasoning and reasoning not in _CODEX_REASONING_EFFORTS:
+                raise ValueError(
+                    "memory.backends.codex.reasoning_effort must be one of "
+                    + ", ".join(sorted(_CODEX_REASONING_EFFORTS))
+                )
+        threshold = codex.get("max_used_percent")
+        if threshold not in (None, ""):
+            if isinstance(threshold, bool) or (
+                isinstance(threshold, float) and not threshold.is_integer()
+            ):
+                raise ValueError(
+                    "memory.backends.codex.max_used_percent must be an integer "
+                    "between 0 and 100"
+                )
+            try:
+                threshold = int(threshold)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "memory.backends.codex.max_used_percent must be an integer "
+                    "between 0 and 100"
+                ) from exc
+            if not 0 <= threshold <= 100:
+                raise ValueError(
+                    "memory.backends.codex.max_used_percent must be an integer "
+                    "between 0 and 100"
+                )
+        limit_id = codex.get("limit_id")
+        if limit_id is not None and not isinstance(limit_id, str):
+            raise ValueError("memory.backends.codex.limit_id must be a string")
+
+    if "pi" not in {write_backend, recovery_backend, search_backend}:
+        return
+    pi = backends.get("pi") or {}
+    if not isinstance(pi, dict):
+        raise ValueError("memory.backends.pi must be a mapping")
+    model_name = str(pi.get("model") or "qwen36-llm").strip()
+    registry = get_models_registry()
+    model = registry.get_by_name(model_name) if registry else None
+    if model is None:
+        raise ValueError(
+            f"memory.backends.pi.model references unknown registry model {model_name!r}"
+        )
+    if model.model_type != "llm" or str(model.api_family).lower() != "openai":
+        raise ValueError(
+            f"memory.backends.pi.model {model_name!r} must be an OpenAI-compatible LLM"
+        )
+    if not model.resolved_url():
+        raise ValueError(
+            f"memory.backends.pi.model {model_name!r} has no resolvable URL"
+        )
+
+    model_params = model.model_params or {}
+    context_default = getattr(model, "context_window", None)
+    if context_default in (None, ""):
+        context_default = model_params.get("context_window")
+    context_default = _positive_memory_int(
+        context_default,
+        field=f"models.{model_name}.context_window",
+        default=32768,
+    )
+    context_window = _positive_memory_int(
+        pi.get("context_window"),
+        field="memory.backends.pi.context_window",
+        default=context_default,
+    )
+    max_tokens = _positive_memory_int(
+        pi.get("max_tokens"),
+        field="memory.backends.pi.max_tokens",
+        default=4096,
+    )
+    if max_tokens > context_window - 1024:
+        raise ValueError(
+            "memory.backends.pi.max_tokens must leave at least 1024 tokens of context"
+        )
+    raw_thinking = pi.get("thinking", "off")
+    if isinstance(raw_thinking, bool):
+        thinking = "low" if raw_thinking else "off"
+    else:
+        thinking = str(raw_thinking or "off").strip().lower()
+    if thinking not in _PI_THINKING_LEVELS:
+        raise ValueError(
+            "memory.backends.pi.thinking must be one of "
+            + ", ".join(sorted(_PI_THINKING_LEVELS))
+        )
+
+    _positive_memory_int(
+        pi.get("timeout_seconds"),
+        field="memory.backends.pi.timeout_seconds",
+        default=900,
+    )
+    compat = pi.get("compat")
+    if compat is not None:
+        if not isinstance(compat, dict):
+            raise ValueError("memory.backends.pi.compat must be a mapping")
+        unknown = sorted(set(compat) - _PI_COMPAT_FIELDS)
+        if unknown:
+            raise ValueError(
+                "memory.backends.pi.compat contains unsupported field(s): "
+                + ", ".join(unknown)
+            )
+        for name in _PI_COMPAT_BOOLEAN_FIELDS:
+            if name in compat and not isinstance(compat[name], bool):
+                raise ValueError(f"memory.backends.pi.compat.{name} must be a boolean")
+        if compat.get("maxTokensField") not in (
+            None,
+            "max_tokens",
+            "max_completion_tokens",
+        ):
+            raise ValueError(
+                "memory.backends.pi.compat.maxTokensField must be max_tokens or "
+                "max_completion_tokens"
+            )
+        thinking_format = compat.get("thinkingFormat")
+        if thinking_format is not None and thinking_format not in _PI_THINKING_FORMATS:
+            raise ValueError(
+                "memory.backends.pi.compat.thinkingFormat must be one of "
+                + ", ".join(sorted(_PI_THINKING_FORMATS))
+            )
+
 
 async def get_memory_config_raw():
     """Get current memory configuration (memory section of config.yml) as YAML."""
@@ -1050,13 +1305,21 @@ async def get_memory_config_raw():
 
 
 async def update_memory_config_raw(config_yaml: str):
-    """Update memory configuration in config.yml and hot reload registry."""
+    """Update memory configuration and restart processes that cache it."""
     try:
         # Validate YAML
         try:
             new_mem = _yaml.load(config_yaml) or {}
         except Exception as e:
             raise ValueError(f"Invalid YAML syntax: {str(e)}")
+        if not isinstance(new_mem, dict):
+            raise HTTPException(
+                status_code=400, detail="Configuration must be a YAML object"
+            )
+        try:
+            _validate_memory_mapping(new_mem)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         cfg_path = _find_config_path()
         if not os.path.exists(cfg_path):
@@ -1073,13 +1336,19 @@ async def update_memory_config_raw(config_yaml: str):
         with open(cfg_path, "w") as f:
             _yaml.dump(data, f)
 
-        # Reload registry
+        # The API and RQ workers each cache both the registry and memory-service
+        # singleton. Reset this process immediately and ask the worker orchestrator
+        # to restart its processes so the saved backend selection actually applies.
         load_models_config(force_reload=True)
+        reset_memory_service()
+        reset_chat_service()
+        signal_worker_restart()
 
         return {
-            "message": "Memory configuration updated and reloaded successfully",
+            "message": "Memory configuration updated; worker restart requested",
             "config_path": str(cfg_path),
             "backup_created": os.path.exists(backup_path),
+            "requires_worker_restart": True,
             "status": "success",
         }
     except Exception as e:
@@ -1100,8 +1369,10 @@ async def validate_memory_config(config_yaml: str):
             raise HTTPException(
                 status_code=400, detail="Configuration must be a YAML object"
             )
-        # Minimal checks
-        # provider optional; timeout_seconds optional; extraction enabled/prompt optional
+        try:
+            _validate_memory_mapping(parsed)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"message": "Configuration is valid", "status": "success"}
     except HTTPException:
         # Re-raise HTTPExceptions without wrapping
@@ -1114,13 +1385,17 @@ async def validate_memory_config(config_yaml: str):
 
 
 async def reload_memory_config():
-    """Reload config.yml (registry)."""
+    """Reload config.yml and rebuild memory services in API and worker processes."""
     try:
         cfg_path = _find_config_path()
         load_models_config(force_reload=True)
+        reset_memory_service()
+        reset_chat_service()
+        signal_worker_restart()
         return {
-            "message": "Configuration reloaded",
+            "message": "Configuration reloaded; worker restart requested",
             "config_path": str(cfg_path),
+            "requires_worker_restart": True,
             "status": "success",
         }
     except Exception as e:
@@ -1238,6 +1513,7 @@ async def get_llm_operations():
                 "temperature": op_config.temperature,
                 "max_tokens": op_config.max_tokens,
                 "response_format": op_config.response_format,
+                "reasoning_effort": op_config.reasoning_effort,
             }
 
         # Collect available LLM models
@@ -1262,11 +1538,26 @@ async def get_llm_operations():
 async def save_llm_operations(operations: dict):
     """Save LLM operation configurations to config.yml and hot-reload."""
     try:
+        if "memory_agent" in operations:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "llm_operations.memory_agent is obsolete; configure "
+                    "llm_operations.memory_write and llm_operations.memory_search"
+                ),
+            )
+
         registry = get_models_registry()
         if not registry:
             raise RuntimeError("Model registry not loaded")
 
-        valid_keys = {"model", "temperature", "max_tokens", "response_format"}
+        valid_keys = {
+            "model",
+            "temperature",
+            "max_tokens",
+            "response_format",
+            "reasoning_effort",
+        }
 
         for op_name, op_value in operations.items():
             if not isinstance(op_value, dict):
@@ -1305,6 +1596,16 @@ async def save_llm_operations(operations: dict):
                     )
 
             if (
+                "reasoning_effort" in op_value
+                and op_value["reasoning_effort"] is not None
+                and not isinstance(op_value["reasoning_effort"], str)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"reasoning_effort for '{op_name}' must be a string or null",
+                )
+
+            if (
                 "response_format" in op_value
                 and op_value["response_format"] is not None
             ):
@@ -1316,9 +1617,20 @@ async def save_llm_operations(operations: dict):
 
         if save_config_section("llm_operations", operations):
             load_models_config(force_reload=True)
+            memory_operations_changed = bool(
+                {"memory_write", "memory_search"}.intersection(operations)
+            )
+            if memory_operations_changed:
+                # Both API and RQ worker processes cache resolved operations and
+                # memory/chat singletons. Apply the same reset contract as a raw
+                # memory configuration update so a saved model/budget takes effect.
+                reset_memory_service()
+                reset_chat_service()
+                signal_worker_restart()
             logger.info(f"Updated LLM operations config: {list(operations.keys())}")
             return {
                 "message": "LLM operations saved successfully",
+                "requires_worker_restart": memory_operations_changed,
                 "status": "success",
             }
         else:

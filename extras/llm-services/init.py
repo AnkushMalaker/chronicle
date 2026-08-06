@@ -5,6 +5,7 @@ Interactive configuration for llama.cpp-based LLM and embedding services
 """
 
 import argparse
+import ipaddress
 import os
 import shutil
 import sys
@@ -12,7 +13,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import yaml
 from chronicle_setup import ConfigManager, read_env_value
 from dotenv import set_key
 from rich.console import Console
@@ -35,32 +35,68 @@ LLM_MODELS = {
         "hf": "ggml-org/gemma-4-12B-it-GGUF:Q4_K_M",
         "description": "Gemma 4 12B Instruct Q4_K_M (~7GB, strong general model)",
         "ctx_size": 8192,
+        "thinking": True,
     },
     "bartowski/zai-org_GLM-4.7-Flash-GGUF": {
         "hf": "bartowski/zai-org_GLM-4.7-Flash-GGUF:Q4_K_M",
         "description": "GLM-4.7-Flash Q4_K_M (~18GB, 30B MoE / 3B active, fast)",
         "ctx_size": 8192,
+        "thinking": True,
     },
     "unsloth/Qwen3.6-27B-GGUF": {
         "hf": "unsloth/Qwen3.6-27B-GGUF:Q4_K_M",
         # Dense 27B, so unlike the GLM MoE above every parameter is read per token
         # — it needs ~16.8GB of weights resident and the whole card to itself.
         "description": "Qwen 3.6 27B Q4_K_M (~17GB, dense, thinking, needs a free 24GB GPU)",
-        "ctx_size": 8192,
+        # Validated on a 24GB A30: Q8 KV at 64K uses 18,344 MiB with the
+        # text-only/no-projector profile and has effectively the same 7.5K-token
+        # prompt-processing speed as 32K.
+        "ctx_size": 65536,
+        "thinking": True,
     },
     "bartowski/Qwen2.5-7B-Instruct-GGUF": {
         "hf": "bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M",
         "description": "Qwen 2.5 7B Instruct Q4_K_M (~4.7GB, multilingual)",
         "ctx_size": 8192,
+        "thinking": False,
     },
     "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF": {
         "hf": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF:Q4_K_M",
         "description": "Llama 3.1 8B Instruct Q4_K_M (~4.9GB, popular)",
         "ctx_size": 8192,
+        "thinking": False,
     },
 }
 
 DEFAULT_LLM_REPO = "ggml-org/gemma-4-12B-it-GGUF"
+QWEN36_REPO = "unsloth/Qwen3.6-27B-GGUF"
+MANAGED_LLAMACPP_REGISTRY_MODELS = {"llamacpp-llm", "qwen36-llm"}
+DEFAULT_CUSTOM_CONTEXT_WINDOW = 8192
+DEFAULT_PI_MAX_TOKENS = 4096
+PI_PROMPT_HEADROOM_TOKENS = 1024
+TAILSCALE_IPV4_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
+# llama.cpp's documented defaults for the knobs Chronicle changes in the Qwen
+# text-agent profile. Keeping these explicit prevents a rerun from leaving stale
+# Qwen-only values behind when another model is selected.
+DEFAULT_SERVER_PROFILE = {
+    "LLAMA_ARG_N_PARALLEL": "1",
+    "LLAMA_ARG_FLASH_ATTN": "auto",
+    "LLAMA_ARG_JINJA": "true",
+    "LLAMA_ARG_CACHE_TYPE_K": "f16",
+    "LLAMA_ARG_CACHE_TYPE_V": "f16",
+    "LLAMA_ARG_MMPROJ_AUTO": "true",
+}
+QWEN_TEXT_SERVER_PROFILE = {
+    **DEFAULT_SERVER_PROFILE,
+    "LLAMA_ARG_N_PARALLEL": "1",
+    "LLAMA_ARG_FLASH_ATTN": "on",
+    "LLAMA_ARG_CACHE_TYPE_K": "q8_0",
+    "LLAMA_ARG_CACHE_TYPE_V": "q8_0",
+    # `-hf` otherwise auto-downloads and loads Qwen's ~0.93GB vision projector.
+    # Chronicle's local memory service is text-only.
+    "LLAMA_ARG_MMPROJ_AUTO": "false",
+}
 
 # Embedding model options
 EMBED_MODELS = {
@@ -121,6 +157,85 @@ class LLMServicesSetup:
     def read_existing_env_value(self, key: str) -> Optional[str]:
         return read_env_value(str(SERVICE_DIR / ".env"), key)
 
+    @staticmethod
+    def _positive_context_window(value: Any) -> int:
+        try:
+            context_window = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Context size must be a positive integer") from exc
+        if context_window <= 0:
+            raise ValueError("Context size must be a positive integer")
+        return context_window
+
+    def _context_window(self, default: int) -> int:
+        override = getattr(self.args, "ctx_size", None)
+        return self._positive_context_window(
+            default if override in (None, "") else override
+        )
+
+    @staticmethod
+    def _known_repo(reference: str, models: Dict[str, Dict[str, Any]]) -> Optional[str]:
+        normalized = reference.strip().removeprefix("https://huggingface.co/")
+        for repo, info in models.items():
+            hf_ref = str(info.get("hf") or "")
+            if normalized in {repo, hf_ref, hf_ref.split(":", 1)[0]}:
+                return repo
+        return None
+
+    def _llm_from_reference(self, reference: str) -> tuple:
+        normalized = reference.strip().removeprefix("https://huggingface.co/")
+        if not normalized:
+            raise ValueError("LLM model reference must not be empty")
+        known_repo = self._known_repo(normalized, LLM_MODELS)
+        if known_repo:
+            info = dict(LLM_MODELS[known_repo])
+            info["ctx_size"] = self._context_window(int(info["ctx_size"]))
+            return known_repo, info
+
+        context_window = self._context_window(DEFAULT_CUSTOM_CONTEXT_WINDOW)
+        if "/" in normalized:
+            return None, {
+                "hf": normalized,
+                "description": f"Custom HuggingFace model ({normalized})",
+                "ctx_size": context_window,
+                "thinking": False,
+            }
+        return None, {
+            "file": normalized,
+            "description": f"Custom local model ({normalized})",
+            "ctx_size": context_window,
+            "thinking": False,
+        }
+
+    def _embed_from_reference(self, reference: str) -> tuple:
+        normalized = reference.strip().removeprefix("https://huggingface.co/")
+        if not normalized:
+            raise ValueError("Embedding model reference must not be empty")
+        known_repo = self._known_repo(normalized, EMBED_MODELS)
+        if known_repo:
+            return known_repo, dict(EMBED_MODELS[known_repo])
+        if "/" in normalized:
+            return None, {
+                "hf": normalized,
+                "description": f"Custom HuggingFace embedding model ({normalized})",
+                "dimensions": 768,
+            }
+        return None, {
+            "file": normalized,
+            "description": f"Custom local embedding model ({normalized})",
+            "dimensions": 768,
+        }
+
+    def _current_llm_repo(self) -> Optional[str]:
+        """Resolve the previously served model so reruns default to it."""
+        for key in ("LLM_HF_REPO", "LLM_MODEL_FILE"):
+            reference = self.read_existing_env_value(key)
+            if reference:
+                known_repo = self._known_repo(reference, LLM_MODELS)
+                if known_repo:
+                    return known_repo
+        return None
+
     def resolve_hf_token(self) -> Optional[str]:
         """HF token, in priority order: --hf-token arg, backend .env, repo-root .env,
         this service's own .env.
@@ -152,14 +267,63 @@ class LLMServicesSetup:
                 f"[blue][INFO][/blue] Backed up existing .env file to {backup_path}"
             )
 
+    def configure_network_contract(self) -> None:
+        """Default host publication to loopback; require auth for wider binds."""
+        api_key = self.read_existing_env_value("LLAMA_API_KEY") or ""
+
+        def validated_host(key: str, label: str) -> tuple[str, ipaddress.IPv4Address]:
+            host = (self.read_existing_env_value(key) or "127.0.0.1").strip()
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{label} bind host must be an IPv4 address (use 127.0.0.1 locally)"
+                ) from exc
+            if address.version != 4:
+                raise ValueError(
+                    f"{label} bind host currently supports IPv4 addresses only"
+                )
+            if address in TAILSCALE_IPV4_NETWORK:
+                raise ValueError(
+                    f"Do not persist a Tailscale IP in {key}. Same-host Chronicle "
+                    "uses container DNS; keep the published port on 127.0.0.1."
+                )
+            if not address.is_loopback and not api_key:
+                raise ValueError(
+                    f"A non-loopback {label} bind requires LLAMA_API_KEY. "
+                    "Set the same key in extras/llm-services/.env and "
+                    "backends/advanced/.env."
+                )
+            return host, address
+
+        bind_host, bind_ip = validated_host("LLM_BIND_HOST", "LLM")
+        embed_bind_host, _ = validated_host("EMBED_BIND_HOST", "embedding")
+        self.config["LLM_BIND_HOST"] = bind_host
+        self.config["EMBED_BIND_HOST"] = embed_bind_host
+        if api_key:
+            self.config["LLAMA_API_KEY"] = api_key
+        boundary = "loopback" if bind_ip.is_loopback else "authenticated non-loopback"
+        self.console.print(
+            f"[green][SUCCESS][/green] LLM host publication: {bind_host} ({boundary})"
+        )
+
     def select_llm_model(self) -> tuple:
         """Select LLM chat model. Returns (repo, model_info)."""
         self.print_section("Chat Model Selection")
 
+        configured_reference = getattr(self.args, "llm_model", None)
+        if configured_reference:
+            return self._llm_from_reference(configured_reference)
+
         model_choices = {}
         repos = list(LLM_MODELS.keys())
+        current_repo = self._current_llm_repo()
         for i, (repo, info) in enumerate(LLM_MODELS.items(), 1):
-            default_marker = " (Default)" if repo == DEFAULT_LLM_REPO else ""
+            default_marker = ""
+            if repo == current_repo:
+                default_marker = " (Current)"
+            elif current_repo is None and repo == DEFAULT_LLM_REPO:
+                default_marker = " (Default)"
             model_choices[str(i)] = f"{info['description']}{default_marker}"
 
         custom_key = str(len(repos) + 1)
@@ -167,10 +331,11 @@ class LLMServicesSetup:
             "Custom GGUF (HuggingFace repo:quant, or local filename)"
         )
 
-        # Find default choice
+        # Prefer the currently served model; otherwise use the shipped default.
+        preferred_repo = current_repo or DEFAULT_LLM_REPO
         default_choice = "1"
         for i, repo in enumerate(repos, 1):
-            if repo == DEFAULT_LLM_REPO:
+            if repo == preferred_repo:
                 default_choice = str(i)
                 break
 
@@ -187,29 +352,24 @@ class LLMServicesSetup:
             ref = self.prompt_value(
                 "HuggingFace repo:quant reference, or local GGUF filename"
             )
-            ctx_size = self.prompt_value("Context size", "8192")
-
-            # A "/" means it's a HuggingFace repo reference (llama.cpp auto-downloads);
-            # otherwise treat it as a local filename in the mounted models/ directory.
-            ref = ref.strip().removeprefix("https://huggingface.co/")
-            if "/" in ref:
-                return None, {
-                    "hf": ref,
-                    "description": f"Custom HuggingFace model ({ref})",
-                    "ctx_size": int(ctx_size),
-                }
-            return None, {
-                "file": ref,
-                "description": f"Custom local model ({ref})",
-                "ctx_size": int(ctx_size),
-            }
+            if getattr(self.args, "ctx_size", None) in (None, ""):
+                self.args.ctx_size = self.prompt_value(
+                    "Context size", str(DEFAULT_CUSTOM_CONTEXT_WINDOW)
+                )
+            return self._llm_from_reference(ref)
         else:
             repo = repos[int(choice) - 1]
-            return repo, LLM_MODELS[repo]
+            info = dict(LLM_MODELS[repo])
+            info["ctx_size"] = self._context_window(int(info["ctx_size"]))
+            return repo, info
 
     def select_embed_model(self) -> tuple:
         """Select embedding model. Returns (repo, model_info)."""
         self.print_section("Embedding Model Selection")
+
+        configured_reference = getattr(self.args, "embed_model", None)
+        if configured_reference:
+            return self._embed_from_reference(configured_reference)
 
         repos = list(EMBED_MODELS.keys())
         repo = repos[0]
@@ -225,10 +385,18 @@ class LLMServicesSetup:
             "[blue][INFO][/blue] llama.cpp uses pre-built CUDA Docker images (no local CUDA build)"
         )
 
-        n_gpu_layers = self.prompt_value(
-            "GPU layers (-1 = all layers on GPU, 0 = CPU only)", "-1"
-        )
-        self.config["N_GPU_LAYERS"] = n_gpu_layers
+        n_gpu_layers = getattr(self.args, "n_gpu_layers", None)
+        if n_gpu_layers in (None, ""):
+            n_gpu_layers = self.prompt_value(
+                "GPU layers (-1 = all layers on GPU, 0 = CPU only)", "-1"
+            )
+        try:
+            parsed_layers = int(n_gpu_layers)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("GPU layers must be an integer") from exc
+        if parsed_layers < -1:
+            raise ValueError("GPU layers must be -1, 0, or a positive integer")
+        self.config["N_GPU_LAYERS"] = str(parsed_layers)
 
     def download_models(self, llm_info, embed_info):
         """Report how each selected model will be obtained.
@@ -277,64 +445,144 @@ class LLMServicesSetup:
         os.chmod(env_path, 0o600)
         self.console.print("[green][SUCCESS][/green] .env file configured successfully")
 
-    def update_config_yml(self):
-        """Update config/config.yml with llama.cpp model defaults."""
-        try:
-            config_manager = ConfigManager(service_path="extras/llm-services")
-            config = config_manager.get_full_config()
-            models = config.get("models", []) or []
-            model_names = [m.get("name") for m in models]
+    @staticmethod
+    def _registry_llm_name(llm_repo, llm_info) -> str:
+        """Map a served GGUF to the Chronicle registry entry that identifies it."""
+        hf_ref = str(llm_info.get("hf") or "")
+        upstream_repo = hf_ref.split(":", 1)[0]
+        if llm_repo == QWEN36_REPO or upstream_repo == QWEN36_REPO:
+            return "qwen36-llm"
+        return "llamacpp-llm"
 
-            needed_models = ["llamacpp-llm", "llamacpp-embed"]
-            missing = [name for name in needed_models if name not in model_names]
+    @classmethod
+    def _server_profile(cls, llm_repo, llm_info) -> Dict[str, str]:
+        if cls._registry_llm_name(llm_repo, llm_info) == "qwen36-llm":
+            return dict(QWEN_TEXT_SERVER_PROFILE)
+        return dict(DEFAULT_SERVER_PROFILE)
 
-            if missing:
-                # Load defaults.yml to get model definitions
-                defaults_path = config_manager.config_dir / "defaults.yml"
-                if defaults_path.exists():
-                    with open(defaults_path) as f:
-                        defaults = yaml.safe_load(f) or {}
-                    defaults_models = defaults.get("models", []) or []
-                    defaults_by_name = {
-                        m["name"]: m for m in defaults_models if "name" in m
-                    }
+    @staticmethod
+    def _pi_max_tokens(context_window: int) -> int:
+        return min(
+            DEFAULT_PI_MAX_TOKENS,
+            context_window // 4,
+            context_window - PI_PROMPT_HEADROOM_TOKENS,
+        )
 
-                    for name in missing:
-                        if name in defaults_by_name:
-                            models.append(defaults_by_name[name])
-                            self.console.print(
-                                f"[green][SUCCESS][/green] Added model '{name}' to config.yml from defaults"
-                            )
-                        else:
-                            self.console.print(
-                                f"[yellow][WARNING][/yellow] Model '{name}' not found in defaults.yml"
-                            )
+    @classmethod
+    def _reconcile_managed_pi_model(
+        cls,
+        config_manager: ConfigManager,
+        *,
+        registry_llm: str,
+        context_window: int,
+    ) -> bool:
+        """Keep an active Pi agent aligned with the one locally served model.
 
-                    config["models"] = models
-                    config_manager.save_full_config(config)
-            else:
-                self.console.print(
-                    "[blue][INFO][/blue] Model definitions already present in config.yml"
-                )
+        Chronicle's llama.cpp service hosts one chat model at a time. Retarget only
+        the shipped managed llama.cpp entries; an explicit cloud/custom Pi model is
+        left untouched.
+        """
+        config = config_manager.get_full_config()
+        memory = config.get("memory")
+        if not isinstance(memory, dict):
+            return False
+        agents = memory.get("agents")
+        if not isinstance(agents, dict):
+            return False
+        write = agents.get("write") if isinstance(agents.get("write"), dict) else {}
+        search = agents.get("search") if isinstance(agents.get("search"), dict) else {}
+        active_backends = {
+            str(write.get("backend") or "direct").lower(),
+            str(search.get("backend") or "direct").lower(),
+        }
+        recovery = write.get("recovery_backend", "direct")
+        if recovery not in (None, ""):
+            active_backends.add(str(recovery).lower())
+        if "pi" not in active_backends:
+            return False
 
-            # Update defaults
-            config_manager.update_config_defaults(
-                {"llm": "llamacpp-llm", "embedding": "llamacpp-embed"}
+        backends = memory.setdefault("backends", {})
+        if not isinstance(backends, dict):
+            raise ValueError("memory.backends must be a mapping")
+        pi = backends.setdefault("pi", {})
+        if not isinstance(pi, dict):
+            raise ValueError("memory.backends.pi must be a mapping")
+        current_model = str(pi.get("model") or "").strip()
+        if current_model and current_model not in MANAGED_LLAMACPP_REGISTRY_MODELS:
+            return False
+
+        pi["model"] = registry_llm
+        pi["context_window"] = context_window
+        pi["max_tokens"] = cls._pi_max_tokens(context_window)
+        config_manager.save_full_config(config)
+        return True
+
+    def update_config_yml(self, llm_repo, llm_info):
+        """Sync the selected llama.cpp model and make it the configured default."""
+        config_manager = ConfigManager(service_path="extras/llm-services")
+        registry_llm = self._registry_llm_name(llm_repo, llm_info)
+        required_models = [registry_llm, "llamacpp-embed"]
+        synced = config_manager.sync_models_from_defaults(required_models)
+        missing = sorted(set(required_models) - set(synced))
+        if missing:
+            raise ValueError(
+                "Could not sync required model definition(s) from defaults.yml: "
+                + ", ".join(missing)
             )
+        self.console.print(
+            "[green][SUCCESS][/green] Re-synced model definitions from "
+            f"defaults.yml: {', '.join(synced)}"
+        )
 
-            self.console.print(
-                "[green][SUCCESS][/green] Updated defaults.llm to 'llamacpp-llm' in config/config.yml"
+        # llama.cpp exposes the exact --hf-repo/file identity through /v1/models.
+        # Persist the selected identity/context/reasoning contract for every choice;
+        # otherwise the registry and the one served model diverge.
+        config = config_manager.get_full_config()
+        selected = next(
+            (
+                model
+                for model in (config.get("models") or [])
+                if isinstance(model, dict) and model.get("name") == registry_llm
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError(
+                f"{registry_llm} was not available after syncing defaults.yml"
             )
-            self.console.print(
-                "[green][SUCCESS][/green] Updated defaults.embedding to 'llamacpp-embed' in config/config.yml"
+        model_identity = llm_info.get("hf") or llm_info.get("file")
+        if not str(model_identity or "").strip():
+            raise ValueError(
+                "Selected llama.cpp model has no HuggingFace or file identity"
             )
+        context_window = self._positive_context_window(llm_info["ctx_size"])
+        selected = dict(selected)
+        selected["model_name"] = str(model_identity)
+        selected["context_window"] = context_window
+        selected["thinking"] = bool(llm_info.get("thinking", False))
+        config_manager.add_or_update_model(selected)
 
-        except Exception as e:
+        config_manager.update_config_defaults(
+            {"llm": registry_llm, "embedding": "llamacpp-embed"}
+        )
+        reconciled_pi = self._reconcile_managed_pi_model(
+            config_manager,
+            registry_llm=registry_llm,
+            context_window=context_window,
+        )
+
+        self.console.print(
+            f"[green][SUCCESS][/green] Updated defaults.llm to '{registry_llm}' "
+            "in config/config.yml"
+        )
+        self.console.print(
+            "[green][SUCCESS][/green] Updated defaults.embedding to "
+            "'llamacpp-embed' in config/config.yml"
+        )
+        if reconciled_pi:
             self.console.print(
-                f"[yellow][WARNING][/yellow] Could not update config.yml: {e}"
-            )
-            self.console.print(
-                "[blue][INFO][/blue] You may need to manually set defaults in config/config.yml"
+                "[green][SUCCESS][/green] Aligned the active Pi memory backend with "
+                f"{registry_llm} ({context_window}-token context)"
             )
 
     def show_summary(self, llm_info, embed_info):
@@ -348,7 +596,29 @@ class LLMServicesSetup:
 
         table.add_row("Chat Model", llm_info.get("hf") or llm_info.get("file", ""))
         table.add_row("Chat Port", self.config.get("LLM_PORT", "8081"))
+        table.add_row("Host Bind", self.config.get("LLM_BIND_HOST", "127.0.0.1"))
+        table.add_row(
+            "API Authentication",
+            "enabled" if self.config.get("LLAMA_API_KEY") else "network boundary",
+        )
         table.add_row("Context Size", str(self.config.get("CTX_SIZE", "8192")))
+        table.add_row("Parallel Slots", self.config.get("LLAMA_ARG_N_PARALLEL", "1"))
+        table.add_row(
+            "Flash Attention", self.config.get("LLAMA_ARG_FLASH_ATTN", "auto")
+        )
+        table.add_row(
+            "KV Cache",
+            f"K={self.config.get('LLAMA_ARG_CACHE_TYPE_K', 'f16')}, "
+            f"V={self.config.get('LLAMA_ARG_CACHE_TYPE_V', 'f16')}",
+        )
+        table.add_row(
+            "Vision Projector",
+            (
+                "auto"
+                if self.config.get("LLAMA_ARG_MMPROJ_AUTO", "true") == "true"
+                else "disabled"
+            ),
+        )
         table.add_row(
             "Embedding Model", embed_info.get("hf") or embed_info.get("file", "")
         )
@@ -384,7 +654,7 @@ class LLMServicesSetup:
 
         try:
             # Select models
-            _, llm_info = self.select_llm_model()
+            llm_repo, llm_info = self.select_llm_model()
             _, embed_info = self.select_embed_model()
 
             # GPU configuration
@@ -401,6 +671,8 @@ class LLMServicesSetup:
             self.config["EMBED_CTX_SIZE"] = "2048"
             self.config["LLM_PORT"] = "8083"
             self.config["EMBED_PORT"] = "8082"
+            self.config.update(self._server_profile(llm_repo, llm_info))
+            self.configure_network_contract()
 
             # HF token: llama.cpp pulls GGUFs from HuggingFace, so a token avoids IP
             # rate-limiting (429) and unlocks gated repos. Resolve from --hf-token,
@@ -417,7 +689,7 @@ class LLMServicesSetup:
             self.generate_env_file()
 
             # Update config/config.yml
-            self.update_config_yml()
+            self.update_config_yml(llm_repo, llm_info)
 
             # Show results
             self.show_summary(llm_info, embed_info)
@@ -442,20 +714,18 @@ def main():
     parser = argparse.ArgumentParser(description="LLM Services Setup (llama.cpp)")
     parser.add_argument(
         "--llm-model",
-        help="LLM model GGUF filename",
+        help="Built-in model repo, HuggingFace repo:quant, or local GGUF filename",
     )
     parser.add_argument(
         "--embed-model",
-        help="Embedding model GGUF filename",
+        help="Built-in model repo, HuggingFace repo:quant, or local GGUF filename",
     )
     parser.add_argument(
         "--n-gpu-layers",
-        default="-1",
         help="Number of GPU layers (-1 = all)",
     )
     parser.add_argument(
         "--ctx-size",
-        default="8192",
         help="Context size for chat model",
     )
     parser.add_argument(

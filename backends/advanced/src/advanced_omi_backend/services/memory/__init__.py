@@ -20,9 +20,14 @@ import logging
 memory_logger = logging.getLogger("memory_service")
 
 # Import the main interface functions from service_factory
-from .service_factory import get_memory_service, shutdown_memory_service
+from .service_factory import (
+    get_memory_service,
+    reset_memory_service,
+    shutdown_memory_service,
+)
 
 __all__ = [
     "get_memory_service",
+    "reset_memory_service",
     "shutdown_memory_service",
 ]

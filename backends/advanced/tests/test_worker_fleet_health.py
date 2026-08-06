@@ -159,11 +159,23 @@ async def test_worker_fleet_poller_records_outage_once_then_recovery(monkeypatch
 @pytest.mark.asyncio
 async def test_readiness_requires_fresh_worker_fleet_heartbeat(monkeypatch):
     monkeypatch.setattr(health_routes, "mongo_client", FakeMongoClient())
+    checks = []
+
+    async def memory_ready():
+        checks.append("memory")
+        return True
+
+    monkeypatch.setattr(
+        health_routes,
+        "get_memory_service",
+        lambda: SimpleNamespace(test_connection=memory_ready),
+    )
 
     monkeypatch.setattr(health_routes, "redis_conn", FakeSyncRedis())
     unavailable = await health_routes.readiness_check()
     assert unavailable.status_code == 503
     assert json.loads(unavailable.body)["status"] == "not_ready"
+    assert checks == []
 
     heartbeat = json.dumps(
         {"status": "healthy", "timestamp": 1_000, "workers_total": 12}
@@ -173,3 +185,28 @@ async def test_readiness_requires_fresh_worker_fleet_heartbeat(monkeypatch):
     ready = await health_routes.readiness_check()
     assert ready.status_code == 200
     assert json.loads(ready.body)["status"] == "ready"
+    assert checks == ["memory"]
+
+
+@pytest.mark.asyncio
+async def test_readiness_rejects_invalid_memory_runtime(monkeypatch):
+    heartbeat = json.dumps(
+        {"status": "healthy", "timestamp": 1_000, "workers_total": 12}
+    )
+    monkeypatch.setattr(health_routes.time, "time", lambda: 1_005)
+    monkeypatch.setattr(health_routes, "mongo_client", FakeMongoClient())
+    monkeypatch.setattr(health_routes, "redis_conn", FakeSyncRedis(heartbeat))
+
+    async def memory_unavailable():
+        return False
+
+    monkeypatch.setattr(
+        health_routes,
+        "get_memory_service",
+        lambda: SimpleNamespace(test_connection=memory_unavailable),
+    )
+
+    response = await health_routes.readiness_check()
+
+    assert response.status_code == 503
+    assert json.loads(response.body)["status"] == "not_ready"
