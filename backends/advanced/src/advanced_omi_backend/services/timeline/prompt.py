@@ -144,6 +144,7 @@ Rules:
 - Accessibility/OCR can include background or offscreen text.
 - Assistant-generated text is not evidence that its claims happened.
 - Every important boundary/assertion must cite supplied evidence IDs.
+- Episode citations must temporally overlap the episode interval.
 - Every episode must include at least one supplied evidence ID; otherwise leave the
   interval unassigned instead of creating an ungrounded episode.
 - Never return both `episodes` and `unassigned_intervals` empty when evidence exists.

@@ -23,16 +23,25 @@ def validate_agent_result(
             raise ValueError(
                 f"episode {index} references unknown evidence: {sorted(unknown)}"
             )
+        overlapping_evidence_ids: list[str] = []
         for evidence_id in episode.evidence_ids:
             item = evidence[evidence_id]
             item_end = item.ended_at or item.started_at
-            if item.started_at >= episode.ended_at or item_end <= episode.started_at:
-                raise ValueError(
-                    f"episode {index} evidence {evidence_id} does not overlap its interval"
-                )
+            if item.started_at < episode.ended_at and item_end > episode.started_at:
+                overlapping_evidence_ids.append(evidence_id)
+        if not overlapping_evidence_ids:
+            raise ValueError(f"episode {index} has no temporally overlapping evidence")
+        episode.evidence_ids = overlapping_evidence_ids
+        bound_evidence = set(overlapping_evidence_ids)
         for assertion in episode.assertions:
-            if not set(assertion.evidence_ids).issubset(set(episode.evidence_ids)):
-                raise ValueError(f"episode {index} assertion has unbound evidence")
+            assertion.evidence_ids = [
+                evidence_id
+                for evidence_id in assertion.evidence_ids
+                if evidence_id in bound_evidence
+            ]
+        episode.assertions = [
+            assertion for assertion in episode.assertions if assertion.evidence_ids
+        ]
         if episode.representative_evidence_id:
             representative = evidence.get(episode.representative_evidence_id)
             if (

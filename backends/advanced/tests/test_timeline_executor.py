@@ -92,3 +92,29 @@ def test_unavailable_representative_image_is_dropped_without_losing_episode():
     result.episodes[0].representative_evidence_id = "observation:one"
     validate_agent_result(result, _manifest())
     assert result.episodes[0].representative_evidence_id is None
+
+
+def test_non_overlapping_citation_is_pruned_when_episode_remains_grounded():
+    manifest = _manifest()
+    outside = TimelineEvidenceItem(
+        evidence_id="observation:outside",
+        kind="observation",
+        started_at=manifest.started_at + timedelta(minutes=27),
+        ended_at=manifest.started_at + timedelta(minutes=28),
+        role="application_state",
+        excerpt="Later application state",
+    )
+    manifest.evidence.append(outside)
+    result = _result()
+    result.episodes[0].evidence_ids.append(outside.evidence_id)
+    validate_agent_result(result, manifest)
+    assert result.episodes[0].evidence_ids == ["observation:one"]
+
+
+def test_episode_without_overlapping_citation_is_rejected():
+    manifest = _manifest()
+    result = _result()
+    result.episodes[0].started_at = manifest.started_at + timedelta(minutes=26)
+    result.episodes[0].ended_at = manifest.started_at + timedelta(minutes=27)
+    with pytest.raises(ValueError, match="no temporally overlapping evidence"):
+        validate_agent_result(result, manifest)
