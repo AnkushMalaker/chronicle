@@ -1,0 +1,44 @@
+<!-- @dsCard group="Components" viewport="700x360" name="Core — buttons, badges, stats, tabs" subtitle="Actions, chips, metric tiles and segmented controls" -->
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<link rel="stylesheet" href="../../styles.css">
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script src="../../_ds_bundle.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>body{margin:0;background:var(--surface-raised);color:var(--text-primary);font-family:var(--font-sans);padding:20px}.grp{display:flex;flex-direction:column;gap:16px}.rr{display:flex;gap:10px;flex-wrap:wrap;align-items:center}</style>
+</head><body><div id="root"></div>
+<script type="text/babel">
+const NS = window.Chronicle || Object.values(window).find(v => v && v.Button && v.Badge) || {}
+const { Button, IconButton, Badge, StatCard, Tabs } = NS
+const I = (n, s=14) => { const el = React.createElement('span',{ref:e=>{if(e){e.innerHTML='';const i=document.createElement('i');i.setAttribute('data-lucide',n);e.appendChild(i);window.lucide&&window.lucide.createIcons()}},style:{display:'inline-flex'}}); return el }
+function Demo(){
+  const [b,setB]=React.useState('pending')
+  return <div className="grp">
+    <div className="rr">
+      <Button variant="primary" icon={I('target')}>Prime</Button>
+      <Button variant="secondary" icon={I('refresh-cw')}>Refresh</Button>
+      <Button variant="danger">Delete audio</Button>
+      <Button variant="ghost">Cancel</Button>
+      <Button variant="primary" disabled>Disabled</Button>
+      <IconButton label="Delete" danger>{I('trash-2')}</IconButton>
+    </div>
+    <div className="rr">
+      <Badge tone="success" icon={I('shield-check')}>verifier on</Badge>
+      <Badge tone="warning" icon={I('eye')}>collect-only on</Badge>
+      <Badge tone="info">missed</Badge>
+      <Badge tone="suggest">also fired</Badge>
+      <Badge tone="danger">not wake</Badge>
+      <Badge tone="mono">hey_hermes_f.onnx</Badge>
+    </div>
+    <div className="rr" style={{display:'grid',gridTemplateColumns:'repeat(4,140px)'}}>
+      <StatCard value={4} label="Pending" tone="amber"/>
+      <StatCard value={196} label="Positives" tone="green"/>
+      <StatCard value={75} label="Negatives" tone="red"/>
+      <StatCard value={2} label="False negatives" tone="blue"/>
+    </div>
+    <Tabs variant="pill" value={b} onChange={setB} tabs={[{value:'pending',label:'Pending review'},{value:'pos',label:'Positives (wake)'},{value:'neg',label:'Negatives (not wake)'}]}/>
+  </div>
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo/>)
+</script></body></html>

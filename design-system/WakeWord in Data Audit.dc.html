@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://unpkg.com">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0b0f19;font-family:system-ui,sans-serif;color:#e5e7eb}
+  .ic svg{display:block;stroke-width:2}
+  .ic-3 svg{width:12px;height:12px}
+  .ic-3\.5 svg{width:14px;height:14px}
+  .ic-4 svg{width:16px;height:16px}
+  .ic-4\.5 svg{width:18px;height:18px}
+  .ic-5 svg{width:20px;height:20px}
+  .ic-6 svg{width:24px;height:24px}
+  .ic-8 svg{width:32px;height:32px}
+  a{color:#60a5fa;text-decoration:none}
+  a:hover{color:#93c5fd}
+</style>
+</helmet>
+
+<div style="max-width:1500px;margin:0 auto;padding:48px 40px 120px;display:flex;flex-direction:column;gap:40px">
+
+  <section style="display:flex;flex-direction:column;gap:28px">
+    <div style="max-width:900px;display:flex;flex-direction:column;gap:12px">
+      <div style="font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.08em;color:#6b7280;text-transform:uppercase">Turn 1 · three ways to home Wake-Word Lab</div>
+      <h1 style="margin:0;font-size:30px;font-weight:700;color:#f3f4f6;letter-spacing:-.01em">Wake-Word Lab &amp; Data Audit — one umbrella, three formats</h1>
+      <p style="margin:0;font-size:15px;line-height:1.6;color:#9ca3af;text-wrap:pretty">You said they're two different tools that belong under one umbrella, and that when you're doing wake-word work you don't want the other views around. That points away from cramming both onto one page. Each option below is your real shell with the Wake-Word Lab recreated from code — the only thing that changes is <em style="color:#d1d5db">how you get into it</em>. My pick: <a href="#1b">1b</a> (matches "move it into Data Audit" literally) or <a href="#1a">1a</a> if you expect more curation tools later. <a href="#1c">1c</a> is the tabs idea, shown so you can judge it.</p>
+    </div>
+
+    <div style="display:flex;flex-wrap:wrap;gap:48px;align-items:flex-start">
+
+      <!-- ============ OPTION 1A : GROUPED NAV ============ -->
+      <div id="1a" style="display:flex;flex-direction:column;gap:16px;width:1360px">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:26px;padding:0 8px;border-radius:6px;background:#1e3a8a;color:#bfdbfe;font-family:ui-monospace,monospace;font-size:13px;font-weight:700">1a</span>
+            <h2 style="margin:0;font-size:19px;font-weight:600;color:#f3f4f6">Grouped in the sidebar</h2>
+          </div>
+          <p style="margin:0;max-width:640px;font-size:13.5px;line-height:1.55;color:#9ca3af">A <strong style="color:#d1d5db">Curation</strong> group in the nav holds Data Audit and Wake-Word Lab as two peers. Each stays a full standalone view. Clicking Wake-Word Lab drops you into it with nothing else on screen.</p>
+          <div style="display:flex;gap:20px;font-size:12.5px;line-height:1.5">
+            <ul style="margin:0;padding-left:16px;color:#86efac;flex:1;max-width:300px"><li>Total focus — its own full-screen view</li><li>Reads as "two tools, one umbrella" right in the nav</li><li>Scales cleanly if a 3rd curation tool appears</li></ul>
+            <ul style="margin:0;padding-left:16px;color:#fca5a5;flex:1;max-width:300px"><li>Not visually "inside" Data Audit</li><li>Adds one nav group to learn</li></ul>
+          </div>
+        </div>
+
+        <!-- APP FRAME 1A -->
+        <div style="width:1360px;height:880px;background:#111827;border:1px solid #374151;border-radius:12px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.45)">
+          <!-- header -->
+          <div style="height:64px;flex-shrink:0;background:#1f2937;border-bottom:1px solid #374151;display:flex;align-items:center;justify-content:space-between;padding:0 28px">
+            <div style="display:flex;align-items:center;gap:14px"><span class="ic ic-8" style="color:#2563eb"><i data-lucide="music"></i></span><span style="font-size:19px;font-weight:600;color:#f3f4f6">Chronicle Dashboard</span></div>
+            <div style="display:flex;align-items:center;gap:18px;color:#9ca3af;font-size:13px">
+              <span style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e"></span>Live</span>
+              <span class="ic ic-5"><i data-lucide="sun"></i></span>
+              <span style="display:flex;align-items:center;gap:6px;color:#d1d5db"><span class="ic ic-4" style="color:#2563eb"><i data-lucide="shield"></i></span>admin@example.com</span>
+              <span style="display:flex;align-items:center;gap:6px"><span class="ic ic-5"><i data-lucide="log-out"></i></span>Logout</span>
+            </div>
+          </div>
+          <!-- body -->
+          <div style="flex:1;display:flex;gap:32px;padding:28px;overflow:hidden">
+            <!-- sidebar (grouped) -->
+            <nav style="width:256px;flex-shrink:0;background:#1f2937;border:1px solid #374151;border-radius:10px;padding:14px">
+              <ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:14px">
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="radio"></i></span>Live Record</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="message-circle"></i></span>Chat</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="message-square"></i></span>Conversations</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="calendar-days"></i></span>Timeline</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="scroll-text"></i></span>Memory Ledger</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="users"></i></span>User Management</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="upload"></i></span>Upload Audio</li>
+                <li style="padding:14px 12px 4px;font-size:10.5px;font-weight:600;letter-spacing:.09em;color:#6b7280;text-transform:uppercase">Curation</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;margin-left:8px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="sparkles"></i></span>Data Audit</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;margin-left:8px;border-radius:6px;background:#2563eb;color:#fff;font-weight:500"><span class="ic ic-5"><i data-lucide="target"></i></span>Wake-Word Lab</li>
+                <li style="height:1px;background:#374151;margin:8px 4px"></li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="layers"></i></span>Queue &amp; Events</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="puzzle"></i></span>Plugins</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="zap"></i></span>Training</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="network"></i></span>Network</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="activity"></i></span>System Status</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="settings"></i></span>Settings</li>
+              </ul>
+            </nav>
+            <!-- main -->
+            <main style="flex:1;min-width:0;background:#1f2937;border:1px solid #374151;border-radius:10px;padding:24px;overflow:hidden">
+
+        <div style="display:flex;flex-direction:column;gap:18px">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <div style="display:flex;align-items:center;gap:10px"><span class="ic ic-6" style="color:#2563eb"><i data-lucide="target"></i></span><h1 style="margin:0;font-size:24px;font-weight:700;color:#f3f4f6">Wake-Word Lab</h1></div>
+            <div style="display:flex;align-items:center;gap:6px;font-size:13px;color:#d1d5db;background:#374151;padding:6px 12px;border-radius:8px"><span class="ic ic-4"><i data-lucide="refresh-cw"></i></span>Refresh</div>
+          </div>
+          <p style="margin:0;font-size:13px;line-height:1.55;color:#9ca3af;max-width:1000px">Close the training loop, per wake word: review false positives the model fired on, and capture clips of yourself saying that word (false negatives). Each section below is one wake word &mdash; labeled clips roll straight into that word's next retrain.</p>
+          <div style="border:1px solid #374151;border-radius:8px;padding:16px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:14px;font-weight:600;color:#e5e7eb"><span class="ic ic-4"><i data-lucide="radio"></i></span>Active streams</div>
+            <p style="margin:0;font-size:13px;color:#9ca3af">No live streams. Start a recording (Live Record) and it will appear here &mdash; then use an "I'll say it now" button in a wake-word section below.</p>
+          </div>
+          <section style="border:1px solid #374151;border-radius:12px">
+            <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;border-bottom:1px solid #374151;padding:12px 16px">
+              <h2 style="margin:0;font-size:18px;font-weight:700;color:#f3f4f6">"hey hermes"</h2>
+              <span style="background:#111827;padding:2px 8px;border-radius:4px;font-family:ui-monospace,monospace;font-size:12px;color:#9ca3af">hey_hermes_f.onnx</span>
+              <span style="display:flex;align-items:center;gap:4px;background:rgba(20,83,45,.4);color:#86efac;padding:2px 8px;border-radius:4px;font-size:12px"><span class="ic ic-3.5"><i data-lucide="shield-check"></i></span>verifier on</span>
+              <span style="display:flex;align-items:center;gap:4px;color:#9ca3af;padding:2px 8px;border-radius:4px;font-size:12px;background:#111827"><span class="ic ic-3.5"><i data-lucide="eye"></i></span>collect-only off</span>
+              <span style="font-size:12px;color:#9ca3af">thr 0.9 &middot; patience 2</span>
+              <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+                <div style="display:flex;align-items:center;gap:6px;background:#374151;color:#d1d5db;padding:7px 12px;border-radius:6px;font-size:13px"><span class="ic ic-3.5"><i data-lucide="copy-x"></i></span>Remove duplicates</div>
+                <div style="display:flex;align-items:center;gap:6px;background:#2563eb;color:#fff;padding:7px 12px;border-radius:6px;font-size:13px;font-weight:500;opacity:.4"><span class="ic ic-3.5"><i data-lucide="target"></i></span>I'll say "hey hermes" now</div>
+              </div>
+            </div>
+            <div style="padding:16px">
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+                <div style="border:1px solid #374151;border-radius:8px;padding:12px;text-align:center"><div style="font-size:24px;font-weight:700;color:#fbbf24">4</div><div style="font-size:12px;color:#9ca3af">Pending</div></div>
+                <div style="border:1px solid #374151;border-radius:8px;padding:12px;text-align:center"><div style="font-size:24px;font-weight:700;color:#4ade80">196</div><div style="font-size:12px;color:#9ca3af">Positives</div></div>
+                <div style="border:1px solid #374151;border-radius:8px;padding:12px;text-align:center"><div style="font-size:24px;font-weight:700;color:#f87171">75</div><div style="font-size:12px;color:#9ca3af">Negatives</div></div>
+                <div style="border:1px solid #374151;border-radius:8px;padding:12px;text-align:center"><div style="font-size:24px;font-weight:700;color:#60a5fa">2</div><div style="font-size:12px;color:#9ca3af">False negatives</div></div>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                <div style="background:#2563eb;color:#fff;padding:7px 14px;border-radius:8px;font-size:13px;font-weight:500">Pending review</div>
+                <div style="background:#374151;color:#d1d5db;padding:7px 14px;border-radius:8px;font-size:13px;font-weight:500">Positives (wake)</div>
+                <div style="background:#374151;color:#d1d5db;padding:7px 14px;border-radius:8px;font-size:13px;font-weight:500">Negatives (not wake)</div>
+                <div style="margin-left:auto;display:flex;align-items:center;gap:5px;font-size:12px;color:#9ca3af"><span class="ic ic-4"><i data-lucide="help-circle"></i></span>How to label</div>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;border:1px solid #374151;border-radius:6px;padding:8px 12px">
+            <span style="font-family:ui-monospace,monospace;font-size:14px;font-weight:600;color:#e5e7eb;width:52px">0.996</span>
+            <span style="display:flex;align-items:center;gap:4px;background:#374151;color:#d1d5db;padding:3px 8px;border-radius:4px;font-size:12px"><span class="ic ic-3"><i data-lucide="arrow-right-left"></i></span>Move / Copy</span>
+            <span style="font-size:12px;color:#9ca3af">22/7/2026, 1:36:18 am</span>
+            <span style="font-size:12px;color:#6b7280">3s &middot; smart_turn</span>
+            <div style="display:flex;align-items:center;gap:8px;background:#0b0f19;border:1px solid #374151;border-radius:6px;padding:5px 10px;width:220px">
+              <span class="ic ic-3.5" style="color:#d1d5db"><i data-lucide="play"></i></span>
+              <div style="flex:1;height:3px;border-radius:2px;background:#4b5563;position:relative"><span style="position:absolute;left:8%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;border-radius:50%;background:#d1d5db"></span></div>
+              <span style="font-family:ui-monospace,monospace;font-size:11px;color:#9ca3af">0:00</span>
+              <span class="ic ic-3.5" style="color:#9ca3af"><i data-lucide="volume-2"></i></span>
+            </div>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(20,83,45,.4);color:#86efac;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="check"></i></span>Wake</div>
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(127,29,29,.4);color:#fca5a5;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="x"></i></span>Not</div>
+              <span class="ic ic-3.5" style="color:#9ca3af;padding:5px"><i data-lucide="trash-2"></i></span>
+            </div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;border:1px solid #374151;border-radius:6px;padding:8px 12px">
+            <span style="font-family:ui-monospace,monospace;font-size:14px;font-weight:600;color:#e5e7eb;width:52px">0.996</span>
+            <span style="display:flex;align-items:center;gap:4px;background:#374151;color:#d1d5db;padding:3px 8px;border-radius:4px;font-size:12px"><span class="ic ic-3"><i data-lucide="arrow-right-left"></i></span>Move / Copy</span>
+            <span style="font-size:12px;color:#9ca3af">22/7/2026, 1:35:10 am</span>
+            <span style="font-size:12px;color:#6b7280">3s &middot; smart_turn</span>
+            <div style="display:flex;align-items:center;gap:8px;background:#0b0f19;border:1px solid #374151;border-radius:6px;padding:5px 10px;width:220px">
+              <span class="ic ic-3.5" style="color:#d1d5db"><i data-lucide="play"></i></span>
+              <div style="flex:1;height:3px;border-radius:2px;background:#4b5563;position:relative"><span style="position:absolute;left:8%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;border-radius:50%;background:#d1d5db"></span></div>
+              <span style="font-family:ui-monospace,monospace;font-size:11px;color:#9ca3af">0:00</span>
+              <span class="ic ic-3.5" style="color:#9ca3af"><i data-lucide="volume-2"></i></span>
+            </div>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(20,83,45,.4);color:#86efac;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="check"></i></span>Wake</div>
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(127,29,29,.4);color:#fca5a5;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="x"></i></span>Not</div>
+              <span class="ic ic-3.5" style="color:#9ca3af;padding:5px"><i data-lucide="trash-2"></i></span>
+            </div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;border:1px solid #374151;border-radius:6px;padding:8px 12px">
+            <span style="font-family:ui-monospace,monospace;font-size:14px;font-weight:600;color:#e5e7eb;width:52px">0.996</span>
+            <span style="display:flex;align-items:center;gap:4px;background:#374151;color:#d1d5db;padding:3px 8px;border-radius:4px;font-size:12px"><span class="ic ic-3"><i data-lucide="arrow-right-left"></i></span>Move / Copy</span>
+            <span style="font-size:12px;color:#9ca3af">22/7/2026, 1:34:33 am</span>
+            <span style="font-size:12px;color:#6b7280">3s &middot; smart_turn</span>
+            <div style="display:flex;align-items:center;gap:8px;background:#0b0f19;border:1px solid #374151;border-radius:6px;padding:5px 10px;width:220px">
+              <span class="ic ic-3.5" style="color:#d1d5db"><i data-lucide="play"></i></span>
+              <div style="flex:1;height:3px;border-radius:2px;background:#4b5563;position:relative"><span style="position:absolute;left:8%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;border-radius:50%;background:#d1d5db"></span></div>
+              <span style="font-family:ui-monospace,monospace;font-size:11px;color:#9ca3af">0:00</span>
+              <span class="ic ic-3.5" style="color:#9ca3af"><i data-lucide="volume-2"></i></span>
+            </div>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(20,83,45,.4);color:#86efac;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="check"></i></span>Wake</div>
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(127,29,29,.4);color:#fca5a5;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="x"></i></span>Not</div>
+              <span class="ic ic-3.5" style="color:#9ca3af;padding:5px"><i data-lucide="trash-2"></i></span>
+            </div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;border:1px solid #374151;border-radius:6px;padding:8px 12px">
+            <span style="font-family:ui-monospace,monospace;font-size:14px;font-weight:600;color:#e5e7eb;width:52px">0.996</span>
+            <span style="display:flex;align-items:center;gap:4px;background:#374151;color:#d1d5db;padding:3px 8px;border-radius:4px;font-size:12px"><span class="ic ic-3"><i data-lucide="arrow-right-left"></i></span>Move / Copy</span>
+            <span style="font-size:12px;color:#9ca3af">22/7/2026, 1:34:24 am</span>
+            <span style="font-size:12px;color:#6b7280">3s &middot; smart_turn</span>
+            <div style="display:flex;align-items:center;gap:8px;background:#0b0f19;border:1px solid #374151;border-radius:6px;padding:5px 10px;width:220px">
+              <span class="ic ic-3.5" style="color:#d1d5db"><i data-lucide="play"></i></span>
+              <div style="flex:1;height:3px;border-radius:2px;background:#4b5563;position:relative"><span style="position:absolute;left:8%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;border-radius:50%;background:#d1d5db"></span></div>
+              <span style="font-family:ui-monospace,monospace;font-size:11px;color:#9ca3af">0:00</span>
+              <span class="ic ic-3.5" style="color:#9ca3af"><i data-lucide="volume-2"></i></span>
+            </div>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(20,83,45,.4);color:#86efac;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="check"></i></span>Wake</div>
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(127,29,29,.4);color:#fca5a5;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="x"></i></span>Not</div>
+              <span class="ic ic-3.5" style="color:#9ca3af;padding:5px"><i data-lucide="trash-2"></i></span>
+            </div>
+          </div>
+              </div>
+            </div>
+          </section>
+          <div style="font-size:12px;color:#6b7280;font-style:italic;text-align:center">"hermes" section (185 pending) continues below</div>
+        </div>
+            </main>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ OPTION 1B : HUB LAUNCHER CARD ============ -->
+      <div id="1b" style="display:flex;flex-direction:column;gap:16px;width:1360px">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:26px;padding:0 8px;border-radius:6px;background:#14532d;color:#86efac;font-family:ui-monospace,monospace;font-size:13px;font-weight:700">1b</span>
+            <h2 style="margin:0;font-size:19px;font-weight:600;color:#f3f4f6">A card in the Data Audit hub <span style="font-size:12px;font-weight:600;color:#86efac;background:#14532d;padding:2px 8px;border-radius:999px;margin-left:6px">recommended</span></h2>
+          </div>
+          <p style="margin:0;max-width:660px;font-size:13.5px;line-height:1.55;color:#9ca3af">Wake-Word Lab becomes the 4th tile on your existing hub. Clicking it opens a dedicated full-screen route (breadcrumb back to the hub) — so it lives <em style="color:#d1d5db">inside</em> Data Audit but still gets its own uncluttered view.</p>
+          <div style="display:flex;gap:20px;font-size:12.5px;line-height:1.5">
+            <ul style="margin:0;padding-left:16px;color:#86efac;flex:1;max-width:300px"><li>Literally "moved into" Data Audit</li><li>Reuses the card pattern already on the hub</li><li>Opens a full route → no other views in the way</li></ul>
+            <ul style="margin:0;padding-left:16px;color:#fca5a5;flex:1;max-width:300px"><li>One extra click (hub → card) to reach it</li><li>Hub leans more launcher than workspace</li></ul>
+          </div>
+        </div>
+
+        <!-- APP FRAME 1B -->
+        <div style="width:1360px;height:880px;background:#111827;border:1px solid #374151;border-radius:12px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.45)">
+          <div style="height:64px;flex-shrink:0;background:#1f2937;border-bottom:1px solid #374151;display:flex;align-items:center;justify-content:space-between;padding:0 28px">
+            <div style="display:flex;align-items:center;gap:14px"><span class="ic ic-8" style="color:#2563eb"><i data-lucide="music"></i></span><span style="font-size:19px;font-weight:600;color:#f3f4f6">Chronicle Dashboard</span></div>
+            <div style="display:flex;align-items:center;gap:18px;color:#9ca3af;font-size:13px">
+              <span style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e"></span>Live</span>
+              <span class="ic ic-5"><i data-lucide="sun"></i></span>
+              <span style="display:flex;align-items:center;gap:6px;color:#d1d5db"><span class="ic ic-4" style="color:#2563eb"><i data-lucide="shield"></i></span>admin@example.com</span>
+              <span style="display:flex;align-items:center;gap:6px"><span class="ic ic-5"><i data-lucide="log-out"></i></span>Logout</span>
+            </div>
+          </div>
+          <div style="flex:1;display:flex;gap:32px;padding:28px;overflow:hidden">
+            <!-- flat sidebar, Data Audit active, no separate Wake-Word Lab -->
+            <nav style="width:256px;flex-shrink:0;background:#1f2937;border:1px solid #374151;border-radius:10px;padding:14px">
+              <ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:14px">
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="radio"></i></span>Live Record</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="message-circle"></i></span>Chat</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="message-square"></i></span>Conversations</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="calendar-days"></i></span>Timeline</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="scroll-text"></i></span>Memory Ledger</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="users"></i></span>User Management</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="upload"></i></span>Upload Audio</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;background:#2563eb;color:#fff;font-weight:500"><span class="ic ic-5"><i data-lucide="sparkles"></i></span>Data Audit</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="layers"></i></span>Queue &amp; Events</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="puzzle"></i></span>Plugins</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="zap"></i></span>Training</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="network"></i></span>Network</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="activity"></i></span>System Status</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="settings"></i></span>Settings</li>
+              </ul>
+            </nav>
+            <main style="flex:1;min-width:0;background:#1f2937;border:1px solid #374151;border-radius:10px;padding:24px;overflow:hidden;display:flex;flex-direction:column;gap:20px">
+              <!-- hub header -->
+              <div style="display:flex;align-items:flex-start;gap:12px">
+                <span class="ic ic-6" style="color:#2563eb;margin-top:2px"><i data-lucide="sparkles"></i></span>
+                <div>
+                  <h2 style="margin:0;font-size:20px;font-weight:600;color:#f3f4f6">Data Audit</h2>
+                  <p style="margin:4px 0 0;font-size:13.5px;color:#9ca3af;max-width:820px">Decide what the audio is — audit conversations, enroll speakers, classify background &amp; role, and tune wake words. One home for all curation.</p>
+                </div>
+              </div>
+              <!-- 4-card grid -->
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px">
+                <div style="background:#111827;border:1px solid #374151;border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px">
+                  <div style="display:flex;align-items:flex-start;justify-content:space-between"><span class="ic ic-5" style="color:#9ca3af"><i data-lucide="sparkles"></i></span><span style="font-size:22px;font-weight:700;color:#60a5fa">468</span></div>
+                  <div style="font-size:15px;font-weight:600;color:#f3f4f6">Audit conversations</div>
+                  <div style="font-size:12px;line-height:1.5;color:#9ca3af">Find speech-free or mis-attributed audio; split, merge, archive.</div>
+                </div>
+                <div style="background:#111827;border:1px solid #374151;border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px">
+                  <span class="ic ic-5" style="color:#9ca3af"><i data-lucide="mic"></i></span>
+                  <div style="font-size:15px;font-weight:600;color:#f3f4f6">Enroll speakers</div>
+                  <div style="font-size:12px;line-height:1.5;color:#9ca3af">Review the relabel queue and strengthen voiceprints — deliberate, gated.</div>
+                </div>
+                <div style="background:#111827;border:1px solid #374151;border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px">
+                  <span class="ic ic-5" style="color:#9ca3af"><i data-lucide="radio"></i></span>
+                  <div style="font-size:15px;font-weight:600;color:#f3f4f6">Background &amp; role</div>
+                  <div style="font-size:12px;line-height:1.5;color:#9ca3af">Content vs real people vs noise. Feeds background suppression.</div>
+                </div>
+                <!-- the new tile -->
+                <div style="background:#1e2a44;border:1px solid #2563eb;border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px;position:relative">
+                  <div style="position:absolute;top:12px;right:12px;font-size:9.5px;font-weight:700;letter-spacing:.06em;color:#93c5fd;background:#1e3a8a;padding:2px 7px;border-radius:999px">NEW</div>
+                  <span class="ic ic-5" style="color:#60a5fa"><i data-lucide="target"></i></span>
+                  <div style="font-size:15px;font-weight:600;color:#f3f4f6">Wake-Word Lab</div>
+                  <div style="font-size:12px;line-height:1.5;color:#9ca3af">Review false positives &amp; capture wake clips; per-word retrain loop.</div>
+                  <div style="display:flex;align-items:center;gap:5px;font-size:12.5px;font-weight:600;color:#60a5fa;margin-top:2px">Open lab <span class="ic ic-3.5"><i data-lucide="arrow-right"></i></span></div>
+                </div>
+              </div>
+              <!-- confidence collapsible -->
+              <div style="border:1px solid #374151;border-radius:8px;display:flex;align-items:center;justify-content:space-between;padding:10px 16px">
+                <div style="display:flex;align-items:center;gap:8px"><span class="ic ic-4" style="color:#6b7280"><i data-lucide="chevron-right"></i></span><span class="ic ic-4" style="color:#2563eb"><i data-lucide="gauge"></i></span><span style="font-size:14px;font-weight:500;color:#f3f4f6">Speaker identification confidence</span></div>
+                <span style="font-size:12px;color:#9ca3af">2048/11625 (17.6%) low-confidence</span>
+              </div>
+              <div style="border:1px solid #374151;border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:8px">
+                <div style="display:flex;align-items:center;justify-content:space-between">
+                  <div style="display:flex;align-items:center;gap:8px"><span class="ic ic-5" style="color:#22c55e"><i data-lucide="shield-check"></i></span><span style="font-size:16px;font-weight:600;color:#f3f4f6">Curated Speaker Enrollment</span></div>
+                  <div style="display:flex;align-items:center;gap:6px;font-size:13px;color:#d1d5db;background:#374151;padding:6px 12px;border-radius:8px"><span class="ic ic-3.5"><i data-lucide="refresh-cw"></i></span>Refresh</div>
+                </div>
+                <p style="margin:0;font-size:12.5px;line-height:1.55;color:#9ca3af">Only the segments <strong style="color:#d1d5db">you relabelled by hand</strong> are candidates, gated for quality. Clean clips are pre-selected; greyed clips are excluded with a reason.</p>
+              </div>
+              <div style="font-size:12px;color:#6b7280;font-style:italic">…hub continues below</div>
+            </main>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ OPTION 1C : TOP TABS ============ -->
+      <div id="1c" style="display:flex;flex-direction:column;gap:16px;width:1360px">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:26px;padding:0 8px;border-radius:6px;background:#374151;color:#d1d5db;font-family:ui-monospace,monospace;font-size:13px;font-weight:700">1c</span>
+            <h2 style="margin:0;font-size:19px;font-weight:600;color:#f3f4f6">Top tabs on one page</h2>
+          </div>
+          <p style="margin:0;max-width:660px;font-size:13.5px;line-height:1.55;color:#9ca3af">The format you floated: a segmented control at the top of one Data Audit page toggles between <strong style="color:#d1d5db">Audit &amp; enroll</strong> and <strong style="color:#d1d5db">Wake-Word Lab</strong>. Switching hides the other, so the lab does get focus.</p>
+          <div style="display:flex;gap:20px;font-size:12.5px;line-height:1.5">
+            <ul style="margin:0;padding-left:16px;color:#86efac;flex:1;max-width:300px"><li>One click to switch; both on one page</li><li>Familiar pattern</li></ul>
+            <ul style="margin:0;padding-left:16px;color:#fca5a5;flex:1;max-width:300px"><li>Collides with the inner tabs it already has (Conversations/Archived, clip buckets) — nested tabs get confusing</li><li>Two heavy tools sharing one route feels less like "its own view"</li></ul>
+          </div>
+        </div>
+
+        <!-- APP FRAME 1C -->
+        <div style="width:1360px;height:880px;background:#111827;border:1px solid #374151;border-radius:12px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.45)">
+          <div style="height:64px;flex-shrink:0;background:#1f2937;border-bottom:1px solid #374151;display:flex;align-items:center;justify-content:space-between;padding:0 28px">
+            <div style="display:flex;align-items:center;gap:14px"><span class="ic ic-8" style="color:#2563eb"><i data-lucide="music"></i></span><span style="font-size:19px;font-weight:600;color:#f3f4f6">Chronicle Dashboard</span></div>
+            <div style="display:flex;align-items:center;gap:18px;color:#9ca3af;font-size:13px">
+              <span style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e"></span>Live</span>
+              <span class="ic ic-5"><i data-lucide="sun"></i></span>
+              <span style="display:flex;align-items:center;gap:6px;color:#d1d5db"><span class="ic ic-4" style="color:#2563eb"><i data-lucide="shield"></i></span>admin@example.com</span>
+              <span style="display:flex;align-items:center;gap:6px"><span class="ic ic-5"><i data-lucide="log-out"></i></span>Logout</span>
+            </div>
+          </div>
+          <div style="flex:1;display:flex;gap:32px;padding:28px;overflow:hidden">
+            <nav style="width:256px;flex-shrink:0;background:#1f2937;border:1px solid #374151;border-radius:10px;padding:14px">
+              <ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:14px">
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="radio"></i></span>Live Record</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="message-circle"></i></span>Chat</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="message-square"></i></span>Conversations</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="calendar-days"></i></span>Timeline</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="scroll-text"></i></span>Memory Ledger</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="users"></i></span>User Management</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="upload"></i></span>Upload Audio</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;background:#2563eb;color:#fff;font-weight:500"><span class="ic ic-5"><i data-lucide="sparkles"></i></span>Data Audit</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="layers"></i></span>Queue &amp; Events</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="puzzle"></i></span>Plugins</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="zap"></i></span>Training</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="network"></i></span>Network</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="activity"></i></span>System Status</li>
+                <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="settings"></i></span>Settings</li>
+              </ul>
+            </nav>
+            <main style="flex:1;min-width:0;background:#1f2937;border:1px solid #374151;border-radius:10px;padding:24px;overflow:hidden;display:flex;flex-direction:column;gap:18px">
+              <!-- segmented control -->
+              <div style="display:inline-flex;align-self:flex-start;background:#111827;border:1px solid #374151;border-radius:10px;padding:4px;gap:4px">
+                <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;border-radius:7px;font-size:14px;font-weight:500;color:#9ca3af"><span class="ic ic-4"><i data-lucide="sparkles"></i></span>Audit &amp; enroll</div>
+                <div style="display:flex;align-items:center;gap:8px;padding:8px 16px;border-radius:7px;font-size:14px;font-weight:500;background:#2563eb;color:#fff"><span class="ic ic-4"><i data-lucide="target"></i></span>Wake-Word Lab</div>
+              </div>
+              <div style="height:1px;background:#374151"></div>
+
+        <div style="display:flex;flex-direction:column;gap:18px">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <div style="display:flex;align-items:center;gap:10px"><span class="ic ic-6" style="color:#2563eb"><i data-lucide="target"></i></span><h1 style="margin:0;font-size:24px;font-weight:700;color:#f3f4f6">Wake-Word Lab</h1></div>
+            <div style="display:flex;align-items:center;gap:6px;font-size:13px;color:#d1d5db;background:#374151;padding:6px 12px;border-radius:8px"><span class="ic ic-4"><i data-lucide="refresh-cw"></i></span>Refresh</div>
+          </div>
+          <p style="margin:0;font-size:13px;line-height:1.55;color:#9ca3af;max-width:1000px">Close the training loop, per wake word: review false positives the model fired on, and capture clips of yourself saying that word (false negatives). Each section below is one wake word &mdash; labeled clips roll straight into that word's next retrain.</p>
+          <div style="border:1px solid #374151;border-radius:8px;padding:16px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:14px;font-weight:600;color:#e5e7eb"><span class="ic ic-4"><i data-lucide="radio"></i></span>Active streams</div>
+            <p style="margin:0;font-size:13px;color:#9ca3af">No live streams. Start a recording (Live Record) and it will appear here &mdash; then use an "I'll say it now" button in a wake-word section below.</p>
+          </div>
+          <section style="border:1px solid #374151;border-radius:12px">
+            <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;border-bottom:1px solid #374151;padding:12px 16px">
+              <h2 style="margin:0;font-size:18px;font-weight:700;color:#f3f4f6">"hey hermes"</h2>
+              <span style="background:#111827;padding:2px 8px;border-radius:4px;font-family:ui-monospace,monospace;font-size:12px;color:#9ca3af">hey_hermes_f.onnx</span>
+              <span style="display:flex;align-items:center;gap:4px;background:rgba(20,83,45,.4);color:#86efac;padding:2px 8px;border-radius:4px;font-size:12px"><span class="ic ic-3.5"><i data-lucide="shield-check"></i></span>verifier on</span>
+              <span style="display:flex;align-items:center;gap:4px;color:#9ca3af;padding:2px 8px;border-radius:4px;font-size:12px;background:#111827"><span class="ic ic-3.5"><i data-lucide="eye"></i></span>collect-only off</span>
+              <span style="font-size:12px;color:#9ca3af">thr 0.9 &middot; patience 2</span>
+              <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+                <div style="display:flex;align-items:center;gap:6px;background:#374151;color:#d1d5db;padding:7px 12px;border-radius:6px;font-size:13px"><span class="ic ic-3.5"><i data-lucide="copy-x"></i></span>Remove duplicates</div>
+                <div style="display:flex;align-items:center;gap:6px;background:#2563eb;color:#fff;padding:7px 12px;border-radius:6px;font-size:13px;font-weight:500;opacity:.4"><span class="ic ic-3.5"><i data-lucide="target"></i></span>I'll say "hey hermes" now</div>
+              </div>
+            </div>
+            <div style="padding:16px">
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+                <div style="border:1px solid #374151;border-radius:8px;padding:12px;text-align:center"><div style="font-size:24px;font-weight:700;color:#fbbf24">4</div><div style="font-size:12px;color:#9ca3af">Pending</div></div>
+                <div style="border:1px solid #374151;border-radius:8px;padding:12px;text-align:center"><div style="font-size:24px;font-weight:700;color:#4ade80">196</div><div style="font-size:12px;color:#9ca3af">Positives</div></div>
+                <div style="border:1px solid #374151;border-radius:8px;padding:12px;text-align:center"><div style="font-size:24px;font-weight:700;color:#f87171">75</div><div style="font-size:12px;color:#9ca3af">Negatives</div></div>
+                <div style="border:1px solid #374151;border-radius:8px;padding:12px;text-align:center"><div style="font-size:24px;font-weight:700;color:#60a5fa">2</div><div style="font-size:12px;color:#9ca3af">False negatives</div></div>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                <div style="background:#2563eb;color:#fff;padding:7px 14px;border-radius:8px;font-size:13px;font-weight:500">Pending review</div>
+                <div style="background:#374151;color:#d1d5db;padding:7px 14px;border-radius:8px;font-size:13px;font-weight:500">Positives (wake)</div>
+                <div style="background:#374151;color:#d1d5db;padding:7px 14px;border-radius:8px;font-size:13px;font-weight:500">Negatives (not wake)</div>
+                <div style="margin-left:auto;display:flex;align-items:center;gap:5px;font-size:12px;color:#9ca3af"><span class="ic ic-4"><i data-lucide="help-circle"></i></span>How to label</div>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;border:1px solid #374151;border-radius:6px;padding:8px 12px">
+            <span style="font-family:ui-monospace,monospace;font-size:14px;font-weight:600;color:#e5e7eb;width:52px">0.996</span>
+            <span style="display:flex;align-items:center;gap:4px;background:#374151;color:#d1d5db;padding:3px 8px;border-radius:4px;font-size:12px"><span class="ic ic-3"><i data-lucide="arrow-right-left"></i></span>Move / Copy</span>
+            <span style="font-size:12px;color:#9ca3af">22/7/2026, 1:36:18 am</span>
+            <span style="font-size:12px;color:#6b7280">3s &middot; smart_turn</span>
+            <div style="display:flex;align-items:center;gap:8px;background:#0b0f19;border:1px solid #374151;border-radius:6px;padding:5px 10px;width:220px">
+              <span class="ic ic-3.5" style="color:#d1d5db"><i data-lucide="play"></i></span>
+              <div style="flex:1;height:3px;border-radius:2px;background:#4b5563;position:relative"><span style="position:absolute;left:8%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;border-radius:50%;background:#d1d5db"></span></div>
+              <span style="font-family:ui-monospace,monospace;font-size:11px;color:#9ca3af">0:00</span>
+              <span class="ic ic-3.5" style="color:#9ca3af"><i data-lucide="volume-2"></i></span>
+            </div>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(20,83,45,.4);color:#86efac;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="check"></i></span>Wake</div>
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(127,29,29,.4);color:#fca5a5;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="x"></i></span>Not</div>
+              <span class="ic ic-3.5" style="color:#9ca3af;padding:5px"><i data-lucide="trash-2"></i></span>
+            </div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;border:1px solid #374151;border-radius:6px;padding:8px 12px">
+            <span style="font-family:ui-monospace,monospace;font-size:14px;font-weight:600;color:#e5e7eb;width:52px">0.996</span>
+            <span style="display:flex;align-items:center;gap:4px;background:#374151;color:#d1d5db;padding:3px 8px;border-radius:4px;font-size:12px"><span class="ic ic-3"><i data-lucide="arrow-right-left"></i></span>Move / Copy</span>
+            <span style="font-size:12px;color:#9ca3af">22/7/2026, 1:35:10 am</span>
+            <span style="font-size:12px;color:#6b7280">3s &middot; smart_turn</span>
+            <div style="display:flex;align-items:center;gap:8px;background:#0b0f19;border:1px solid #374151;border-radius:6px;padding:5px 10px;width:220px">
+              <span class="ic ic-3.5" style="color:#d1d5db"><i data-lucide="play"></i></span>
+              <div style="flex:1;height:3px;border-radius:2px;background:#4b5563;position:relative"><span style="position:absolute;left:8%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;border-radius:50%;background:#d1d5db"></span></div>
+              <span style="font-family:ui-monospace,monospace;font-size:11px;color:#9ca3af">0:00</span>
+              <span class="ic ic-3.5" style="color:#9ca3af"><i data-lucide="volume-2"></i></span>
+            </div>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(20,83,45,.4);color:#86efac;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="check"></i></span>Wake</div>
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(127,29,29,.4);color:#fca5a5;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="x"></i></span>Not</div>
+              <span class="ic ic-3.5" style="color:#9ca3af;padding:5px"><i data-lucide="trash-2"></i></span>
+            </div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;border:1px solid #374151;border-radius:6px;padding:8px 12px">
+            <span style="font-family:ui-monospace,monospace;font-size:14px;font-weight:600;color:#e5e7eb;width:52px">0.996</span>
+            <span style="display:flex;align-items:center;gap:4px;background:#374151;color:#d1d5db;padding:3px 8px;border-radius:4px;font-size:12px"><span class="ic ic-3"><i data-lucide="arrow-right-left"></i></span>Move / Copy</span>
+            <span style="font-size:12px;color:#9ca3af">22/7/2026, 1:34:33 am</span>
+            <span style="font-size:12px;color:#6b7280">3s &middot; smart_turn</span>
+            <div style="display:flex;align-items:center;gap:8px;background:#0b0f19;border:1px solid #374151;border-radius:6px;padding:5px 10px;width:220px">
+              <span class="ic ic-3.5" style="color:#d1d5db"><i data-lucide="play"></i></span>
+              <div style="flex:1;height:3px;border-radius:2px;background:#4b5563;position:relative"><span style="position:absolute;left:8%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;border-radius:50%;background:#d1d5db"></span></div>
+              <span style="font-family:ui-monospace,monospace;font-size:11px;color:#9ca3af">0:00</span>
+              <span class="ic ic-3.5" style="color:#9ca3af"><i data-lucide="volume-2"></i></span>
+            </div>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(20,83,45,.4);color:#86efac;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="check"></i></span>Wake</div>
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(127,29,29,.4);color:#fca5a5;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="x"></i></span>Not</div>
+              <span class="ic ic-3.5" style="color:#9ca3af;padding:5px"><i data-lucide="trash-2"></i></span>
+            </div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;border:1px solid #374151;border-radius:6px;padding:8px 12px">
+            <span style="font-family:ui-monospace,monospace;font-size:14px;font-weight:600;color:#e5e7eb;width:52px">0.996</span>
+            <span style="display:flex;align-items:center;gap:4px;background:#374151;color:#d1d5db;padding:3px 8px;border-radius:4px;font-size:12px"><span class="ic ic-3"><i data-lucide="arrow-right-left"></i></span>Move / Copy</span>
+            <span style="font-size:12px;color:#9ca3af">22/7/2026, 1:34:24 am</span>
+            <span style="font-size:12px;color:#6b7280">3s &middot; smart_turn</span>
+            <div style="display:flex;align-items:center;gap:8px;background:#0b0f19;border:1px solid #374151;border-radius:6px;padding:5px 10px;width:220px">
+              <span class="ic ic-3.5" style="color:#d1d5db"><i data-lucide="play"></i></span>
+              <div style="flex:1;height:3px;border-radius:2px;background:#4b5563;position:relative"><span style="position:absolute;left:8%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;border-radius:50%;background:#d1d5db"></span></div>
+              <span style="font-family:ui-monospace,monospace;font-size:11px;color:#9ca3af">0:00</span>
+              <span class="ic ic-3.5" style="color:#9ca3af"><i data-lucide="volume-2"></i></span>
+            </div>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(20,83,45,.4);color:#86efac;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="check"></i></span>Wake</div>
+              <div style="display:flex;align-items:center;gap:4px;background:rgba(127,29,29,.4);color:#fca5a5;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500"><span class="ic ic-3.5"><i data-lucide="x"></i></span>Not</div>
+              <span class="ic ic-3.5" style="color:#9ca3af;padding:5px"><i data-lucide="trash-2"></i></span>
+            </div>
+          </div>
+              </div>
+            </div>
+          </section>
+          <div style="font-size:12px;color:#6b7280;font-style:italic;text-align:center">"hermes" section (185 pending) continues below</div>
+        </div>
+            </main>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+</div>
+</x-dc>
+<script data-dc-script type="text/plain">
+class Component extends DCLogic {
+  componentDidMount() { this.build() }
+  build() {
+    ;['1a', '1c'].forEach((id) => {
+      const opt = document.querySelector('[id="' + id + '"]')
+      const frame = opt && opt.lastElementChild
+      if (!frame || frame.querySelector('[data-boost]')) return
+      frame.style.position = 'relative'
+      const pill = document.createElement('div')
+      pill.setAttribute('data-boost', '')
+      pill.style.cssText = 'position:absolute;bottom:20px;right:20px;display:flex;align-items:center;gap:8px;background:#374151;color:#d1d5db;padding:9px 16px;border-radius:999px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.4)'
+      pill.innerHTML = '<span class="ic ic-4"><i data-lucide="volume-2"></i></span>Volume boost off'
+      frame.appendChild(pill)
+    })
+    this.icons()
+  }
+  icons() { if (window.lucide) window.lucide.createIcons() }
+}
+</script>
+</body>
+</html>

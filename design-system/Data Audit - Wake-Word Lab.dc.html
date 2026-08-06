@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://unpkg.com">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#111827;font-family:system-ui,sans-serif;color:#e5e7eb}
+  .ic svg{display:block;stroke-width:2}
+  .ic-3 svg{width:12px;height:12px}
+  .ic-3\.5 svg{width:14px;height:14px}
+  .ic-4 svg{width:16px;height:16px}
+  .ic-5 svg{width:20px;height:20px}
+  .ic-6 svg{width:24px;height:24px}
+  .ic-8 svg{width:32px;height:32px}
+  a{color:#60a5fa;text-decoration:none}
+  a:hover{color:#93c5fd}
+</style>
+</helmet>
+
+<div style="min-height:100vh;display:flex;flex-direction:column;background:#111827">
+  <!-- Header -->
+  <header style="background:#1f2937;border-bottom:1px solid #374151;height:64px;flex-shrink:0;display:flex;align-items:center">
+    <div style="max-width:1600px;width:100%;margin:0 auto;padding:0 32px;display:flex;align-items:center;justify-content:space-between">
+      <div style="display:flex;align-items:center;gap:14px"><span class="ic ic-8" style="color:#2563eb"><i data-lucide="music"></i></span><span style="font-size:19px;font-weight:600;color:#f3f4f6">Chronicle Dashboard</span></div>
+      <div style="display:flex;align-items:center;gap:18px;color:#9ca3af;font-size:13px">
+        <span style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e"></span>Live</span>
+        <span class="ic ic-5"><i data-lucide="sun"></i></span>
+        <span style="display:flex;align-items:center;gap:6px;color:#d1d5db"><span class="ic ic-4" style="color:#2563eb"><i data-lucide="shield"></i></span>admin@example.com</span>
+        <span style="display:flex;align-items:center;gap:6px"><span class="ic ic-5"><i data-lucide="log-out"></i></span>Logout</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Body -->
+  <div style="flex:1;max-width:1600px;width:100%;margin:0 auto;padding:32px;display:flex;gap:32px">
+    <!-- Sidebar -->
+    <nav style="width:256px;flex-shrink:0;align-self:flex-start;background:#1f2937;border:1px solid #374151;border-radius:10px;padding:14px">
+      <ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:14px">
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="radio"></i></span>Live Record</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="message-circle"></i></span>Chat</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="message-square"></i></span>Conversations</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="calendar-days"></i></span>Timeline</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="scroll-text"></i></span>Memory Ledger</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="users"></i></span>User Management</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="upload"></i></span>Upload Audio</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;background:#2563eb;color:#fff;font-weight:500"><span class="ic ic-5"><i data-lucide="sparkles"></i></span>Data Audit</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="layers"></i></span>Queue &amp; Events</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="puzzle"></i></span>Plugins</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="zap"></i></span>Training</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="network"></i></span>Network</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="activity"></i></span>System Status</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="alert-triangle"></i></span>System Errors</li>
+        <li style="display:flex;align-items:center;gap:12px;padding:8px 12px;border-radius:6px;color:#d1d5db"><span class="ic ic-5"><i data-lucide="settings"></i></span>Settings</li>
+      </ul>
+    </nav>
+
+    <!-- Main -->
+    <main style="flex:1;min-width:0;background:#1f2937;border:1px solid #374151;border-radius:10px;padding:28px">
+
+      <!-- ========== HUB VIEW ========== -->
+      <sc-if value="{{ isHub }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;flex-direction:column;gap:22px">
+        <div style="display:flex;align-items:flex-start;gap:12px">
+          <span class="ic ic-6" style="color:#2563eb;margin-top:2px"><i data-lucide="sparkles"></i></span>
+          <div>
+            <h2 style="margin:0;font-size:22px;font-weight:600;color:#f3f4f6">Data Audit</h2>
+            <p style="margin:5px 0 0;font-size:14px;color:#9ca3af;max-width:860px">Decide what the audio is — audit conversations, enroll speakers, classify background &amp; role, and tune wake words. One home for all curation.</p>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px">
+          <div style="background:#111827;border:1px solid #374151;border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between"><span class="ic ic-5" style="color:#9ca3af"><i data-lucide="sparkles"></i></span><span style="font-size:22px;font-weight:700;color:#60a5fa">468</span></div>
+            <div style="font-size:15px;font-weight:600;color:#f3f4f6">Audit conversations</div>
+            <div style="font-size:12px;line-height:1.5;color:#9ca3af">Find speech-free or mis-attributed audio; split, merge, archive.</div>
+          </div>
+          <div style="background:#111827;border:1px solid #374151;border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px">
+            <span class="ic ic-5" style="color:#9ca3af"><i data-lucide="mic"></i></span>
+            <div style="font-size:15px;font-weight:600;color:#f3f4f6">Enroll speakers</div>
+            <div style="font-size:12px;line-height:1.5;color:#9ca3af">Review the relabel queue and strengthen voiceprints — deliberate, gated.</div>
+          </div>
+          <div style="background:#111827;border:1px solid #374151;border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px">
+            <span class="ic ic-5" style="color:#9ca3af"><i data-lucide="radio"></i></span>
+            <div style="font-size:15px;font-weight:600;color:#f3f4f6">Background &amp; role</div>
+            <div style="font-size:12px;line-height:1.5;color:#9ca3af">Content vs real people vs noise. Feeds background suppression.</div>
+          </div>
+          <!-- NEW: Wake-Word Lab entry -->
+          <div onClick="{{ goLab }}" style="background:#1e2a44;border:1px solid #2563eb;border-radius:10px;padding:18px;display:flex;flex-direction:column;gap:10px;position:relative;cursor:pointer" style-hover="background:#233150;border-color:#3b82f6">
+            <div style="position:absolute;top:12px;right:12px;font-size:9.5px;font-weight:700;letter-spacing:.06em;color:#93c5fd;background:#1e3a8a;padding:2px 7px;border-radius:999px">NEW</div>
+            <span class="ic ic-5" style="color:#60a5fa"><i data-lucide="target"></i></span>
+            <div style="font-size:15px;font-weight:600;color:#f3f4f6">Wake-Word Lab</div>
+            <div style="font-size:12px;line-height:1.5;color:#9ca3af">Review false positives &amp; capture wake clips; per-word retrain loop.</div>
+            <div style="display:flex;align-items:center;gap:5px;font-size:12.5px;font-weight:600;color:#60a5fa;margin-top:2px">Open lab <span class="ic ic-3.5"><i data-lucide="arrow-right"></i></span></div>
+          </div>
+        </div>
+
+        <div style="border:1px solid #374151;border-radius:8px;display:flex;align-items:center;justify-content:space-between;padding:11px 16px">
+          <div style="display:flex;align-items:center;gap:8px"><span class="ic ic-4" style="color:#6b7280"><i data-lucide="chevron-right"></i></span><span class="ic ic-4" style="color:#2563eb"><i data-lucide="gauge"></i></span><span style="font-size:14px;font-weight:500;color:#f3f4f6">Speaker identification confidence</span></div>
+          <span style="font-size:12px;color:#9ca3af">2048/11625 (17.6%) low-confidence</span>
+        </div>
+
+        <div style="border:1px solid #374151;border-radius:8px;padding:18px;display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <div style="display:flex;align-items:center;gap:8px"><span class="ic ic-5" style="color:#22c55e"><i data-lucide="shield-check"></i></span><span style="font-size:16px;font-weight:600;color:#f3f4f6">Curated Speaker Enrollment</span></div>
+            <div style="display:flex;align-items:center;gap:6px;font-size:13px;color:#d1d5db;background:#374151;padding:6px 12px;border-radius:8px;cursor:pointer"><span class="ic ic-3.5"><i data-lucide="refresh-cw"></i></span>Refresh</div>
+          </div>
+          <p style="margin:0;font-size:12.5px;line-height:1.55;color:#9ca3af">Only the segments <strong style="color:#d1d5db">you relabelled by hand</strong> are candidates, gated for quality (≥ 3s, no cross-talk, deduped). Clean clips are pre-selected; greyed clips are excluded with a reason — tick them to override.</p>
+          <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:#d1d5db;cursor:pointer"><input type="checkbox" style="accent-color:#2563eb"> Also show auto-identified segments <span style="color:#6b7280">(off by default — never pre-ticked)</span></label>
+          <p style="margin:2px 0 0;font-size:12.5px;font-style:italic;color:#6b7280">No enrollment candidates — annotate and apply speaker labels on a conversation, then they'll appear here.</p>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;align-items:center;gap:8px"><span class="ic ic-5" style="color:#2563eb"><i data-lucide="mic"></i></span><span style="font-size:18px;font-weight:700;color:#f3f4f6">Speaker enrollment</span></div>
+          <input placeholder="Search for a speaker to enhance…" style="width:100%;background:#111827;border:1px solid #374151;border-radius:8px;padding:10px 14px;font-size:14px;color:#e5e7eb">
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ========== LAB VIEW ========== -->
+      <sc-if value="{{ isLab }}">
+      <div style="display:flex;flex-direction:column;gap:18px">
+        <!-- breadcrumb -->
+        <div style="display:flex;align-items:center;gap:8px;font-size:13px;color:#9ca3af">
+          <span onClick="{{ goHub }}" style="color:#60a5fa;cursor:pointer;display:inline-flex;align-items:center;gap:5px"><span class="ic ic-3.5"><i data-lucide="arrow-left"></i></span>Data Audit</span>
+          <span class="ic ic-3.5" style="color:#4b5563"><i data-lucide="chevron-right"></i></span>
+          <span style="color:#d1d5db">Wake-Word Lab</span>
+        </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div style="display:flex;align-items:center;gap:10px"><span class="ic ic-6" style="color:#2563eb"><i data-lucide="target"></i></span><h1 style="margin:0;font-size:24px;font-weight:700;color:#f3f4f6">Wake-Word Lab</h1></div>
+          <div style="display:flex;align-items:center;gap:6px;font-size:13px;color:#d1d5db;background:#374151;padding:6px 12px;border-radius:8px;cursor:pointer"><span class="ic ic-4"><i data-lucide="refresh-cw"></i></span>Refresh</div>
+        </div>
+        <p style="margin:0;font-size:13px;line-height:1.55;color:#9ca3af;max-width:1000px">Close the training loop, per wake word: review false positives the model fired on, and capture clips of yourself saying that word (false negatives). Each section below is one wake word — labeled clips roll straight into that word's next retrain.</p>
+
+        <div style="border:1px solid #374151;border-radius:8px;padding:16px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:14px;font-weight:600;color:#e5e7eb"><span class="ic ic-4"><i data-lucide="radio"></i></span>Active streams</div>
+          <p style="margin:0;font-size:13px;color:#9ca3af">No live streams. Start a recording (Live Record) and it will appear here — then use an "I'll say it now" button in a wake-word section below.</p>
+        </div>
+
+        <sc-for list="{{ words }}" as="w" hint-placeholder-count="2">
+          <section style="border:1px solid #374151;border-radius:12px">
+            <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;border-bottom:1px solid #374151;padding:12px 16px">
+              <h2 style="margin:0;font-size:18px;font-weight:700;color:#f3f4f6">{{ w.titleText }}</h2>
+              <span style="background:#111827;padding:2px 8px;border-radius:4px;font-family:ui-monospace,monospace;font-size:12px;color:#9ca3af">{{ w.model }}</span>
+              <span style="{{ w.verifierStyle }}"><span class="ic ic-3.5"><i data-lucide="shield-check"></i></span>{{ w.verifierText }}</span>
+              <span style="{{ w.collectStyle }}"><span class="ic ic-3.5"><i data-lucide="eye"></i></span>{{ w.collectText }}</span>
+              <span style="font-size:12px;color:#9ca3af">{{ w.thrText }}</span>
+              <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+                <div style="display:flex;align-items:center;gap:6px;background:#374151;color:#d1d5db;padding:7px 12px;border-radius:6px;font-size:13px;cursor:pointer"><span class="ic ic-3.5"><i data-lucide="copy-x"></i></span>Remove duplicates</div>
+                <div style="display:flex;align-items:center;gap:6px;background:#2563eb;color:#fff;padding:7px 12px;border-radius:6px;font-size:13px;font-weight:500;opacity:.4"><span class="ic ic-3.5"><i data-lucide="target"></i></span>{{ w.primeText }}</div>
+              </div>
+            </div>
+            <div style="padding:16px">
+              <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+                <div style="border:1px solid #374151;border-radius:8px;padding:12px;text-align:center"><div style="font-size:24px;font-weight:700;color:#fbbf24">{{ w.statPending }}</div><div style="font-size:12px;color:#9ca3af">Pending</div></div>
+                <div style="border:1px solid #374151;border-radius:8px;padding:12px;text-align:center"><div style="font-size:24px;font-weight:700;color:#4ade80">{{ w.statPositive }}</div><div style="font-size:12px;color:#9ca3af">Positives</div></div>
+                <div style="border:1px solid #374151;border-radius:8px;padding:12px;text-align:center"><div style="font-size:24px;font-weight:700;color:#f87171">{{ w.statNegative }}</div><div style="font-size:12px;color:#9ca3af">Negatives</div></div>
+                <div style="border:1px solid #374151;border-radius:8px;padding:12px;text-align:center"><div style="font-size:24px;font-weight:700;color:#60a5fa">{{ w.statFn }}</div><div style="font-size:12px;color:#9ca3af">False negatives</div></div>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                <div onClick="{{ w.onP }}" style="{{ w.bpP }}">Pending review</div>
+                <div onClick="{{ w.onPos }}" style="{{ w.bpPos }}">Positives (wake)</div>
+                <div onClick="{{ w.onNeg }}" style="{{ w.bpNeg }}">Negatives (not wake)</div>
+                <div style="margin-left:auto;display:flex;align-items:center;gap:5px;font-size:12px;color:#9ca3af;cursor:pointer"><span class="ic ic-4"><i data-lucide="help-circle"></i></span>How to label</div>
+              </div>
+
+              <sc-if value="{{ w.hasClips }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <sc-for list="{{ w.clips }}" as="c" hint-placeholder-count="4">
+                  <div style="display:flex;flex-wrap:wrap;align-items:center;gap:12px;border:1px solid #374151;border-radius:6px;padding:8px 12px">
+                    <span style="font-family:ui-monospace,monospace;font-size:14px;font-weight:600;color:#e5e7eb;width:52px">{{ c.score }}</span>
+                    <sc-if value="{{ c.missed }}">
+                      <span style="background:#1e3a8a;color:#93c5fd;padding:2px 8px;border-radius:4px;font-size:11px">missed</span>
+                    </sc-if>
+                    <div style="position:relative;display:inline-flex">
+                      <div onClick="{{ c.onMenu }}" style="{{ c.menuBtnStyle }}"><span class="ic ic-3"><i data-lucide="arrow-right-left"></i></span>{{ c.menuLabel }}</div>
+                      <sc-if value="{{ c.menuOpen }}">
+                        <div style="position:absolute;left:0;top:calc(100% + 4px);z-index:30;width:256px;background:#1f2937;border:1px solid #374151;border-radius:8px;padding:8px;box-shadow:0 12px 32px rgba(0,0,0,.5)">
+                          <div style="font-size:11px;line-height:1.4;color:#9ca3af;padding:2px 4px 6px"><b style="color:#d1d5db">Move</b> = it's really that word's. <b style="color:#d1d5db">Copy</b> = a shared false positive.</div>
+                          <sc-for list="{{ c.targets }}" as="t" hint-placeholder-count="1">
+                            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;padding:4px">
+                              <span style="font-size:12px;font-weight:500;color:#e5e7eb">{{ t.title }}</span>
+                              <span style="display:flex;gap:5px">
+                                <span onClick="{{ t.onMove }}" style="background:rgba(30,58,138,.5);color:#93c5fd;padding:3px 10px;border-radius:5px;font-size:12px;cursor:pointer">Move</span>
+                                <span onClick="{{ t.onCopy }}" style="background:#374151;color:#d1d5db;padding:3px 10px;border-radius:5px;font-size:12px;cursor:pointer">Copy</span>
+                              </span>
+                            </div>
+                          </sc-for>
+                        </div>
+                      </sc-if>
+                    </div>
+                    <span style="font-size:12px;color:#9ca3af">{{ c.when }}</span>
+                    <span style="font-size:12px;color:#6b7280">{{ c.meta }}</span>
+                    <div style="display:flex;align-items:center;gap:8px;background:#111827;border:1px solid #374151;border-radius:6px;padding:5px 10px;width:220px">
+                      <span class="ic ic-3.5" style="color:#d1d5db"><i data-lucide="play"></i></span>
+                      <div style="flex:1;height:3px;border-radius:2px;background:#4b5563;position:relative"><span style="position:absolute;left:8%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;border-radius:50%;background:#d1d5db"></span></div>
+                      <span style="font-family:ui-monospace,monospace;font-size:11px;color:#9ca3af">0:00</span>
+                      <span class="ic ic-3.5" style="color:#9ca3af"><i data-lucide="volume-2"></i></span>
+                    </div>
+                    <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+                      <div style="display:flex;align-items:center;gap:4px;background:rgba(20,83,45,.4);color:#86efac;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer"><span class="ic ic-3.5"><i data-lucide="check"></i></span>Wake</div>
+                      <div style="display:flex;align-items:center;gap:4px;background:rgba(127,29,29,.4);color:#fca5a5;padding:5px 9px;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer"><span class="ic ic-3.5"><i data-lucide="x"></i></span>Not</div>
+                      <span class="ic ic-3.5" style="color:#9ca3af;padding:5px;cursor:pointer"><i data-lucide="trash-2"></i></span>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+              </sc-if>
+              <sc-if value="{{ w.empty }}">
+                <p style="padding:24px 0;text-align:center;font-size:13px;color:#6b7280">{{ w.emptyText }}</p>
+              </sc-if>
+            </div>
+          </section>
+        </sc-for>
+      </div>
+      <div onClick="{{ cycleBoost }}" style="{{ boostStyle }}"><span class="ic ic-4"><i data-lucide="volume-2"></i></span>Volume boost {{ boostText }}</div>
+      </sc-if>
+
+    </main>
+  </div>
+
+  <!-- Footer -->
+  <footer style="background:#1f2937;border-top:1px solid #374151;padding:18px">
+    <div style="text-align:center;font-size:13px;color:#6b7280">Chronicle — understand everything, everywhere, all at once.</div>
+  </footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { view: 'hub', boost: 1, buckets: { 0: 'pending', 1: 'pending' }, menu: null }
+
+  data = [
+    {
+      name: 'hey hermes', model: 'hey_hermes_f.onnx', verifier: true, collectOnly: false, thr: 0.9, patience: 2,
+      stats: { pending: 4, positive: 196, negative: 75, fn: 2 },
+      clips: {
+        pending: [
+          { id: 'a1', score: '0.996', when: '22/7/2026, 1:36:18 am', reason: 'smart_turn' },
+          { id: 'a2', score: '0.996', when: '22/7/2026, 1:35:10 am', reason: 'smart_turn' },
+          { id: 'a3', score: '0.996', when: '22/7/2026, 1:34:33 am', reason: 'smart_turn' },
+          { id: 'a4', score: '0.996', when: '22/7/2026, 1:34:24 am', reason: 'smart_turn' },
+        ],
+        positive: [
+          { id: 'ap1', score: '0.998', when: '21/7/2026, 9:12:03 pm', reason: 'labeled wake' },
+          { id: 'ap2', score: '0.997', when: '21/7/2026, 8:40:55 pm', reason: 'labeled wake' },
+          { id: 'ap3', score: '0.995', when: '21/7/2026, 7:22:11 pm', reason: 'labeled wake' },
+        ],
+        negative: [
+          { id: 'an1', score: '0.612', when: '21/7/2026, 6:05:41 pm', reason: 'tv audio' },
+          { id: 'an2', score: '0.548', when: '21/7/2026, 5:51:20 pm', reason: 'near-miss' },
+        ],
+      },
+    },
+    {
+      name: 'hermes', model: 'hermes_hubert_convattn.pt', verifier: true, collectOnly: true, thr: 0.9, patience: 2,
+      stats: { pending: 185, positive: 59, negative: 367, fn: 8 },
+      clips: {
+        pending: [
+          { id: 'b1', score: '0.933', when: '22/7/2026, 2:19:07 am', reason: 'shadow_arm' },
+          { id: 'b2', score: '0.963', when: '22/7/2026, 2:18:56 am', reason: 'shadow_arm', alsoFired: ['hey hermes'] },
+          { id: 'b3', score: '0.975', when: '22/7/2026, 2:10:34 am', reason: 'shadow_arm' },
+          { id: 'b4', score: '0.976', when: '22/7/2026, 1:47:05 am', reason: 'shadow_arm' },
+          { id: 'b5', score: '0.940', when: '22/7/2026, 1:46:32 am', reason: 'shadow_arm' },
+          { id: 'b6', score: '0.906', when: '22/7/2026, 1:46:18 am', reason: 'shadow_arm' },
+        ],
+        positive: [
+          { id: 'bp1', score: '0.981', when: '20/7/2026, 4:12:00 pm', reason: 'labeled wake' },
+        ],
+        negative: [
+          { id: 'bn1', score: '0.702', when: '20/7/2026, 3:40:10 pm', reason: 'cross-talk' },
+          { id: 'bn2', score: '0.655', when: '20/7/2026, 3:31:44 pm', reason: 'noise', missed: true },
+        ],
+      },
+    },
+  ]
+
+  componentDidMount() { this.icons() }
+  componentDidUpdate() { this.icons() }
+  icons() { if (window.lucide) window.lucide.createIcons() }
+
+  setView(v) { this.setState({ view: v, menu: null }) }
+  cycleBoost() { const L = [1, 4, 8]; this.setState((s) => ({ boost: L[(L.indexOf(s.boost) + 1) % 3] })) }
+  setBucket(i, b) { this.setState((s) => ({ buckets: { ...s.buckets, [i]: b }, menu: null })) }
+  toggleMenu(id) { this.setState((s) => ({ menu: s.menu === id ? null : id })) }
+
+  renderVals() {
+    const chip = (on, kind) => {
+      const base = 'display:flex;align-items:center;gap:4px;padding:2px 8px;border-radius:4px;font-size:12px;'
+      if (kind === 'verifier') return base + (on ? 'background:rgba(20,83,45,.4);color:#86efac' : 'background:#111827;color:#9ca3af')
+      return base + (on ? 'background:rgba(120,53,15,.5);color:#fcd34d' : 'background:#111827;color:#9ca3af')
+    }
+    const tab = (on) => 'padding:7px 14px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;' + (on ? 'background:#2563eb;color:#fff' : 'background:#374151;color:#d1d5db')
+
+    const words = this.data.map((w, i) => {
+      const bucket = this.state.buckets[i] || 'pending'
+      const list = w.clips[bucket] || []
+      const clips = list.map((c) => {
+        const also = (c.alsoFired || [])
+        const suggested = also.length > 0
+        const targets = this.data.filter((x) => x.name !== w.name).map((x) => ({
+          title: also.includes(x.name) ? '"' + x.name + '"  · also fired' : '"' + x.name + '"',
+          onMove: () => this.toggleMenu(null),
+          onCopy: () => this.toggleMenu(null),
+        }))
+        return {
+          ...c,
+          when: c.when,
+          meta: '3s · ' + c.reason,
+          missed: !!c.missed,
+          menuOpen: this.state.menu === c.id,
+          onMenu: () => this.toggleMenu(c.id),
+          menuLabel: suggested ? 'also: ' + also[0] : 'Move / Copy',
+          menuBtnStyle: 'display:flex;align-items:center;gap:4px;padding:3px 8px;border-radius:4px;font-size:12px;cursor:pointer;' +
+            (suggested ? 'background:rgba(88,28,135,.5);color:#d8b4fe' : 'background:#374151;color:#d1d5db'),
+          targets,
+        }
+      })
+      const emptyText = 'No clips in "' + { pending: 'Pending review', positive: 'Positives (wake)', negative: 'Negatives (not wake)' }[bucket] + '" for "' + w.name + '".'
+      return {
+        titleText: '"' + w.name + '"',
+        model: w.model,
+        verifierText: w.verifier ? 'verifier on' : 'verifier off',
+        verifierStyle: chip(w.verifier, 'verifier'),
+        collectText: 'collect-only ' + (w.collectOnly ? 'on' : 'off'),
+        collectStyle: chip(w.collectOnly, 'collect'),
+        thrText: 'thr ' + w.thr + ' · patience ' + w.patience,
+        primeText: 'I\'ll say "' + w.name + '" now',
+        statPending: w.stats.pending, statPositive: w.stats.positive, statNegative: w.stats.negative, statFn: w.stats.fn,
+        bpP: tab(bucket === 'pending'), bpPos: tab(bucket === 'positive'), bpNeg: tab(bucket === 'negative'),
+        onP: () => this.setBucket(i, 'pending'), onPos: () => this.setBucket(i, 'positive'), onNeg: () => this.setBucket(i, 'negative'),
+        clips, hasClips: clips.length > 0, empty: clips.length === 0, emptyText,
+      }
+    })
+
+    return {
+      isHub: this.state.view === 'hub',
+      isLab: this.state.view === 'lab',
+      goLab: () => this.setView('lab'),
+      goHub: () => this.setView('hub'),
+      boostText: this.state.boost > 1 ? this.state.boost + '×' : 'off',
+      boostStyle: 'position:fixed;bottom:24px;right:24px;display:flex;align-items:center;gap:8px;padding:10px 18px;border-radius:999px;font-size:13px;cursor:pointer;z-index:40;box-shadow:0 8px 24px rgba(0,0,0,.4);' +
+        (this.state.boost > 1 ? 'background:#2563eb;color:#fff' : 'background:#374151;color:#d1d5db'),
+      cycleBoost: () => this.cycleBoost(),
+      words,
+    }
+  }
+}
+</script>
+</body>
+</html>

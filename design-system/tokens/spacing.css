@@ -1,0 +1,22 @@
+/* Chronicle spacing — Tailwind's 4px base grid. The layout leans on flex/grid
+   gap rather than margins. Common values below are the ones actually recurring
+   in the product (gap-2/3, p-3/4, py-1.5/2, section gap-6/8). */
+:root {
+  --space-0-5: 2px;
+  --space-1:   4px;
+  --space-1-5: 6px;
+  --space-2:   8px;
+  --space-3:   12px;
+  --space-4:   16px;
+  --space-5:   20px;
+  --space-6:   24px;
+  --space-8:   32px;
+  --space-10:  40px;
+
+  /* frequent composite paddings */
+  --pad-chip:    2px 8px;    /* status chip */
+  --pad-btn-sm:  6px 12px;   /* toolbar button */
+  --pad-btn:     7px 14px;   /* pill tab / primary button */
+  --pad-card:    16px;       /* inner tile / panel */
+  --pad-page:    24px 28px;  /* main content card */
+}

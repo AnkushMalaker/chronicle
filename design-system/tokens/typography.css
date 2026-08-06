@@ -1,0 +1,22 @@
+/* Chronicle type system. The webui sets html { font-family: system-ui, sans-serif }
+   and uses Tailwind's default type scale; mono is used for scores, model names,
+   timestamps and code-like metadata. */
+:root {
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --text-xs:   12px;  --leading-xs:   16px;
+  --text-sm:   14px;  --leading-sm:   20px;
+  --text-base: 16px;  --leading-base: 24px;
+  --text-lg:   18px;  --leading-lg:   28px;
+  --text-xl:   20px;  --leading-xl:   28px;
+  --text-2xl:  24px;  --leading-2xl:  32px;
+  --text-3xl:  30px;  --leading-3xl:  36px;
+
+  --font-medium:   500;
+  --font-semibold: 600;
+  --font-bold:     700;
+
+  --tracking-tight: -0.01em;
+  --tracking-wide:   0.08em; /* uppercase eyebrows / group labels */
+}

@@ -1,0 +1,18 @@
+<!-- @dsCard group="Components" viewport="700x210" name="Forms — input, select, checkbox" subtitle="Field controls with focus + accent states" -->
+<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="../../_ds_bundle.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>body{margin:0;background:var(--surface-raised);color:var(--text-primary);font-family:var(--font-sans);padding:20px}.grp{display:flex;flex-direction:column;gap:14px;max-width:520px}</style>
+</head><body><div id="root"></div>
+<script type="text/babel">
+const NS = window.Chronicle || Object.values(window).find(v => v && v.Input && v.Checkbox) || {}
+const { Input, Select, Checkbox } = NS
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <div className="grp">
+    <Input placeholder="Search for a speaker to enhance…" />
+    <Select defaultValue="a"><option value="a">Sort: most informative</option><option value="b">Sort: newest</option></Select>
+    <Checkbox label="Also show auto-identified segments" hint="(off by default — never pre-ticked)" defaultChecked={false} />
+  </div>)
+</script></body></html>

@@ -1,0 +1,24 @@
+<!-- @dsCard group="Components" viewport="700x260" name="Navigation — nav item, breadcrumb" subtitle="Sidebar rows (active/badge) and sub-view trail" -->
+<!DOCTYPE html><html><head><meta charset="utf-8"><link rel="stylesheet" href="../../styles.css">
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script src="../../_ds_bundle.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>body{margin:0;background:var(--surface-raised);color:var(--text-primary);font-family:var(--font-sans);padding:20px}</style>
+</head><body><div id="root"></div>
+<script type="text/babel">
+const NS = window.Chronicle || Object.values(window).find(v => v && v.NavItem) || {}
+const { NavItem, Breadcrumb } = NS
+const I = (n) => React.createElement('span',{ref:e=>{if(e){e.innerHTML='';const i=document.createElement('i');i.setAttribute('data-lucide',n);e.appendChild(i);window.lucide&&window.lucide.createIcons()}},style:{display:'inline-flex'}})
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <div style={{display:'flex',gap:24,alignItems:'flex-start'}}>
+    <div style={{width:230,background:'var(--surface-raised)',border:'1px solid var(--border)',borderRadius:10,padding:12,display:'flex',flexDirection:'column',gap:4}}>
+      <NavItem icon={I('upload')} label="Upload Audio"/>
+      <NavItem icon={I('sparkles')} label="Data Audit" active/>
+      <NavItem icon={I('layers')} label="Queue & Events"/>
+      <NavItem icon={I('alert-triangle')} label="System Errors" badge={3}/>
+    </div>
+    <Breadcrumb items={[{label:'Data Audit',icon:I('arrow-left')},{label:'Wake-Word Lab'}]}/>
+  </div>)
+</script></body></html>

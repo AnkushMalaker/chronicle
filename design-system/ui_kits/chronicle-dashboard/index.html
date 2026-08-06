@@ -1,0 +1,21 @@
+<!-- @dsCard group="Chronicle Dashboard" viewport="1440x780" subtitle="Data Audit hub → Wake-Word Lab, in the real app shell" -->
+<!-- @startingPoint section="Screens" subtitle="Chronicle admin dashboard (Data Audit + Wake-Word Lab)" viewport="1440x900" -->
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="../../styles.css">
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script src="../../_ds_bundle.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>body{margin:0;background:var(--surface-page)}</style>
+</head><body>
+<div id="root"></div>
+<script type="text/babel" src="Sidebar.jsx"></script>
+<script type="text/babel" src="DataAuditHub.jsx"></script>
+<script type="text/babel" src="WakeWordLab.jsx"></script>
+<script type="text/babel" src="App.jsx"></script>
+<script type="text/babel" data-presets="react">
+  const mount = () => { if (window.CK && CK.App) ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(CK.App)); else setTimeout(mount, 60) }
+  mount()
+</script>
+</body></html>

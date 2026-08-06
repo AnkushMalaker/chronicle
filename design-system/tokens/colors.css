@@ -1,0 +1,88 @@
+/* Chronicle color system — reverse-engineered from the webui (default Tailwind
+   palette used via inline classes; dark theme is the product's signature look).
+   Base scale first, then semantic aliases. Dark is the default on :root. */
+:root {
+  /* neutral scale (Tailwind gray) */
+  --gray-900: #111827;
+  --gray-800: #1f2937;
+  --gray-700: #374151;
+  --gray-600: #4b5563;
+  --gray-500: #6b7280;
+  --gray-400: #9ca3af;
+  --gray-300: #d1d5db;
+  --gray-200: #e5e7eb;
+  --gray-100: #f3f4f6;
+  --gray-50:  #f9fafb;
+
+  /* brand blue (Tailwind blue) */
+  --blue-900: #1e3a8a;
+  --blue-700: #1d4ed8;
+  --blue-600: #2563eb;
+  --blue-500: #3b82f6;
+  --blue-400: #60a5fa;
+  --blue-300: #93c5fd;
+
+  /* semantic hues */
+  --green-600: #16a34a; --green-500: #22c55e; --green-400: #4ade80; --green-300: #86efac;
+  --red-600:   #dc2626; --red-500:   #ef4444; --red-400:   #f87171; --red-300:   #fca5a5;
+  --amber-500: #f59e0b; --amber-400: #fbbf24; --amber-300: #fcd34d;
+  --orange-400:#fb923c;
+  --purple-400:#c084fc; --purple-300:#d8b4fe;
+
+  /* ---- semantic aliases (dark, default) ---- */
+  --surface-page:    var(--gray-900);  /* app background */
+  --surface-raised:  var(--gray-800);  /* header, sidebar, main card */
+  --surface-sunken:  var(--gray-900);  /* inputs, chips, inner tiles on a raised card */
+  --border:          var(--gray-700);  /* default hairline */
+  --border-subtle:   var(--gray-800);
+
+  --text-primary:    var(--gray-100);
+  --text-secondary:  var(--gray-300);
+  --text-muted:      var(--gray-400);
+  --text-faint:      var(--gray-500);
+
+  --accent:          var(--blue-600);  /* primary action, active nav/tab */
+  --accent-hover:    var(--blue-700);
+  --accent-fg:       var(--blue-400);  /* accent text/icons on dark */
+  --accent-nav-bg:   var(--blue-900);
+
+  /* soft status chips: translucent fill + light text (as used on chips/labels) */
+  --success:         var(--green-500);
+  --success-fg:      var(--green-300);
+  --success-soft-bg: rgba(20,83,45,.40);
+  --danger:          var(--red-600);
+  --danger-fg:       var(--red-300);
+  --danger-soft-bg:  rgba(127,29,29,.40);
+  --warning:         var(--amber-500);
+  --warning-fg:      var(--amber-300);
+  --warning-soft-bg: rgba(120,53,15,.50);
+  --info-fg:         var(--blue-300);
+  --info-soft-bg:    var(--blue-900);
+  --suggest-fg:      var(--purple-300);
+  --suggest-soft-bg: rgba(88,28,135,.50);
+
+  /* neutral chip / secondary button */
+  --chip-bg:         var(--gray-700);
+  --chip-fg:         var(--gray-300);
+}
+
+/* Light theme (the app also ships a light mode via Tailwind's dark: variant). */
+:root[data-theme="light"] {
+  --surface-page:   var(--gray-50);
+  --surface-raised: #ffffff;
+  --surface-sunken: var(--gray-100);
+  --border:         var(--gray-200);
+  --border-subtle:  var(--gray-100);
+  --text-primary:   #111827;
+  --text-secondary: #374151;
+  --text-muted:     var(--gray-500);
+  --text-faint:     var(--gray-400);
+  --accent-fg:      var(--blue-600);
+  --accent-nav-bg:  #dbeafe;
+  --success-fg:     #15803d; --success-soft-bg:#dcfce7;
+  --danger-fg:      #b91c1c; --danger-soft-bg: #fee2e2;
+  --warning-fg:     #b45309; --warning-soft-bg:#fef3c7;
+  --info-fg:        #1d4ed8; --info-soft-bg:   #dbeafe;
+  --suggest-fg:     #7e22ce; --suggest-soft-bg:#f3e8ff;
+  --chip-bg:        var(--gray-100); --chip-fg: var(--gray-700);
+}

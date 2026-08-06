@@ -1,0 +1,5 @@
+/* Chronicle Design System — global entry. @import only. */
+@import "./tokens/colors.css";
+@import "./tokens/typography.css";
+@import "./tokens/spacing.css";
+@import "./tokens/effects.css";

@@ -1,0 +1,20 @@
+/* Chronicle radii, borders, shadows, motion. */
+:root {
+  --radius-sm:   4px;   /* chips, small tags (rounded) */
+  --radius-md:   6px;   /* buttons, list rows (rounded-md) */
+  --radius-lg:   8px;   /* cards, inputs, tabs (rounded-lg) */
+  --radius-xl:   12px;  /* word sections / large panels (rounded-xl) */
+  --radius-full: 9999px;
+
+  --border-width: 1px;
+
+  /* soft elevation (Tailwind shadow-sm / lg) + the floating-pill shadow */
+  --shadow-sm:   0 1px 2px 0 rgba(0,0,0,.30);
+  --shadow-lg:   0 10px 15px -3px rgba(0,0,0,.40), 0 4px 6px -4px rgba(0,0,0,.40);
+  --shadow-pill: 0 8px 24px rgba(0,0,0,.40);
+  --shadow-menu: 0 12px 32px rgba(0,0,0,.50);
+
+  --dur-fast: 120ms;
+  --dur:      200ms;
+  --ease:     cubic-bezier(.4,0,.2,1);
+}
