@@ -6,6 +6,13 @@ computer. Chronicle does not mirror that entire store: the companion collector s
 compact, event-driven observations and can fulfill bounded snapshot/OCR requests for
 the timeline and memory curator.
 
+Continuous ScreenPipe audio is timeline evidence rather than a user-facing
+Conversation. Approximately 30-second source files are assembled into bounded compute
+spans; Chronicle persists compact 10-second speech/acoustic/coverage arrays and runs
+changed-day semantic analysis on a configurable 30-minute cadence. Neither the source
+files nor the compute spans impose episode boundaries. See
+[Semantic timeline episodes](backend/timeline-episodes.md).
+
 ## Component boundaries
 
 - `screenpipe record` captures and retains source data locally.

@@ -9,7 +9,6 @@ Also includes audio cropping operations that work with the Conversation model.
 
 import logging
 import os
-import time
 import uuid
 
 from fastapi import UploadFile
@@ -51,6 +50,12 @@ async def upload_and_process_audio_files(
     device_name: str = "upload",
     source: str = "upload",
     annotation_only: bool = False,
+    external_source_id: str | None = None,
+    external_source_type: str | None = None,
+    data_purpose: str | None = None,
+    memory_excluded: bool | None = None,
+    memory_exclusion_reason: str | None = None,
+    skip_post_processing: bool = False,
 ) -> dict:
     """
     Upload audio files and process them directly.
@@ -114,19 +119,17 @@ async def upload_and_process_audio_files(
                         continue
 
                 # Track external source for deduplication (Google Drive, etc.)
-                external_source_id = None
-                external_source_type = None
                 if source == "gdrive":
-                    external_source_id = getattr(file, "file_id", None) or getattr(
-                        file, "audio_uuid", None
+                    external_source_id = (
+                        external_source_id
+                        or getattr(file, "file_id", None)
+                        or getattr(file, "audio_uuid", None)
                     )
-                    external_source_type = "gdrive"
+                    external_source_type = external_source_type or "gdrive"
                     if not external_source_id:
                         audio_logger.warning(
                             f"Missing file_id for gdrive file: {filename}"
                         )
-                timestamp = int(time.time() * 1000)
-
                 # Validate and prepare audio (read format from WAV file)
                 try:
                     audio_data, sample_rate, sample_width, channels, duration = (
@@ -169,11 +172,13 @@ async def upload_and_process_audio_files(
                     ),
                     external_source_id=external_source_id,
                     external_source_type=external_source_type,
-                    data_purpose="annotation" if annotation_only else None,
-                    memory_excluded=annotation_only,
-                    memory_exclusion_reason=(
-                        "annotation_only_upload" if annotation_only else None
+                    data_purpose=data_purpose
+                    or ("annotation" if annotation_only else None),
+                    memory_excluded=(
+                        annotation_only if memory_excluded is None else memory_excluded
                     ),
+                    memory_exclusion_reason=memory_exclusion_reason
+                    or ("annotation_only_upload" if annotation_only else None),
                 )
                 await conversation.insert()
                 conversation_id = (
@@ -260,14 +265,22 @@ async def upload_and_process_audio_files(
                     )
 
                 # Enqueue post-conversation processing job chain (depends on transcription)
-                job_ids = start_post_conversation_jobs(
-                    conversation_id=conversation_id,
-                    user_id=user.user_id,
-                    transcript_version_id=version_id,  # Pass the version_id from transcription job
-                    depends_on_job=transcription_job,  # Wait for transcription to complete (or None)
-                    client_id=client_id,  # Pass client_id for UI tracking
-                    skip_memory_extraction=annotation_only,
-                )
+                if skip_post_processing:
+                    job_ids = {
+                        "speaker_recognition": None,
+                        "memory": None,
+                        "title_summary": None,
+                        "event_dispatch": None,
+                    }
+                else:
+                    job_ids = start_post_conversation_jobs(
+                        conversation_id=conversation_id,
+                        user_id=user.user_id,
+                        transcript_version_id=version_id,
+                        depends_on_job=transcription_job,
+                        client_id=client_id,
+                        skip_memory_extraction=annotation_only,
+                    )
 
                 file_result = {
                     "filename": filename,

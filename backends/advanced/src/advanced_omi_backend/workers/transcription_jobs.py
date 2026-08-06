@@ -36,6 +36,7 @@ from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
+from advanced_omi_backend.models.timeline import AudioEvidenceSpan
 from advanced_omi_backend.observability.otel_setup import (
     set_otel_session,
     set_span_attrs,
@@ -80,6 +81,21 @@ from advanced_omi_backend.utils.silence_condense import (
 from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
 
 logger = logging.getLogger(__name__)
+
+
+async def _settle_audio_evidence_span(
+    conversation: Conversation, word_count: int, state: str
+) -> None:
+    if conversation.external_source_type != "screenpipe":
+        return
+    span = await AudioEvidenceSpan.find_one(
+        AudioEvidenceSpan.conversation_id == conversation.conversation_id
+    )
+    if span is None:
+        return
+    span.word_count = word_count
+    span.state = state
+    await span.save()
 
 
 async def apply_speaker_recognition(
@@ -531,6 +547,11 @@ async def process_transcription_result(
             conversation_id=conversation_id,
             deletion_reason="no_meaningful_speech_batch_transcription",
         )
+        await _settle_audio_evidence_span(
+            conversation,
+            int(speech_analysis.get("word_count", 0)),
+            "no_speech",
+        )
 
         # Cancel dependent jobs
         current_job = get_current_job()
@@ -687,6 +708,7 @@ async def process_transcription_result(
         conversation.summary = "No speech detected"
 
     await conversation.save()
+    await _settle_audio_evidence_span(conversation, len(words), "transcribed")
 
     logger.info(
         f"✅ Transcript processing completed for {conversation_id} in {processing_time:.2f}s"
@@ -1485,9 +1507,7 @@ async def stream_speech_detection_job(
                         )
                     break
                 elif speaker_check_job.is_failed:
-                    logger.warning(
-                        f"⚠️ Speaker check job failed, assuming not enrolled"
-                    )
+                    logger.warning(f"⚠️ Speaker check job failed, assuming not enrolled")
 
                     # Update session event for speaker check failed
                     await store.record_event(session_id, "speaker_check_failed")

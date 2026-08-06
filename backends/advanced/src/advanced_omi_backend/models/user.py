@@ -18,6 +18,7 @@ class UserCreate(BaseUserCreate):
     display_name: Optional[str] = None
     assistant_name: Optional[str] = None
     notification_email: Optional[EmailStr] = None
+    timezone: Optional[str] = None
     is_superuser: Optional[bool] = False
 
 
@@ -27,6 +28,7 @@ class UserRead(BaseUser[PydanticObjectId]):
     display_name: Optional[str] = None
     assistant_name: Optional[str] = None
     notification_email: Optional[EmailStr] = None
+    timezone: Optional[str] = None
     registered_clients: dict[str, dict] = Field(default_factory=dict)
     primary_speakers: list[dict] = Field(default_factory=list)
     wakeword_gate_enabled: bool = False
@@ -39,6 +41,7 @@ class UserUpdate(BaseUserUpdate):
     display_name: Optional[str] = None
     assistant_name: Optional[str] = None
     notification_email: Optional[EmailStr] = None
+    timezone: Optional[str] = None
     is_superuser: Optional[bool] = None
 
     def create_update_dict(self):
@@ -50,6 +53,8 @@ class UserUpdate(BaseUserUpdate):
             update_dict["assistant_name"] = self.assistant_name
         if self.notification_email is not None:
             update_dict["notification_email"] = self.notification_email
+        if self.timezone is not None:
+            update_dict["timezone"] = self.timezone
         return update_dict
 
     def create_update_dict_superuser(self):
@@ -61,6 +66,8 @@ class UserUpdate(BaseUserUpdate):
             update_dict["assistant_name"] = self.assistant_name
         if self.notification_email is not None:
             update_dict["notification_email"] = self.notification_email
+        if self.timezone is not None:
+            update_dict["timezone"] = self.timezone
         return update_dict
 
 
@@ -77,6 +84,8 @@ class User(BeanieBaseUser, Document):
     # Name used to label the assistant's turns when extracting memories from chat
     assistant_name: Optional[str] = None
     notification_email: Optional[EmailStr] = None
+    # Last browser-confirmed IANA timezone used for current-day timeline analysis.
+    timezone: Optional[str] = None
     # Client tracking for audio devices
     registered_clients: dict[str, dict] = Field(default_factory=dict)
     # Speaker processing filter configuration

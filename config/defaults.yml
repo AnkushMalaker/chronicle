@@ -895,6 +895,24 @@ cron_jobs:
     description: "Expire conversation screen context whose conversation is gone"
     enabled: true
     schedule: "0 4 * * *"
+  timeline_analysis:
+    description: "Reconcile changed current-day capture evidence into semantic episodes"
+    enabled: true
+    schedule: "*/30 * * * *"
+
+timeline:
+  window_minutes: 20
+  overlap_minutes: 3
+  max_text_chars_per_window: 30000
+  max_anchor_images_per_window: 4
+  executor: codex
+  prompt_version: timeline-episodes-v1
+  codex:
+    model: null
+    reasoning_effort: medium
+    timeout_seconds: 1800
+    max_used_percent: 80
+    retry_hours: 6
 
 # Data Audit / auto-clean "level" (thresholds for the auto_clean cron job).
 # Kept separate from cron_jobs.auto_clean so toggling the schedule in the UI

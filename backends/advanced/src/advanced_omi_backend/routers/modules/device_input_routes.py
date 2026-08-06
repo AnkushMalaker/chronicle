@@ -32,6 +32,7 @@ from advanced_omi_backend.models.device_input import (
     PairingCode,
     utcnow,
 )
+from advanced_omi_backend.models.timeline import AudioEvidenceSpan
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services.device_context import (
     request_conversation_context_jobs,
@@ -456,6 +457,13 @@ async def ingest_audio(
     )
     if existing:
         return {"status": "duplicate", "item_id": str(existing.id)}
+    compacted = await AudioEvidenceSpan.find_one(
+        AudioEvidenceSpan.user_id == source.user_id,
+        AudioEvidenceSpan.source_id == source.source_id,
+        {"source_item_ids": source_item_id},
+    )
+    if compacted:
+        return {"status": "duplicate", "compacted": True}
     if file.content_type not in _ALLOWED_AUDIO_TYPES:
         raise HTTPException(status_code=415, detail="Unsupported audio type")
     data = await file.read(_MAX_AUDIO_BYTES + 1)

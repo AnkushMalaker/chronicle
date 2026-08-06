@@ -37,6 +37,12 @@ from advanced_omi_backend.models.device_input import (
 )
 from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
 from advanced_omi_backend.models.system_event import SystemEvent
+from advanced_omi_backend.models.timeline import (
+    AudioEvidenceSpan,
+    TimelineAnalysisRun,
+    TimelineDay,
+    TimelineEpisode,
+)
 from advanced_omi_backend.models.waveform import WaveformData
 from advanced_omi_backend.redis_factory import create_async_redis
 from advanced_omi_backend.routers.api_router import router as api_router
@@ -90,6 +96,10 @@ async def lifespan(app: FastAPI):
                 PairingCode,
                 DeviceInputItem,
                 DeviceInputJob,
+                AudioEvidenceSpan,
+                TimelineAnalysisRun,
+                TimelineEpisode,
+                TimelineDay,
             ],
         )
         application_logger.info("Beanie initialized for all document models")
@@ -282,6 +292,9 @@ async def lifespan(app: FastAPI):
                 process_observation_curation,
             )
             from advanced_omi_backend.services.person_photos import sync_person_photos
+            from advanced_omi_backend.services.timeline.discovery import (
+                process_current_timeline_days,
+            )
             from advanced_omi_backend.workers.annotation_jobs import (
                 surface_error_suggestions,
             )
@@ -305,6 +318,7 @@ async def lifespan(app: FastAPI):
             register_cron_job("device_audio_ingest", process_device_audio)
             register_cron_job("observation_curation", process_observation_curation)
             register_cron_job("screen_context_retention", purge_screen_context)
+            register_cron_job("timeline_analysis", process_current_timeline_days)
 
             scheduler = get_scheduler()
             await scheduler.start()

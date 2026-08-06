@@ -3,9 +3,9 @@
 ## Status
 
 This document records design learnings from the July 2026 audit of Chronicle's
-ScreenPipe observation pipeline. It describes the target architecture and the
-constraints that future implementation should preserve. It is not a claim that the
-current pipeline already behaves this way.
+ScreenPipe observation pipeline. The semantic episode ledger and evidence broker are
+now implemented for the Timeline; vault promotion and configurable zoom remain future
+work. See [Semantic timeline episodes](backend/timeline-episodes.md) for current behavior.
 
 > **Partly superseded.** The layering below still holds, but three assumptions in
 > the "Deterministic local signal layer" section were tested against the real

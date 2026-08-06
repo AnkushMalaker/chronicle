@@ -234,6 +234,77 @@ export const deviceInputApi = {
     api.post(`/api/device-input/items/${itemId}/promote`),
 }
 
+export interface TimelineEvidenceRef {
+  evidence_id: string
+  kind: 'audio_span' | 'transcript' | 'observation' | 'frame' | 'meeting' | 'immich' | 'capture_gap'
+  source_id: string | null
+  source_item_id: string | null
+  started_at: string
+  ended_at: string | null
+  role: string
+  excerpt: string | null
+  ephemeral: boolean
+}
+
+export interface TimelineEpisode {
+  episode_id: string
+  started_at: string
+  ended_at: string
+  kind: string
+  title: string
+  summary: string
+  status: 'provisional' | 'confirmed' | 'superseded'
+  salience: 'background' | 'routine' | 'notable' | 'highlight'
+  confidence: number
+  activity_mode: 'foreground' | 'background' | 'ambient' | 'idle'
+  entities: string[]
+  attributes: Record<string, unknown>
+  assertions: Array<{ claim: string; role: string; confidence: number; evidence_ids: string[] }>
+  evidence: TimelineEvidenceRef[]
+  related_episode_ids: string[]
+  related_conversation_ids: string[]
+  parent_episode_id: string | null
+  has_thumbnail: boolean
+}
+
+export interface TimelineAnalysis {
+  run_id: string
+  state: 'pending' | 'preparing' | 'awaiting_evidence' | 'running' | 'validating' | 'complete' | 'failed' | 'quota_deferred'
+  attempts: number
+  retry_after: string | null
+  error: string | null
+  created_at: string
+  completed_at: string | null
+}
+
+export interface TimelineDay {
+  date: string
+  timezone: string
+  active_run_id: string | null
+  coverage: {
+    started_at?: string
+    ended_at?: string
+    window_count?: number
+    evidence_count?: number
+    unassigned_intervals?: Array<{ started_at: string; ended_at: string; reason: string }>
+  }
+  analysis: TimelineAnalysis | null
+  episodes: TimelineEpisode[]
+}
+
+export const timelineApi = {
+  getDay: (date: string, timezone: string) =>
+    api.get<TimelineDay>('/api/timeline/day', { params: { date, timezone } }),
+  analyze: (date: string, timezone: string, force = false) =>
+    api.post<TimelineAnalysis>('/api/timeline/analyze', { date, timezone, force }),
+  getAnalysis: (runId: string) =>
+    api.get<TimelineAnalysis>(`/api/timeline/analysis/${runId}`),
+  setTimezone: (timezone: string) =>
+    api.put<{ timezone: string }>('/api/timeline/timezone', { timezone }),
+  getThumbnail: (episodeId: string) =>
+    api.get<Blob>(`/api/timeline/episodes/${episodeId}/thumbnail`, { responseType: 'blob' }),
+}
+
 // One recorded change to the memory vault (the audit ledger). Content lives in
 // the per-entry diff endpoint, not the list, so the list stays light.
 export interface MemoryAuditEntry {

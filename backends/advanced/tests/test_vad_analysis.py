@@ -169,6 +169,7 @@ class TestDetectSpeechPcm:
     """Structured speech verdicts distinguish rejection from fail-open reasons."""
 
     class FakeProvider:
+        name = "fixture-vad"
         frame_hop_ms = 16
 
         def __init__(self, scores):

@@ -36,6 +36,7 @@ from .queue_routes import router as queue_router
 from .sse_routes import router as sse_router
 from .system_events_routes import router as system_events_router
 from .system_routes import router as system_router
+from .timeline_routes import router as timeline_router
 from .user_routes import router as user_router
 from .vault_sync_routes import router as vault_sync_router
 from .wakeword_routes import router as wakeword_router
@@ -59,6 +60,7 @@ __all__ = [
     "sse_router",
     "system_events_router",
     "system_router",
+    "timeline_router",
     "user_router",
     "vault_sync_router",
     "wakeword_router",

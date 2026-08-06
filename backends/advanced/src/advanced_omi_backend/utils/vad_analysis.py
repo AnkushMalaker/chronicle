@@ -34,6 +34,9 @@ BATCH_CHUNKS = 30  # decode 30 x 10s chunks (~5 min) at a time to bound memory
 HISTOGRAM_BINS = 20  # probability bins over [0, 1]
 HISTOGRAM_BIN_WIDTH = 1.0 / HISTOGRAM_BINS
 SPEECH_PROB_THRESHOLD = 0.5  # default frame prob at/above which audio counts as speech
+EVIDENCE_BUCKET_SECONDS = 10.0
+ENERGY_FRAME_SECONDS = 0.1
+ACOUSTIC_ACTIVE_DBFS = -45.0
 
 # Speech-region derivation parameters
 REGION_PAD_SECONDS = 0.3  # widen each region so playback doesn't clip word edges
@@ -113,6 +116,26 @@ class VadFrameScores:
 
     scores: np.ndarray
     hop_seconds: float
+    provider: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class AudioEvidenceProfile:
+    """Compact, sliceable signal profile for continuous-capture audio."""
+
+    scored: bool
+    reason: SpeechDetectionReason
+    bucket_seconds: float
+    speech_seconds: Optional[float]
+    longest_no_speech_seconds: Optional[float]
+    acoustic_active_seconds: float
+    acoustic_quiet_seconds: float
+    speech_fraction: list[Optional[float]]
+    acoustic_active_fraction: list[float]
+    rms_dbfs: list[Optional[float]]
+    peak_dbfs: list[Optional[float]]
+    provider: Optional[str]
+    frame_hop_ms: Optional[float]
 
 
 class VadScoringError(RuntimeError):
@@ -178,6 +201,144 @@ def score_pcm_frames(
     return VadFrameScores(
         scores=scores,
         hop_seconds=provider.frame_hop_ms / 1000.0,
+        provider=provider.name,
+    )
+
+
+def _dbfs(value: float) -> Optional[float]:
+    if value <= 0:
+        return None
+    return float(20.0 * np.log10(value / 32768.0))
+
+
+def _longest_false_run(values: np.ndarray, seconds_per_value: float) -> float:
+    longest = current = 0
+    for value in values:
+        if value:
+            current = 0
+        else:
+            current += 1
+            longest = max(longest, current)
+    return longest * seconds_per_value
+
+
+def profile_pcm_audio(
+    pcm_data: bytes,
+    sample_rate: int,
+    channels: int,
+    sample_width: int,
+    bucket_seconds: float = EVIDENCE_BUCKET_SECONDS,
+) -> AudioEvidenceProfile:
+    """Measure voice and general acoustic activity without conflating the two."""
+    if sample_width != 2 or sample_rate <= 0 or channels <= 0:
+        reason = (
+            SpeechDetectionReason.UNSUPPORTED_SAMPLE_WIDTH
+            if sample_width != 2
+            else (
+                SpeechDetectionReason.INVALID_SAMPLE_RATE
+                if sample_rate <= 0
+                else SpeechDetectionReason.INVALID_CHANNELS
+            )
+        )
+        return AudioEvidenceProfile(
+            scored=False,
+            reason=reason,
+            bucket_seconds=bucket_seconds,
+            speech_seconds=None,
+            longest_no_speech_seconds=None,
+            acoustic_active_seconds=0,
+            acoustic_quiet_seconds=0,
+            speech_fraction=[],
+            acoustic_active_fraction=[],
+            rms_dbfs=[],
+            peak_dbfs=[],
+            provider=None,
+            frame_hop_ms=None,
+        )
+
+    mono = _pcm_to_mono_int16(pcm_data, channels).astype(np.float32)
+    duration = mono.size / sample_rate
+    bucket_samples = max(1, int(round(bucket_seconds * sample_rate)))
+    energy_samples = max(1, int(round(ENERGY_FRAME_SECONDS * sample_rate)))
+    bucket_count = max(1, int(np.ceil(duration / bucket_seconds)))
+    rms_series: list[Optional[float]] = []
+    peak_series: list[Optional[float]] = []
+    acoustic_series: list[float] = []
+    active_seconds = 0.0
+
+    for bucket_index in range(bucket_count):
+        bucket = mono[
+            bucket_index * bucket_samples : (bucket_index + 1) * bucket_samples
+        ]
+        if not bucket.size:
+            rms_series.append(None)
+            peak_series.append(None)
+            acoustic_series.append(0.0)
+            continue
+        rms_series.append(_dbfs(float(np.sqrt(np.mean(np.square(bucket))))))
+        peak_series.append(_dbfs(float(np.max(np.abs(bucket)))))
+        active = measured = 0.0
+        for offset in range(0, bucket.size, energy_samples):
+            frame = bucket[offset : offset + energy_samples]
+            frame_seconds = frame.size / sample_rate
+            measured += frame_seconds
+            frame_rms = float(np.sqrt(np.mean(np.square(frame)))) if frame.size else 0
+            if (_dbfs(frame_rms) or -120.0) >= ACOUSTIC_ACTIVE_DBFS:
+                active += frame_seconds
+        active_seconds += active
+        acoustic_series.append(active / measured if measured else 0.0)
+
+    try:
+        vad = score_pcm_frames(pcm_data, sample_rate, channels)
+    except VadScoringError as error:
+        return AudioEvidenceProfile(
+            scored=False,
+            reason=error.reason,
+            bucket_seconds=bucket_seconds,
+            speech_seconds=None,
+            longest_no_speech_seconds=None,
+            acoustic_active_seconds=active_seconds,
+            acoustic_quiet_seconds=max(0.0, duration - active_seconds),
+            speech_fraction=[None] * bucket_count,
+            acoustic_active_fraction=acoustic_series,
+            rms_dbfs=rms_series,
+            peak_dbfs=peak_series,
+            provider=None,
+            frame_hop_ms=None,
+        )
+
+    speech = vad.scores >= SPEECH_PROB_THRESHOLD
+    speech_series: list[Optional[float]] = []
+    for bucket_index in range(bucket_count):
+        first = int(bucket_index * bucket_seconds / vad.hop_seconds)
+        last = int((bucket_index + 1) * bucket_seconds / vad.hop_seconds)
+        values = speech[first:last]
+        speech_series.append(float(np.mean(values)) if values.size else 0.0)
+    speech_seconds = min(duration, float(np.count_nonzero(speech)) * vad.hop_seconds)
+    meaningful_speech = any(
+        end - start >= REGION_MIN_SECONDS
+        for start, end in frame_speech_intervals(vad.scores, vad.hop_seconds, 0.0)
+    )
+    return AudioEvidenceProfile(
+        scored=True,
+        reason=(
+            SpeechDetectionReason.SPEECH_DETECTED
+            if meaningful_speech
+            else SpeechDetectionReason.NO_SPEECH
+        ),
+        bucket_seconds=bucket_seconds,
+        speech_seconds=speech_seconds,
+        longest_no_speech_seconds=min(
+            duration, _longest_false_run(speech, vad.hop_seconds)
+        ),
+        acoustic_active_seconds=active_seconds,
+        acoustic_quiet_seconds=max(0.0, duration - active_seconds),
+        speech_fraction=speech_series,
+        acoustic_active_fraction=acoustic_series,
+        rms_dbfs=rms_series,
+        peak_dbfs=peak_series,
+        provider=vad.provider,
+        frame_hop_ms=vad.hop_seconds * 1000.0,
     )
 
 

@@ -27,6 +27,7 @@ from .modules import (
     sse_router,
     system_events_router,
     system_router,
+    timeline_router,
     user_router,
     vault_sync_router,
     wakeword_router,
@@ -56,6 +57,7 @@ router.include_router(openai_compat_router)
 router.include_router(sse_router)
 router.include_router(system_events_router)
 router.include_router(system_router)
+router.include_router(timeline_router)
 router.include_router(queue_router)
 router.include_router(vault_sync_router)
 router.include_router(wakeword_router)

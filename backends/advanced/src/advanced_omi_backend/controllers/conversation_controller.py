@@ -378,6 +378,9 @@ async def get_conversations(
     """
     try:
         user_filter = {} if user.is_superuser else {"user_id": str(user.user_id)}
+        # Continuous ScreenPipe artifacts are evidence for semantic episodes, not
+        # user-facing conversations. The raw device-input API remains available.
+        user_filter["external_source_type"] = {"$ne": "screenpipe"}
 
         if starred_only:
             user_filter["starred"] = True
@@ -544,7 +547,10 @@ async def _regex_search_conversations(
     """Filter conversations by text across the selected conversation fields."""
     collection = Conversation.get_pymongo_collection()
 
-    match_filter: dict = {"deleted": False}
+    match_filter: dict = {
+        "deleted": False,
+        "external_source_type": {"$ne": "screenpipe"},
+    }
     if not user.is_superuser:
         match_filter["user_id"] = str(user.user_id)
 

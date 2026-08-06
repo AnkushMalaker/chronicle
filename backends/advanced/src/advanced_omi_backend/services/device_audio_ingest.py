@@ -1,6 +1,7 @@
 """Assemble timestamped ScreenPipe chunks into Chronicle conversation sessions."""
 
 import asyncio
+import hashlib
 import logging
 import tempfile
 import wave
@@ -17,11 +18,13 @@ from advanced_omi_backend.controllers.audio_controller import (
 )
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import DeviceInputItem, utcnow
+from advanced_omi_backend.models.timeline import AudioEvidenceSpan
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.utils.vad_analysis import (
+    AudioEvidenceProfile,
     SpeechDetectionReason,
     SpeechDetectionResult,
-    detect_speech_pcm,
+    profile_pcm_audio,
 )
 
 logger = logging.getLogger(__name__)
@@ -138,8 +141,8 @@ async def _mix_session(
         )
 
 
-def _detect_wav_speech(path: Path) -> SpeechDetectionResult:
-    """Return a structured VAD verdict for an assembled session WAV."""
+def _profile_wav(path: Path) -> AudioEvidenceProfile:
+    """Decode and profile an assembled session once."""
     try:
         with wave.open(str(path), "rb") as handle:
             sample_rate = handle.getframerate()
@@ -155,11 +158,139 @@ def _detect_wav_speech(path: Path) -> SpeechDetectionResult:
             detail,
             path,
         )
-        return SpeechDetectionResult.unscored(
-            SpeechDetectionReason.WAV_DECODE_FAILED,
-            detail,
+        return AudioEvidenceProfile(
+            scored=False,
+            reason=SpeechDetectionReason.WAV_DECODE_FAILED,
+            bucket_seconds=10.0,
+            speech_seconds=None,
+            longest_no_speech_seconds=None,
+            acoustic_active_seconds=0,
+            acoustic_quiet_seconds=0,
+            speech_fraction=[],
+            acoustic_active_fraction=[],
+            rms_dbfs=[],
+            peak_dbfs=[],
+            provider=None,
+            frame_hop_ms=None,
         )
-    return detect_speech_pcm(pcm, sample_rate, channels, sample_width)
+    return profile_pcm_audio(pcm, sample_rate, channels, sample_width)
+
+
+def _speech_detection(profile: AudioEvidenceProfile) -> SpeechDetectionResult:
+    if not profile.scored:
+        return SpeechDetectionResult.unscored(profile.reason, profile.reason.value)
+    if profile.reason == SpeechDetectionReason.NO_SPEECH:
+        return SpeechDetectionResult.no_speech()
+    return SpeechDetectionResult.speech()
+
+
+def _coverage_profile(
+    items: list[DeviceInputItem],
+    started_at: datetime,
+    ended_at: datetime,
+    bucket_seconds: float,
+) -> tuple[float, float, list[float]]:
+    intervals = sorted(
+        (
+            max(started_at, _as_utc(item.captured_at)),
+            min(ended_at, _as_utc(item.ended_at or item.captured_at)),
+        )
+        for item in items
+    )
+    merged: list[tuple[datetime, datetime]] = []
+    for start, end in intervals:
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    covered = sum((end - start).total_seconds() for start, end in merged)
+    duration = (ended_at - started_at).total_seconds()
+    bucket_count = max(1, int((duration + bucket_seconds - 0.000001) // bucket_seconds))
+    fractions: list[float] = []
+    for index in range(bucket_count):
+        bucket_start = started_at + timedelta(seconds=index * bucket_seconds)
+        bucket_end = min(ended_at, bucket_start + timedelta(seconds=bucket_seconds))
+        bucket_duration = (bucket_end - bucket_start).total_seconds()
+        overlap = sum(
+            max(0.0, (min(end, bucket_end) - max(start, bucket_start)).total_seconds())
+            for start, end in merged
+        )
+        fractions.append(
+            min(1.0, overlap / bucket_duration) if bucket_duration else 0.0
+        )
+    return covered, max(0.0, duration - covered), fractions
+
+
+async def _save_evidence_span(
+    session: list[DeviceInputItem],
+    direction: str,
+    profile: AudioEvidenceProfile,
+    state: str,
+    conversation_id: str | None = None,
+) -> AudioEvidenceSpan:
+    started_at = min(_as_utc(item.captured_at) for item in session)
+    ended_at = max(_as_utc(item.ended_at or item.captured_at) for item in session)
+    source_item_ids = [item.source_item_id for item in session]
+    covered, missing, coverage = _coverage_profile(
+        session, started_at, ended_at, profile.bucket_seconds
+    )
+    series_length = len(profile.acoustic_active_fraction)
+    if len(coverage) < series_length:
+        coverage.extend([0.0] * (series_length - len(coverage)))
+    elif len(coverage) > series_length:
+        coverage = coverage[:series_length]
+    range_hash = hashlib.sha256("\n".join(source_item_ids).encode()).hexdigest()
+    values = {
+        "source_item_ids": source_item_ids,
+        "source_range_hash": range_hash,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "meeting_id": _meeting_id(session[0]),
+        "conversation_id": conversation_id,
+        "state": state,
+        "covered_seconds": covered,
+        "missing_seconds": missing,
+        "bucket_seconds": profile.bucket_seconds,
+        "coverage_fraction": coverage,
+        "speech_fraction": profile.speech_fraction,
+        "acoustic_active_fraction": profile.acoustic_active_fraction,
+        "rms_dbfs": profile.rms_dbfs,
+        "peak_dbfs": profile.peak_dbfs,
+        "speech_seconds": profile.speech_seconds,
+        "longest_no_speech_seconds": profile.longest_no_speech_seconds,
+        "acoustic_active_seconds": profile.acoustic_active_seconds,
+        "acoustic_quiet_seconds": profile.acoustic_quiet_seconds,
+        "analysis": {
+            "profile_version": "audio-evidence-v1",
+            "vad_provider": profile.provider,
+            "vad_reason": profile.reason.value,
+            "vad_frame_hop_ms": profile.frame_hop_ms,
+        },
+    }
+    existing = await AudioEvidenceSpan.find_one(
+        AudioEvidenceSpan.user_id == session[0].user_id,
+        AudioEvidenceSpan.source_id == session[0].source_id,
+        AudioEvidenceSpan.direction == direction,
+        AudioEvidenceSpan.first_source_item_id == source_item_ids[0],
+        AudioEvidenceSpan.last_source_item_id == source_item_ids[-1],
+    )
+    if existing is not None:
+        for field, value in values.items():
+            setattr(existing, field, value)
+        await existing.save()
+        return existing
+    span = AudioEvidenceSpan(
+        user_id=session[0].user_id,
+        source_id=session[0].source_id,
+        first_source_item_id=source_item_ids[0],
+        last_source_item_id=source_item_ids[-1],
+        direction=direction if direction in {"input", "output"} else "unknown",
+        **values,
+    )
+    await span.insert()
+    return span
 
 
 async def process_device_audio() -> dict[str, Any]:
@@ -200,14 +331,18 @@ async def process_device_audio() -> dict[str, Any]:
                     / f"screenpipe-{source_id}-{session[0].source_item_id}.wav"
                 )
                 await _mix_session(session, Path(temp_dir), output)
+                profile = _profile_wav(output)
                 speech_detection = (
-                    _detect_wav_speech(output) if require_speech else None
+                    _speech_detection(profile) if require_speech else None
                 )
                 if speech_detection is not None and speech_detection.has_speech is None:
                     reason = speech_detection.reason.value
                     unscored_sessions += 1
                     unscored_reasons[reason] = unscored_reasons.get(reason, 0) + 1
                 if speech_detection is not None and speech_detection.should_reject:
+                    await _save_evidence_span(
+                        session, direction, profile, state="no_speech"
+                    )
                     # Silent session: never enters the conversation pipeline.
                     logger.info(
                         "🔇 ScreenPipe session %s-%s (%d chunks) has no speech "
@@ -219,12 +354,7 @@ async def process_device_audio() -> dict[str, Any]:
                         speech_detection.scored,
                     )
                     for item in session:
-                        item.state = "rejected"
-                        item.metadata["rejection_reason"] = "no_speech"
-                        item.metadata["vad_reason"] = speech_detection.reason.value
-                        await item.save()
-                        item.media_data = None
-                        await item.save()
+                        await item.delete()
                     rejected_no_speech += 1
                     continue
                 with output.open("rb") as handle:
@@ -233,22 +363,37 @@ async def process_device_audio() -> dict[str, Any]:
                         [UploadFile(file=handle, filename=output.name)],
                         device_name=f"{source_id}-{direction}",
                         source="screenpipe",
+                        external_source_id=(
+                            f"screenpipe:{source_id}:{direction}:"
+                            f"{session[0].source_item_id}-{session[-1].source_item_id}"
+                        ),
+                        external_source_type="screenpipe",
+                        data_purpose="capture_evidence",
+                        memory_excluded=True,
+                        memory_exclusion_reason="continuous_screenpipe_capture",
+                        skip_post_processing=True,
                     )
             if (
                 not isinstance(result, dict)
                 or not result.get("files")
                 or result["files"][0].get("status") != "started"
             ):
+                await _save_evidence_span(session, direction, profile, state="failed")
                 continue
             conversation_id = result["files"][0]["conversation_id"]
+            await _save_evidence_span(
+                session,
+                direction,
+                profile,
+                state="transcribed" if profile.scored else "unscored",
+                conversation_id=conversation_id,
+            )
             session_start = min(_as_utc(item.captured_at) for item in session)
             conversation = await Conversation.find_one(
                 Conversation.conversation_id == conversation_id
             )
             if conversation is not None:
                 conversation.created_at = session_start
-                conversation.external_source_id = f"screenpipe:{source_id}:{direction}:{session[0].source_item_id}-{session[-1].source_item_id}"
-                conversation.external_source_type = "screenpipe"
                 await conversation.save()
             observations = await DeviceInputItem.find(
                 DeviceInputItem.user_id == user_id,
@@ -269,11 +414,7 @@ async def process_device_audio() -> dict[str, Any]:
                     observation.curation = "pending"
                     await observation.save()
             for item in session:
-                item.state = "linked"
-                item.conversation_id = conversation_id
-                await item.save()
-                item.media_data = None
-                await item.save()
+                await item.delete()
             processed += 1
     return {
         "pending_chunks": len(pending),

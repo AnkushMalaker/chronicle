@@ -54,6 +54,12 @@ async def _ensure_beanie_initialized():
                 PairingCode,
             )
             from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
+            from advanced_omi_backend.models.timeline import (
+                AudioEvidenceSpan,
+                TimelineAnalysisRun,
+                TimelineDay,
+                TimelineEpisode,
+            )
             from advanced_omi_backend.models.user import User
             from advanced_omi_backend.models.waveform import WaveformData
 
@@ -86,6 +92,10 @@ async def _ensure_beanie_initialized():
                     PairingCode,
                     DeviceInputItem,
                     DeviceInputJob,
+                    AudioEvidenceSpan,
+                    TimelineAnalysisRun,
+                    TimelineEpisode,
+                    TimelineDay,
                 ],
             )
 
