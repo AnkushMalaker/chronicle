@@ -185,6 +185,8 @@ def main() -> None:
                     "[red]not running[/red]" if status["installed"] else "not installed"
                 )
             )
+            if component == "screenpipe" and status.get("detail"):
+                state += f" — {status['detail']}"
             console.print(f"  {status['description']}: {state}")
 
     console.print(

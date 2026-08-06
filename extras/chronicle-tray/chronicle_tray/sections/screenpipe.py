@@ -107,6 +107,7 @@ class ScreenPipeSection(Section):
         # Written by the update worker thread, rendered by refresh().
         self._update_lock = threading.Lock()
         self._update_state = {"busy": False, "message": ""}
+        self._engine_detail = "checking"
 
     def available(self) -> tuple[bool, str]:
         if shutil.which("screenpipe") or SCREENPIPE_DB.exists():
@@ -186,7 +187,10 @@ class ScreenPipeSection(Section):
             and verb in {"start", "restart"}
         ):
             self.pause_timer.stop()
-        _clients().component_action(component, verb)
+        try:
+            _clients().component_action(component, verb)
+        except RuntimeError as error:
+            logger.error("Could not %s %s: %s", verb, component, error)
         QTimer.singleShot(500, self.refresh)
 
     def _pause_capture(self, minutes: int) -> None:
@@ -346,23 +350,58 @@ class ScreenPipeSection(Section):
         return _component_state(COLLECTOR)
 
     def refresh(self) -> None:
+        clients = _clients()
+        try:
+            if clients.reconcile_screenpipe_ownership():
+                logger.warning(
+                    "Stopped Chronicle recorder because the ScreenPipe desktop app "
+                    "owns recording"
+                )
+        except (OSError, RuntimeError):
+            logger.exception("Could not reconcile ScreenPipe recorder ownership")
+
+        recorder_status = clients.component_status(RECORDER)
+        runtime_owner = recorder_status.get("runtime_owner", "none")
+        external_owner = runtime_owner in {"desktop_app", "unknown"}
+        self._engine_detail = recorder_status.get("detail") or (
+            "active" if recorder_status["active"] else "inactive"
+        )
         if self.engine_status is not None:
-            engine = _component_state(RECORDER)
-            self.engine_status.setText(f"ScreenPipe: {engine}")
+            self.engine_status.setText(f"ScreenPipe: {self._engine_detail}")
             if self.pause_menu is not None:
-                self.pause_menu.setEnabled(engine == "active")
+                self.pause_menu.setEnabled(
+                    runtime_owner == "chronicle"
+                    and recorder_status.get("recording_active", False)
+                )
         collector = self._collector_state()
         self.collector_status.setText(f"Chronicle collector: {collector}")
         for component, actions in self.unit_actions.items():
+            if component == RECORDER:
+                active = recorder_status["active"]
+                actions["start"].setEnabled(
+                    recorder_status["installed"] and not active and not external_owner
+                )
+                actions["stop"].setEnabled(
+                    active and runtime_owner == "chronicle"
+                )
+                actions["restart"].setEnabled(
+                    active and runtime_owner == "chronicle"
+                )
+                continue
             active = _component_state(component) == "active"
             actions["start"].setEnabled(not active)
             actions["stop"].setEnabled(active)
+            actions["restart"].setEnabled(active)
         self.stats_item.setText(_stats())
         self._refresh_capture_settings()
+        if external_owner:
+            for action in (self.audio_capture, self.video_capture):
+                action.setEnabled(False)
+            self.settings_action.setEnabled(False)
         self._refresh_update_actions()
 
     def tooltip(self) -> str:
-        return f"Collector: {self._collector_state()}"
+        return f"Recorder: {self._engine_detail} · Collector: {self._collector_state()}"
 
     def shutdown(self) -> None:
         if self.pause_timer is not None:

@@ -17,8 +17,11 @@ Stdlib-only on purpose: updates.py and the node agent must always be able to
 import it, and client installs happen before any project venv exists.
 """
 
+import json
 import os
+import plistlib
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -35,6 +38,8 @@ _SPEC_DIR = (
     / "chronicle"
     / "clients"
 )
+_SCREENPIPE_PORT = 3030
+_SCREENPIPE_SETTINGS = Path.home() / ".screenpipe" / "store.bin"
 
 # A component is either a *project* component (a uv project in this repo, run as
 # `uv run --project <path> <command>`) or a *spec* component, whose argv and
@@ -143,8 +148,6 @@ def write_component_spec(name: str, argv, env=None) -> Path:
     Written 0600 because the environment carries the recorder's API key. Call
     before install_component(); the unit/plist is generated from this.
     """
-    import json
-
     if not CLIENT_COMPONENTS[name].get("spec"):
         raise RuntimeError(f"{name} is not a spec component")
     _SPEC_DIR.mkdir(parents=True, exist_ok=True)
@@ -166,8 +169,6 @@ def update_component_argv(name: str, argv) -> None:
 
 
 def read_component_spec(name: str) -> dict:
-    import json
-
     path = component_spec_path(name)
     if not path.exists():
         raise RuntimeError(
@@ -296,8 +297,6 @@ def _dotenv_values(env_file: Path) -> dict:
 
 
 def _install_macos(name: str, extras=()) -> None:
-    import plistlib
-
     cfg = CLIENT_COMPONENTS[name]
     label = cfg["label"]
     project = _component_project(name)
@@ -373,18 +372,131 @@ def component_installed(name: str) -> bool:
 def component_active(name: str) -> bool:
     cfg = CLIENT_COMPONENTS[name]
     if IS_MACOS:
-        return _launchctl("print", f"gui/{os.getuid()}/{cfg['label']}").returncode == 0
+        result = _launchctl("print", f"gui/{os.getuid()}/{cfg['label']}")
+        if result.returncode != 0:
+            return False
+        return any(
+            line.strip() == "state = running" or line.strip().startswith("pid = ")
+            for line in result.stdout.splitlines()
+        )
     return _systemctl("is-active", cfg["unit"]).returncode == 0
+
+
+def _screenpipe_desktop_processes() -> list[dict]:
+    """Return ScreenPipe desktop-app processes, excluding CLI/MCP companions."""
+    result = subprocess.run(
+        ["ps", "-axo", "pid=,command="], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        return []
+    processes = []
+    for line in result.stdout.splitlines():
+        fields = line.strip().split(maxsplit=1)
+        if len(fields) != 2 or not fields[0].isdigit():
+            continue
+        command = fields[1]
+        lowered = command.lower()
+        executable = lowered.split(maxsplit=1)[0]
+        if (
+            "/contents/macos/screenpipe-app" in lowered
+            or executable.endswith("/screenpipe-app")
+            or executable == "screenpipe-app"
+        ):
+            processes.append({"pid": int(fields[0]), "command": command})
+    return processes
+
+
+def _screenpipe_port_open() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", _SCREENPIPE_PORT), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+def _desktop_meeting_detection_disabled() -> bool | None:
+    try:
+        settings = json.loads(_SCREENPIPE_SETTINGS.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    app_settings = settings.get("settings", settings)
+    if not isinstance(app_settings, dict):
+        return None
+    value = app_settings.get("disableMeetingDetector")
+    return value if isinstance(value, bool) else None
+
+
+def screenpipe_runtime_status(chronicle_active: bool | None = None) -> dict:
+    """Describe which local process owns ScreenPipe recording and port 3030."""
+    desktop_processes = _screenpipe_desktop_processes()
+    desktop_active = bool(desktop_processes)
+    if chronicle_active is None:
+        chronicle_active = component_active("screenpipe")
+    port_open = _screenpipe_port_open()
+
+    if desktop_active:
+        meeting_disabled = _desktop_meeting_detection_disabled()
+        if chronicle_active:
+            detail = "desktop app and Chronicle recorder are both running"
+            conflict = True
+        elif port_open:
+            detail = "desktop app owns recording"
+            conflict = False
+        else:
+            detail = "desktop app is open but recorder API is unavailable"
+            conflict = True
+        if meeting_disabled is True:
+            detail += " — meeting detection disabled"
+        return {
+            "runtime_owner": "desktop_app",
+            "recording_active": port_open,
+            "conflict": conflict,
+            "detail": detail,
+            "desktop_pids": [process["pid"] for process in desktop_processes],
+        }
+
+    if chronicle_active:
+        return {
+            "runtime_owner": "chronicle",
+            "recording_active": port_open,
+            "conflict": False,
+            "detail": (
+                "Chronicle recorder active"
+                if port_open
+                else "Chronicle recorder starting; API not ready"
+            ),
+            "desktop_pids": [],
+        }
+
+    if port_open:
+        return {
+            "runtime_owner": "unknown",
+            "recording_active": True,
+            "conflict": True,
+            "detail": "port 3030 is owned by an unrecognized process",
+            "desktop_pids": [],
+        }
+
+    return {
+        "runtime_owner": "none",
+        "recording_active": False,
+        "conflict": False,
+        "detail": "recorder inactive",
+        "desktop_pids": [],
+    }
 
 
 def component_status(name: str) -> dict:
     installed = component_installed(name)
-    return {
+    status = {
         "name": name,
         "description": CLIENT_COMPONENTS[name]["description"],
         "installed": installed,
         "active": component_active(name) if installed else False,
     }
+    if name == "screenpipe":
+        status.update(screenpipe_runtime_status(status["active"]))
+    return status
 
 
 def installed_components() -> list[str]:
@@ -400,6 +512,15 @@ def install_component(name: str, extras=()) -> None:
     """
     if name not in CLIENT_COMPONENTS:
         raise RuntimeError(f"Unknown client component: {name}")
+    if name == "screenpipe":
+        for message in disable_screenpipe_app_autostart():
+            print(message)
+        desktop_processes = _screenpipe_desktop_processes()
+        if desktop_processes:
+            raise RuntimeError(
+                "Cannot install/start Chronicle recorder while the ScreenPipe "
+                "desktop app is running. Quit the app and retry."
+            )
     if name == "tray":
         conflicts = _TRAY_CONFLICTS_MACOS if IS_MACOS else _TRAY_CONFLICTS_LINUX
         if "pendant" in extras and IS_MACOS:
@@ -427,24 +548,112 @@ def uninstall_component(name: str) -> None:
 def component_action(name: str, action: str) -> bool:
     """start | stop | restart an installed component. Returns success."""
     cfg = CLIENT_COMPONENTS[name]
+    if name == "screenpipe" and action in {"start", "restart"}:
+        runtime = screenpipe_runtime_status()
+        if runtime["runtime_owner"] in {"desktop_app", "unknown"}:
+            raise RuntimeError(
+                f"Cannot {action} Chronicle recorder: {runtime['detail']}. "
+                "Quit the ScreenPipe desktop app or release port 3030 first."
+            )
     if IS_MACOS:
         domain = f"gui/{os.getuid()}"
+        plist = str(_plist_path(cfg["label"]))
         if action == "stop":
-            return (
-                _launchctl("bootout", domain, str(_plist_path(cfg["label"]))).returncode
-                == 0
-            )
+            return _launchctl("bootout", domain, plist).returncode == 0
         if action == "start":
-            return (
-                _launchctl(
-                    "bootstrap", domain, str(_plist_path(cfg["label"]))
-                ).returncode
-                == 0
-            )
-        return _launchctl("kickstart", "-k", f"{domain}/{cfg['label']}").returncode == 0
+            return _launchctl("bootstrap", domain, plist).returncode == 0
+        if action == "restart":
+            # kickstart -k can't revive a booted-out agent; a bootout/bootstrap
+            # cycle restarts from any state and picks up plist edits.
+            _launchctl("bootout", domain, plist)
+            return _launchctl("bootstrap", domain, plist).returncode == 0
+        raise RuntimeError(f"Unknown action: {action}")
     if action not in ("start", "stop", "restart"):
         raise RuntimeError(f"Unknown action: {action}")
     return _systemctl(action, cfg["unit"]).returncode == 0
+
+
+def _macos_screenpipe_app_agents() -> list[tuple[str, Path]]:
+    agents = []
+    for path in _LAUNCH_AGENTS_DIR.glob("*screenpipe*.plist"):
+        try:
+            with path.open("rb") as handle:
+                plist = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException):
+            continue
+        argv = [str(value).lower() for value in plist.get("ProgramArguments", [])]
+        label = plist.get("Label")
+        if label and any(value.endswith("/screenpipe-app") for value in argv):
+            agents.append((str(label), path))
+    return agents
+
+
+def _linux_screenpipe_app_units() -> list[str]:
+    result = _systemctl("list-unit-files", "--no-legend", "--plain")
+    if result.returncode != 0:
+        return []
+    units = []
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        unit = fields[0]
+        lowered = unit.lower()
+        if lowered.startswith("app-screenpipe") and lowered.endswith(
+            "@autostart.service"
+        ):
+            units.append(unit)
+    return units
+
+
+def disable_screenpipe_app_autostart() -> list[str]:
+    """Select Chronicle as login recorder without uninstalling the desktop app."""
+    messages = []
+    if IS_MACOS:
+        domain = f"gui/{os.getuid()}"
+        for label, path in _macos_screenpipe_app_agents():
+            _launchctl("bootout", domain, str(path))
+            result = _launchctl("disable", f"{domain}/{label}")
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Could not disable ScreenPipe app autostart ({label}): "
+                    f"{result.stderr.strip()}"
+                )
+            messages.append(
+                f"Disabled ScreenPipe desktop app autostart ({label}); "
+                "the app remains manually launchable"
+            )
+        return messages
+
+    for unit in _linux_screenpipe_app_units():
+        result = _systemctl("mask", "--now", unit)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Could not disable ScreenPipe app autostart ({unit}): "
+                f"{result.stderr.strip()}"
+            )
+        messages.append(
+            f"Disabled ScreenPipe desktop app autostart ({unit}); "
+            "the app remains manually launchable"
+        )
+    return messages
+
+
+def reconcile_screenpipe_ownership() -> bool:
+    """Stop Chronicle's job when a manually launched desktop app takes ownership."""
+    if not _screenpipe_desktop_processes() or not component_installed("screenpipe"):
+        return False
+    cfg = CLIENT_COMPONENTS["screenpipe"]
+    if IS_MACOS:
+        loaded = (
+            _launchctl("print", f"gui/{os.getuid()}/{cfg['label']}").returncode == 0
+        )
+        return component_action("screenpipe", "stop") if loaded else False
+
+    state = _systemctl("is-active", cfg["unit"])
+    if state.stdout.strip() not in {"active", "activating", "reloading"}:
+        return False
+    return component_action("screenpipe", "stop")
 
 
 # ── legacy units (pre-unified-tray installs) ─────────────────────────────────

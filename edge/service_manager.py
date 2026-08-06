@@ -1008,7 +1008,11 @@ def client_action(name: str, action: str, body: ActionBody | None = None):
         raise HTTPException(
             status_code=400, detail=f"{name} is not installed on this node"
         )
-    if not clients.component_action(name, action):
+    try:
+        ok = clients.component_action(name, action)
+    except RuntimeError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if not ok:
         raise HTTPException(status_code=500, detail=f"{name} {action} failed")
     return clients.component_status(name)
 

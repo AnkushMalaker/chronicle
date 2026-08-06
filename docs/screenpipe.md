@@ -37,6 +37,19 @@ them have "screenpipe" in the name and neither is the one Chronicle ships:
 | `chronicle-tray.service` | desktop tray; starts/stops the two above | `extras/chronicle-tray/` |
 | `app-screenpipe*@autostart.service` | ScreenPipe's own desktop UI | upstream; **should stay disabled** (see above) |
 
+Chronicle enforces that ownership rule when its recorder component is installed. It
+disables the ScreenPipe desktop app's login autostart (without uninstalling the app),
+then starts `screenpipe record` as the single login recorder. The desktop app remains
+manually launchable. If it is opened later, the Chronicle tray yields recording to the
+app by stopping Chronicle's recorder job; it does not silently restart Chronicle when
+the app exits, because that could override an intentional pause.
+
+Recorder status distinguishes `Chronicle recorder active`, `desktop app owns
+recording`, and `port 3030 is owned by an unrecognized process`. Start/restart actions
+are rejected with that detail while another owner is active. On macOS the status also
+warns when the desktop app's readable settings have meeting detection disabled; the
+third-party preference is never rewritten automatically.
+
 **Chronicle does not install ScreenPipe.** `init.py` resolves the recorder with
 `shutil.which("screenpipe")` and exits with instructions if it is absent; it only
 writes the unit around whatever is already on `PATH`. So the recording binary is
@@ -308,6 +321,19 @@ The Linux ScreenPipe UI launcher may set rendering/onboarding environment requir
 the locally installed build, but its desktop autostart entry should remain disabled.
 Open that UI manually only when the full local ScreenPipe timeline is needed; the
 recorder and Chronicle collector remain independently managed background services.
+
+Installing Chronicle's recorder selects Chronicle as the login owner. To deliberately
+restore the ScreenPipe desktop app as the login owner after removing/stopping the
+Chronicle recorder, reverse the platform override:
+
+```bash
+# macOS — use the Label from the app's plist
+launchctl enable "gui/$(id -u)/screenpipe - Development"
+
+# Linux — use the exact generated unit shown by list-unit-files
+systemctl --user list-unit-files 'app-screenpipe*@autostart.service'
+systemctl --user unmask 'app-screenpipe\x20\x2d\x20Development@autostart.service'
+```
 
 ## Implementation map
 

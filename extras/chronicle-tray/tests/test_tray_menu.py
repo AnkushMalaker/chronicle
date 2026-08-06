@@ -128,3 +128,49 @@ def test_screenpipe_controls_only_use_real_client_components(monkeypatch):
     assert set(used) <= set(
         clients.CLIENT_COMPONENTS
     ), f"unknown component(s): {set(used) - set(clients.CLIENT_COMPONENTS)}"
+
+
+def test_screenpipe_menu_surfaces_external_owner_and_disables_controls(monkeypatch):
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    from chronicle_tray.sections import screenpipe as section_module
+
+    class FakeClients:
+        @staticmethod
+        def reconcile_screenpipe_ownership():
+            return False
+
+        @staticmethod
+        def component_status(name):
+            if name == section_module.RECORDER:
+                return {
+                    "installed": True,
+                    "active": False,
+                    "runtime_owner": "desktop_app",
+                    "recording_active": True,
+                    "detail": "desktop app owns recording — meeting detection disabled",
+                }
+            return {"installed": True, "active": True}
+
+    monkeypatch.setattr(section_module, "_clients", lambda: FakeClients)
+    monkeypatch.setattr(section_module, "_stats", lambda: "1 frame")
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    section = section_module.ScreenPipeSection()
+    menu = QtWidgets.QMenu()
+    section.build(menu)
+    monkeypatch.setattr(section, "_refresh_capture_settings", lambda: None)
+    monkeypatch.setattr(section, "_refresh_update_actions", lambda: None)
+    try:
+        section.refresh()
+
+        assert section.engine_status.text() == (
+            "ScreenPipe: desktop app owns recording — meeting detection disabled"
+        )
+        assert not section.unit_actions[section_module.RECORDER]["start"].isEnabled()
+        assert not section.unit_actions[section_module.RECORDER]["stop"].isEnabled()
+        assert not section.unit_actions[section_module.RECORDER]["restart"].isEnabled()
+        assert not section.pause_menu.isEnabled()
+        assert "desktop app owns recording" in section.tooltip()
+    finally:
+        section.shutdown()
+        del menu

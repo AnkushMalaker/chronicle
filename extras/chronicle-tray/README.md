@@ -13,6 +13,13 @@ with a single icon whose menu shows only what this machine can do:
 Unavailable sections show a disabled hint line with the install command instead
 of vanishing.
 
+The ScreenPipe line also reports the active recorder owner. Chronicle disables the
+ScreenPipe desktop app's login autostart when installing its recorder, while leaving
+the app manually launchable. If the app is opened manually, the tray stops Chronicle's
+recorder retry loop, displays `desktop app owns recording`, and disables controls that
+cannot affect the external owner. An unknown process on port 3030 is reported as a
+conflict instead of appearing as an inactive recorder.
+
 ## Run / install
 
 ```bash

@@ -1179,6 +1179,8 @@ def handle_client_command(args) -> None:
                 state = "[green]active[/green]"
             else:
                 state = "[yellow]installed, inactive[/yellow]"
+            if name == "screenpipe" and status.get("detail"):
+                state += f" — {escape(status['detail'])}"
             table.add_row(name, status["description"], state)
         console.print(table)
         for check in clients.binary_checks():
