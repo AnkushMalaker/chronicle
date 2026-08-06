@@ -92,7 +92,6 @@ class UnassignedInterval(BaseModel):
 
 
 class TimelineAgentResult(BaseModel):
-    covered_window_ids: list[str]
     episodes: list[AgentEpisode]
     unassigned_intervals: list[UnassignedInterval] = Field(default_factory=list)
 

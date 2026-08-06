@@ -8,11 +8,6 @@ from .contracts import TimelineAgentResult, TimelineEvidenceManifest
 def validate_agent_result(
     result: TimelineAgentResult, manifest: TimelineEvidenceManifest
 ) -> None:
-    expected_windows = [window.window_id for window in manifest.windows]
-    if sorted(result.covered_window_ids) != sorted(expected_windows):
-        raise ValueError("agent result does not cover the exact evidence window set")
-    if len(result.covered_window_ids) != len(set(result.covered_window_ids)):
-        raise ValueError("agent result contains duplicate covered windows")
     if manifest.evidence and not result.episodes and not result.unassigned_intervals:
         raise ValueError("agent result accounts for no evidence intervals")
 

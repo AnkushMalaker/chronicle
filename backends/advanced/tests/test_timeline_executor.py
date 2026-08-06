@@ -47,7 +47,6 @@ def _manifest() -> TimelineEvidenceManifest:
 def _result(evidence_id: str = "observation:one") -> TimelineAgentResult:
     manifest = _manifest()
     return TimelineAgentResult(
-        covered_window_ids=["window:one"],
         episodes=[
             AgentEpisode(
                 kind="media_watched",
@@ -82,17 +81,8 @@ def test_invented_evidence_is_rejected():
         validate_agent_result(_result("observation:invented"), _manifest())
 
 
-def test_incomplete_window_coverage_is_rejected():
-    result = _result()
-    result.covered_window_ids = []
-    with pytest.raises(ValueError, match="exact evidence window set"):
-        validate_agent_result(result, _manifest())
-
-
 def test_empty_accounting_is_rejected_when_evidence_exists():
-    result = TimelineAgentResult(
-        covered_window_ids=["window:one"], episodes=[], unassigned_intervals=[]
-    )
+    result = TimelineAgentResult(episodes=[], unassigned_intervals=[])
     with pytest.raises(ValueError, match="accounts for no evidence intervals"):
         validate_agent_result(result, _manifest())
 

@@ -2,14 +2,13 @@
 
 import json
 
-PROMPT_VERSION = "timeline-episodes-v1"
+PROMPT_VERSION = "timeline-episodes-v2"
 
 
 OUTPUT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "covered_window_ids": {"type": "array", "items": {"type": "string"}},
         "episodes": {
             "type": "array",
             "items": {
@@ -122,7 +121,7 @@ OUTPUT_SCHEMA = {
             },
         },
     },
-    "required": ["covered_window_ids", "episodes", "unassigned_intervals"],
+    "required": ["episodes", "unassigned_intervals"],
 }
 
 
@@ -150,7 +149,8 @@ Rules:
 - Never return both `episodes` and `unassigned_intervals` empty when evidence exists.
 - `representative_evidence_id` is optional and, when set, must name image evidence
   already cited by that episode. Use null when no suitable image is available.
-- Never invent an evidence ID. Include every window ID exactly once in covered_window_ids.
+- Never invent an evidence ID. Chronicle tracks authoritative window coverage itself;
+  do not echo window IDs into the result.
 - Salience is display value, not confidence.
 - Express optional episode metadata as short string key/value entries in `attributes`.
 - Prefer a few coherent episodes over arbitrary periodic fragments.
