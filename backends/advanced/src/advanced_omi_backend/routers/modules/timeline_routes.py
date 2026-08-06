@@ -1,7 +1,6 @@
 """Authenticated semantic timeline APIs."""
 
 from datetime import date
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
@@ -17,16 +16,16 @@ from advanced_omi_backend.services.timeline.discovery import (
     process_timeline_analysis_runs,
     request_timeline_analysis,
 )
+from advanced_omi_backend.services.timeline.timezone import canonical_timezone
 
 router = APIRouter(prefix="/timeline", tags=["timeline"])
 
 
 def _validate_timezone(value: str) -> str:
     try:
-        ZoneInfo(value)
-    except ZoneInfoNotFoundError as error:
+        return canonical_timezone(value)
+    except ValueError as error:
         raise HTTPException(status_code=422, detail="Unknown IANA timezone") from error
-    return value
 
 
 def _run_payload(run: TimelineAnalysisRun | None) -> dict | None:
