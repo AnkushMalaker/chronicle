@@ -172,7 +172,7 @@ def test_naive_agent_timestamps_are_interpreted_as_utc():
     assert result.episodes[0].ended_at.tzinfo == timezone.utc
 
 
-def test_every_evidence_interval_must_be_semantically_accounted_for():
+def test_unexplained_evidence_is_materialized_as_an_unassigned_interval():
     manifest = _manifest()
     later = TimelineEvidenceItem(
         evidence_id="observation:later",
@@ -183,8 +183,16 @@ def test_every_evidence_interval_must_be_semantically_accounted_for():
     )
     manifest.evidence.append(later)
 
-    with pytest.raises(ValueError, match="unaccounted evidence interval"):
-        validate_agent_result(_result(), manifest)
+    result = _result()
+
+    validate_agent_result(result, manifest)
+
+    assert len(result.unassigned_intervals) == 1
+    assert result.unassigned_intervals[0].started_at == later.started_at
+    assert result.unassigned_intervals[0].ended_at == later.ended_at
+    assert result.unassigned_intervals[0].reason == (
+        "Evidence was not assigned by semantic analysis"
+    )
 
 
 def test_unassigned_intervals_must_be_positive_and_inside_manifest():

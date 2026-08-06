@@ -2,7 +2,7 @@
 
 import json
 
-PROMPT_VERSION = "timeline-episodes-v4"
+PROMPT_VERSION = "timeline-episodes-v5"
 
 
 OUTPUT_SCHEMA = {

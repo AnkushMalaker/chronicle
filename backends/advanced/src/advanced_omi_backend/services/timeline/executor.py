@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .contracts import TimelineAgentResult, TimelineEvidenceManifest
+from .contracts import TimelineAgentResult, TimelineEvidenceManifest, UnassignedInterval
 
 BOUNDARY_SUPPORT_TOLERANCE = timedelta(minutes=2)
 ACCOUNTING_GAP_TOLERANCE = timedelta(minutes=1)
@@ -63,6 +63,67 @@ def _validate_evidence_accounting(
                 break
         if end - cursor > ACCOUNTING_GAP_TOLERANCE:
             raise ValueError(f"unaccounted evidence interval at item {index}")
+
+
+def _fill_unassigned_evidence(
+    result: TimelineAgentResult, manifest: TimelineEvidenceManifest
+) -> None:
+    """Materialize evidence the semantic draft did not explain as explicit unknowns."""
+
+    accounted = sorted(
+        [
+            (interval.started_at, interval.ended_at)
+            for interval in result.unassigned_intervals
+        ]
+        + [(episode.started_at, episode.ended_at) for episode in result.episodes]
+    )
+    missing: list[tuple[datetime, datetime]] = []
+    point_width = timedelta(seconds=1)
+    for item in manifest.evidence:
+        start = max(item.started_at, manifest.started_at)
+        end = min(_evidence_end(item), manifest.ended_at)
+        if end <= start:
+            if any(
+                low - ACCOUNTING_GAP_TOLERANCE
+                <= start
+                <= high + ACCOUNTING_GAP_TOLERANCE
+                for low, high in accounted
+            ):
+                continue
+            low = max(manifest.started_at, start - point_width)
+            high = min(manifest.ended_at, start + point_width)
+            if high > low:
+                missing.append((low, high))
+            continue
+
+        cursor = start
+        for low, high in accounted:
+            if high <= cursor:
+                continue
+            if low > cursor:
+                gap_end = min(low, end)
+                if gap_end - cursor > ACCOUNTING_GAP_TOLERANCE:
+                    missing.append((cursor, gap_end))
+            cursor = max(cursor, min(high, end))
+            if cursor >= end:
+                break
+        if end - cursor > ACCOUNTING_GAP_TOLERANCE:
+            missing.append((cursor, end))
+
+    merged: list[tuple[datetime, datetime]] = []
+    for low, high in sorted(missing):
+        if merged and low <= merged[-1][1] + ACCOUNTING_GAP_TOLERANCE:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], high))
+        else:
+            merged.append((low, high))
+    result.unassigned_intervals.extend(
+        UnassignedInterval(
+            started_at=low,
+            ended_at=high,
+            reason="Evidence was not assigned by semantic analysis",
+        )
+        for low, high in merged
+    )
 
 
 def validate_agent_result(
@@ -149,6 +210,7 @@ def validate_agent_result(
             if episode.parent_episode_index == index:
                 raise ValueError(f"episode {index} cannot parent itself")
 
+    _fill_unassigned_evidence(result, manifest)
     _validate_evidence_accounting(result, manifest)
 
 
