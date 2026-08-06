@@ -87,6 +87,27 @@ models:
       max_tokens: 2000
     model_output: json
 
+  - name: qwen36-llm
+    description: Local LLM via llama.cpp (Qwen3.6-27B Q4_K_M)
+    model_type: llm
+    model_provider: llamacpp
+    api_family: openai
+    thinking: true  # Qwen3-class thinking model — controls thinking via chat template
+    model_name: qwen3.6-27b
+    # Served by the same llama.cpp container as llamacpp-llm above, which hosts one
+    # model at a time — selecting this one means LLM_HF_REPO points at the Qwen GGUF.
+    # Dense 27B: ~16.8GB of weights must stay resident, so it wants a 24GB GPU with
+    # nothing else on it (a 12GB card cannot hold it at all).
+    model_url: ${oc.env:LLM_BASE_URL,''}
+    discovery_service: chronicle-llm
+    discovery_path: /v1
+    discovery_default: http://host.docker.internal:8083/v1
+    api_key: no-key
+    model_params:
+      temperature: 0.2
+      max_tokens: 2000
+    model_output: json
+
   - name: gemma4-llm
     description: Gemma 4 E2B-it (unified model, reuses ASR service)
     model_type: llm

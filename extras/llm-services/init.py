@@ -41,6 +41,13 @@ LLM_MODELS = {
         "description": "GLM-4.7-Flash Q4_K_M (~18GB, 30B MoE / 3B active, fast)",
         "ctx_size": 8192,
     },
+    "unsloth/Qwen3.6-27B-GGUF": {
+        "hf": "unsloth/Qwen3.6-27B-GGUF:Q4_K_M",
+        # Dense 27B, so unlike the GLM MoE above every parameter is read per token
+        # — it needs ~16.8GB of weights resident and the whole card to itself.
+        "description": "Qwen 3.6 27B Q4_K_M (~17GB, dense, thinking, needs a free 24GB GPU)",
+        "ctx_size": 8192,
+    },
     "bartowski/Qwen2.5-7B-Instruct-GGUF": {
         "hf": "bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M",
         "description": "Qwen 2.5 7B Instruct Q4_K_M (~4.7GB, multilingual)",
