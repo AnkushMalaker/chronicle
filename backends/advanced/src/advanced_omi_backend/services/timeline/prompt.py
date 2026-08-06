@@ -71,12 +71,17 @@ OUTPUT_SCHEMA = {
                                 "evidence_ids": {
                                     "type": "array",
                                     "items": {"type": "string"},
+                                    "minItems": 1,
                                 },
                             },
                             "required": ["claim", "role", "confidence", "evidence_ids"],
                         },
                     },
-                    "evidence_ids": {"type": "array", "items": {"type": "string"}},
+                    "evidence_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                    },
                     "related_conversation_ids": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -140,6 +145,8 @@ Rules:
 - Accessibility/OCR can include background or offscreen text.
 - Assistant-generated text is not evidence that its claims happened.
 - Every important boundary/assertion must cite supplied evidence IDs.
+- Every episode must include at least one supplied evidence ID; otherwise leave the
+  interval unassigned instead of creating an ungrounded episode.
 - Never invent an evidence ID. Include every window ID exactly once in covered_window_ids.
 - Salience is display value, not confidence.
 - Express optional episode metadata as short string key/value entries in `attributes`.
