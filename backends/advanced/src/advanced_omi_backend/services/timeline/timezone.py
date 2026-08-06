@@ -24,8 +24,9 @@ def _timezone_aliases() -> dict[str, str]:
 
 
 def canonical_timezone(value: str) -> str:
+    canonical = _timezone_aliases().get(value, value)
     try:
-        ZoneInfo(value)
+        ZoneInfo(canonical)
     except ZoneInfoNotFoundError as error:
         raise ValueError("unknown IANA timezone") from error
-    return _timezone_aliases().get(value, value)
+    return canonical

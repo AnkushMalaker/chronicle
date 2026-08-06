@@ -24,6 +24,7 @@ from .codex_executor import TimelineQuotaDeferred
 from .contracts import TimelineAgentResult, TimelineEvidenceManifest
 from .evidence import assemble_day_evidence, day_bounds
 from .executor import build_executor, settings_dict, validate_agent_result
+from .timezone import canonical_timezone
 from .workspace import write_workspace
 
 
@@ -41,6 +42,7 @@ async def request_timeline_analysis(
         window_minutes=int(settings.get("window_minutes", 20)),
         overlap_minutes=int(settings.get("overlap_minutes", 3)),
     )
+    timezone_name = manifest.timezone
     revision = manifest.evidence_revision
     if force:
         revision = f"{revision}:force:{uuid.uuid4().hex}"
@@ -266,6 +268,7 @@ async def _process_run(run: TimelineAnalysisRun) -> None:
         window_minutes=int(settings.get("window_minutes", 20)),
         overlap_minutes=int(settings.get("overlap_minutes", 3)),
     )
+    run.processed_evidence_revision = manifest.evidence_revision
     if not manifest.evidence:
         run.state = "awaiting_evidence"
         run.coverage_window_ids = [window.window_id for window in manifest.windows]
@@ -333,12 +336,13 @@ async def process_current_timeline_days() -> dict[str, int]:
     users = await User.find({"timezone": {"$nin": [None, ""]}}).to_list()
     now = datetime.now(timezone.utc)
     for user in users:
-        zone = ZoneInfo(user.timezone)
+        timezone_name = canonical_timezone(user.timezone)
+        zone = ZoneInfo(timezone_name)
         today = now.astimezone(zone).date()
         # Current day gives prompt updates; previous day gets one final reconciliation
         # on the first scheduler tick after midnight, then evidence dedupe makes it free.
         for local_date in (today, today - timedelta(days=1)):
-            await request_timeline_analysis(str(user.id), local_date, user.timezone)
+            await request_timeline_analysis(str(user.id), local_date, timezone_name)
             requested += 1
     result = await process_timeline_analysis_runs(max_runs=max(1, len(users)))
     return {"requested": requested, **result}

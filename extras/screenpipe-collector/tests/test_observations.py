@@ -146,6 +146,27 @@ def test_long_activity_stays_one_observation_with_novel_and_liveness_samples():
     assert tracker.active["source_item_id"] == "observation:1"
 
 
+def test_restart_gap_closes_old_observation_at_last_real_frame():
+    tracker = ObservationTracker(max_continuity_gap_seconds=300)
+    tracker.process_rows(
+        [frame(1, 0, "Code", "service.py", text="initial code")],
+        "2026-07-23T10:00:11Z",
+    )
+    next_day = {
+        **frame(2, 0, "Code", "service.py", trigger="click", text="new session"),
+        "timestamp": "2026-07-24T10:00:00Z",
+    }
+
+    events = tracker.process_rows([next_day], "2026-07-24T10:00:00Z")
+
+    assert [(event["event"], event["source_item_id"]) for event in events] == [
+        ("close", "observation:1"),
+        ("open", "observation:2"),
+    ]
+    assert events[0]["ended_at"] == "2026-07-23T10:00:00Z"
+    assert tracker.active["captured_at"] == "2026-07-24T10:00:00Z"
+
+
 def test_contextless_ocr_enriches_context_without_replacing_accessibility_text():
     tracker = ObservationTracker()
     opened = tracker.process_rows(

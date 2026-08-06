@@ -1,6 +1,6 @@
 """Authenticated semantic timeline APIs."""
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
@@ -21,6 +21,14 @@ from advanced_omi_backend.services.timeline.timezone import canonical_timezone
 router = APIRouter(prefix="/timeline", tags=["timeline"])
 
 
+def _utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _validate_timezone(value: str) -> str:
     try:
         return canonical_timezone(value)
@@ -35,18 +43,20 @@ def _run_payload(run: TimelineAnalysisRun | None) -> dict | None:
         "run_id": run.run_id,
         "state": run.state,
         "attempts": run.attempts,
-        "retry_after": run.retry_after,
+        "retry_after": _utc(run.retry_after),
         "error": run.error,
-        "created_at": run.created_at,
-        "completed_at": run.completed_at,
+        "requested_evidence_revision": run.evidence_revision,
+        "processed_evidence_revision": run.processed_evidence_revision,
+        "created_at": _utc(run.created_at),
+        "completed_at": _utc(run.completed_at),
     }
 
 
 def _episode_payload(episode: TimelineEpisode) -> dict:
     return {
         "episode_id": episode.episode_id,
-        "started_at": episode.started_at,
-        "ended_at": episode.ended_at,
+        "started_at": _utc(episode.started_at),
+        "ended_at": _utc(episode.ended_at),
         "kind": episode.kind,
         "title": episode.title,
         "summary": episode.summary,
@@ -59,7 +69,15 @@ def _episode_payload(episode: TimelineEpisode) -> dict:
         "assertions": [
             assertion.model_dump(mode="json") for assertion in episode.assertions
         ],
-        "evidence": [ref.model_dump(mode="json") for ref in episode.evidence_refs],
+        "evidence": [
+            ref.model_copy(
+                update={
+                    "started_at": _utc(ref.started_at),
+                    "ended_at": _utc(ref.ended_at),
+                }
+            ).model_dump(mode="json")
+            for ref in episode.evidence_refs
+        ],
         "related_episode_ids": episode.related_episode_ids,
         "related_conversation_ids": episode.related_conversation_ids,
         "parent_episode_id": episode.parent_episode_id,

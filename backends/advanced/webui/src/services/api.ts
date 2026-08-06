@@ -273,6 +273,8 @@ export interface TimelineAnalysis {
   attempts: number
   retry_after: string | null
   error: string | null
+  requested_evidence_revision?: string
+  processed_evidence_revision?: string | null
   created_at: string
   completed_at: string | null
 }

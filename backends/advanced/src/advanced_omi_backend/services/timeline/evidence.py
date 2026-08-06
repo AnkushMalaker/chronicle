@@ -15,6 +15,9 @@ from .contracts import (
     TimelineEvidenceItem,
     TimelineEvidenceManifest,
 )
+from .timezone import canonical_timezone
+
+SCREEN_EVIDENCE_CONTINUITY_GAP = timedelta(minutes=20)
 
 
 def utc(value: datetime) -> datetime:
@@ -120,24 +123,170 @@ def _device_item(row: DeviceInputItem) -> TimelineEvidenceItem:
     )
 
 
+def _timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return utc(value)
+    if not value:
+        return None
+    try:
+        return utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _device_items(row: DeviceInputItem) -> list[TimelineEvidenceItem]:
+    """Materialize supported screen intervals from one durable device row.
+
+    Observation state is intentionally sparse: initial/novel/liveness samples prove
+    continuity without storing every captured frame. A collector interruption can leave
+    one observation open across a long wall-clock gap, however. Split those unsupported
+    gaps here so historical rows cannot claim activity while a source was offline.
+    Meeting intervals have their own liveness/closure state machine and remain intact.
+    """
+
+    base = _device_item(row)
+    if (
+        row.kind not in {"activity", "observation"}
+        or base.kind == "meeting"
+        or row.ended_at is None
+    ):
+        return [base]
+
+    start = utc(row.captured_at)
+    end = utc(row.ended_at)
+    if end <= start:
+        return [base]
+
+    markers = {start, end}
+    for sample in row.samples:
+        marker = _timestamp(sample.get("captured_at"))
+        if marker is not None and start <= marker <= end:
+            markers.add(marker)
+    for candidate in row.frame_candidates:
+        marker = _timestamp(candidate.get("captured_at"))
+        if marker is not None and start <= marker <= end:
+            markers.add(marker)
+
+    ordered = sorted(markers)
+    groups: list[list[datetime]] = [[ordered[0]]]
+    for marker in ordered[1:]:
+        if marker - groups[-1][-1] > SCREEN_EVIDENCE_CONTINUITY_GAP:
+            groups.append([marker])
+        else:
+            groups[-1].append(marker)
+    if len(groups) == 1:
+        return [base]
+
+    image_candidate = next(
+        (
+            candidate
+            for candidate in row.frame_candidates
+            if candidate.get("frame_id") == row.metadata.get("preview_frame_id")
+        ),
+        row.frame_candidates[0] if row.frame_candidates else None,
+    )
+    image_captured_at = (
+        _timestamp(image_candidate.get("captured_at")) if image_candidate else None
+    )
+    result: list[TimelineEvidenceItem] = []
+    for index, group in enumerate(groups):
+        item = base.model_copy(deep=True)
+        item.evidence_id = f"{base.evidence_id}:segment:{index}"
+        item.started_at = group[0]
+        item.ended_at = group[-1] if group[-1] > group[0] else None
+        segment_samples = [
+            sample
+            for sample in row.samples
+            if (marker := _timestamp(sample.get("captured_at"))) is not None
+            and group[0] <= marker <= group[-1]
+        ]
+        segment_candidates = [
+            candidate
+            for candidate in row.frame_candidates
+            if (marker := _timestamp(candidate.get("captured_at"))) is not None
+            and group[0] <= marker <= group[-1]
+        ]
+        text_parts = [
+            str(row.metadata.get(key) or "")
+            for key in ("app_name", "window_name", "browser_url")
+        ]
+        if index == 0:
+            text_parts.extend(
+                str(row.metadata.get(key) or "") for key in ("text", "summary")
+            )
+        text_parts.extend(
+            str(sample.get("text") or "") for sample in segment_samples[-8:]
+        )
+        item.excerpt = (
+            " · ".join(part.strip() for part in text_parts if part.strip())[:6000]
+            or None
+        )
+        item.content_hash = hashlib.sha256(
+            f"{base.content_hash}:{item.started_at.isoformat()}:"
+            f"{item.ended_at.isoformat() if item.ended_at else ''}".encode()
+        ).hexdigest()
+        item.metadata["continuity_segment"] = index
+        item.metadata["continuity_segment_count"] = len(groups)
+        item.metadata["continuity_marker_count"] = len(group)
+        item.metadata["sample_count"] = len(segment_samples)
+        item.metadata["sample_fingerprints"] = [
+            sample.get("content_fingerprint") for sample in segment_samples[-12:]
+        ]
+        item.metadata["frame_candidates"] = segment_candidates
+        segment_has_image = bool(item.image_filename) and (
+            (image_captured_at is None and index == 0)
+            or (
+                image_captured_at is not None
+                and group[0] <= image_captured_at <= group[-1]
+            )
+        )
+        if segment_has_image:
+            item.image_filename = f"{item.image_filename}-segment-{index}"
+        else:
+            item.image_filename = None
+            item.ephemeral = False
+            item.metadata["image_content_type"] = None
+        result.append(item)
+    return result
+
+
 def _coalesce_application_evidence(
     items: list[TimelineEvidenceItem],
 ) -> list[TimelineEvidenceItem]:
-    """Collapse adjacent low-level app rows without imposing episode boundaries."""
+    """Compact each capture source independently, then merge for the user.
+
+    Mongo's user/timestamp index is descending, and multiple devices naturally
+    interleave. Sorting by source stream before compaction prevents negative gaps and
+    ensures one computer never changes another computer's screen boundaries.
+    """
+
+    ordered = sorted(
+        items,
+        key=lambda item: (
+            item.source_id or "",
+            str(item.metadata.get("source_kind") or ""),
+            utc(item.started_at),
+            item.evidence_id,
+        ),
+    )
     result: list[TimelineEvidenceItem] = []
-    for item in items:
+    for item in ordered:
         source_kind = item.metadata.get("source_kind")
         app_key = (
             item.source_id,
+            source_kind,
             item.metadata.get("app_name"),
             item.metadata.get("window_name"),
+            item.metadata.get("browser_url"),
         )
         previous = result[-1] if result else None
         previous_key = (
             (
                 previous.source_id,
+                previous.metadata.get("source_kind"),
                 previous.metadata.get("app_name"),
                 previous.metadata.get("window_name"),
+                previous.metadata.get("browser_url"),
             )
             if previous
             else None
@@ -145,13 +294,13 @@ def _coalesce_application_evidence(
         previous_end = (
             utc(previous.ended_at or previous.started_at) if previous else None
         )
+        gap = utc(item.started_at) - previous_end if previous_end is not None else None
         if (
             previous
             and source_kind in {"activity", "screen_context"}
-            and previous.metadata.get("source_kind") == source_kind
             and app_key == previous_key
-            and previous_end is not None
-            and utc(item.started_at) - previous_end <= timedelta(seconds=60)
+            and gap is not None
+            and timedelta(0) <= gap <= timedelta(seconds=60)
             and not previous.image_filename
             and not item.image_filename
         ):
@@ -166,7 +315,36 @@ def _coalesce_application_evidence(
             ).hexdigest()
             continue
         result.append(item.model_copy(deep=True))
-    return result
+    return sorted(result, key=lambda item: (utc(item.started_at), item.evidence_id))
+
+
+def _clip_evidence_to_range(
+    items: list[TimelineEvidenceItem], low: datetime, high: datetime
+) -> list[TimelineEvidenceItem]:
+    """Clip every source to the user's requested local-day range."""
+
+    clipped: list[TimelineEvidenceItem] = []
+    for original in items:
+        start = utc(original.started_at)
+        end = utc(original.ended_at) if original.ended_at else None
+        if end is None or end <= start:
+            if low <= start < high:
+                item = original.model_copy(deep=True)
+                item.started_at = start
+                item.ended_at = None
+                clipped.append(item)
+            continue
+        bounded_start = max(start, low)
+        bounded_end = min(end, high)
+        if bounded_end <= bounded_start:
+            continue
+        item = original.model_copy(deep=True)
+        item.started_at = bounded_start
+        item.ended_at = bounded_end
+        if bounded_start != start or bounded_end != end:
+            item.metadata["clipped_to_day"] = True
+        clipped.append(item)
+    return clipped
 
 
 def _transcript_item(conversation: Conversation) -> TimelineEvidenceItem | None:
@@ -248,6 +426,7 @@ async def assemble_day_evidence(
     overlap_minutes: int = 3,
     now: datetime | None = None,
 ) -> tuple[TimelineEvidenceManifest, dict[str, bytes]]:
+    timezone_name = canonical_timezone(timezone_name)
     day_start, day_end = day_bounds(local_date, timezone_name)
     checked_at = utc(now or datetime.now(timezone.utc))
     range_end = (
@@ -273,8 +452,22 @@ async def assemble_day_evidence(
         Conversation.created_at < range_end,
     ).to_list()
 
+    device_evidence: list[TimelineEvidenceItem] = []
+    images: dict[str, bytes] = {}
+    for row in rows:
+        items = _device_items(row)
+        device_evidence.extend(items)
+        if row.media_data:
+            images.update(
+                {
+                    item.evidence_id: row.media_data
+                    for item in items
+                    if item.image_filename
+                }
+            )
+
     evidence = [_audio_item(span) for span in spans]
-    evidence.extend(_coalesce_application_evidence([_device_item(row) for row in rows]))
+    evidence.extend(_coalesce_application_evidence(device_evidence))
     for conversation in conversations:
         item = _transcript_item(conversation)
         if item and _overlaps(item.started_at, item.ended_at, day_start, range_end):
@@ -295,7 +488,14 @@ async def assemble_day_evidence(
             )
         )
 
+    evidence = _clip_evidence_to_range(evidence, day_start, range_end)
     evidence.sort(key=lambda item: (item.started_at, item.evidence_id))
+    evidence_ids = {item.evidence_id for item in evidence}
+    images = {
+        evidence_id: data
+        for evidence_id, data in images.items()
+        if evidence_id in evidence_ids
+    }
     windows = _window_items(
         day_start, range_end, window_minutes, overlap_minutes, evidence
     )
@@ -325,9 +525,4 @@ async def assemble_day_evidence(
         windows=windows,
         evidence=evidence,
     )
-    images = {
-        item.evidence_id: row.media_data
-        for item, row in zip([_device_item(row) for row in rows], rows)
-        if row.media_data
-    }
     return manifest, images

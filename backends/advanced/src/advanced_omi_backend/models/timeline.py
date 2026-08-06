@@ -137,6 +137,7 @@ class TimelineAnalysisRun(Document):
     day_started_at: datetime
     day_ended_at: datetime
     evidence_revision: str
+    processed_evidence_revision: Optional[str] = None
     prompt_version: str
     executor: str
     state: Literal[

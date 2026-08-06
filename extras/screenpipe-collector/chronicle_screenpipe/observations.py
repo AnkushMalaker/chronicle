@@ -262,6 +262,7 @@ class ObservationTracker:
         stability_seconds: float = 10,
         sample_cooldown_seconds: float = 120,
         liveness_seconds: float = 900,
+        max_continuity_gap_seconds: float = 1200,
     ):
         state = state or {"schema": self.SCHEMA, "active": None, "candidate": None}
         if state.get("schema") != self.SCHEMA:
@@ -270,6 +271,7 @@ class ObservationTracker:
         self.stability_seconds = stability_seconds
         self.sample_cooldown_seconds = sample_cooldown_seconds
         self.liveness_seconds = liveness_seconds
+        self.max_continuity_gap_seconds = max_continuity_gap_seconds
 
     @property
     def active(self) -> dict[str, Any] | None:
@@ -365,13 +367,36 @@ class ObservationTracker:
                 return observation["key"]
         return key
 
+    def _close_stale_state(self, captured_at: str) -> list[dict[str, Any]]:
+        """End an old session at its last real frame before processing a new row."""
+
+        observations = [
+            observation
+            for observation in (self.active, self.candidate)
+            if observation is not None
+        ]
+        if not observations:
+            return []
+        last_seen_at = max(
+            (observation["ended_at"] for observation in observations),
+            key=timestamp_seconds,
+        )
+        gap = timestamp_seconds(captured_at) - timestamp_seconds(last_seen_at)
+        if gap <= self.max_continuity_gap_seconds:
+            return []
+        self.candidate = None
+        if self.active is None:
+            return []
+        return self._close_active(self.active["ended_at"])
+
     def process_rows(
         self, rows: Iterable[Mapping[str, Any]], now: str
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         for row in rows:
-            key = self._effective_context_key(row)
             captured_at = iso_timestamp(row["timestamp"])
+            events.extend(self._close_stale_state(captured_at))
+            key = self._effective_context_key(row)
             if self.candidate is not None:
                 if self.candidate["key"] == key:
                     update_observation(self.candidate, row)

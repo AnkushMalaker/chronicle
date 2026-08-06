@@ -10,6 +10,7 @@ from advanced_omi_backend.services.timeline.contracts import (
     TimelineCoverageWindow,
     TimelineEvidenceItem,
     TimelineEvidenceManifest,
+    UnassignedInterval,
 )
 from advanced_omi_backend.services.timeline.executor import validate_agent_result
 
@@ -107,6 +108,13 @@ def test_non_overlapping_citation_is_pruned_when_episode_remains_grounded():
     manifest.evidence.append(outside)
     result = _result()
     result.episodes[0].evidence_ids.append(outside.evidence_id)
+    result.unassigned_intervals.append(
+        UnassignedInterval(
+            started_at=outside.started_at,
+            ended_at=outside.ended_at,
+            reason="Separate later evidence",
+        )
+    )
     validate_agent_result(result, manifest)
     assert result.episodes[0].evidence_ids == ["observation:one"]
 
@@ -117,4 +125,43 @@ def test_episode_without_overlapping_citation_is_rejected():
     result.episodes[0].started_at = manifest.started_at + timedelta(minutes=26)
     result.episodes[0].ended_at = manifest.started_at + timedelta(minutes=27)
     with pytest.raises(ValueError, match="no temporally overlapping evidence"):
+        validate_agent_result(result, manifest)
+
+
+def test_episode_end_requires_nearby_cited_boundary_support():
+    manifest = _manifest()
+    manifest.evidence[0].ended_at = manifest.started_at + timedelta(minutes=5)
+    result = _result()
+
+    with pytest.raises(ValueError, match="ending boundary"):
+        validate_agent_result(result, manifest)
+
+
+def test_every_evidence_interval_must_be_semantically_accounted_for():
+    manifest = _manifest()
+    later = TimelineEvidenceItem(
+        evidence_id="observation:later",
+        kind="observation",
+        started_at=manifest.started_at + timedelta(minutes=27),
+        ended_at=manifest.started_at + timedelta(minutes=29),
+        role="application_state",
+    )
+    manifest.evidence.append(later)
+
+    with pytest.raises(ValueError, match="unaccounted evidence interval"):
+        validate_agent_result(_result(), manifest)
+
+
+def test_unassigned_intervals_must_be_positive_and_inside_manifest():
+    manifest = _manifest()
+    result = _result()
+    result.unassigned_intervals.append(
+        UnassignedInterval(
+            started_at=manifest.started_at - timedelta(minutes=1),
+            ended_at=manifest.started_at,
+            reason="Invalid outer interval",
+        )
+    )
+
+    with pytest.raises(ValueError, match="unassigned interval 0 lies outside"):
         validate_agent_result(result, manifest)
