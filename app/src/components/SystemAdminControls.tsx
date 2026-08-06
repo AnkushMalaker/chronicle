@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, StyleSheet, Text, TouchableOpacity, View, ActivityIndicator } from 'react-native';
-import { useTheme, ThemeColors } from '../theme';
+import { Alert, StyleSheet, Text, View, ActivityIndicator } from 'react-native';
+
+import { Button, ButtonRow, Card, CardWell, Divider } from '@/components/ui';
+import { useTheme, type Theme } from '@/theme';
 
 interface WakewordEntry {
   name: string;
@@ -44,8 +46,8 @@ const normalizeMode = (entry: WakewordEntry): 'dispatch' | 'collect_only' | 'off
 };
 
 const SystemAdminControls: React.FC<SystemAdminControlsProps> = ({ backendUrl, jwtToken }) => {
-  const { colors } = useTheme();
-  const s = createStyles(colors);
+  const t = useTheme();
+  const s = createStyles(t);
 
   const baseUrl = useMemo(() => toHttpBaseUrl(backendUrl), [backendUrl]);
 
@@ -263,23 +265,26 @@ const SystemAdminControls: React.FC<SystemAdminControlsProps> = ({ backendUrl, j
   }, [authHeaders, baseUrl]);
 
   return (
-    <View style={s.section}>
-      <Text style={s.sectionTitle}>System Controls</Text>
-
-      <TouchableOpacity
-        style={[s.restartButton, restarting ? s.disabledButton : null]}
-        onPress={restartBackend}
+    <Card title="System Controls">
+      <Button
+        variant="danger"
+        size="md"
+        fullWidth
+        loading={restarting}
         disabled={restarting}
+        onPress={restartBackend}
       >
-        {restarting ? <ActivityIndicator size="small" color="#fff" /> : <Text style={s.restartButtonText}>Restart Backend</Text>}
-      </TouchableOpacity>
+        Restart Backend
+      </Button>
+
+      <Divider style={s.subSectionDivider} />
 
       <View style={s.subSection}>
         <View style={s.subSectionHeader}>
           <Text style={s.subSectionTitle}>Wakeword Modes</Text>
-          <TouchableOpacity onPress={fetchModes} disabled={loadingModes}>
-            <Text style={s.refreshText}>{loadingModes ? 'Refreshing...' : 'Refresh'}</Text>
-          </TouchableOpacity>
+          <Button variant="link" size="sm" loading={loadingModes} onPress={fetchModes}>
+            {loadingModes ? 'Refreshing...' : 'Refresh'}
+          </Button>
         </View>
 
         {wakewordUnavailable ? (
@@ -287,142 +292,80 @@ const SystemAdminControls: React.FC<SystemAdminControlsProps> = ({ backendUrl, j
         ) : null}
 
         {loadingModes ? (
-          <ActivityIndicator size="small" color={colors.primary} />
+          <ActivityIndicator size="small" color={t.color.accent.fg} />
         ) : wakewords.length === 0 && !wakewordUnavailable ? (
           <Text style={s.emptyText}>No wakewords found.</Text>
         ) : (
           wakewords.map((w) => (
-            <View key={w.name} style={s.row}>
+            <CardWell key={w.name} style={s.row}>
               <Text style={s.wordName}>{w.name}</Text>
-              <View style={s.modeButtons}>
+              <ButtonRow>
                 {(['dispatch', 'collect_only', 'off'] as const).map((mode) => {
                   const isActive = w.mode === mode;
                   const isUpdating = updatingWord === w.name;
                   return (
-                    <TouchableOpacity
+                    <Button
                       key={mode}
-                      style={[s.modeButton, isActive ? s.modeButtonActive : null, isUpdating ? s.disabledButton : null]}
+                      variant={isActive ? 'primary' : 'secondary'}
+                      size="sm"
                       onPress={() => setWordMode(w.name, mode)}
                       disabled={isUpdating}
                     >
-                      <Text style={[s.modeButtonText, isActive ? s.modeButtonTextActive : null]}>
-                        {mode === 'collect_only' ? 'collect' : mode}
-                      </Text>
-                    </TouchableOpacity>
+                      {mode === 'collect_only' ? 'collect' : mode}
+                    </Button>
                   );
                 })}
-              </View>
-            </View>
+              </ButtonRow>
+            </CardWell>
           ))
         )}
 
         {modeError ? <Text style={s.errorText}>{modeError}</Text> : null}
       </View>
-    </View>
+    </Card>
   );
 };
 
-const createStyles = (colors: ThemeColors) => StyleSheet.create({
-  section: {
-    marginBottom: 25,
-    padding: 15,
-    backgroundColor: colors.card,
-    borderRadius: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    marginBottom: 12,
-    color: colors.text,
-  },
-  restartButton: {
-    backgroundColor: colors.danger,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  restartButtonText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
+const createStyles = (t: Theme) => StyleSheet.create({
+  subSectionDivider: {
+    marginTop: t.space[4],
   },
   subSection: {
-    marginTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: colors.separator,
-    paddingTop: 12,
+    paddingTop: t.space[3],
   },
   subSectionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: t.space[3],
   },
   subSectionTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: colors.textSecondary,
-  },
-  refreshText: {
-    fontSize: 13,
-    color: colors.primary,
-    fontWeight: '600',
+    fontFamily: t.font.sans,
+    ...t.type.base,
+    fontWeight: t.weight.semibold,
+    color: t.color.text.secondary,
   },
   row: {
-    marginBottom: 10,
-    padding: 10,
-    borderWidth: 1,
-    borderColor: colors.separator,
-    borderRadius: 8,
+    marginBottom: t.space[3],
   },
   wordName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: colors.text,
-    marginBottom: 8,
-  },
-  modeButtons: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  modeButton: {
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: colors.inputBorder,
-    backgroundColor: colors.inputBackground,
-  },
-  modeButtonActive: {
-    backgroundColor: colors.primary,
-    borderColor: colors.primary,
-  },
-  modeButtonText: {
-    color: colors.textSecondary,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  modeButtonTextActive: {
-    color: '#fff',
+    fontFamily: t.font.mono,
+    ...t.type.sm,
+    fontWeight: t.weight.semibold,
+    color: t.color.text.primary,
+    marginBottom: t.space[2],
   },
   emptyText: {
-    color: colors.textTertiary,
-    fontSize: 13,
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    color: t.color.text.muted,
     fontStyle: 'italic',
   },
   errorText: {
-    marginTop: 8,
-    fontSize: 12,
-    color: colors.danger,
-  },
-  disabledButton: {
-    opacity: 0.6,
+    fontFamily: t.font.sans,
+    ...t.type.xs,
+    color: t.color.status.danger.fg,
+    marginTop: t.space[2],
   },
 });
 

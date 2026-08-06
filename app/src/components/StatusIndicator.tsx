@@ -1,43 +1,33 @@
 import React from 'react';
-import { View, StyleSheet } from 'react-native';
+
+import { StatusDot, type Tone } from '@/components/ui';
+import { useTheme } from '@/theme';
 
 interface StatusIndicatorProps {
   isActive: boolean;
   size?: number;
-  activeColor?: string;
-  inactiveColor?: string;
+  /** Tone shown while active. */
+  activeTone?: Tone;
+  /** Tone shown while inactive. */
+  inactiveTone?: Tone;
 }
 
 const StatusIndicator: React.FC<StatusIndicatorProps> = ({
   isActive,
   size = 10,
-  activeColor = '#4CD964', // Green
-  inactiveColor = '#FF3B30', // Red
+  activeTone = 'success',
+  inactiveTone = 'danger',
 }) => {
+  const t = useTheme();
+
   return (
-    <View
-      style={[
-        styles.dot,
-        {
-          width: size,
-          height: size,
-          borderRadius: size / 2,
-          backgroundColor: isActive ? activeColor : inactiveColor,
-        }
-      ]}
+    <StatusDot
+      tone={isActive ? activeTone : inactiveTone}
+      size={size}
+      // Spacing around the dot, as before.
+      style={{ marginHorizontal: t.space[2] }}
     />
   );
 };
-
-const styles = StyleSheet.create({
-  dot: {
-    marginHorizontal: 8, // Add some spacing around the dot
-    // elevation: 1, // Optional: add a slight shadow for depth
-    // shadowColor: '#000',
-    // shadowOffset: { width: 0, height: 1 },
-    // shadowOpacity: 0.2,
-    // shadowRadius: 1,
-  },
-});
 
 export default StatusIndicator;

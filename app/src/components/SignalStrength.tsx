@@ -1,6 +1,7 @@
 import React from 'react';
-import { View, StyleSheet } from 'react-native';
-import { useTheme } from '../theme';
+import { StyleSheet, View } from 'react-native';
+
+import { useTheme, type Theme } from '@/theme';
 
 interface SignalStrengthProps {
   rssi: number | null | undefined;
@@ -18,17 +19,21 @@ function getBars(rssi: number | null | undefined): number {
 const BAR_HEIGHTS = [6, 10, 14, 18];
 
 const SignalStrength: React.FC<SignalStrengthProps> = ({ rssi }) => {
-  const { colors } = useTheme();
+  const t = useTheme();
+  const s = createStyles(t);
   const bars = getBars(rssi);
 
   return (
-    <View style={styles.container}>
+    <View style={s.container}>
       {BAR_HEIGHTS.map((height, i) => (
         <View
           key={i}
           style={[
-            styles.bar,
-            { height, backgroundColor: i < bars ? colors.success : colors.separator },
+            s.bar,
+            {
+              height,
+              backgroundColor: i < bars ? t.color.status.success.base : t.color.border.subtle,
+            },
           ]}
         />
       ))}
@@ -36,17 +41,18 @@ const SignalStrength: React.FC<SignalStrengthProps> = ({ rssi }) => {
   );
 };
 
-const styles = StyleSheet.create({
-  container: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 2,
-    marginLeft: 8,
-  },
-  bar: {
-    width: 4,
-    borderRadius: 1,
-  },
-});
+const createStyles = (t: Theme) =>
+  StyleSheet.create({
+    container: {
+      flexDirection: 'row',
+      alignItems: 'flex-end',
+      gap: t.space[0.5],
+      marginLeft: t.space[2],
+    },
+    bar: {
+      width: t.space[1],
+      borderRadius: 1,
+    },
+  });
 
 export default SignalStrength;

@@ -2,15 +2,16 @@ import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
-  TouchableOpacity,
   StyleSheet,
   Modal,
   Alert,
 } from 'react-native';
 import { CameraView, useCameraPermissions, scanFromURLAsync } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
-import { parseScannedConfig, ScannedBackendConfig } from '../utils/urlConversion';
-import { useTheme, ThemeColors } from '../theme';
+
+import { Body, Button, Caption, Heading } from '@/components/ui';
+import { darkTheme, useTheme, type Theme } from '@/theme';
+import { parseScannedConfig, ScannedBackendConfig } from '@/utils/urlConversion';
 
 interface QRScannerProps {
   visible: boolean;
@@ -19,8 +20,8 @@ interface QRScannerProps {
 }
 
 export const QRScanner: React.FC<QRScannerProps> = ({ visible, onScanned, onClose }) => {
-  const { colors } = useTheme();
-  const s = createStyles(colors);
+  const t = useTheme();
+  const s = createStyles(t);
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
 
@@ -71,20 +72,20 @@ export const QRScanner: React.FC<QRScannerProps> = ({ visible, onScanned, onClos
 
   const renderContent = () => {
     if (!permission) {
-      return <Text style={s.messageText}>Requesting camera permission...</Text>;
+      return <Body style={s.messageText}>Requesting camera permission...</Body>;
     }
 
     if (!permission.granted) {
       return (
         <View style={s.permissionContainer}>
-          <Text style={s.messageText}>Camera access is needed to scan QR codes.</Text>
-          <TouchableOpacity style={s.permissionButton} onPress={requestPermission}>
-            <Text style={s.permissionButtonText}>Grant Camera Access</Text>
-          </TouchableOpacity>
-          <Text style={s.orText}>or</Text>
-          <TouchableOpacity style={s.galleryButton} onPress={handlePickFromGallery}>
-            <Text style={s.galleryButtonText}>Pick from Gallery</Text>
-          </TouchableOpacity>
+          <Body style={s.messageText}>Camera access is needed to scan QR codes.</Body>
+          <Button variant="primary" size="lg" onPress={requestPermission}>
+            Grant Camera Access
+          </Button>
+          <Caption style={s.orText}>or</Caption>
+          <Button variant="outline" size="lg" onPress={handlePickFromGallery} style={s.galleryButton}>
+            Pick from Gallery
+          </Button>
         </View>
       );
     }
@@ -100,9 +101,9 @@ export const QRScanner: React.FC<QRScannerProps> = ({ visible, onScanned, onClos
         <View style={s.overlay}>
           <Text style={s.overlayText}>Point at QR code on Chronicle dashboard</Text>
         </View>
-        <TouchableOpacity style={s.galleryButton} onPress={handlePickFromGallery}>
-          <Text style={s.galleryButtonText}>Pick from Gallery</Text>
-        </TouchableOpacity>
+        <Button variant="outline" size="lg" onPress={handlePickFromGallery} style={s.galleryButton}>
+          Pick from Gallery
+        </Button>
       </View>
     );
   };
@@ -111,10 +112,10 @@ export const QRScanner: React.FC<QRScannerProps> = ({ visible, onScanned, onClos
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet">
       <View style={s.container}>
         <View style={s.header}>
-          <Text style={s.headerTitle}>Scan QR Code</Text>
-          <TouchableOpacity onPress={onClose} style={s.closeButton}>
-            <Text style={s.closeButtonText}>Close</Text>
-          </TouchableOpacity>
+          <Heading>Scan QR Code</Heading>
+          <Button variant="link" size="sm" onPress={onClose}>
+            Close
+          </Button>
         </View>
         {renderContent()}
       </View>
@@ -122,35 +123,22 @@ export const QRScanner: React.FC<QRScannerProps> = ({ visible, onScanned, onClos
   );
 };
 
-const createStyles = (colors: ThemeColors) =>
+const createStyles = (t: Theme) =>
   StyleSheet.create({
     container: {
       flex: 1,
-      backgroundColor: colors.background,
+      backgroundColor: t.color.surface.page,
     },
     header: {
       flexDirection: 'row',
       justifyContent: 'space-between',
       alignItems: 'center',
-      paddingHorizontal: 20,
-      paddingTop: 60,
-      paddingBottom: 15,
-      borderBottomWidth: 1,
-      borderBottomColor: colors.separator,
-      backgroundColor: colors.card,
-    },
-    headerTitle: {
-      fontSize: 18,
-      fontWeight: '600',
-      color: colors.text,
-    },
-    closeButton: {
-      padding: 8,
-    },
-    closeButtonText: {
-      fontSize: 16,
-      color: colors.primary,
-      fontWeight: '500',
+      paddingHorizontal: t.space[5],
+      paddingTop: t.space[12] + t.space[3],
+      paddingBottom: t.space[4],
+      borderBottomWidth: t.borderWidth,
+      borderBottomColor: t.color.border.subtle,
+      backgroundColor: t.color.surface.raised,
     },
     cameraContainer: {
       flex: 1,
@@ -162,64 +150,43 @@ const createStyles = (colors: ThemeColors) =>
     },
     overlay: {
       position: 'absolute',
-      top: 40,
-      left: 20,
-      right: 20,
+      top: t.space[10],
+      left: t.space[5],
+      right: t.space[5],
       alignItems: 'center',
     },
     overlayText: {
-      color: '#ffffff',
-      fontSize: 16,
-      fontWeight: '500',
+      // This label sits on a scrim over the live camera feed, which is dark in
+      // both themes — so it always needs the dark theme's light ink, not the
+      // active theme's text colour (which is near-black under the light theme).
+      color: darkTheme.color.text.primary,
+      backgroundColor: t.color.overlay,
+      fontFamily: t.font.sans,
+      ...t.type.base,
+      fontWeight: t.weight.medium,
       textAlign: 'center',
-      backgroundColor: 'rgba(0,0,0,0.5)',
-      paddingHorizontal: 16,
-      paddingVertical: 8,
-      borderRadius: 8,
+      paddingHorizontal: t.space[4],
+      paddingVertical: t.space[2],
+      borderRadius: t.radius.lg,
       overflow: 'hidden',
     },
     permissionContainer: {
       flex: 1,
       justifyContent: 'center',
       alignItems: 'center',
-      padding: 30,
+      padding: t.space[8],
     },
     messageText: {
-      fontSize: 16,
-      color: colors.textSecondary,
+      ...t.type.base,
       textAlign: 'center',
-      marginBottom: 20,
-    },
-    permissionButton: {
-      backgroundColor: colors.primary,
-      paddingVertical: 12,
-      paddingHorizontal: 24,
-      borderRadius: 8,
-    },
-    permissionButtonText: {
-      color: '#ffffff',
-      fontSize: 16,
-      fontWeight: '600',
+      marginBottom: t.space[5],
     },
     orText: {
-      fontSize: 14,
-      color: colors.textTertiary,
-      marginVertical: 12,
+      marginVertical: t.space[3],
     },
     galleryButton: {
-      paddingVertical: 12,
-      paddingHorizontal: 24,
-      borderRadius: 8,
-      borderWidth: 1,
-      borderColor: colors.primary,
-      marginTop: 12,
-      marginBottom: 20,
-    },
-    galleryButtonText: {
-      color: colors.primary,
-      fontSize: 16,
-      fontWeight: '500',
-      textAlign: 'center',
+      marginTop: t.space[3],
+      marginBottom: t.space[5],
     },
   });
 

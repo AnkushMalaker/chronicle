@@ -1,7 +1,8 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Linking } from 'react-native';
+import { Linking } from 'react-native';
 import { State as BluetoothState } from 'react-native-ble-plx';
-import { useTheme, ThemeColors } from '../theme';
+
+import { Button, InlineAlert } from '@/components/ui';
 
 interface BluetoothStatusBannerProps {
   bluetoothState: BluetoothState;
@@ -16,15 +17,8 @@ export const BluetoothStatusBanner: React.FC<BluetoothStatusBannerProps> = ({
   permissionGranted,
   onRequestPermission
 }) => {
-  const { colors } = useTheme();
-  const s = createStyles(colors);
-
   if (isPermissionsLoading && bluetoothState === BluetoothState.Unknown) {
-    return (
-      <View style={[s.statusBanner, { backgroundColor: colors.primary }]}>
-        <Text style={s.statusText}>Initializing Bluetooth...</Text>
-      </View>
-    );
+    return <InlineAlert tone="accent">Initializing Bluetooth...</InlineAlert>;
   }
 
   if (bluetoothState === BluetoothState.PoweredOn && permissionGranted) {
@@ -70,44 +64,19 @@ export const BluetoothStatusBanner: React.FC<BluetoothStatusBannerProps> = ({
   }
 
   return (
-    <View style={[s.statusBanner, { backgroundColor: isWarning ? colors.warning : colors.primary }]}>
-      <Text style={s.statusText}>{bannerMessage}</Text>
-      {onButtonPress && (
-        <TouchableOpacity style={s.statusButton} onPress={onButtonPress}>
-          <Text style={s.statusButtonText}>{buttonText}</Text>
-        </TouchableOpacity>
-      )}
-    </View>
+    <InlineAlert
+      tone={isWarning ? 'warning' : 'accent'}
+      action={
+        onButtonPress ? (
+          <Button variant="outline" size="sm" onPress={onButtonPress}>
+            {buttonText}
+          </Button>
+        ) : undefined
+      }
+    >
+      {bannerMessage}
+    </InlineAlert>
   );
 };
-
-const createStyles = (colors: ThemeColors) => StyleSheet.create({
-  statusBanner: {
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 15,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  statusText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: '500',
-    flex: 1,
-    marginRight: 10,
-  },
-  statusButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.3)',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 6,
-  },
-  statusButtonText: {
-    color: 'white',
-    fontWeight: '600',
-    fontSize: 12,
-  },
-});
 
 export default BluetoothStatusBanner;

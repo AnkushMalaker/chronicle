@@ -1,6 +1,9 @@
 import React from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, Share, Platform } from 'react-native';
-import { logError, getLogPath, readLog } from '@/utils/logger';
+import { Platform, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
+
+import { Button, ButtonRow } from '@/components/ui';
+import { useTheme, type Theme } from '@/theme';
+import { getLogPath, logError, readLog } from '@/utils/logger';
 
 interface Props {
   children: React.ReactNode;
@@ -9,6 +12,50 @@ interface Props {
 interface State {
   error: Error | null;
   info: React.ErrorInfo | null;
+}
+
+interface FallbackProps {
+  error: Error;
+  info: React.ErrorInfo | null;
+  onShare: () => void;
+  onReset: () => void;
+}
+
+/**
+ * The crash screen. Split out as a function component because a class cannot
+ * call `useTheme()`.
+ */
+function ErrorFallback({ error, info, onShare, onReset }: FallbackProps) {
+  const t = useTheme();
+  const s = createStyles(t);
+
+  return (
+    <View style={s.container}>
+      <Text style={s.title}>Chronicle crashed</Text>
+      <Text style={s.subtitle}>The error has been written to the on-device log.</Text>
+      <ScrollView style={s.scroll} contentContainerStyle={s.scrollContent}>
+        <Text style={s.errorHeading}>
+          {error.name}: {error.message}
+        </Text>
+        {error.stack ? <Text style={s.stack}>{error.stack}</Text> : null}
+        {info?.componentStack ? (
+          <>
+            <Text style={s.errorHeading}>Component stack</Text>
+            <Text style={s.stack}>{info.componentStack}</Text>
+          </>
+        ) : null}
+      </ScrollView>
+      <Text style={s.path}>Log: {getLogPath()}</Text>
+      <ButtonRow>
+        <Button variant="primary" onPress={onShare} style={s.action}>
+          Share Log
+        </Button>
+        <Button variant="secondary" onPress={onReset} style={s.action}>
+          Try Again
+        </Button>
+      </ButtonRow>
+    </View>
+  );
 }
 
 export default class ErrorBoundary extends React.Component<Props, State> {
@@ -43,44 +90,60 @@ export default class ErrorBoundary extends React.Component<Props, State> {
     const { error, info } = this.state;
     if (!error) return this.props.children;
 
-    return (
-      <View style={styles.container}>
-        <Text style={styles.title}>Chronicle crashed</Text>
-        <Text style={styles.subtitle}>The error has been written to the on-device log.</Text>
-        <ScrollView style={styles.scroll} contentContainerStyle={{ padding: 12 }}>
-          <Text style={styles.errorHeading}>{error.name}: {error.message}</Text>
-          {error.stack ? <Text style={styles.stack}>{error.stack}</Text> : null}
-          {info?.componentStack ? (
-            <>
-              <Text style={styles.errorHeading}>Component stack</Text>
-              <Text style={styles.stack}>{info.componentStack}</Text>
-            </>
-          ) : null}
-        </ScrollView>
-        <Text style={styles.path}>Log: {getLogPath()}</Text>
-        <View style={styles.row}>
-          <TouchableOpacity style={styles.btn} onPress={this.share}>
-            <Text style={styles.btnText}>Share Log</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.btn, styles.btnSecondary]} onPress={this.reset}>
-            <Text style={styles.btnText}>Try Again</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    );
+    return <ErrorFallback error={error} info={info} onShare={this.share} onReset={this.reset} />;
   }
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#1c1c1e', padding: 16, paddingTop: 60 },
-  title: { color: '#FF3B30', fontSize: 22, fontWeight: '700', marginBottom: 4 },
-  subtitle: { color: '#aeaeb2', fontSize: 13, marginBottom: 12 },
-  scroll: { flex: 1, backgroundColor: '#2c2c2e', borderRadius: 8 },
-  errorHeading: { color: '#fff', fontSize: 14, fontWeight: '600', marginTop: 8 },
-  stack: { color: '#d1d1d6', fontSize: 11, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', marginTop: 4 },
-  path: { color: '#8e8e93', fontSize: 11, marginTop: 10, marginBottom: 6 },
-  row: { flexDirection: 'row', gap: 8 },
-  btn: { flex: 1, backgroundColor: '#0A84FF', paddingVertical: 12, borderRadius: 8, alignItems: 'center' },
-  btnSecondary: { backgroundColor: '#3a3a3c' },
-  btnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
-});
+const createStyles = (t: Theme) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: t.color.surface.page,
+      padding: t.space[4],
+      paddingTop: 60,
+    },
+    title: {
+      fontFamily: t.font.sans,
+      color: t.color.status.danger.fg,
+      ...t.type['2xl'],
+      fontWeight: t.weight.bold,
+      marginBottom: t.space[1],
+    },
+    subtitle: {
+      fontFamily: t.font.sans,
+      color: t.color.text.secondary,
+      ...t.type.sm,
+      marginBottom: t.space[3],
+    },
+    scroll: {
+      flex: 1,
+      backgroundColor: t.color.surface.sunken,
+      borderRadius: t.radius.lg,
+    },
+    scrollContent: {
+      padding: t.space[3],
+    },
+    errorHeading: {
+      fontFamily: t.font.sans,
+      color: t.color.text.primary,
+      ...t.type.sm,
+      fontWeight: t.weight.semibold,
+      marginTop: t.space[2],
+    },
+    stack: {
+      fontFamily: t.font.mono,
+      color: t.color.text.secondary,
+      ...t.type.xs,
+      marginTop: t.space[1],
+    },
+    path: {
+      fontFamily: t.font.sans,
+      color: t.color.text.muted,
+      ...t.type.xs,
+      marginTop: t.space[3],
+      marginBottom: t.space[1.5],
+    },
+    action: {
+      flex: 1,
+    },
+  });

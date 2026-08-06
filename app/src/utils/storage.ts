@@ -10,6 +10,7 @@ const AUTH_EMAIL_KEY = 'AUTH_EMAIL_KEY';
 const SERVICE_MANAGER_URL_KEY = 'SERVICE_MANAGER_URL_KEY';
 const AUTO_RECONNECT_ENABLED_KEY = 'AUTO_RECONNECT_ENABLED_KEY';
 const MIC_CAPTURE_PROFILE_KEY = 'MIC_CAPTURE_PROFILE_KEY';
+const THEME_PREFERENCE_KEY = 'THEME_PREFERENCE_KEY';
 // SecureStore keys must be alphanumeric + ._- (no other punctuation).
 const AUTH_PASSWORD_KEY = 'AUTH_PASSWORD_KEY';
 const JWT_TOKEN_KEY = 'JWT_TOKEN_KEY';
@@ -267,6 +268,27 @@ export const getMicCaptureProfile = async (): Promise<MicCaptureProfile> => {
   } catch (error) {
     console.error('[Storage] Error retrieving mic capture profile:', error);
     return 'far-field';
+  }
+};
+
+// Appearance preference: 'system' (default) follows the OS, 'light'/'dark' pin it.
+export type ThemePreference = 'system' | 'light' | 'dark';
+
+export const saveThemePreference = async (preference: ThemePreference): Promise<void> => {
+  try {
+    await AsyncStorage.setItem(THEME_PREFERENCE_KEY, preference);
+  } catch (error) {
+    console.error('[Storage] Error saving theme preference:', error);
+  }
+};
+
+export const getThemePreference = async (): Promise<ThemePreference> => {
+  try {
+    const v = await AsyncStorage.getItem(THEME_PREFERENCE_KEY);
+    return v === 'light' || v === 'dark' ? v : 'system';
+  } catch (error) {
+    console.error('[Storage] Error retrieving theme preference:', error);
+    return 'system';
   }
 };
 

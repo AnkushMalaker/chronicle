@@ -1,13 +1,24 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { useTheme, ThemeColors } from '../theme';
+
+import {
+  Badge,
+  Button,
+  ButtonRow,
+  Card,
+  CardWell,
+  InlineAlert,
+  StatusDot,
+  type Tone,
+} from '@/components/ui';
 import {
   listServices,
   serviceAction,
   getOperation,
   ServiceInfo,
   ServicesResult,
-} from '../services/serviceManager';
+} from '@/services/serviceManager';
+import { useTheme, type Theme } from '@/theme';
 
 interface NetworkOverviewProps {
   backendUrl: string;
@@ -34,8 +45,8 @@ const waitForOperation = async (
 };
 
 const NetworkOverview: React.FC<NetworkOverviewProps> = ({ backendUrl }) => {
-  const { colors } = useTheme();
-  const s = createStyles(colors);
+  const t = useTheme();
+  const s = createStyles(t);
 
   const [result, setResult] = useState<ServicesResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -97,14 +108,14 @@ const NetworkOverview: React.FC<NetworkOverviewProps> = ({ backendUrl }) => {
     const health = svc.health || 'unknown';
     const up = health !== 'stopped' && health !== 'unknown';
     const isBusy = busyService === svc.name;
-    const badgeColor =
+    const badgeTone: Tone =
       health === 'healthy'
-        ? colors.success
+        ? 'success'
         : health === 'stopped' || health === 'unhealthy'
-        ? colors.danger
+        ? 'danger'
         : health === 'unknown'
-        ? colors.disabled
-        : colors.warning; // partial | starting
+        ? 'neutral'
+        : 'warning'; // partial | starting
     return (
       <View key={`${svc.node || 'local'}:${svc.name}`} style={s.row}>
         <View style={s.rowHeader}>
@@ -113,31 +124,26 @@ const NetworkOverview: React.FC<NetworkOverviewProps> = ({ backendUrl }) => {
             {svc.description ? <Text style={s.descText}>{svc.description}</Text> : null}
             {svc.enabled === false ? <Text style={s.descText}>not enabled in config</Text> : null}
           </View>
-          <View style={[s.badge, { backgroundColor: badgeColor }]}>
-            <Text style={s.badgeText}>{health}</Text>
-          </View>
+          <Badge tone={badgeTone}>{health}</Badge>
         </View>
-        <View style={s.actions}>
+        <ButtonRow style={s.actions}>
           {isBusy ? (
-            <ActivityIndicator size="small" color={colors.primary} />
+            <ActivityIndicator size="small" color={t.color.accent.fg} />
           ) : up ? (
             <>
-              <TouchableOpacity style={s.actionButton} onPress={() => runAction(svc, 'restart')}>
-                <Text style={s.actionText}>Restart</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={s.actionButton} onPress={() => runAction(svc, 'stop')}>
-                <Text style={s.actionText}>Stop</Text>
-              </TouchableOpacity>
+              <Button variant="secondary" size="sm" onPress={() => runAction(svc, 'restart')}>
+                Restart
+              </Button>
+              <Button variant="danger" size="sm" onPress={() => runAction(svc, 'stop')}>
+                Stop
+              </Button>
             </>
           ) : (
-            <TouchableOpacity
-              style={[s.actionButton, s.startButton]}
-              onPress={() => runAction(svc, 'start')}
-            >
-              <Text style={[s.actionText, s.startText]}>Start</Text>
-            </TouchableOpacity>
+            <Button variant="primary" size="sm" onPress={() => runAction(svc, 'start')}>
+              Start
+            </Button>
           )}
-        </View>
+        </ButtonRow>
       </View>
     );
   };
@@ -151,15 +157,14 @@ const NetworkOverview: React.FC<NetworkOverviewProps> = ({ backendUrl }) => {
         ? 'Set a backend URL first.'
         : 'The service manager is unreachable from here.';
     return (
-      <View>
-        <Text style={s.emptyText}>Network control unavailable ({reason}).</Text>
-        <Text style={s.hintText}>{hint}</Text>
-      </View>
+      <InlineAlert tone="warning" title={`Network control unavailable (${reason}).`}>
+        {hint}
+      </InlineAlert>
     );
   };
 
   return (
-    <View style={s.section}>
+    <Card>
       <View style={s.header}>
         <TouchableOpacity
           style={s.headerLeft}
@@ -169,12 +174,12 @@ const NetworkOverview: React.FC<NetworkOverviewProps> = ({ backendUrl }) => {
           <Text style={s.chevron}>{expanded ? '▾' : '▸'}</Text>
           <Text style={s.sectionTitle}>Network Overview</Text>
         </TouchableOpacity>
-        <TouchableOpacity onPress={refresh} disabled={loading}>
-          <Text style={s.refreshText}>{loading ? 'Refreshing…' : 'Refresh'}</Text>
-        </TouchableOpacity>
+        <Button variant="link" size="sm" loading={loading} onPress={refresh}>
+          {loading ? 'Refreshing…' : 'Refresh'}
+        </Button>
       </View>
 
-      {loading && !result ? <ActivityIndicator size="small" color={colors.primary} /> : null}
+      {loading && !result ? <ActivityIndicator size="small" color={t.color.accent.fg} /> : null}
 
       {result && !result.available ? renderUnavailable() : null}
 
@@ -191,38 +196,31 @@ const NetworkOverview: React.FC<NetworkOverviewProps> = ({ backendUrl }) => {
             ? Object.entries(groups).map(([node, svcs]) => {
                 const groupUp = svcs.filter(svc => svc.health && svc.health !== 'stopped').length;
                 return (
-                  <View key={node} style={s.group}>
+                  <CardWell key={node} style={s.group}>
                     <View style={s.groupHeaderRow}>
                       <View style={s.groupHeaderLeft}>
-                        <View style={s.nodeDot} />
+                        <StatusDot tone="accent" size={8} style={s.nodeDot} />
                         <Text style={s.groupHeader}>{node}</Text>
-                        {svcs[0]?.remote ? <Text style={s.remoteTag}>REMOTE</Text> : null}
+                        {svcs[0]?.remote ? (
+                          <Badge tone="neutral" style={s.remoteTag}>
+                            REMOTE
+                          </Badge>
+                        ) : null}
                       </View>
                       <Text style={s.groupCount}>{groupUp}/{svcs.length} up</Text>
                     </View>
                     {svcs.map(renderServiceRow)}
-                  </View>
+                  </CardWell>
                 );
               })
             : null}
         </>
       ) : null}
-    </View>
+    </Card>
   );
 };
 
-const createStyles = (colors: ThemeColors) => StyleSheet.create({
-  section: {
-    marginBottom: 25,
-    padding: 15,
-    backgroundColor: colors.card,
-    borderRadius: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
-  },
+const createStyles = (t: Theme) => StyleSheet.create({
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -234,39 +232,34 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     flex: 1,
   },
   chevron: {
-    fontSize: 14,
-    color: colors.textSecondary,
-    marginRight: 8,
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    color: t.color.text.secondary,
+    marginRight: t.space[2],
     width: 14,
   },
   sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: colors.text,
-  },
-  refreshText: {
-    fontSize: 13,
-    color: colors.primary,
-    fontWeight: '600',
+    fontFamily: t.font.sans,
+    ...t.type.lg,
+    fontWeight: t.weight.semibold,
+    color: t.color.text.primary,
   },
   summary: {
-    fontSize: 13,
-    color: colors.textSecondary,
-    marginTop: 8,
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    color: t.color.text.secondary,
+    marginTop: t.space[2],
   },
   group: {
-    marginTop: 16,
-    backgroundColor: colors.background,
-    borderRadius: 10,
+    marginTop: t.space[4],
     borderLeftWidth: 3,
-    borderLeftColor: colors.primary,
-    padding: 10,
+    borderLeftColor: t.color.accent.base,
   },
   groupHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: t.space[3],
   },
   groupHeaderLeft: {
     flexDirection: 'row',
@@ -274,41 +267,30 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     flex: 1,
   },
   nodeDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: colors.primary,
-    marginRight: 8,
+    marginRight: t.space[2],
   },
   groupHeader: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: colors.text,
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    fontWeight: t.weight.bold,
+    color: t.color.text.primary,
   },
   remoteTag: {
-    marginLeft: 8,
-    fontSize: 10,
-    fontWeight: '700',
-    color: colors.textTertiary,
-    borderWidth: 1,
-    borderColor: colors.separator,
-    borderRadius: 4,
-    paddingHorizontal: 5,
-    paddingVertical: 1,
-    overflow: 'hidden',
+    marginLeft: t.space[2],
   },
   groupCount: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: colors.textTertiary,
+    fontFamily: t.font.sans,
+    ...t.type.xs,
+    fontWeight: t.weight.semibold,
+    color: t.color.text.muted,
   },
   row: {
-    marginBottom: 10,
-    padding: 10,
-    borderWidth: 1,
-    borderColor: colors.separator,
-    borderRadius: 8,
-    backgroundColor: colors.card,
+    marginBottom: t.space[3],
+    padding: t.space[3],
+    borderWidth: t.borderWidth,
+    borderColor: t.color.border.base,
+    borderRadius: t.radius.lg,
+    backgroundColor: t.color.surface.raised,
   },
   rowHeader: {
     flexDirection: 'row',
@@ -317,67 +299,22 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   rowHeaderText: {
     flex: 1,
-    marginRight: 8,
+    marginRight: t.space[2],
   },
   serviceName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: colors.text,
+    fontFamily: t.font.mono,
+    ...t.type.sm,
+    fontWeight: t.weight.semibold,
+    color: t.color.text.primary,
   },
   descText: {
-    fontSize: 12,
-    color: colors.textTertiary,
-    marginTop: 2,
-  },
-  badge: {
-    paddingVertical: 3,
-    paddingHorizontal: 8,
-    borderRadius: 10,
-  },
-  badgeText: {
-    color: '#fff',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  nodeText: {
-    fontSize: 12,
-    color: colors.textTertiary,
-    marginTop: 4,
+    fontFamily: t.font.sans,
+    ...t.type.xs,
+    color: t.color.text.muted,
+    marginTop: t.space[0.5],
   },
   actions: {
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 10,
-  },
-  actionButton: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: colors.inputBorder,
-    backgroundColor: colors.inputBackground,
-  },
-  startButton: {
-    backgroundColor: colors.primary,
-    borderColor: colors.primary,
-  },
-  actionText: {
-    color: colors.textSecondary,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  startText: {
-    color: '#fff',
-  },
-  emptyText: {
-    color: colors.textTertiary,
-    fontSize: 13,
-    fontStyle: 'italic',
-  },
-  hintText: {
-    color: colors.textSecondary,
-    fontSize: 12,
-    marginTop: 6,
+    marginTop: t.space[3],
   },
 });
 
