@@ -306,6 +306,27 @@ cd extras/asr-services && docker compose up --build -d
 - **Backend**: `setup-requirements.txt` (rich>=13.0.0, pyyaml>=6.0.0)
 - **Extras**: No additional setup dependencies required
 
+### Why `chronicle-setup` is installed editable
+
+`setup-requirements.txt` lists the shared package as `-e ./extras/chronicle-setup`.
+The `-e` is load-bearing: `uv run --with-requirements` caches the environment it
+builds and reuses it while this file's text is unchanged, so a non-editable path
+dependency stays frozen at the sources it was first built from. Edits to
+`chronicle_setup/` are then silently ignored by the wizard, every `init.py`, and
+`services.py doctor`, which keep running a stale wheel from `~/.cache/uv`.
+
+Measured on uv 0.6.16: neither `uv cache clean chronicle-setup` nor a
+`[tool.uv] cache-keys` entry invalidates it — only `--reinstall-package`, which
+every invocation would have to remember. Editable installs link to the source
+tree instead. If a change to this package appears to have no effect, check that
+the `-e` is still there:
+
+```bash
+uv run --with-requirements setup-requirements.txt \
+  python -c "import chronicle_setup, sys; print(chronicle_setup.__file__)"
+# want the repo path, not a ~/.cache/uv/archive-* path
+```
+
 ## Troubleshooting
 
 ### Common Issues

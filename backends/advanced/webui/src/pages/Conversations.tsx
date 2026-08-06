@@ -54,6 +54,7 @@ const isUnknownLabel = (name?: string): boolean => {
 }
 
 const PAGE_SIZE = 20
+const SEARCH_DEBOUNCE_MS = 800
 
 const SORT_OPTIONS = [
   { label: 'Date (newest)', sortBy: 'created_at', sortOrder: 'desc' },
@@ -130,8 +131,8 @@ export default function Conversations() {
 
   // Search state (regex-only; semantic search was removed for performance reasons)
   const [searchQuery, setSearchQuery] = useState('')
-  type SearchField = 'title' | 'summary' | 'speakers'
-  const allSearchFields: SearchField[] = ['title', 'summary', 'speakers']
+  type SearchField = 'id' | 'title' | 'summary' | 'speakers'
+  const allSearchFields: SearchField[] = ['id', 'title', 'summary', 'speakers']
   const [searchFields, setSearchFields] = useState<SearchField[]>(allSearchFields)
   const [searchResults, setSearchResults] = useState<Conversation[] | null>(null)
   const [isSearching, setIsSearching] = useState(false)
@@ -216,7 +217,10 @@ export default function Conversations() {
     }
 
     setIsSearching(true)
-    searchTimeoutRef.current = setTimeout(() => runSearch(trimmed, searchFields), 300)
+    searchTimeoutRef.current = setTimeout(
+      () => runSearch(trimmed, searchFields),
+      SEARCH_DEBOUNCE_MS,
+    )
 
     return () => {
       if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current)
@@ -652,7 +656,7 @@ export default function Conversations() {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search conversations or people..."
+              placeholder="Search conversations, IDs, or people..."
               className="w-full pl-9 pr-9 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
             />
             {searchQuery && (
@@ -684,7 +688,7 @@ export default function Conversations() {
               <Brain className="h-4 w-4" />
             </button>
           </div>
-          {/* Search fields: Everything mirrors the three individual checkboxes. */}
+          {/* Search fields: Everything mirrors the individual checkboxes. */}
           <div className="relative">
             <button
               type="button"
@@ -708,6 +712,7 @@ export default function Conversations() {
               >
                 {[
                   { key: 'all', label: 'Everything', selected: allFieldsSelected },
+                  { key: 'id', label: 'Conversation IDs', selected: searchFields.includes('id') },
                   { key: 'title', label: 'Titles', selected: searchFields.includes('title') },
                   { key: 'summary', label: 'Summaries', selected: searchFields.includes('summary') },
                   { key: 'speakers', label: 'Speakers', selected: searchFields.includes('speakers') },

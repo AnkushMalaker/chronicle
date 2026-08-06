@@ -5,17 +5,22 @@ import {
   HelpCircle,
   Loader2,
   PackageOpen,
+  Pause,
+  Play,
   ShieldCheck,
   Trash2,
 } from 'lucide-react'
 import {
   AuditConversation,
+  ExportPreviewClip,
+  ExportPreviewResult,
   ExportRecord,
   ScreenConversationReport,
   ScreenResult,
   dataAuditApi,
 } from '../../services/api'
-import { Alert, Button, Modal, Textarea } from '../../components/ui'
+import { Alert, Button, Modal, StateBadge, Textarea } from '../../components/ui'
+import { useGaplessPlayer } from '../../hooks/useGaplessPlayer'
 import { useJobPolling } from '../../hooks/useJobPolling'
 import { formatDate, formatDuration } from './format'
 
@@ -45,6 +50,12 @@ function Hint({ text }: { text: string }) {
 
 // A flagged segment is keyed by conversation + its segment index.
 const segKey = (cid: string, index: number) => `${cid}:${index}`
+
+// A previewed clip is keyed by conversation + its exact boundaries, so a
+// boundary change after re-preview (different clip) naturally resets the
+// include/drop decision instead of applying it to the wrong audio.
+const clipKey = (cid: string, clip: ExportPreviewClip) =>
+  `${cid}@${clip.start}-${clip.end}`
 
 // 16 kHz mono 16-bit PCM — what exported WAV clips contain (pre-zip).
 const WAV_BYTES_PER_SECOND = 32000
@@ -79,6 +90,14 @@ export default function ExportModal({ selected, onClose }: Props) {
   const [screenResult, setScreenResult] = useState<ScreenResult | null>(null)
   // Flagged segments the user has chosen to withhold (default: all flagged).
   const [excluded, setExcluded] = useState<Set<string>>(new Set())
+
+  // Contents preview (dry-run): the exact clips the current settings would
+  // ship, from the same plan computation the export job runs.
+  const [preview, setPreview] = useState<ExportPreviewResult | null>(null)
+  const [previewing, setPreviewing] = useState(false)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  // Clips unticked in the preview (keyed by exact boundaries — see clipKey).
+  const [dropped, setDropped] = useState<Set<string>>(new Set())
 
   // Run state
   const [exporting, setExporting] = useState(false)
@@ -246,6 +265,21 @@ export default function ExportModal({ selected, onClose }: Props) {
     return ranges
   }
 
+  // dropped_ranges for the export request: each unticked clip's exact
+  // [start, end], so the job carves out precisely what the user reviewed away.
+  const buildDroppedRanges = (): Record<string, number[][]> => {
+    const ranges: Record<string, number[][]> = {}
+    for (const conv of preview?.conversations ?? []) {
+      const picked = (conv.clips ?? []).filter((c) =>
+        dropped.has(clipKey(conv.conversation_id, c))
+      )
+      if (picked.length) {
+        ranges[conv.conversation_id] = picked.map((c) => [c.start, c.end])
+      }
+    }
+    return ranges
+  }
+
   const runExport = async () => {
     setExporting(true)
     setError(null)
@@ -260,6 +294,7 @@ export default function ExportModal({ selected, onClose }: Props) {
           speech_threshold: speechThreshold,
           merge_gap_seconds: mergeGap,
           excluded_ranges: excludedRanges,
+          dropped_ranges: buildDroppedRanges(),
           sensitivity_policy:
             screenEnabled && Object.keys(excludedRanges).length ? policy : null,
         }
@@ -310,6 +345,78 @@ export default function ExportModal({ selected, onClose }: Props) {
   const totalFlagged = screenResult?.totals.flagged_segments ?? 0
   const totalExcluded = excluded.size
 
+  // ── Contents preview ──────────────────────────────────────────────────────
+  // Auto-refresh (debounced) whenever anything that changes the plan changes:
+  // selection, mode, clip params, or the privacy-screen withholdings. The
+  // response is the export job's own plan computation, so what's listed here
+  // is exactly what the zip would contain.
+  const screenRanges = screenEnabled && resultValid ? buildExcludedRanges() : {}
+  const previewSig = JSON.stringify({
+    idsSig,
+    mode,
+    padSeconds,
+    speechThreshold,
+    mergeGap,
+    screenRanges,
+  })
+  useEffect(() => {
+    if (selected.length === 0) return
+    let cancelled = false
+    setPreviewing(true)
+    setPreviewError(null)
+    const timer = setTimeout(() => {
+      dataAuditApi
+        .previewExport(
+          selected.map((c) => c.conversation_id),
+          {
+            mode,
+            pad_seconds: padSeconds,
+            speech_threshold: speechThreshold,
+            merge_gap_seconds: mergeGap,
+            excluded_ranges: screenRanges,
+          }
+        )
+        .then((res) => {
+          if (cancelled) return
+          setPreview(res.data)
+          setPreviewing(false)
+        })
+        .catch((e) => {
+          if (cancelled) return
+          setPreviewError(e?.response?.data?.error || 'Failed to preview export contents')
+          setPreviewing(false)
+        })
+    }, 400)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+    // previewSig captures every input the request uses
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewSig])
+
+  // Live totals for what will actually ship (preview minus unticked clips).
+  const included = (() => {
+    let clips = 0
+    let seconds = 0
+    let droppedClips = 0
+    let droppedSeconds = 0
+    let unanalyzed = 0
+    for (const conv of preview?.conversations ?? []) {
+      if (conv.skipped_reason === 'not analyzed') unanalyzed += 1
+      for (const c of conv.clips ?? []) {
+        if (dropped.has(clipKey(conv.conversation_id, c))) {
+          droppedClips += 1
+          droppedSeconds += c.duration_seconds
+        } else {
+          clips += 1
+          seconds += c.duration_seconds
+        }
+      }
+    }
+    return { clips, seconds, droppedClips, droppedSeconds, unanalyzed }
+  })()
+
   // Dataset-impact estimate, live-updated as withhold toggles change.
   // Baseline = what the export would contain without the screen: full mode is
   // the exact summed duration; clips mode estimates speech via the cached
@@ -356,7 +463,7 @@ export default function ExportModal({ selected, onClose }: Props) {
       onClose={onClose}
       title="Export for annotation"
       icon={<PackageOpen className="h-5 w-5 text-blue-600" />}
-      maxWidthClassName="max-w-2xl"
+      maxWidthClassName="max-w-3xl"
       className="max-h-[85vh] overflow-y-auto"
       footer={
         <Button variant="secondary" size="md" onClick={onClose}>
@@ -545,12 +652,30 @@ export default function ExportModal({ selected, onClose }: Props) {
               )}
             </div>
 
+            {/* Contents preview: listen + curate exactly what will ship */}
+            {selected.length > 0 && (
+              <PreviewPanel
+                preview={preview}
+                previewing={previewing}
+                error={previewError}
+                dropped={dropped}
+                onToggle={(key) =>
+                  setDropped((prev) => {
+                    const next = new Set(prev)
+                    if (next.has(key)) next.delete(key)
+                    else next.add(key)
+                    return next
+                  })
+                }
+              />
+            )}
+
             <div className="flex items-center space-x-3">
               <Button
                 variant="primary"
                 size="md"
                 onClick={needsScreenFirst ? runScreen : runExport}
-                disabled={busy || selected.length === 0}
+                disabled={busy || previewing || selected.length === 0 || (!needsScreenFirst && preview !== null && included.clips === 0)}
                 icon={busy ? <Loader2 className="h-4 w-4 animate-spin" /> : undefined}
               >
                 {screening
@@ -561,7 +686,12 @@ export default function ExportModal({ selected, onClose }: Props) {
                   ? status || 'Exporting…'
                   : needsScreenFirst
                   ? `Screen ${selected.length} conversation${selected.length === 1 ? '' : 's'}`
-                  : `Export ${selected.length} conversation${selected.length === 1 ? '' : 's'}` +
+                  : (preview
+                      ? `Export ${included.clips} clip${included.clips === 1 ? '' : 's'} · ${formatDuration(included.seconds)}`
+                      : `Export ${selected.length} conversation${selected.length === 1 ? '' : 's'}`) +
+                    (included.droppedClips > 0
+                      ? ` · ${included.droppedClips} dropped`
+                      : '') +
                     (screenEnabled && totalExcluded > 0
                       ? ` · withholding ${totalExcluded} segment${totalExcluded === 1 ? '' : 's'}`
                       : '')}
@@ -665,6 +795,189 @@ export default function ExportModal({ selected, onClose }: Props) {
         </div>
 
     </Modal>
+  )
+}
+
+/**
+ * Contents preview: every clip the export would produce, grouped by
+ * conversation — play it, read its transcript slice, and untick the junk.
+ * Backed by the export job's own plan computation, so this list IS the
+ * dataset; unticked clips are carved out via dropped_ranges.
+ */
+function PreviewPanel({
+  preview,
+  previewing,
+  error,
+  dropped,
+  onToggle,
+}: {
+  preview: ExportPreviewResult | null
+  previewing: boolean
+  error: string | null
+  dropped: Set<string>
+  onToggle: (key: string) => void
+}) {
+  const player = useGaplessPlayer()
+  // Which clip this panel last started (play state itself lives in the player).
+  const [playingKey, setPlayingKey] = useState<string | null>(null)
+  const lastCidRef = useRef<string | null>(null)
+
+  // Stop playback this panel started when the modal closes.
+  useEffect(() => {
+    return () => {
+      if (lastCidRef.current && player.isActive(lastCidRef.current)) player.stop()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const togglePlay = (cid: string, clip: ExportPreviewClip) => {
+    const key = clipKey(cid, clip)
+    if (playingKey === key && player.isActive(cid)) {
+      if (player.isPlaying) {
+        player.pause()
+        return
+      }
+      if (player.isPaused) {
+        player.resume()
+        return
+      }
+    }
+    lastCidRef.current = cid
+    setPlayingKey(key)
+    player.playProgram(cid, [{ start: clip.start, end: clip.end }])
+  }
+
+  if (error) {
+    return (
+      <Alert tone="danger" icon={<AlertTriangle className="h-4 w-4" />}>
+        {error}
+      </Alert>
+    )
+  }
+  if (!preview) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        <span>Computing dataset contents…</span>
+      </div>
+    )
+  }
+
+  const unanalyzed = preview.conversations.filter(
+    (c) => c.skipped_reason === 'not analyzed'
+  )
+  const otherSkipped = preview.conversations.filter(
+    (c) => c.skipped_reason && c.skipped_reason !== 'not analyzed'
+  )
+
+  return (
+    <div className="rounded-lg border border-gray-200 dark:border-gray-700">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-gray-700">
+        <div className="flex items-center gap-1.5 text-sm font-medium text-gray-900 dark:text-gray-100">
+          <span>Dataset contents</span>
+          <Hint text="Exactly what the export will ship — same clip computation the export job runs. Play a clip to hear it; untick it to leave it out of the dataset." />
+        </div>
+        <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+          {previewing && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+          <span className="tabular-nums">
+            {preview.totals.clip_count} clip{preview.totals.clip_count === 1 ? '' : 's'} ·{' '}
+            {formatDuration(preview.totals.total_clip_seconds)} ·{' '}
+            {formatBytes(preview.totals.total_clip_seconds * WAV_BYTES_PER_SECOND)}
+          </span>
+        </div>
+      </div>
+
+      {unanalyzed.length > 0 && (
+        <div className="px-3 py-2 text-xs text-amber-700 dark:text-amber-300 border-b border-gray-200 dark:border-gray-700">
+          {unanalyzed.length} conversation{unanalyzed.length === 1 ? '' : 's'} not
+          analyzed — the export will run VAD and include them unreviewed. Run{' '}
+          <strong>Analyze audio</strong> first to preview them here.
+        </div>
+      )}
+      {otherSkipped.length > 0 && (
+        <div className="px-3 py-2 text-xs text-yellow-700 dark:text-yellow-300 border-b border-gray-200 dark:border-gray-700">
+          {otherSkipped.length} skipped:{' '}
+          {otherSkipped
+            .map((c) => `${c.title || c.conversation_id.slice(0, 8)} (${c.skipped_reason})`)
+            .join(', ')}
+        </div>
+      )}
+
+      <div className="max-h-80 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800">
+        {preview.conversations
+          .filter((c) => (c.clips?.length ?? 0) > 0)
+          .map((conv) => (
+            <div key={conv.conversation_id}>
+              <div className="flex items-center justify-between px-3 py-1.5 bg-gray-50 dark:bg-gray-800/60 text-xs">
+                <span className="font-medium text-gray-700 dark:text-gray-200 truncate">
+                  {conv.title || conv.conversation_id.slice(0, 8)}
+                </span>
+                <span className="text-gray-400 tabular-nums whitespace-nowrap ml-2">
+                  {conv.clips!.length} clip{conv.clips!.length === 1 ? '' : 's'} ·{' '}
+                  {formatDuration(conv.clip_seconds ?? 0)}
+                </span>
+              </div>
+              {conv.clips!.map((clip) => {
+                const key = clipKey(conv.conversation_id, clip)
+                const isDropped = dropped.has(key)
+                const isCurrent =
+                  playingKey === key && player.isActive(conv.conversation_id)
+                const playing = isCurrent && player.isPlaying
+                return (
+                  <div
+                    key={key}
+                    className={`flex items-start gap-2 px-3 py-1.5 text-xs ${
+                      isDropped ? 'opacity-45' : ''
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!isDropped}
+                      onChange={() => onToggle(key)}
+                      title={isDropped ? 'Include this clip' : 'Drop this clip from the export'}
+                      className="mt-1"
+                    />
+                    <button
+                      onClick={() => togglePlay(conv.conversation_id, clip)}
+                      title={playing ? 'Pause' : 'Play this clip'}
+                      aria-label={playing ? 'Pause clip' : `Play clip ${clip.clip_index + 1}`}
+                      className={`flex-shrink-0 p-1 rounded-full transition-colors ${
+                        isCurrent
+                          ? 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-200'
+                          : 'text-gray-400 hover:text-blue-600 hover:bg-gray-100 dark:hover:bg-gray-700'
+                      }`}
+                    >
+                      {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                    </button>
+                    <span className="text-gray-400 tabular-nums whitespace-nowrap pt-1">
+                      {formatDuration(clip.duration_seconds)}
+                    </span>
+                    <span className="min-w-0 flex-1 pt-1">
+                      {clip.text ? (
+                        <span
+                          className={`block truncate text-gray-600 dark:text-gray-300 ${
+                            isDropped ? 'line-through' : ''
+                          }`}
+                          title={clip.text}
+                        >
+                          {clip.text}
+                        </span>
+                      ) : (
+                        <StateBadge
+                          tone="warning"
+                          title="No transcript covers this clip — the annotator would start from silence. Consider dropping it or reprocessing the transcript first."
+                        >
+                          no transcript
+                        </StateBadge>
+                      )}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          ))}
+      </div>
+    </div>
   )
 }
 

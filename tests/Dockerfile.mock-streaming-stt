@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir websockets
 COPY tests/libs/mock_streaming_stt_server.py .
 
 # Expose WebSocket port
-EXPOSE 9999
+EXPOSE 8879
 
 # Run server
-CMD ["python", "mock_streaming_stt_server.py", "--host", "0.0.0.0", "--port", "9999"]
+CMD ["python", "mock_streaming_stt_server.py", "--host", "0.0.0.0", "--port", "8879"]

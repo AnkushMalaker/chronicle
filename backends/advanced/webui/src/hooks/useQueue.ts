@@ -1,10 +1,15 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import { queueApi } from '../services/api'
 
 export function useQueueDashboard(expandedSessions: string[]) {
   return useQuery({
     queryKey: ['queue', 'dashboard', expandedSessions],
     queryFn: () => queueApi.getDashboard(expandedSessions).then(r => r.data),
+    // Expanding a conversation adds to the key, which would otherwise be a cold
+    // query and blank the whole page to its loading spinner. Keep rendering the
+    // previous result while the wider payload loads; `isFetching` still drives
+    // the Refresh spinner.
+    placeholderData: keepPreviousData,
   })
 }
 

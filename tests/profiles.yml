@@ -2,7 +2,7 @@
 #
 # A profile declares WHICH BACKING SERVICES ARE REAL for a test run. Services
 # that are not listed as real are served by the in-repo stubs (mock STT on
-# :9999/:8765, mock LLM on :11435, the in-process mock speaker client).
+# :8879/:8765, mock LLM on :11435, the in-process mock speaker client).
 #
 # The Robot suite is IDENTICAL across every profile. There is deliberately no
 # per-test credential gating: a test is never skipped because a key is absent.

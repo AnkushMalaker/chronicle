@@ -101,8 +101,27 @@ class ExportRequest(BaseModel):
         description="conversation_id → withheld [start, end] time ranges (seconds) "
         "from the privacy screen; carved out of the exported audio + transcript",
     )
+    dropped_ranges: Dict[str, List[List[float]]] = Field(
+        default_factory=dict,
+        description="conversation_id → [start, end] ranges of clips the user "
+        "unticked in the export preview; removed from the export (accounted "
+        "separately from privacy withholdings)",
+    )
     sensitivity_policy: Optional[str] = Field(
         None, description="Policy used for the screen (recorded in export metadata)"
+    )
+
+
+class ExportPreviewRequest(BaseModel):
+    conversation_ids: List[str] = Field(..., min_length=1, max_length=200)
+    mode: str = Field("clips", pattern="^(clips|full)$")
+    pad_seconds: float = Field(1.0, ge=0.0, le=10.0)
+    speech_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    merge_gap_seconds: float = Field(3.0, ge=0.0, le=60.0)
+    excluded_ranges: Dict[str, List[List[float]]] = Field(
+        default_factory=dict,
+        description="Privacy-screen withholdings to apply to the preview, so the "
+        "clips shown match what the export would produce",
     )
 
 
@@ -159,6 +178,12 @@ async def list_conversations(
         max_length=200,
         description="Only conversations imported from this annotation dataset",
     ),
+    exported: Optional[str] = Query(
+        None,
+        pattern="^(never|exported)$",
+        description="Filter on annotation-export history: never = not in any "
+        "export, exported = shipped by a previous export",
+    ),
     archived_only: bool = Query(
         False,
         description="List archived metadata stubs instead of active conversations",
@@ -192,6 +217,7 @@ async def list_conversations(
         include_speakers=_csv(include_speakers),
         exclude_speakers=_csv(exclude_speakers),
         dataset_id=dataset_id,
+        exported=exported,
         archived_only=archived_only,
         hide_failed=hide_failed,
         hide_reviewed=hide_reviewed,
@@ -814,6 +840,28 @@ async def screen_export(
     )
 
 
+@router.post("/export/preview")
+async def preview_export(
+    body: ExportPreviewRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Dry-run of the export: the exact clips (boundaries, durations, sliced
+    transcripts) the current settings would produce, computed synchronously
+    without writing any audio. Unanalyzed conversations are reported skipped
+    (``not analyzed``) — run /analyze first. Untick clips here and pass their
+    ranges to /export as ``dropped_ranges``.
+    """
+    return await data_audit_controller.preview_export(
+        current_user,
+        body.conversation_ids,
+        mode=body.mode,
+        pad_seconds=body.pad_seconds,
+        speech_threshold=body.speech_threshold,
+        merge_gap_seconds=body.merge_gap_seconds,
+        excluded_ranges=body.excluded_ranges,
+    )
+
+
 @router.post("/export")
 async def start_export(
     body: ExportRequest,
@@ -822,8 +870,9 @@ async def start_export(
     """Enqueue an annotation-dataset export: WAV audio + transcript manifest,
     zipped for download. Mode ``clips`` cuts one padded WAV per VAD speech
     region (silence cropped); mode ``full`` exports each conversation as a
-    single untouched WAV. ``excluded_ranges`` from the privacy screen are
-    carved out of the exported audio + transcript.
+    single untouched WAV. ``excluded_ranges`` from the privacy screen and
+    ``dropped_ranges`` from the export preview are carved out of the exported
+    audio + transcript.
 
     Poll job status via /api/queue/jobs/{id}/status, then download from
     /api/data-audit/exports/{export_id}/download.
@@ -836,6 +885,7 @@ async def start_export(
         speech_threshold=body.speech_threshold,
         merge_gap_seconds=body.merge_gap_seconds,
         excluded_ranges=body.excluded_ranges,
+        dropped_ranges=body.dropped_ranges,
         sensitivity_policy=body.sensitivity_policy,
     )
 

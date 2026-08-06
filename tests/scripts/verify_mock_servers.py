@@ -140,7 +140,7 @@ async def test_streaming_stt():
     """Test mock streaming STT server."""
     print("Testing Mock Streaming STT - WebSocket...")
     try:
-        async with websockets.connect("ws://localhost:9999") as ws:
+        async with websockets.connect("ws://localhost:8879") as ws:
             # Receive initial empty result
             initial_msg = await ws.recv()
             initial_data = json.loads(initial_msg)

@@ -173,6 +173,18 @@ internally by querying `podman ps` scoped to the compose project label.
   checks for it; the node agent's watchdog repairs it by churning a throwaway
   container to force a reload.
 
+  Pinning only *public* resolvers trades one outage for another: MagicDNS names
+  are served solely by `100.100.100.100`, so `*.ts.net` stops resolving in
+  containers (public and container names keep working) and anything addressed by
+  tailnet name fails with `[Errno -2] Name or service not known`. Hence
+  `100.100.100.100` first — see
+  [compose-stack.md](backend/compose-stack.md#dns-pinning-x-public-dns). Same
+  asymmetric diagnosis:
+  ```bash
+  getent hosts <peer>.<tailnet>.ts.net                          # host: works
+  podman exec <container> getent hosts <peer>.<tailnet>.ts.net  # container: fails
+  ```
+
 - **Docker Desktop auto-start.** On Windows, Docker Desktop relaunches on login and
   its `restart: unless-stopped` containers reclaim host ports (27017/6379/…) via the
   WSL relay, blocking Podman. Uninstall it (or disable login-start + `compose down`

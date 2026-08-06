@@ -165,6 +165,82 @@ def test_dns_not_applicable_when_getent_absent(monkeypatch, have_all_binaries):
     assert result.status == NOT_APPLICABLE
 
 
+# -------------------------------------------------------------------- container MagicDNS
+
+
+def test_magicdns_ok_when_container_resolves_the_node(monkeypatch, have_all_binaries):
+    install(
+        monkeypatch,
+        FakeRunner(
+            [
+                (["status"], (0, STATUS_RUNNING, "")),
+                RUNNING_CONTAINER,
+                (["getent"], (0, "100.83.66.30  kraken.parrot-census.ts.net\n", "")),
+            ]
+        ),
+    )
+    result = checks.check_container_magicdns(
+        CheckContext(engine="podman", dns_containers=("backend",))
+    )
+    assert result.status == OK
+
+
+def test_magicdns_fails_when_only_public_upstreams_are_pinned(
+    monkeypatch, have_all_binaries
+):
+    """The regression: public DNS resolves, so check_container_dns stays green."""
+    runner = install(
+        monkeypatch,
+        FakeRunner(
+            [
+                (["status"], (0, STATUS_RUNNING, "")),
+                RUNNING_CONTAINER,
+                (["getent", "api.openai.com"], (0, "162.159.140.245  x\n", "")),
+                (["getent", "ts.net"], (2, "", "")),
+            ]
+        ),
+    )
+    ctx = CheckContext(engine="podman", dns_containers=("backend",), network="net")
+
+    assert checks.check_container_dns(ctx).status == OK
+
+    result = checks.check_container_magicdns(ctx)
+    assert result.status == FAIL
+    assert "kraken.parrot-census.ts.net" in result.detail
+    assert "100.100.100.100" in (result.remedy or "")
+    # Probed by the node's own name, trailing dot stripped.
+    assert runner.argv_containing("kraken.parrot-census.ts.net")
+
+
+def test_magicdns_not_applicable_without_a_tailnet(monkeypatch, have_all_binaries):
+    """A host with no tailnet is not misreported as broken."""
+    install(
+        monkeypatch,
+        FakeRunner([(["status"], (0, STATUS_LOGGED_OUT, "")), RUNNING_CONTAINER]),
+    )
+    result = checks.check_container_magicdns(
+        CheckContext(engine="podman", dns_containers=("backend",))
+    )
+    assert result.status == NOT_APPLICABLE
+
+
+def test_magicdns_not_applicable_when_getent_absent(monkeypatch, have_all_binaries):
+    install(
+        monkeypatch,
+        FakeRunner(
+            [
+                (["status"], (0, STATUS_RUNNING, "")),
+                RUNNING_CONTAINER,
+                (["getent"], (127, "", "not found")),
+            ]
+        ),
+    )
+    result = checks.check_container_magicdns(
+        CheckContext(engine="podman", dns_containers=("backend",))
+    )
+    assert result.status == NOT_APPLICABLE
+
+
 # ------------------------------------------------------------------------ tailscale
 
 

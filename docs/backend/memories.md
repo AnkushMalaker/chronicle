@@ -61,6 +61,8 @@ It is per-user (keyed by the MongoDB ObjectId `user_id`) and organized into note
 
 These are ordinary Markdown files — readable, editable, and grep-able. Because the vault is the system of record, memories survive as durable text rather than as opaque vector rows.
 
+If an Immich photo library is configured (`IMMICH_URL`/`IMMICH_API_KEY`, offered by the setup wizard), the `person_photos` cron job (`services/person_photos.py`) matches each `People/<name>.md` note against Immich's people API, stores the person's face-crop thumbnail content-addressed under the vault's `_media/` directory, and embeds a small photo at the top of the note.
+
 ## Write path: the memory agent
 
 Memory extraction runs as part of the post-conversation RQ pipeline. After a conversation closes, `memory_extraction_job` calls `memory_service.add_memory()`, which invokes the **write agent** (`_add_memory_agent` in `providers/chronicle.py`).
@@ -94,11 +96,19 @@ Chat is always **agentic / tool-calling**. The chat LLM is given a `search_memor
 ## API Endpoints
 
 - `GET /api/memories/search?query={query}&limit={limit}` — runs the agentic vault search and returns the synthesized answer plus the notes the read agent consulted.
+- `GET /api/memories/people/suggestions` — ranks conservative deterministic duplicate-person candidates for review; it never merges automatically.
+- `POST /api/memories/people/identity` — records or clears a symmetric `distinct_from` decision in two People notes, with optional stale-revision protection.
+- `POST /api/memories/people/merge/preview` and `POST /api/memories/people/merge` — preview and apply a locked deterministic merge. A `distinct_from` decision blocks preview.
 - Other `/api/memories/*` management endpoints operate over the vault notes.
 
 ## Vault sync to Obsidian (separate feature)
 
 The vault is designed to be edited and viewed directly. The optional **vault sync** feature (in the cross-platform desktop tray, `extras/chronicle-tray/`) syncs `data/conversation_docs/` to an Obsidian vault via Syncthing, so you can browse and hand-edit your memory notes in Obsidian. Human edits made in Obsidian sync back into the vault. This sync is independent of the memory provider itself — the vault on the backend remains the source of truth.
+
+The optional [Chronicle Companion](../obsidian-companion.md) plugin adds explicit,
+deterministic maintenance actions such as merging duplicate people. The UI previews and
+confirms the action, while the backend performs the locked mutation; no LLM participates
+in execution.
 
 ## What was removed
 

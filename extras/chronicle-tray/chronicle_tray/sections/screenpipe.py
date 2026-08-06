@@ -15,8 +15,10 @@ import logging
 import shutil
 import sqlite3
 import subprocess
+import threading
 from pathlib import Path
 
+from chronicle_tray import recorder_update
 from chronicle_tray.capture_settings_dialog import CaptureSettingsDialog
 from chronicle_tray.paths import add_repo_root
 from chronicle_tray.screenpipe_settings import (
@@ -100,6 +102,11 @@ class ScreenPipeSection(Section):
         self.settings_action = None
         # What to restore when the master audio switch is turned back on.
         self.audio_restore = ("both", "both")
+        self.update_action = None
+        self.revert_action = None
+        # Written by the update worker thread, rendered by refresh().
+        self._update_lock = threading.Lock()
+        self._update_state = {"busy": False, "message": ""}
 
     def available(self) -> tuple[bool, str]:
         if shutil.which("screenpipe") or SCREENPIPE_DB.exists():
@@ -166,6 +173,10 @@ class ScreenPipeSection(Section):
         self.video_capture.triggered.connect(self._toggle_video_capture)
         self.settings_action = menu.addAction(
             "Capture settings…", self._open_capture_settings
+        )
+        self.update_action = menu.addAction("Update recorder…", self._update_recorder)
+        self.revert_action = menu.addAction(
+            "Revert recorder update", self._revert_recorder
         )
 
     def _unit(self, verb: str, component: str) -> None:
@@ -272,6 +283,65 @@ class ScreenPipeSection(Section):
                 action.setEnabled(False)
             self.settings_action.setEnabled(False)
 
+    def _update_recorder(self) -> None:
+        self._run_update_step(self._update_worker)
+
+    def _revert_recorder(self) -> None:
+        self._run_update_step(self._revert_worker)
+
+    def _run_update_step(self, worker) -> None:
+        """Start ``worker`` on a daemon thread; refresh() renders its state.
+
+        The download is tens of MB, so it cannot run on the menu action
+        directly. One step at a time — a second click while busy is ignored
+        rather than queued.
+        """
+        with self._update_lock:
+            if self._update_state["busy"]:
+                return
+        self._set_update_state(True, "working…")
+        threading.Thread(target=worker, daemon=True).start()
+        self.refresh()
+
+    def _set_update_state(self, busy: bool, message: str) -> None:
+        with self._update_lock:
+            self._update_state = {"busy": busy, "message": message}
+
+    def _update_worker(self) -> None:
+        try:
+            _current, latest, available = recorder_update.check()
+            if not available:
+                self._set_update_state(False, f"up to date ({latest['describe']})")
+                return
+            self._set_update_state(True, "downloading…")
+            recorder_update.install(latest)
+            self._set_update_state(False, f"updated to {latest['describe']}")
+        except Exception as error:  # rendered in the menu, never raised into Qt
+            logger.exception("recorder update failed")
+            self._set_update_state(False, f"update failed: {error}")
+
+    def _revert_worker(self) -> None:
+        try:
+            manifest = recorder_update.revert()
+            name = manifest["describe"] if manifest else "previous build"
+            self._set_update_state(False, f"reverted to {name}")
+        except Exception as error:
+            logger.exception("recorder revert failed")
+            self._set_update_state(False, f"revert failed: {error}")
+
+    def _refresh_update_actions(self) -> None:
+        if self.update_action is None:
+            return
+        with self._update_lock:
+            busy = self._update_state["busy"]
+            message = self._update_state["message"]
+        label = "Update recorder…"
+        if message:
+            label = f"Update recorder… ({message})"
+        self.update_action.setText(label)
+        self.update_action.setEnabled(not busy)
+        self.revert_action.setEnabled(not busy and recorder_update.can_revert())
+
     def _collector_state(self) -> str:
         return _component_state(COLLECTOR)
 
@@ -289,6 +359,7 @@ class ScreenPipeSection(Section):
             actions["stop"].setEnabled(active)
         self.stats_item.setText(_stats())
         self._refresh_capture_settings()
+        self._refresh_update_actions()
 
     def tooltip(self) -> str:
         return f"Collector: {self._collector_state()}"

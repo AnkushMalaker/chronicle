@@ -51,6 +51,7 @@ PERSON_TEMPLATE = """\
 categories:
   - "[[People]]"
 aliases: []
+distinct_from: []
 org:
 role:
 relationship:

@@ -6,9 +6,10 @@ from advanced_omi_backend.controllers.conversation_controller import (
 )
 
 
-def test_everything_search_includes_all_three_categories():
-    fields = _search_fields(["title", "summary", "speakers"])
+def test_everything_search_includes_all_categories():
+    fields = _search_fields(["id", "title", "summary", "speakers"])
 
+    assert "conversation_id" in fields
     assert "title" in fields
     assert "summary" in fields
     assert "detailed_summary" in fields
@@ -17,9 +18,29 @@ def test_everything_search_includes_all_three_categories():
 
 
 def test_search_categories_are_independent():
+    assert _search_fields(["id"]) == ["conversation_id"]
     assert _search_fields(["title"]) == ["title"]
     assert _search_fields(["summary"]) == ["summary", "detailed_summary"]
     assert _search_fields(["speakers"]) == ["_search_active_version.segments.speaker"]
+
+
+def test_conversation_id_search_matches_literal_fragments():
+    stages = _search_query_stages("abc.123", _search_fields(["id"]))
+
+    assert stages == [
+        {
+            "$match": {
+                "$or": [
+                    {
+                        "conversation_id": {
+                            "$regex": r"abc\.123",
+                            "$options": "i",
+                        }
+                    }
+                ]
+            }
+        }
+    ]
 
 
 def test_speaker_search_resolves_only_the_active_transcript_version():

@@ -15,6 +15,7 @@ import {
   FileArchive,
   LucideIcon,
   Mic,
+  PackageOpen,
   Search,
   Users,
 } from 'lucide-react'
@@ -409,6 +410,49 @@ const datasetFilter: FilterDef<string> = {
 }
 
 // ---------------------------------------------------------------------------
+// Export history (from the on-disk annotation-export metadata)
+// ---------------------------------------------------------------------------
+
+type ExportedValue = '' | 'never' | 'exported'
+
+const exportedFilter: FilterDef<ExportedValue> = {
+  key: 'exported',
+  label: 'Export history',
+  icon: PackageOpen,
+  defaultValue: '',
+  isActive: (v) => v !== '',
+  chipLabel: (v) => (v === 'never' ? 'Not yet exported' : 'Previously exported'),
+  toParams: (v) => ({ exported: v || undefined }),
+  Editor: ({ value, onChange }) => (
+    <div className="w-56 space-y-1">
+      {(
+        [
+          { key: '', label: 'All conversations' },
+          { key: 'never', label: 'Not yet exported' },
+          { key: 'exported', label: 'Previously exported' },
+        ] as const
+      ).map((opt) => (
+        <label
+          key={opt.key}
+          className="flex items-center space-x-2 text-sm text-gray-700 dark:text-gray-200 cursor-pointer"
+        >
+          <input
+            type="radio"
+            name="exported-filter"
+            checked={value === opt.key}
+            onChange={() => onChange(opt.key)}
+          />
+          <span>{opt.label}</span>
+        </label>
+      ))}
+      <p className="pt-1 text-[11px] text-gray-500 dark:text-gray-400">
+        Whether a previous annotation export shipped the conversation.
+      </p>
+    </div>
+  ),
+}
+
+// ---------------------------------------------------------------------------
 // Hide failed (processing_status == 'failed')
 // ---------------------------------------------------------------------------
 
@@ -444,6 +488,7 @@ export const AUDIT_FILTERS: FilterDef[] = [
   speakersFilter,
   dateFilter,
   datasetFilter,
+  exportedFilter,
   hideFailedFilter,
   hideReviewedFilter,
 ]

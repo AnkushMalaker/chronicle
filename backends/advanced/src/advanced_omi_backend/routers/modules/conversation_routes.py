@@ -88,13 +88,13 @@ async def search_conversations(
     q: str = Query("", description="Optional text search query"),
     limit: int = Query(50, ge=1, le=200, description="Max results to return"),
     offset: int = Query(0, ge=0, description="Number of results to skip"),
-    fields: list[Literal["title", "summary", "speakers"]] = Query(
-        default=["title", "summary", "speakers"],
-        description="Search categories: title, summary, and/or speakers",
+    fields: list[Literal["id", "title", "summary", "speakers"]] = Query(
+        default=["id", "title", "summary", "speakers"],
+        description="Search categories: conversation ID, title, summary, and/or speakers",
     ),
     current_user: User = Depends(current_active_user),
 ):
-    """Search conversations and identified people by literal case-insensitive pattern."""
+    """Search conversation metadata by literal case-insensitive pattern."""
     return await conversation_controller.search_conversations(
         q.strip(), current_user, limit, offset, fields
     )

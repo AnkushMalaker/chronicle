@@ -185,6 +185,10 @@ class MemoryAgentResult:
     # so a note disappearing is never invisible in the ledger.
     removed: List[dict] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    # Token counts for the run, keyed as Langfuse usage details (``input_tokens``,
+    # ``output_tokens``, ``input_cached_tokens``, ``output_reasoning_tokens``). Empty
+    # when the executor reports none.
+    usage: Dict[str, int] = field(default_factory=dict)
     truncated: bool = (
         False  # loop ended on a truncated/empty LLM response, not a deliberate finish
     )

@@ -42,12 +42,12 @@ Health Check
 
 
 Start Mock Transcription Server
-    [Documentation]    Start the mock WebSocket transcription server on port 9999
+    [Documentation]    Start the mock WebSocket transcription server on port 8879
     ...                Used for testing transcription workflows without external API dependencies.
 
     # Start mock server as background process
     ${handle}=    Start Process
-    ...    python3    ${CURDIR}/../scripts/mock_transcription_server.py    --host    0.0.0.0    --port    9999
+    ...    python3    ${CURDIR}/../scripts/mock_transcription_server.py    --host    0.0.0.0    --port    8879
     ...    alias=mock_transcription_server
     ...    stdout=${OUTPUTDIR}/mock_transcription_server.log
     ...    stderr=STDOUT
@@ -58,7 +58,7 @@ Start Mock Transcription Server
     # Wait for server to start
     Sleep    2s
 
-    Log    ✅ Started Mock Transcription Server on ws://localhost:9999
+    Log    ✅ Started Mock Transcription Server on ws://localhost:8879
 
 
 Stop Mock Transcription Server

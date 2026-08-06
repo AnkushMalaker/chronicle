@@ -166,10 +166,12 @@ services:
     build:
       context: ../..
       dockerfile: tests/Dockerfile.mock-streaming-stt
+    # 8879 on purpose: the old 9999 is a popular default port for other
+    # tools and collided with unrelated services on a dev host.
     ports:
-      - "9999:9999"
+      - "8879:8879"
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost',9999)); s.close()"]
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost',8879)); s.close()"]
       interval: 10s
       timeout: 5s
       retries: 3

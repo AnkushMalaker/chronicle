@@ -28,7 +28,6 @@ from advanced_omi_backend.controllers.conversation_controller import (
     archive_conversation_audio_doc,
 )
 from advanced_omi_backend.llm_client import async_generate
-from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
 from advanced_omi_backend.services.observability.system_events import record_event_sync
@@ -45,6 +44,10 @@ from advanced_omi_backend.utils.audio_chunk_utils import (
     audio_cache_duration_matches,
     reconstruct_audio_segment,
 )
+from advanced_omi_backend.utils.export_planning import (
+    export_eligibility,
+    plan_conversation_clips,
+)
 from advanced_omi_backend.utils.sensitivity_screening import (
     DEFAULT_SENSITIVITY_POLICY,
     build_screening_prompt,
@@ -52,12 +55,7 @@ from advanced_omi_backend.utils.sensitivity_screening import (
     screenable_segments,
 )
 from advanced_omi_backend.utils.transcript_slicing import slice_segments
-from advanced_omi_backend.utils.vad_analysis import (
-    analyze_conversation_audio,
-    frame_speech_intervals,
-    merge_speech_regions,
-    subtract_intervals,
-)
+from advanced_omi_backend.utils.vad_analysis import analyze_conversation_audio
 
 logger = logging.getLogger(__name__)
 
@@ -445,49 +443,6 @@ async def screen_conversations_job(
     return summary
 
 
-async def _collect_raw_intervals(
-    conversation_id: str, threshold: float
-) -> Tuple[Optional[List[List[float]]], float, int]:
-    """Raw speech intervals from cached chunk frame scores (streaming cursor).
-
-    Returns (intervals, last_chunk_end_seconds, sample_rate); intervals is
-    None when any chunk lacks VAD scores (caller should analyze first).
-    """
-    collection = AudioChunkDocument.get_pymongo_collection()
-    cursor = collection.find(
-        {"conversation_id": conversation_id},
-        {
-            "start_time": 1,
-            "end_time": 1,
-            "sample_rate": 1,
-            "vad.scores": 1,
-            "vad.frame_hop_ms": 1,
-        },
-    ).sort("chunk_index", 1)
-
-    intervals: List[List[float]] = []
-    last_end = 0.0
-    sample_rate = 16000
-    first = True
-    async for chunk in cursor:
-        if first:
-            sample_rate = int(chunk.get("sample_rate") or 16000)
-            first = False
-        vad = chunk.get("vad")
-        if not vad or vad.get("scores") is None:
-            return None, 0.0, sample_rate
-        intervals.extend(
-            frame_speech_intervals(
-                vad["scores"],
-                float(vad["frame_hop_ms"]) / 1000.0,
-                float(chunk["start_time"]),
-                threshold=threshold,
-            )
-        )
-        last_end = float(chunk["end_time"])
-    return intervals, last_end, sample_rate
-
-
 async def _export_conversation_clips(
     zf: zipfile.ZipFile,
     conv: Conversation,
@@ -496,82 +451,65 @@ async def _export_conversation_clips(
     speech_threshold: float,
     merge_gap_seconds: float,
     excluded_ranges: Optional[List[List[float]]] = None,
-) -> Tuple[List[dict], float, float]:
+    dropped_ranges: Optional[List[List[float]]] = None,
+) -> Tuple[List[dict], float, float, float]:
     """Write the conversation's WAV clip(s) into the zip; return its manifest
-    records, total clipped seconds, and excluded (withheld) seconds.
+    records, total clipped seconds, excluded (privacy-withheld) seconds, and
+    dropped (preview-unticked) seconds.
 
-    Mode ``clips``: one padded WAV per VAD speech region (silence cropped).
-    Mode ``full``: a single untouched WAV spanning the whole conversation —
-    no VAD needed.
-
-    ``excluded_ranges`` (absolute conversation seconds, from the privacy
-    screen) are carved out of the regions so the withheld audio + its
-    transcript never enter a clip.
+    The clip boundaries come from ``plan_conversation_clips`` — the same
+    computation the preview endpoint serves — so what the user approved is
+    exactly what gets written. Unanalyzed audio gets VAD run inline
+    (idempotent) and the plan retried.
     """
-    cid = conv.conversation_id
-
-    if mode == "full":
-        duration = conv.audio_total_duration or 0.0
-        if duration <= 0:
-            raise ValueError("Conversation has no audio duration")
-        regions = [[0.0, duration]]
-        first = await AudioChunkDocument.find_one(
-            AudioChunkDocument.conversation_id == cid
+    plan = await plan_conversation_clips(
+        conv,
+        mode,
+        pad_seconds,
+        speech_threshold,
+        merge_gap_seconds,
+        excluded_ranges,
+        dropped_ranges,
+    )
+    if plan.skipped_reason == "not analyzed":
+        if await _analyze_and_store(conv) is None:
+            raise ValueError("VAD analysis failed")
+        plan = await plan_conversation_clips(
+            conv,
+            mode,
+            pad_seconds,
+            speech_threshold,
+            merge_gap_seconds,
+            excluded_ranges,
+            dropped_ranges,
         )
-        sample_rate = first.sample_rate if first else 16000
-    else:
-        intervals, last_end, sample_rate = await _collect_raw_intervals(
-            cid, speech_threshold
-        )
-        if intervals is None:
-            # Unanalyzed audio — run VAD inline (idempotent), then retry.
-            if await _analyze_and_store(conv) is None:
-                raise ValueError("VAD analysis failed")
-            intervals, last_end, sample_rate = await _collect_raw_intervals(
-                cid, speech_threshold
-            )
-            if intervals is None:
-                raise ValueError("VAD scores missing after analysis")
-
-        duration = conv.audio_total_duration or last_end
-        # Cached speech_regions are built with the default 0.3s pad — always
-        # re-merge here so the export honors the requested padding.
-        regions = merge_speech_regions(
-            intervals,
-            duration,
-            pad_seconds=pad_seconds,
-            merge_gap_seconds=merge_gap_seconds,
-        )
-
-    # Carve out privacy-screened ranges so withheld audio/transcript is
-    # never written. Done after padding/merge so padding can't re-expose a cut.
-    kept_seconds = sum(t1 - t0 for t0, t1 in regions)
-    if excluded_ranges:
-        regions = subtract_intervals(regions, excluded_ranges)
-    excluded_seconds = kept_seconds - sum(t1 - t0 for t0, t1 in regions)
+        if plan.skipped_reason == "not analyzed":
+            raise ValueError("VAD scores missing after analysis")
+    if plan.skipped_reason:
+        raise ValueError(plan.skipped_reason.capitalize())
 
     segments = active_segments(conv)
     created_at = conv.created_at.isoformat() if conv.created_at else None
 
     records: List[dict] = []
-    clip_seconds = 0.0
-    for i, (t0, t1) in enumerate(regions):
-        wav = await reconstruct_audio_segment(cid, t0, t1)
+    for clip in plan.clips:
+        wav = await reconstruct_audio_segment(
+            conv.conversation_id, clip.start, clip.end
+        )
         record = build_clip_record(
-            conversation_id=cid,
+            conversation_id=conv.conversation_id,
             conversation_title=conv.title,
             client_id=conv.client_id,
             conversation_created_at=created_at,
-            clip_index=i,
-            region_start=t0,
-            region_end=t1,
-            sample_rate=sample_rate,
-            segments=slice_segments(segments, t0, t1),
+            clip_index=clip.clip_index,
+            region_start=clip.start,
+            region_end=clip.end,
+            sample_rate=plan.sample_rate,
+            segments=slice_segments(segments, clip.start, clip.end),
         )
         zf.writestr(record["audio_path"], wav)
         records.append(record)
-        clip_seconds += t1 - t0
-    return records, clip_seconds, round(max(0.0, excluded_seconds), 2)
+    return records, plan.clip_seconds, plan.excluded_seconds, plan.dropped_seconds
 
 
 @async_job(redis=False, beanie=True, timeout=3600)
@@ -584,6 +522,7 @@ async def export_annotation_dataset_job(
     speech_threshold: float = 0.5,
     merge_gap_seconds: float = 3.0,
     excluded_ranges: Optional[Dict[str, List[List[float]]]] = None,
+    dropped_ranges: Optional[Dict[str, List[List[float]]]] = None,
     sensitivity_policy: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build an annotation dataset zip for the selected conversations.
@@ -597,15 +536,17 @@ async def export_annotation_dataset_job(
     the download endpoint.
 
     ``excluded_ranges`` maps ``conversation_id`` → withheld time ranges (from
-    the privacy screen); those ranges are carved out of each conversation's
-    audio and transcript. ``sensitivity_policy`` is recorded in the metadata
-    for auditability.
+    the privacy screen) and ``dropped_ranges`` → clips the user unticked in
+    the export preview; both are carved out of each conversation's audio and
+    transcript, accounted separately. ``sensitivity_policy`` is recorded in
+    the metadata for auditability.
 
     Per-conversation failures are recorded as ``skipped_reason``; the job
     only raises on export-level failures (e.g. disk errors).
     """
     start = time.time()
     excluded_ranges = excluded_ranges or {}
+    dropped_ranges = dropped_ranges or {}
     user = await User.get(PydanticObjectId(user_id))
     is_super = bool(user and user.is_superuser)
 
@@ -617,6 +558,7 @@ async def export_annotation_dataset_job(
     manifest_records: List[dict] = []
     total_clip_seconds = 0.0
     total_excluded_seconds = 0.0
+    total_dropped_seconds = 0.0
 
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for cid in dict.fromkeys(conversation_ids):
@@ -630,19 +572,12 @@ async def export_annotation_dataset_job(
                 summary["title"] = conv.title
                 summary["client_id"] = conv.client_id
 
-            if not conv:
-                summary["skipped_reason"] = "not found"
-            elif not is_super and conv.user_id != user_id:
-                summary["skipped_reason"] = "access forbidden"
-            elif conv.deleted:
-                summary["skipped_reason"] = "deleted"
-            elif conv.audio_archived:
-                summary["skipped_reason"] = "audio archived"
-            elif not conv.audio_chunks_count:
-                summary["skipped_reason"] = "no audio"
+            skipped = export_eligibility(conv, user_id, is_super)
+            if skipped:
+                summary["skipped_reason"] = skipped
             else:
                 try:
-                    records, clip_seconds, excluded_seconds = (
+                    records, clip_seconds, excluded_seconds, dropped_seconds = (
                         await _export_conversation_clips(
                             zf,
                             conv,
@@ -651,15 +586,19 @@ async def export_annotation_dataset_job(
                             speech_threshold,
                             merge_gap_seconds,
                             excluded_ranges.get(cid),
+                            dropped_ranges.get(cid),
                         )
                     )
                     manifest_records.extend(records)
                     total_clip_seconds += clip_seconds
                     total_excluded_seconds += excluded_seconds
+                    total_dropped_seconds += dropped_seconds
                     summary["clip_count"] = len(records)
                     summary["clip_seconds"] = round(clip_seconds, 2)
                     if excluded_seconds > 0:
                         summary["excluded_seconds"] = excluded_seconds
+                    if dropped_seconds > 0:
+                        summary["dropped_seconds"] = dropped_seconds
                 except Exception as e:
                     logger.exception(f"Export failed for conversation {cid[:12]}")
                     summary["skipped_reason"] = f"error: {e}"
@@ -678,6 +617,7 @@ async def export_annotation_dataset_job(
                 "merge_gap_seconds": merge_gap_seconds,
                 "screened": bool(excluded_ranges),
                 "sensitivity_policy": sensitivity_policy if excluded_ranges else None,
+                "curated": bool(dropped_ranges),
             },
             "conversations": conv_summaries,
             "totals": {
@@ -686,6 +626,7 @@ async def export_annotation_dataset_job(
                 "clip_count": len(manifest_records),
                 "total_clip_seconds": round(total_clip_seconds, 2),
                 "excluded_seconds": round(total_excluded_seconds, 2),
+                "dropped_seconds": round(total_dropped_seconds, 2),
             },
         }
         zf.writestr(

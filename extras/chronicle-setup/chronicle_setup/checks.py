@@ -179,6 +179,52 @@ def check_container_dns(ctx: CheckContext) -> CheckResult:
     )
 
 
+def check_container_magicdns(ctx: CheckContext) -> CheckResult:
+    """Resolve this node's own MagicDNS name from inside a container.
+
+    Not implied by ``check_container_dns``: public upstreams answer public names
+    while every ``*.ts.net`` name fails, so both probes are needed. See
+    docs/backend/compose-stack.md#dns-pinning-x-public-dns.
+    """
+    cid = "container_magicdns"
+    title = "Container can resolve Tailscale MagicDNS"
+
+    if shutil.which(ctx.engine) is None:
+        return CheckResult(cid, title, NOT_APPLICABLE, f"{ctx.engine} not installed")
+
+    status = _tailscale_status()
+    if status is None or status.get("BackendState") != "Running":
+        return CheckResult(cid, title, NOT_APPLICABLE, "Tailscale not running")
+
+    probe = ((status.get("Self") or {}).get("DNSName") or "").rstrip(".")
+    if not probe:
+        return CheckResult(cid, title, NOT_APPLICABLE, "no MagicDNS name for this node")
+
+    container = _first_running(ctx.engine, ctx.dns_containers)
+    if container is None:
+        return CheckResult(cid, title, NOT_APPLICABLE, "no probe container is running")
+
+    result = _run([ctx.engine, "exec", container, "getent", "hosts", probe], timeout=20)
+    if result is None:
+        return CheckResult(cid, title, NOT_APPLICABLE, "could not exec into container")
+    if result.returncode == _CMD_NOT_FOUND:
+        return CheckResult(cid, title, NOT_APPLICABLE, "getent absent in image")
+    if result.returncode == 0 and result.stdout.strip():
+        return CheckResult(cid, title, OK, f"{container} resolved {probe}")
+
+    return CheckResult(
+        cid,
+        title,
+        FAIL,
+        f"{container} cannot resolve {probe}",
+        remedy=(
+            "List 100.100.100.100 first in the compose file's `dns:` upstreams "
+            "(x-public-dns), then recreate the containers — `dns:` is applied at "
+            "create time, so a plain restart will not pick it up."
+        ),
+    )
+
+
 def check_tailscale_login(ctx: CheckContext) -> CheckResult:
     """Whether tailscaled is actually logged in.
 
@@ -493,6 +539,7 @@ def repair_tailscale_operator(user: Optional[str]) -> bool:
 
 ALL_CHECKS: Tuple[Callable[[CheckContext], CheckResult], ...] = (
     check_container_dns,
+    check_container_magicdns,
     check_tailscale_login,
     check_tailscale_key_expiry,
     check_tailscale_operator,

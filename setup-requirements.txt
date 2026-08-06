@@ -3,7 +3,10 @@
 # The relative path below is resolved by uv against the *working directory*, not
 # against this file, so setup commands must be run from the repository root:
 #   uv run --with-requirements setup-requirements.txt python extras/<svc>/init.py
-./extras/chronicle-setup
+#
+# Keep the `-e`: without it, edits to chronicle_setup/ are silently ignored.
+# See docs/init-system.md#why-chronicle-setup-is-installed-editable
+-e ./extras/chronicle-setup
 rich>=13.0.0
 python-dotenv>=1.0.0
 requests>=2.31.0

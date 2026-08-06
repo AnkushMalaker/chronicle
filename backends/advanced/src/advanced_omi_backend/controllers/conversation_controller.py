@@ -483,6 +483,7 @@ async def get_conversations(
 
 # MongoDB fields covered by each independently selectable search category.
 _SEARCH_CATEGORY_FIELDS: dict[str, list[str]] = {
+    "id": ["conversation_id"],
     "title": ["title"],
     "summary": ["summary", "detailed_summary"],
     "speakers": ["_search_active_version.segments.speaker"],
@@ -591,7 +592,7 @@ async def search_conversations(
     categories: list[str] | None = None,
 ):
     """Search conversations by literal pattern across selected field categories."""
-    categories = categories or ["title", "summary", "speakers"]
+    categories = categories or ["id", "title", "summary", "speakers"]
     fields = _search_fields(categories)
     try:
         result = await _regex_search_conversations(query, user, fields, limit, offset)

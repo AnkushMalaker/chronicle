@@ -257,6 +257,13 @@ export default function AuditTable({
                       {r.derived_operation && (
                         <MetadataChip>{r.derived_operation}</MetadataChip>
                       )}
+                      {r.last_export && (
+                        <MetadataChip
+                          title={`Shipped in ${r.last_export.export_id} (${formatDate(r.last_export.created_at)}) — filter with Export history to skip these`}
+                        >
+                          exported
+                        </MetadataChip>
+                      )}
                       {(() => {
                         const chip = processingStatusChip(r.processing_status, r.failure_stage)
                         return chip ? (

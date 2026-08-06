@@ -57,9 +57,6 @@ benchmark = [
     { name = "huggingface-hub" },
     { name = "ijson" },
 ]
-deepgram = [
-    { name = "deepgram-sdk" },
-]
 galileo = [
     { name = "galileo" },
     { name = "opentelemetry-exporter-otlp" },
@@ -92,7 +89,6 @@ test = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.8.0" },
     { name = "croniter", specifier = ">=1.3.0" },
-    { name = "deepgram-sdk", marker = "extra == 'deepgram'", specifier = ">=4.0.0" },
     { name = "easy-audio-interfaces", specifier = ">=0.7.1" },
     { name = "easy-audio-interfaces", extras = ["local-audio"], marker = "extra == 'local-audio'", specifier = ">=0.7.1" },
     { name = "en-core-web-sm", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" },
@@ -129,7 +125,7 @@ requires-dist = [
     { name = "websockets", specifier = ">=12.0" },
     { name = "wyoming", specifier = ">=1.6.1" },
 ]
-provides-extras = ["deepgram", "local-audio", "galileo", "benchmark"]
+provides-extras = ["local-audio", "galileo", "benchmark"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -987,22 +983,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/1b/4f/0e0b0359d41ffaa652b066759321d8f2608246090c827061c43b72dcefae/dbus_fast-3.1.2-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:8a78eb3f19ff81fb7a8b16075160ebd1edc6135c59c929da0832511f315b5ede", size = 1606236, upload_time = "2025-11-17T03:49:56.667Z" },
     { url = "https://files.pythonhosted.org/packages/8e/18/1ad08968773f1d1822a1e147dbc98c9af220b582d2c8b95705c7e8f8019f/dbus_fast-3.1.2-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:366550946b281a5b4bb8d70815667d24565141e3c23dc7d40267a315b16def2c", size = 1545417, upload_time = "2025-11-17T03:49:58.111Z" },
     { url = "https://files.pythonhosted.org/packages/89/94/b7ff6279e642b014cd4aef4d914b9fca3917c2c9c35df49db062023cbdfc/dbus_fast-3.1.2-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:1d7cc1315586e4c50875c9a2d56b9ad2e056ec75e2f27c43cd80392f72d0f6e3", size = 1623709, upload_time = "2025-11-17T03:49:59.571Z" },
-]
-
-[[package]]
-name = "deepgram-sdk"
-version = "5.3.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-    { name = "pydantic" },
-    { name = "pydantic-core" },
-    { name = "typing-extensions" },
-    { name = "websockets" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/2d/9c/4529cc5818e9305ac9be3c24545249ad57418cbc3736c3f1c0a8397b59f5/deepgram_sdk-5.3.0.tar.gz", hash = "sha256:4e682a53f64c26dc49d8fd70865eae1e98236d313870d1bcf5f107f125e53793", size = 148179, upload_time = "2025-11-03T15:24:02.436Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/58/e2/cda09edad156199cc9e330533f6b72cb5276c0d476cab7f1744be7ffa16e/deepgram_sdk-5.3.0-py3-none-any.whl", hash = "sha256:431418fdffbd93cdf6a78a168984e3df3cb696818ced1cfc52ce336e0bc6a7fe", size = 390669, upload_time = "2025-11-03T15:24:01.078Z" },
 ]
 
 [[package]]

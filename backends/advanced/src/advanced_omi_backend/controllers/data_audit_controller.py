@@ -14,7 +14,7 @@ import shutil
 import statistics
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -38,6 +38,7 @@ from advanced_omi_backend.utils.annotation_export import (
     EXPORTS_DIR,
     META_NAME,
     ZIP_NAME,
+    active_segments,
     export_dir,
     new_export_id,
     validate_export_id,
@@ -54,6 +55,10 @@ from advanced_omi_backend.utils.audio_chunk_utils import (
 from advanced_omi_backend.utils.audio_utils import (
     AudioValidationError,
     validate_and_prepare_audio,
+)
+from advanced_omi_backend.utils.export_planning import (
+    export_eligibility,
+    plan_conversation_clips,
 )
 from advanced_omi_backend.utils.transcript_slicing import (
     build_transcript_text,
@@ -198,6 +203,38 @@ def _vad_stale(va: Optional[dict], duration: float) -> bool:
     return not audio_cache_duration_matches(cached, duration)
 
 
+def _latest_exports_by_conversation(user: User) -> Dict[str, dict]:
+    """conversation_id → the most recent export that actually shipped it.
+
+    Read from the on-disk export metadata (the audit trail the export job
+    already writes) rather than a new Mongo field, so deleting an export
+    directory naturally un-marks its conversations. Conversations that were
+    selected but skipped don't count as exported. Scoped by the same
+    ownership rule as ``list_exports``.
+    """
+    latest: Dict[str, dict] = {}
+    if not EXPORTS_DIR.is_dir():
+        return latest
+    for meta_path in EXPORTS_DIR.glob(f"*/{META_NAME}"):
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            continue
+        if not user.is_superuser and meta.get("created_by") != str(user.user_id):
+            continue
+        created_at = meta.get("created_at") or ""
+        for conv in meta.get("conversations", []):
+            if conv.get("skipped_reason"):
+                continue
+            cid = conv.get("conversation_id")
+            if cid and created_at > (latest.get(cid, {}).get("created_at") or ""):
+                latest[cid] = {
+                    "export_id": meta.get("export_id"),
+                    "created_at": created_at,
+                }
+    return latest
+
+
 async def list_for_audit(
     user: User,
     speech_threshold: float = 0.5,
@@ -210,6 +247,7 @@ async def list_for_audit(
     include_speakers: Optional[List[str]] = None,
     exclude_speakers: Optional[List[str]] = None,
     dataset_id: Optional[str] = None,
+    exported: Optional[str] = None,
     archived_only: bool = False,
     hide_failed: bool = False,
     hide_reviewed: bool = False,
@@ -225,6 +263,12 @@ async def list_for_audit(
     the ``exclude_speakers``. Speech bounds exclude unanalyzed conversations;
     ``max_speech_fraction=1`` / ``min_speech_fraction=0`` / ``max_duration=0``
     disable the respective bound.
+
+    ``exported`` filters on annotation-export history (from the on-disk export
+    metadata): ``never`` keeps only conversations no export has shipped,
+    ``exported`` only those a previous export contains. Each row carries
+    ``last_export`` either way, so curation sessions can skip audio already
+    sent to annotators.
     """
     try:
         base: dict = {} if user.is_superuser else {"user_id": str(user.user_id)}
@@ -303,6 +347,7 @@ async def list_for_audit(
 
         include_set = set(include_speakers or [])
         exclude_set = set(exclude_speakers or [])
+        export_history = _latest_exports_by_conversation(user)
         matched: List[dict] = []
         # Speakers present anywhere in the scanned working set (before the
         # compound predicate), so the filter UI offers exactly the labels that
@@ -347,6 +392,11 @@ async def list_for_audit(
                 # speech segment already has an identified_as).
                 if hide_reviewed and unknown_count == 0:
                     continue
+                in_export = doc.get("conversation_id") in export_history
+                if exported == "never" and in_export:
+                    continue
+                if exported == "exported" and not in_export:
+                    continue
 
             created_at = doc.get("created_at")
             archived_at = doc.get("audio_archived_at")
@@ -374,6 +424,7 @@ async def list_for_audit(
                     "derived_operation": (
                         derived_from.get("operation") if derived_from else None
                     ),
+                    "last_export": export_history.get(doc.get("conversation_id")),
                     "audio_archived": doc.get("audio_archived", False),
                     "audio_archived_at": (
                         archived_at.isoformat() if archived_at else None
@@ -1705,6 +1756,96 @@ async def get_default_sensitivity_policy():
     return {"policy": get_sensitivity_policy()}
 
 
+async def preview_export(
+    user: User,
+    conversation_ids: List[str],
+    mode: str = "clips",
+    pad_seconds: float = 1.0,
+    speech_threshold: float = 0.5,
+    merge_gap_seconds: float = 3.0,
+    excluded_ranges: Optional[Dict[str, List[List[float]]]] = None,
+):
+    """Dry-run of the export: the exact clips it would produce, without
+    writing any audio.
+
+    Runs the same plan computation as the export job
+    (``utils/export_planning.plan_conversation_clips``), so the boundaries,
+    durations, and sliced transcripts returned here are byte-for-byte what
+    the manifest would contain. Unanalyzed conversations are reported as
+    skipped (``not analyzed``) rather than analyzed inline — VAD over a long
+    recording is too slow for a synchronous endpoint; the UI points at the
+    Analyze button.
+    """
+    excluded_ranges = excluded_ranges or {}
+    user_id = str(user.user_id)
+    conversations: List[dict] = []
+    totals = {"clip_count": 0, "total_clip_seconds": 0.0, "excluded_seconds": 0.0}
+
+    try:
+        for cid in dict.fromkeys(conversation_ids):
+            conv = await Conversation.find_one(Conversation.conversation_id == cid)
+            entry: Dict[str, Any] = {
+                "conversation_id": cid,
+                "title": conv.title if conv else None,
+                "client_id": conv.client_id if conv else None,
+                "created_at": (
+                    conv.created_at.isoformat() if conv and conv.created_at else None
+                ),
+            }
+            skipped = export_eligibility(conv, user_id, user.is_superuser)
+            if not skipped:
+                plan = await plan_conversation_clips(
+                    conv,
+                    mode,
+                    pad_seconds,
+                    speech_threshold,
+                    merge_gap_seconds,
+                    excluded_ranges.get(cid),
+                )
+                skipped = plan.skipped_reason
+            if skipped:
+                entry["skipped_reason"] = skipped
+                conversations.append(entry)
+                continue
+
+            segments = active_segments(conv)
+            clips = []
+            for clip in plan.clips:
+                sliced = slice_segments(segments, clip.start, clip.end)
+                clips.append(
+                    {
+                        "clip_index": clip.clip_index,
+                        "clip_id": f"{cid}_{clip.clip_index:03d}",
+                        "start": round(clip.start, 2),
+                        "end": round(clip.end, 2),
+                        "duration_seconds": round(clip.duration, 2),
+                        "text": build_transcript_text(sliced),
+                        "segment_count": len(sliced),
+                    }
+                )
+            entry["clips"] = clips
+            entry["sample_rate"] = plan.sample_rate
+            entry["clip_seconds"] = round(plan.clip_seconds, 2)
+            entry["excluded_seconds"] = plan.excluded_seconds
+            totals["clip_count"] += len(clips)
+            totals["total_clip_seconds"] += plan.clip_seconds
+            totals["excluded_seconds"] += plan.excluded_seconds
+            conversations.append(entry)
+
+        totals["total_clip_seconds"] = round(totals["total_clip_seconds"], 2)
+        totals["excluded_seconds"] = round(totals["excluded_seconds"], 2)
+        totals["conversation_count"] = len(conversations)
+        totals["exported_conversations"] = sum(
+            1 for c in conversations if "skipped_reason" not in c
+        )
+        return {"conversations": conversations, "totals": totals}
+    except Exception as e:
+        logger.exception(f"Error previewing annotation export: {e}")
+        return JSONResponse(
+            status_code=500, content={"error": "Error previewing export"}
+        )
+
+
 async def start_export(
     user: User,
     conversation_ids: List[str],
@@ -1713,12 +1854,14 @@ async def start_export(
     speech_threshold: float = 0.5,
     merge_gap_seconds: float = 3.0,
     excluded_ranges: Optional[Dict[str, List[List[float]]]] = None,
+    dropped_ranges: Optional[Dict[str, List[List[float]]]] = None,
     sensitivity_policy: Optional[str] = None,
 ):
     """Enqueue the annotation-dataset export job for selected conversations.
 
     ``excluded_ranges`` maps conversation_id → withheld ``[start, end]`` ranges
-    confirmed from the privacy screen; those are carved out of the export.
+    confirmed from the privacy screen; ``dropped_ranges`` → clips the user
+    unticked in the export preview. Both are carved out of the export.
     """
     try:
         export_id = new_export_id()
@@ -1732,6 +1875,7 @@ async def start_export(
             speech_threshold=speech_threshold,
             merge_gap_seconds=merge_gap_seconds,
             excluded_ranges=excluded_ranges,
+            dropped_ranges=dropped_ranges,
             sensitivity_policy=sensitivity_policy,
             job_timeout=3600,
             result_ttl=JOB_RESULT_TTL,
