@@ -482,6 +482,33 @@ def installed_legacy_units() -> list[str]:
 # ── update integration ───────────────────────────────────────────────────────
 
 
+# Flags the recommended recorder invocation no longer carries. The recorder's
+# spec argv is per-node state that code updates never regenerate (and the
+# tray's capture dialog edits only capture flags), so a retired flag would
+# survive every update without this sweep. Currently: the meeting detector
+# must stay ON — the collector mirrors the recorder's persisted meetings into
+# Chronicle's session bounds (see docs/screenpipe.md).
+_RETIRED_RECORDER_FLAGS = ("--disable-meeting-detector",)
+
+
+def migrate_recorder_spec() -> bool:
+    """Drop retired flags from the recorder spec; True if anything changed.
+
+    Regenerates the unit/plist and restarts the recorder so the change takes
+    effect — the one case worth interrupting a live capture session for.
+    """
+    name = "screenpipe"
+    if not component_installed(name) or not component_spec_path(name).exists():
+        return False
+    spec = read_component_spec(name)
+    argv = [arg for arg in spec["argv"] if arg not in _RETIRED_RECORDER_FLAGS]
+    if argv == spec["argv"]:
+        return False
+    update_component_argv(name, argv)
+    component_action(name, "restart")
+    return True
+
+
 def restart_installed(progress=None) -> list[tuple[str, bool]]:
     """Restart every installed client unit so it picks up updated code.
 
@@ -492,10 +519,17 @@ def restart_installed(progress=None) -> list[tuple[str, bool]]:
 
     Spec components are skipped: they run a third-party binary this repo does
     not ship, so an update gives them nothing and a restart would drop a live
-    capture session for no reason.
+    capture session for no reason. The one exception is a retired-flag
+    migration, which does regenerate and restart the recorder.
     """
     progress = progress or (lambda msg: None)
     results: list[tuple[str, bool]] = []
+    try:
+        if migrate_recorder_spec():
+            progress("Recorder flags migrated (meeting detector re-enabled)")
+            results.append(("screenpipe", True))
+    except Exception:
+        results.append(("screenpipe", False))
     for name in installed_components():
         if CLIENT_COMPONENTS[name].get("spec"):
             continue

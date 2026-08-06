@@ -7,11 +7,17 @@ from advanced_omi_backend.services.device_audio_ingest import (
 )
 
 
-def item(identifier: str, start: datetime, duration: float = 30):
+def item(
+    identifier: str,
+    start: datetime,
+    duration: float = 30,
+    meeting_id: str | None = None,
+):
     return SimpleNamespace(
         source_item_id=identifier,
         captured_at=start,
         ended_at=start + timedelta(seconds=duration),
+        metadata={"meeting_id": meeting_id} if meeting_id else {},
     )
 
 
@@ -56,6 +62,69 @@ def test_audio_session_closes_after_meaningful_gap():
 def test_continuous_capture_is_bounded_into_processing_windows():
     start = datetime(2026, 7, 22, tzinfo=timezone.utc)
     rows = [item(str(index), start + timedelta(minutes=index)) for index in range(32)]
+    sessions = group_audio_sessions(rows)
+    assert [len(session) for session in sessions] == [30, 2]
+
+
+def test_meeting_chunks_are_not_split_by_the_thirty_minute_window():
+    start = datetime(2026, 7, 22, tzinfo=timezone.utc)
+    rows = [
+        item(str(index), start + timedelta(minutes=index), meeting_id="meeting:1")
+        for index in range(45)
+    ]
+    sessions = group_audio_sessions(rows)
+    assert [len(session) for session in sessions] == [45]
+
+
+def test_meeting_boundary_starts_a_new_session():
+    start = datetime(2026, 7, 22, tzinfo=timezone.utc)
+    sessions = group_audio_sessions(
+        [
+            item("ambient", start),
+            item("call-1", start + timedelta(seconds=30), meeting_id="meeting:1"),
+            item("call-2", start + timedelta(seconds=60), meeting_id="meeting:1"),
+            item("after", start + timedelta(seconds=90)),
+        ]
+    )
+    assert [[row.source_item_id for row in session] for session in sessions] == [
+        ["ambient"],
+        ["call-1", "call-2"],
+        ["after"],
+    ]
+
+
+def test_back_to_back_meetings_stay_separate_conversations():
+    start = datetime(2026, 7, 22, tzinfo=timezone.utc)
+    sessions = group_audio_sessions(
+        [
+            item("first", start, meeting_id="meeting:1"),
+            item("second", start + timedelta(seconds=30), meeting_id="meeting:2"),
+        ]
+    )
+    assert len(sessions) == 2
+
+
+def test_meeting_tolerates_longer_silences_than_ambient_capture():
+    start = datetime(2026, 7, 22, tzinfo=timezone.utc)
+    sessions = group_audio_sessions(
+        [
+            item("one", start, meeting_id="meeting:1"),
+            item("two", start + timedelta(minutes=4), meeting_id="meeting:1"),
+            item("three", start + timedelta(minutes=11), meeting_id="meeting:1"),
+        ]
+    )
+    assert [[row.source_item_id for row in session] for session in sessions] == [
+        ["one", "two"],
+        ["three"],
+    ]
+
+
+def test_meetings_still_split_at_the_safety_cap():
+    start = datetime(2026, 7, 22, tzinfo=timezone.utc)
+    rows = [
+        item(str(index), start + timedelta(minutes=4 * index), meeting_id="meeting:1")
+        for index in range(32)
+    ]
     sessions = group_audio_sessions(rows)
     assert [len(session) for session in sessions] == [30, 2]
 

@@ -28,7 +28,7 @@ pixels and OCR are retrieved only for bounded jobs requested by Chronicle. See t
      --disable-clipboard-capture --capture-scroll true \
      --prioritize-input-latency --pause-on-drm-content \
      --screenpipe-aec-enabled \
-     --disable-meeting-detector --disable-telemetry \
+     --disable-telemetry \
      --video-quality balanced --retention-days 90 \
      --retention-mode media --api-auth true
    ```
@@ -45,6 +45,20 @@ pixels and OCR are retrieved only for bounded jobs requested by Chronicle. See t
    Pair with `--forward-audio none|output|input|both` to independently control which
    locally recorded sources are uploaded. The guided setup asks for both the local
    capture mode and forwarding mode.
+
+   Leave ScreenPipe's meeting detector **enabled** (no
+   `--disable-meeting-detector`): on macOS and Windows it persists meetings —
+   with titles — into its own database, and the companion mirrors those rows
+   into Chronicle and tags forwarded audio chunks with the meeting interval,
+   so the backend bounds the conversation on the real call instead of fixed
+   time windows. Because the rows are persisted, bounds survive companion
+   downtime and backfill retroactively. Use ScreenPipe's
+   `ignored_meeting_apps` to exclude specific apps. On Linux, where ScreenPipe
+   has no meeting sensor, the companion detects calls itself from the PipeWire
+   graph (a known meeting app or browser holding a *running* microphone
+   stream, browsers attributed through the current observation's URL) —
+   live-only, so intervals only cover time the companion was running. Disable
+   all of it at pairing time with `--no-meeting-detection`.
 
 4. Run the companion:
 

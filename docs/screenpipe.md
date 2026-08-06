@@ -137,6 +137,45 @@ requests zero or one 640px preview; the curator may request one different previe
 selected ScreenPipe image is then fetched at a bounded 1280px size. ScreenPipe remains
 the high-resolution source and Chronicle never uploads a frame sequence.
 
+## Meeting detection and audio session bounds
+
+Without a meeting signal, the backend can only sessionize forwarded audio by blind
+time rules (60 s gap, 30-minute hard split), so a 45-minute call became two arbitrary
+conversations. The collector now supplies real meeting intervals from two sources,
+recorder first:
+
+1. **The recorder's own meetings table (macOS / Windows — preferred).** ScreenPipe's
+   meeting watcher (CoreAudio process taps / WASAPI sessions) persists meetings —
+   with titles — into `db.sqlite`'s `meetings` table. The collector mirrors those
+   rows into Chronicle events and, because the rows are persisted, this is
+   **retroactive**: a meeting recorded while the collector was down still gets its
+   bounds on backfill. The recommended recording flags therefore no longer pass
+   `--disable-meeting-detector`; use ScreenPipe's `ignored_meeting_apps` for
+   exclusions. Once the recorder has written a meeting recently, it owns detection
+   on that node and the collector's own sensor stands down.
+2. **The collector's PipeWire tracker (Linux fallback).** Upstream ScreenPipe has no
+   Linux sensor, so the collector runs the pattern the bot-free note-takers
+   (Granola, ScreenPipe's watcher) converged on: a process holding a *running*
+   PipeWire microphone capture stream (`pw-dump`, `media.class =
+   Stream/Input/Audio`, `state = running` — browsers cork the stream outside calls)
+   is the trigger; classification is allowlist-only (known meeting apps directly, a
+   browser attributed through the current observation's `browser_url`, falling back
+   to `browser-call`), so always-on capturers — ScreenPipe itself, OBS, dictation
+   tools — can never mint meetings. Hysteresis: two consecutive sightings to open
+   (pre-join lobbies, mic tests), a 30 s grace before closing at the drop time, and
+   a stale-sensor close so a dead `pw-dump` cannot pin a meeting open. Live-only:
+   intervals cover only time the collector was running.
+
+Meeting boundaries ship as ordinary observation open/close events
+(`metadata.observation_type = "meeting"`, `detection_source = recorder|pipewire`),
+so they land on the timeline and join overlapping conversations through the existing
+correlation. Each forwarded audio chunk overlapping a meeting interval — state
+persists in `~/.local/state/chronicle-screenpipe/meetings.json` — carries a
+`meeting_id`, and the backend's session grouping (`device_audio_ingest.py`) splits
+on meeting boundaries, tolerates 5-minute silences inside one meeting, and replaces
+the 30-minute split with a 2-hour safety cap. Disable per node at pairing time with
+`--no-meeting-detection`.
+
 ## Screen context and the `chronicle` fork branch
 
 A completed conversation opens a bounded OCR job over its interval, and the collector
@@ -273,7 +312,9 @@ recorder and Chronicle collector remain independently managed background service
 ## Implementation map
 
 - `extras/screenpipe-collector/`: collector CLI, observation state machine, checkpoints, and service installation
+- `extras/screenpipe-collector/chronicle_screenpipe/meeting.py`: PipeWire meeting detection and audio-chunk tagging
 - `backends/advanced/src/advanced_omi_backend/routers/modules/device_input_routes.py`: capture-node ingestion API
+- `backends/advanced/src/advanced_omi_backend/services/device_audio_ingest.py`: meeting-aware audio sessionization into conversations
 - `backends/advanced/src/advanced_omi_backend/services/observation_curation.py`: sparse preview and vault curation
 - `extras/vault-sync/vault_core.py` and `syncthing_manager.py`: vault sync core and Syncthing pairing/control
 - `extras/chronicle-tray/chronicle_tray/sections/vault.py`: unified tray UI adapter (imports the vault-sync core in place)

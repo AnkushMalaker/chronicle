@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 _SESSION_GAP = timedelta(seconds=60)
 _CLOSE_DELAY = timedelta(seconds=90)
 _MAX_SESSION = timedelta(minutes=30)
+# Chunks the collector tagged with the same meeting interval belong to one
+# conversation: tolerate longer silences and only split at a safety cap
+# instead of the blind 30-minute rule.
+_MEETING_SESSION_GAP = timedelta(minutes=5)
+_MAX_MEETING_SESSION = timedelta(hours=2)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -36,6 +41,11 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _meeting_id(item: DeviceInputItem) -> str | None:
+    value = item.metadata.get("meeting_id")
+    return str(value) if value else None
 
 
 def group_audio_sessions(items: list[DeviceInputItem]) -> list[list[DeviceInputItem]]:
@@ -48,9 +58,18 @@ def group_audio_sessions(items: list[DeviceInputItem]) -> list[list[DeviceInputI
         previous_end = _as_utc(previous.ended_at or previous.captured_at)
         session_start = _as_utc(sessions[-1][0].captured_at)
         captured_at = _as_utc(item.captured_at)
+        # A meeting boundary always starts a new session; within one meeting
+        # the collector's interval is trusted over the blind gap/duration
+        # rules, up to a safety cap.
+        same_meeting = _meeting_id(item) is not None and _meeting_id(
+            item
+        ) == _meeting_id(previous)
+        gap_limit = _MEETING_SESSION_GAP if same_meeting else _SESSION_GAP
+        max_session = _MAX_MEETING_SESSION if same_meeting else _MAX_SESSION
         if (
-            captured_at - previous_end > _SESSION_GAP
-            or captured_at - session_start >= _MAX_SESSION
+            _meeting_id(item) != _meeting_id(previous)
+            or captured_at - previous_end > gap_limit
+            or captured_at - session_start >= max_session
         ):
             sessions.append([item])
         else:

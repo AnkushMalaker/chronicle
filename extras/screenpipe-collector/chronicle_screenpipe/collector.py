@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 
+from .meeting import MeetingTracker, RecorderMeetingLog, pipewire_capture_apps
 from .observations import ObservationTracker
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,9 @@ class Config:
     activity_debounce_seconds: float = 10.0
     sample_cooldown_seconds: float = 120.0
     liveness_seconds: float = 900.0
+    # Detect active calls from the PipeWire graph and tag forwarded audio, so
+    # the backend can bound sessions on real meeting intervals.
+    meeting_detection: bool = True
 
 
 class Checkpoints:
@@ -110,7 +114,10 @@ class Collector:
         self.config = config
         self.checkpoints = Checkpoints(state_dir / "checkpoints.json")
         self.observations_path = state_dir / "observations.json"
+        self.meetings_path = state_dir / "meetings.json"
         self.rejections_path = state_dir / "rejections.jsonl"
+        self._meeting_tracker: MeetingTracker | None = None
+        self._recorder_meetings: RecorderMeetingLog | None = None
         self.metrics = {
             "observation_opens": 0,
             "observation_closes": 0,
@@ -131,6 +138,16 @@ class Collector:
             "screenpipe_db": str(self.database_path),
             "audio_cursor": self.checkpoints.get("audio"),
             "frame_cursor": self.checkpoints.get("frames"),
+            "active_meeting": (
+                self._recorder_meetings.active_platform()
+                if self._recorder_meetings
+                else None
+            )
+            or (
+                self._meeting_tracker.active_platform()
+                if self._meeting_tracker
+                else None
+            ),
             **self.metrics,
         }
         if error:
@@ -201,17 +218,26 @@ class Collector:
                 break
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             content_type = mimetypes.guess_type(path.name)[0] or "audio/wav"
+            captured_at = iso_timestamp(row["timestamp"])
+            duration = audio_duration(path)
+            data = {
+                "source_item_id": str(row["id"]),
+                "captured_at": captured_at,
+                "duration_seconds": str(duration),
+                "device_name": path.stem,
+                "direction": direction,
+                "content_hash": digest,
+            }
+            chunk_end = datetime.fromtimestamp(
+                timestamp_seconds(captured_at) + duration, tz=timezone.utc
+            ).isoformat()
+            meeting_id = self._meeting_for(captured_at, chunk_end)
+            if meeting_id:
+                data["meeting_id"] = meeting_id
             with path.open("rb") as handle:
                 response = self.client.post(
                     "/api/device-input/audio",
-                    data={
-                        "source_item_id": str(row["id"]),
-                        "captured_at": iso_timestamp(row["timestamp"]),
-                        "duration_seconds": str(audio_duration(path)),
-                        "device_name": path.stem,
-                        "direction": direction,
-                        "content_hash": digest,
-                    },
+                    data=data,
                     files={"file": (path.name, handle, content_type)},
                 )
             if response.status_code >= 500:
@@ -233,6 +259,88 @@ class Collector:
                     )
             self.checkpoints.set("audio", row["id"])
             sent += 1
+        return sent
+
+    def _load_meeting_state(self) -> tuple[MeetingTracker, RecorderMeetingLog]:
+        state: dict[str, Any] = {}
+        if self.meetings_path.exists():
+            state = json.loads(self.meetings_path.read_text(encoding="utf-8"))
+        return (
+            MeetingTracker(state.get("tracker")),
+            RecorderMeetingLog(state.get("recorder")),
+        )
+
+    def _save_meeting_state(
+        self, tracker: MeetingTracker, recorder: RecorderMeetingLog
+    ) -> None:
+        self.meetings_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.meetings_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(
+                {"tracker": tracker.state, "recorder": recorder.state}, sort_keys=True
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(self.meetings_path)
+
+    def _current_context(self) -> dict[str, Any] | None:
+        """The freshest observed context, for attributing a browser's mic."""
+        tracker = self._load_observation_tracker()
+        for observation in (tracker.candidate, tracker.active):
+            if observation is not None:
+                return observation
+        return None
+
+    def _meeting_for(self, start: str, end: str) -> str | None:
+        """Recorder-written meetings take precedence over the live tracker."""
+        for source in (self._recorder_meetings, self._meeting_tracker):
+            if source is not None:
+                meeting_id = source.meeting_for(start, end)
+                if meeting_id:
+                    return meeting_id
+        return None
+
+    def _recorder_meeting_rows(self, connection: sqlite3.Connection, horizon: str):
+        """Recent rows of the recorder's own meetings table, if it has one."""
+        columns = table_columns(connection, "meetings")
+        if not {"id", "meeting_start", "meeting_end", "meeting_app"} <= columns:
+            return []
+
+        def optional(name: str) -> str:
+            return name if name in columns else f"NULL AS {name}"
+
+        return connection.execute(
+            f"SELECT id, meeting_start, meeting_end, meeting_app, {optional('title')} "
+            "FROM meetings WHERE meeting_start >= ? ORDER BY id",
+            (horizon,),
+        ).fetchall()
+
+    def collect_meetings(self, connection: sqlite3.Connection) -> int:
+        """Advance meeting detection one poll; emit boundaries as observations.
+
+        The recorder's persisted meetings (macOS/Windows watcher) are the
+        preferred source — they survive collector downtime, so backfill keeps
+        its bounds. The PipeWire tracker only runs where the recorder is not
+        writing meetings (Linux, or detector disabled).
+        """
+        if not self.config.meeting_detection:
+            return 0
+        tracker, recorder = self._load_meeting_state()
+        now = datetime.now(timezone.utc).isoformat()
+        horizon = datetime.fromtimestamp(
+            timestamp_seconds(now) - recorder.retain_seconds, tz=timezone.utc
+        ).isoformat()
+        events = recorder.sync(self._recorder_meeting_rows(connection, horizon), now)
+        if recorder.owns_detection(now):
+            events.extend(tracker.retire())
+        else:
+            events.extend(
+                tracker.tick(pipewire_capture_apps(), self._current_context(), now)
+            )
+        sent = self._send_observation_events(events)
+        self._save_meeting_state(tracker, recorder)
+        self._meeting_tracker = tracker
+        self._recorder_meetings = recorder
         return sent
 
     def _load_observation_tracker(self) -> ObservationTracker:
@@ -463,6 +571,7 @@ class Collector:
         while True:
             try:
                 with open_screenpipe_db(self.database_path) as connection:
+                    self.collect_meetings(connection)
                     self.collect_audio(connection)
                     self.collect_observations(connection)
                 self.process_job()

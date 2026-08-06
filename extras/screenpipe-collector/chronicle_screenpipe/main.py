@@ -65,6 +65,7 @@ def pair(args: argparse.Namespace) -> None:
                 "screenpipe_url": args.screenpipe_url,
                 "screenpipe_token": args.screenpipe_token,
                 "forward_audio": args.forward_audio,
+                "meeting_detection": args.meeting_detection,
             },
             indent=2,
         ),
@@ -107,6 +108,12 @@ def main() -> None:
         choices=("none", "output", "input", "both"),
         default="both",
         help="which locally captured ScreenPipe audio sources Chronicle receives",
+    )
+    pair_parser.add_argument(
+        "--meeting-detection",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="detect active calls from the PipeWire graph and tag forwarded audio",
     )
     sub.add_parser("run")
     sub.add_parser("install-service")

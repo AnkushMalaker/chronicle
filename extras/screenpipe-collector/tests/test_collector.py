@@ -1,5 +1,7 @@
 import sqlite3
+import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 from chronicle_screenpipe.collector import (
     Checkpoints,
@@ -8,6 +10,7 @@ from chronicle_screenpipe.collector import (
     audio_duration,
     infer_audio_direction,
 )
+from chronicle_screenpipe.meeting import CaptureApp, MeetingTracker
 
 
 def test_checkpoints_are_atomic(tmp_path: Path):
@@ -61,6 +64,141 @@ def test_collect_audio_checkpoints_sources_excluded_from_forwarding(tmp_path: Pa
 
     assert collector.collect_audio(db) == 0
     assert collector.checkpoints.get("audio") == 1
+
+
+def test_collect_audio_tags_chunks_with_the_active_meeting(tmp_path: Path):
+    chunk = tmp_path / "Microphone (input)_1.wav"
+    with wave.open(str(chunk), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16000)
+        audio.writeframes(b"\0\0" * 16000)
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE audio_chunks (id INTEGER, file_path TEXT, timestamp TEXT)")
+    db.execute(
+        "INSERT INTO audio_chunks VALUES (1, ?, ?)",
+        (str(chunk), "2026-07-22T10:00:30Z"),
+    )
+
+    tracker = MeetingTracker()
+    zoom = [CaptureApp(name="Zoom", binary="zoom")]
+    tracker.tick(zoom, None, "2026-07-22T10:00:00+00:00")
+    tracker.tick(zoom, None, "2026-07-22T10:00:05+00:00")
+
+    posted: dict = {}
+
+    class FakeClient:
+        def post(self, url, data=None, files=None):
+            posted.update(data or {})
+            return SimpleNamespace(status_code=200)
+
+    collector = object.__new__(Collector)
+    collector.config = Config(
+        backend_url="http://backend",
+        source_id="source-1",
+        token="token",
+        screenpipe_dir=tmp_path,
+    )
+    collector.checkpoints = Checkpoints(tmp_path / "state.json")
+    collector._meeting_tracker = tracker
+    collector._recorder_meetings = None
+    collector.client = FakeClient()
+
+    assert collector.collect_audio(db) == 1
+    assert posted["meeting_id"] == tracker.meeting["meeting_id"]
+
+
+def test_collect_meetings_reads_the_recorders_meetings_table(tmp_path: Path):
+    from datetime import datetime, timedelta, timezone
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute(
+        "CREATE TABLE meetings (id INTEGER PRIMARY KEY, meeting_start TEXT, "
+        "meeting_end TEXT, meeting_app TEXT, title TEXT)"
+    )
+    start = datetime.now(timezone.utc) - timedelta(minutes=45)
+    end = start + timedelta(minutes=40)
+    db.execute(
+        "INSERT INTO meetings VALUES (5, ?, ?, 'Google Meet', 'Standup')",
+        (start.isoformat(), end.isoformat()),
+    )
+
+    sent_events = []
+
+    class FakeClient:
+        def post(self, url, json=None, **kwargs):
+            sent_events.extend(json["events"])
+
+            class Done:
+                def raise_for_status(self):
+                    return None
+
+            return Done()
+
+    collector = object.__new__(Collector)
+    collector.config = Config(
+        backend_url="http://backend",
+        source_id="source-1",
+        token="token",
+        screenpipe_dir=tmp_path,
+    )
+    collector.meetings_path = tmp_path / "meetings.json"
+    collector.observations_path = tmp_path / "observations.json"
+    collector.metrics = {
+        "observation_opens": 0,
+        "observation_closes": 0,
+        "observation_samples": 0,
+    }
+    collector._meeting_tracker = None
+    collector._recorder_meetings = None
+    collector.client = FakeClient()
+
+    assert collector.collect_meetings(db) == 2
+    assert [event["event"] for event in sent_events] == ["open", "close"]
+    assert sent_events[0]["metadata"]["title"] == "Standup"
+    # The recorder owns detection now, so no PipeWire sensing is attempted
+    # and a second pass re-sends nothing.
+    assert collector.collect_meetings(db) == 0
+    chunk = start + timedelta(minutes=5)
+    assert (
+        collector._meeting_for(
+            chunk.isoformat(), (chunk + timedelta(seconds=30)).isoformat()
+        )
+        == "meeting:recorder:5"
+    )
+
+
+def test_recorder_meetings_take_precedence_over_the_live_tracker():
+    from chronicle_screenpipe.meeting import RecorderMeetingLog
+
+    tracker = MeetingTracker()
+    zoom = [CaptureApp(name="Zoom", binary="zoom")]
+    tracker.tick(zoom, None, "2026-07-22T10:00:00+00:00")
+    tracker.tick(zoom, None, "2026-07-22T10:00:05+00:00")
+    recorder = RecorderMeetingLog()
+    recorder.sync(
+        [
+            {
+                "id": 4,
+                "meeting_start": "2026-07-22T10:00:00Z",
+                "meeting_end": None,
+                "meeting_app": "Zoom",
+                "title": None,
+            }
+        ],
+        "2026-07-22T10:00:05+00:00",
+    )
+
+    collector = object.__new__(Collector)
+    collector._meeting_tracker = tracker
+    collector._recorder_meetings = recorder
+
+    assert (
+        collector._meeting_for("2026-07-22T10:01:00+00:00", "2026-07-22T10:01:30+00:00")
+        == "meeting:recorder:4"
+    )
 
 
 def _collector_over(database: Path) -> Collector:

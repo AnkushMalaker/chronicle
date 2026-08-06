@@ -445,6 +445,7 @@ async def ingest_audio(
     device_name: str = Form(...),
     direction: Literal["input", "output", "unknown"] = Form(...),
     content_hash: str = Form(..., pattern=r"^[0-9a-fA-F]{64}$"),
+    meeting_id: Optional[str] = Form(None, min_length=1, max_length=200),
     source: CaptureSource = Depends(_device_source),
 ):
     existing = await DeviceInputItem.find_one(
@@ -474,6 +475,7 @@ async def ingest_audio(
             "device_name": device_name,
             "direction": direction,
             "duration_seconds": duration_seconds,
+            **({"meeting_id": meeting_id} if meeting_id else {}),
         },
         media_data=data,
         media_filename=file.filename or "chunk.wav",

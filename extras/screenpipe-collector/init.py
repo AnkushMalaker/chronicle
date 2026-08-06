@@ -66,7 +66,8 @@ def recorder_argv(
         "--disable-clipboard-capture",
         "--prioritize-input-latency",
         "--pause-on-drm-content",
-        "--disable-meeting-detector",
+        # The meeting detector stays ON: on macOS/Windows it persists meeting
+        # bounds (with titles) that the companion mirrors into Chronicle.
         "--disable-telemetry",
         "--video-quality",
         "balanced",
