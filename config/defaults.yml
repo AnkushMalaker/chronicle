@@ -934,10 +934,10 @@ timeline:
   max_text_chars_per_window: 30000
   max_anchor_images_per_window: 4
   executor: codex
-  prompt_version: timeline-episodes-v5
+  prompt_version: timeline-episodes-v6
   codex:
-    model: null
-    reasoning_effort: medium
+    model: gpt-5.6-luna
+    reasoning_effort: low
     # Reuse the memory agent's container-aware sandbox choice. Rootless Podman
     # deployments set that to danger-full-access because the container itself is
     # the isolation boundary and nested bubblewrap cannot start there.
