@@ -31,7 +31,18 @@ OUTPUT_SCHEMA = {
                     },
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                     "entities": {"type": "array", "items": {"type": "string"}},
-                    "attributes": {"type": "object"},
+                    "attributes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "key": {"type": "string"},
+                                "value": {"type": "string"},
+                            },
+                            "required": ["key", "value"],
+                        },
+                    },
                     "assertions": {
                         "type": "array",
                         "items": {
@@ -131,5 +142,6 @@ Rules:
 - Every important boundary/assertion must cite supplied evidence IDs.
 - Never invent an evidence ID. Include every window ID exactly once in covered_window_ids.
 - Salience is display value, not confidence.
+- Express optional episode metadata as short string key/value entries in `attributes`.
 - Prefer a few coherent episodes over arbitrary periodic fragments.
 """

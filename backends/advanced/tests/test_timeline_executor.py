@@ -4,6 +4,7 @@ import pytest
 
 from advanced_omi_backend.services.timeline.contracts import (
     AgentAssertion,
+    AgentAttribute,
     AgentEpisode,
     TimelineAgentResult,
     TimelineCoverageWindow,
@@ -57,6 +58,7 @@ def _result(evidence_id: str = "observation:one") -> TimelineAgentResult:
                 salience="routine",
                 activity_mode="background",
                 confidence=0.9,
+                attributes=[AgentAttribute(key="media", value="Terminator")],
                 evidence_ids=[evidence_id],
                 assertions=[
                     AgentAssertion(

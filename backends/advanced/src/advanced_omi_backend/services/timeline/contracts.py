@@ -49,6 +49,18 @@ class AgentAssertion(BaseModel):
     evidence_ids: list[str] = Field(min_length=1)
 
 
+class AgentAttribute(BaseModel):
+    """A strict-schema-safe episode attribute.
+
+    Codex structured outputs cannot represent an object with arbitrary keys, so the
+    agent emits key/value entries and Chronicle materializes them as an object when
+    publishing the episode.
+    """
+
+    key: str = Field(min_length=1, max_length=80)
+    value: str = Field(max_length=500)
+
+
 class AgentEpisode(BaseModel):
     kind: str = Field(min_length=1, max_length=80)
     title: str = Field(min_length=1, max_length=160)
@@ -59,7 +71,7 @@ class AgentEpisode(BaseModel):
     activity_mode: Literal["foreground", "background", "ambient", "idle"]
     confidence: float = Field(ge=0, le=1)
     entities: list[str] = Field(default_factory=list)
-    attributes: dict[str, Any] = Field(default_factory=dict)
+    attributes: list[AgentAttribute] = Field(default_factory=list)
     assertions: list[AgentAssertion] = Field(default_factory=list)
     evidence_ids: list[str] = Field(min_length=1)
     related_conversation_ids: list[str] = Field(default_factory=list)

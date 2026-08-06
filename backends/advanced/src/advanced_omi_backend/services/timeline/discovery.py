@@ -183,7 +183,7 @@ async def _publish(
                 confidence=episode.confidence,
                 activity_mode=episode.activity_mode,
                 entities=episode.entities,
-                attributes=episode.attributes,
+                attributes={item.key: item.value for item in episode.attributes},
                 assertions=[
                     TimelineAssertion(**assertion.model_dump())
                     for assertion in episode.assertions
