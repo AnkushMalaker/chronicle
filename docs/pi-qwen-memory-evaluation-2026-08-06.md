@@ -196,16 +196,17 @@ are checked. That live ingress change was intentionally not made during the mode
    invoked rather than treating a fallback note as primary success.
 3. Canary Pi retrieval on one non-critical vault and retain Direct as a fast diagnostic
    selector while watching cap warnings and unsupported-answer rate.
-4. Run Chronicle's setup wizard before deploying the Pi branch. Existing obsolete memory
-   keys are intentionally rejected, so Kraken will not silently switch to Direct or
-   another model.
+4. Run Chronicle's setup wizard before rebuilding/restarting Chronicle with Pi selected.
+   Existing obsolete memory keys are intentionally rejected, so Kraken will not silently
+   switch to Direct or another model.
 5. Roll out writes to one non-critical vault first and monitor latency, truncation, tool-error,
    recovery, and invariant metrics before broad ingestion.
 
 Kraken's live llama.cpp profile and private model routing were changed and restarted, with
-rollback copies of the prior configuration retained. The Chronicle Pi application branch
-was not deployed to the live backend; it remains in this worktree pending the wizard and
-normal image rebuild/rollout.
+rollback copies of the prior configuration retained. The Chronicle Pi application code is
+merged into `dev`, but the live backend/workers were not rebuilt or restarted as part of
+that merge. They continue running the prior process image until the wizard and deliberate
+image rebuild/rollout are performed.
 
 ## Cost and limitations
 
