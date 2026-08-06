@@ -25,8 +25,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 import yaml
-from chronicle_wearable.backend import send_button_event, stream_to_backend
 from bleak import BleakScanner
+from chronicle_wearable.backend import send_button_event, stream_to_backend
+from chronicle_wearable.service import install, kickstart, logs, status, uninstall
+from chronicle_wearable.wifi_join import get_current_wifi, join_wifi_ap
+from chronicle_wearable.wifi_receiver import WifiAudioReceiver
 from dotenv import load_dotenv
 from easy_audio_interfaces.filesystem import RollingFileSink
 from friend_lite import (
@@ -38,9 +41,6 @@ from friend_lite import (
 )
 from friend_lite.decoder import OmiOpusDecoder
 from friend_lite.wifi import WifiErrorCode
-from chronicle_wearable.service import install, kickstart, logs, status, uninstall
-from chronicle_wearable.wifi_join import get_current_wifi, join_wifi_ap
-from chronicle_wearable.wifi_receiver import WifiAudioReceiver
 from wyoming.audio import AudioChunk
 
 logging.basicConfig(

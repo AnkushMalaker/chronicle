@@ -18,8 +18,8 @@ import sys
 import time
 import wave
 
-from dotenv import load_dotenv
 from chronicle_client import acheck_credentials
+from dotenv import load_dotenv
 from relay_core import RelayConfig, run_device_session
 from service import install, kickstart, logs, status, uninstall
 

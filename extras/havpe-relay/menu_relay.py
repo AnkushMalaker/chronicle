@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import rumps
-from dotenv import load_dotenv
 from chronicle_client import acheck_credentials
+from dotenv import load_dotenv
 from relay_core import RelayConfig, run_device_session
 
 logger = logging.getLogger(__name__)

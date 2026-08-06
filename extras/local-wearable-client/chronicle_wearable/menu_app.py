@@ -14,7 +14,6 @@ from typing import Optional
 
 import rumps
 from chronicle_wearable.ble import AsyncioThread, BLEManager, SharedState
-from dotenv import load_dotenv, set_key
 from chronicle_wearable.cli import ENV_PATH
 from chronicle_wearable.screen_capture import (
     ScreenCaptureManager,
@@ -22,6 +21,7 @@ from chronicle_wearable.screen_capture import (
     request_permissions,
     screen_recording_ok,
 )
+from dotenv import load_dotenv, set_key
 
 logger = logging.getLogger(__name__)
 

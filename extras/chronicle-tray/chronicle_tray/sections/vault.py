@@ -15,8 +15,8 @@ from typing import Optional
 from urllib.parse import quote
 
 import httpx
-from chronicle_tray.sections import Section
 from chronicle_client import load_client_env
+from chronicle_tray.sections import Section
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMenu
