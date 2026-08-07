@@ -107,6 +107,11 @@ docs/research/
 # Project-wide guidance belongs in AGENTS.md / CLAUDE.md, which are checked in.
 CLAUDE.local.md
 
+# Operator notes about this particular fleet: which box is which, what each one
+# can and cannot do. Facts about hardware and corporate policy, not guidance for
+# any one tool, so they are kept out of CLAUDE.local.md.
+NOTES.local.md
+
 # Legacy per-service SSL (kept for cleanup)
 extras/speaker-recognition/ssl/*
 backends/advanced/ssl/*
