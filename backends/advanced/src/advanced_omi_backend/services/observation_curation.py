@@ -598,25 +598,30 @@ async def apply_curation_decision(
     action = decision["decision"]
 
     updates: dict[str, Any] = {"agent_reason": agent_reason}
-    # Promote the frame the agent chose to the observation's representative image, so
+    # The frame the agent chose becomes the observation's representative image, so
     # every downstream consumer — vault promotion, the 1280px source-media fetch, the
     # timeline thumbnail — uses the frame that was actually judged to depict this
     # session, not the one that scored highest before anyone looked at it.
+    #
+    # Applied in memory here because the promotion path below reads `item.media_data`,
+    # but written only on the branches that keep an image: discard and duplicate
+    # `$unset` these same paths, and Mongo rejects a `$set` and `$unset` of one path
+    # in a single update.
     selected = _selected_preview(item, decision)
+    selection_updates: dict[str, Any] = {}
     if selected is not None:
         item.media_data = selected["data"]
         item.media_content_type = selected["content_type"]
         item.media_filename = f"frame-{selected['frame_id']}.jpg"
-        updates.update(
-            {
-                "media_data": selected["data"],
-                "media_filename": item.media_filename,
-                "media_content_type": selected["content_type"],
-                "content_hash": hashlib.sha256(selected["data"]).hexdigest(),
-                "metadata.preview_frame_id": selected["frame_id"],
-                "metadata.thumbnail_available": True,
-            }
-        )
+        item.content_hash = hashlib.sha256(selected["data"]).hexdigest()
+        selection_updates = {
+            "media_data": item.media_data,
+            "media_filename": item.media_filename,
+            "media_content_type": item.media_content_type,
+            "content_hash": item.content_hash,
+            "metadata.preview_frame_id": selected["frame_id"],
+            "metadata.thumbnail_available": True,
+        }
     unset: tuple[str, ...] = ()
     if action == "duplicate":
         target_id = decision.get("duplicate_observation_id")
@@ -650,6 +655,7 @@ async def apply_curation_decision(
                 "content_hash",
             )
     else:
+        updates.update(selection_updates)
         retain_image = bool(decision.get("retain_image")) or action == "promote_image"
         immich_item_id = decision.get("immich_item_id") if retain_image else None
         if (

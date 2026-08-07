@@ -323,3 +323,38 @@ def test_only_a_shortlisted_frame_can_be_selected():
         observation_curation._selected_preview(item, {"selected_frame_id": None})
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_discarding_a_selected_frame_does_not_set_and_unset_one_path(monkeypatch):
+    """A discarded observation drops its image; it must not also write one.
+
+    Mongo rejects a `$set` and `$unset` of the same path in one update, so applying
+    the agent's frame choice unconditionally made every discard of a closed
+    observation fail with "Updating the path 'media_data' would create a conflict".
+    """
+
+    item = observation(
+        lifecycle="closed",
+        media_previews=[
+            {"frame_id": 7, "data": b"jpeg", "content_type": "image/jpeg"},
+        ],
+        curation="curating",
+    )
+    seen: list[tuple[dict, tuple]] = []
+
+    async def capture(target, fields, *, unset=()):
+        seen.append((fields, unset))
+        return True
+
+    monkeypatch.setattr(observation_curation, "_apply_curation_fields", capture)
+
+    await apply_curation_decision(
+        item,
+        {"decision": "discard", "reason": "Routine", "selected_frame_id": 7},
+        observation_revision(item),
+    )
+
+    fields, unset = seen[-1]
+    assert "media_data" in unset
+    assert not set(fields) & set(unset)
