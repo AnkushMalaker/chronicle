@@ -190,7 +190,14 @@ async def process_episode_thumbnails() -> dict[str, int]:
         return {"requested": 0, "chosen": 0, "unavailable": 0}
     episodes = (
         await TimelineEpisode.find(
-            {"run_id": {"$in": run_ids}, "thumbnail_state": {"$in": ["", "requested"]}}
+            {
+                "run_id": {"$in": run_ids},
+                # "not terminal", not an enumeration of the live states: an episode
+                # written before this field existed has no `thumbnail_state` at all,
+                # and `$in` skips a missing field while `$nin` matches it. Beanie
+                # supplies the "" default on read, so the model hides the difference.
+                "thumbnail_state": {"$nin": ["chosen", "unavailable"]},
+            }
         )
         .sort("-started_at")
         .limit(_EPISODE_BATCH)
