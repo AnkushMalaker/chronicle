@@ -2,12 +2,14 @@
 Conversation controller for handling conversation-related business logic.
 """
 
+import json
 import logging
 import re
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from fastapi.responses import JSONResponse
 
@@ -377,10 +379,15 @@ async def get_conversations(
     Results are paginated with ``limit``/``offset``.
     """
     try:
-        user_filter = {} if user.is_superuser else {"user_id": str(user.user_id)}
-        # Continuous ScreenPipe artifacts are evidence for semantic episodes, not
-        # user-facing conversations. The raw device-input API remains available.
-        user_filter["external_source_type"] = {"$ne": "screenpipe"}
+        user_filter: dict[str, Any] = (
+            {} if user.is_superuser else {"user_id": str(user.user_id)}
+        )
+        # Continuous capture is evidence for semantic episodes, not a user-facing
+        # conversation. Fence on purpose rather than on transport: a ScreenPipe
+        # recording the timeline agent judged conversational — a standup, a 1:1 — is
+        # promoted to data_purpose "conversation" and belongs here. The raw
+        # device-input API remains available for the rest.
+        user_filter["data_purpose"] = {"$ne": "capture_evidence"}
 
         if starred_only:
             user_filter["starred"] = True
@@ -549,7 +556,9 @@ async def _regex_search_conversations(
 
     match_filter: dict = {
         "deleted": False,
-        "external_source_type": {"$ne": "screenpipe"},
+        # See get_conversations: purpose, not transport. Promoted ScreenPipe meetings
+        # are searchable; ambient capture evidence is not.
+        "data_purpose": {"$ne": "capture_evidence"},
     }
     if not user.is_superuser:
         match_filter["user_id"] = str(user.user_id)
@@ -1676,3 +1685,116 @@ def _memory_audit_to_dict(entry) -> dict:
         # before content was retained and for note-less delete_all operations.
         "has_diff": entry.after_text is not None or entry.operation == "delete",
     }
+
+
+def _needs_speaker_recognition(conversation: Conversation) -> bool:
+    """Whether the speaker step never ran for this conversation's active transcript.
+
+    ``speaker_recognition`` metadata is written whenever the job runs, including when it
+    identifies nobody. Its absence — not an empty ``identified_speakers`` — is what marks
+    a transcript the step never saw. Re-running for a genuine zero-identification result
+    would just burn GPU time on the same answer.
+    """
+
+    version = conversation.active_transcript
+    if version is None:
+        return False
+    if "speaker_recognition" in (version.metadata or {}):
+        return False
+    # Diarization needs word timings or existing segments to attribute. A transcript
+    # with neither can never satisfy this backfill, so excluding it here keeps a
+    # permanently un-completable row out of every future batch.
+    return bool(version.words or version.segments)
+
+
+async def backfill_speaker_recognition(
+    user: User,
+    external_source_type: str | None = None,
+    limit: int = 25,
+    dry_run: bool = False,
+) -> JSONResponse:
+    """Re-run speaker identification over conversations that never got it.
+
+    Continuous ScreenPipe capture was ingested with the whole post-conversation chain
+    skipped, so its transcripts carry only anonymous provider turns ("Speaker 0"). The
+    timeline agent reads those, which is why it can describe an activity but not name
+    who was present. This backfills the step for audio already on disk.
+
+    Reuses the single-conversation path so validation, versioning, and the job chain
+    behave identically to a manual reprocess. Memory and title/summary jobs are still
+    enqueued by that chain but no-op on ``memory_excluded`` conversations.
+
+    ``limit`` is deliberately small by default: speaker jobs share
+    ``transcription_queue`` with live capture, so draining 150+ at once would delay
+    real-time work. Call repeatedly to work through a backlog.
+    """
+
+    query: dict[str, Any] = {
+        "deleted": {"$ne": True},
+        "audio_chunks_count": {"$gt": 0},
+    }
+    if external_source_type:
+        query["external_source_type"] = external_source_type
+    if not user.is_superuser:
+        query["user_id"] = str(user.user_id)
+
+    # Whether the step ran is recorded in the *active transcript version's* metadata,
+    # not on the conversation, so eligibility cannot be expressed as a Mongo predicate
+    # over a top-level field. Filter in Python against the active version.
+    eligible = [
+        conversation
+        for conversation in await Conversation.find(query).sort("-created_at").to_list()
+        if _needs_speaker_recognition(conversation)
+    ]
+    remaining = len(eligible)
+    candidates = eligible[: max(0, limit)]
+
+    if dry_run:
+        return JSONResponse(
+            content={
+                "dry_run": True,
+                "eligible_total": remaining,
+                "would_enqueue": [c.conversation_id for c in candidates],
+            }
+        )
+
+    started: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for conversation in candidates:
+        result = await reprocess_speakers(conversation.conversation_id, "active", user)
+        if getattr(result, "status_code", 200) < 400:
+            started.append(conversation.conversation_id)
+            continue
+        # A transcript with no words or segments cannot be re-diarized. That is a
+        # property of the recording, not a failure of the backfill — report it and
+        # keep going rather than aborting the batch.
+        skipped.append(
+            {
+                "conversation_id": conversation.conversation_id,
+                "reason": _response_error(result),
+            }
+        )
+
+    logger.info(
+        "🎙️ Speaker backfill: started=%d skipped=%d remaining_after=%d",
+        len(started),
+        len(skipped),
+        max(0, remaining - len(started)),
+    )
+    return JSONResponse(
+        content={
+            "started": started,
+            "skipped": skipped,
+            "eligible_total": remaining,
+            "remaining_after": max(0, remaining - len(started)),
+        }
+    )
+
+
+def _response_error(result: Any) -> str:
+    """Best-effort error text from a JSONResponse returned by the reprocess path."""
+
+    try:
+        return json.loads(result.body).get("error", "unknown error")
+    except Exception:  # noqa: BLE001 - diagnostic only
+        return "unknown error"

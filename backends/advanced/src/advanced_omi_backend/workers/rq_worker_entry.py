@@ -34,6 +34,8 @@ def main():
     """Start RQ worker with proper logging configuration."""
     # Initialize OTEL/Galileo if configured (patches OpenAI before any job imports)
     try:
+        # Imported here, not at module level: this must run before any
+        # application module is imported (see the comment above).
         from advanced_omi_backend.observability.otel_setup import init_otel
 
         init_otel()

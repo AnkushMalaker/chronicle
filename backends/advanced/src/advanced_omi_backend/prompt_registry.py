@@ -8,6 +8,8 @@ unavailable. Admin prompt editing is handled via the LangFuse web UI.
 import logging
 from typing import Dict, List, Optional
 
+from langfuse import Langfuse
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,7 +40,6 @@ class PromptRegistry:
         """Lazy-init LangFuse client (uses LANGFUSE_* env vars)."""
         if self._langfuse is None:
             try:
-                from langfuse import Langfuse
 
                 self._langfuse = Langfuse()
             except Exception as e:

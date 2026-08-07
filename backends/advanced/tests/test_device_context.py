@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from advanced_omi_backend.routers.modules.device_input_routes import ActivityItem
+from advanced_omi_backend.services import device_context
 from advanced_omi_backend.services.device_context import (
     _expired_conversation_ids,
     select_context_items,
@@ -292,8 +293,6 @@ class FakeFind:
 
 
 def patch_conversations(monkeypatch, rows):
-    from advanced_omi_backend.services import device_context
-
     def find(query):
         wanted = query["conversation_id"]["$in"]
         return FakeFind([row for row in rows if row.conversation_id in wanted])

@@ -55,7 +55,12 @@ async def upload_and_process_audio_files(
     data_purpose: str | None = None,
     memory_excluded: bool | None = None,
     memory_exclusion_reason: str | None = None,
-    skip_post_processing: bool = False,
+    # Continuous capture wants speaker identification (so the timeline agent learns who
+    # spoke) but not per-session memory extraction or an LLM-generated title. The
+    # terminal event-dispatch job always runs — it owns end_reason/completed_at/status,
+    # and it already declines to fire plugins for memory-excluded conversations.
+    skip_memory_extraction: bool = False,
+    skip_title_summary: bool = False,
 ) -> dict:
     """
     Upload audio files and process them directly.
@@ -265,22 +270,15 @@ async def upload_and_process_audio_files(
                     )
 
                 # Enqueue post-conversation processing job chain (depends on transcription)
-                if skip_post_processing:
-                    job_ids = {
-                        "speaker_recognition": None,
-                        "memory": None,
-                        "title_summary": None,
-                        "event_dispatch": None,
-                    }
-                else:
-                    job_ids = start_post_conversation_jobs(
-                        conversation_id=conversation_id,
-                        user_id=user.user_id,
-                        transcript_version_id=version_id,
-                        depends_on_job=transcription_job,
-                        client_id=client_id,
-                        skip_memory_extraction=annotation_only,
-                    )
+                job_ids = start_post_conversation_jobs(
+                    conversation_id=conversation_id,
+                    user_id=user.user_id,
+                    transcript_version_id=version_id,
+                    depends_on_job=transcription_job,
+                    client_id=client_id,
+                    skip_memory_extraction=annotation_only or skip_memory_extraction,
+                    skip_title_summary=skip_title_summary,
+                )
 
                 file_result = {
                     "filename": filename,

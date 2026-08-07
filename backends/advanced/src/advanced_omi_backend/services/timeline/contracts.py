@@ -67,6 +67,11 @@ class AgentEpisode(BaseModel):
     summary: str = Field(max_length=1200)
     started_at: datetime
     ended_at: datetime
+    # Factual, not a memory-worthiness judgement: did people actually converse here.
+    # It is what promotes capture-evidence recordings back into the user-facing
+    # Recordings list and search. What is worth *remembering* stays the vault write
+    # agent's decision — see services/timeline/memory.py.
+    conversational: bool = False
     salience: Literal["background", "routine", "notable", "highlight"]
     activity_mode: Literal["foreground", "background", "ambient", "idle"]
     confidence: float = Field(ge=0, le=1)
@@ -89,11 +94,20 @@ class UnassignedInterval(BaseModel):
     started_at: datetime
     ended_at: datetime
     reason: str
+    # Derived from the manifest after parsing, never from the agent. "Nothing was
+    # captured" and "capture exists but no episode explains it" are different facts,
+    # and agent-authored `reason` prose conflates them freely: one observed run
+    # labelled a three-hour recording blackout "no evidence supports a coherent
+    # episode". Only the second cause is a segmentation deficiency.
+    cause: Literal["no_capture", "unexplained"] = "unexplained"
 
 
 class TimelineAgentResult(BaseModel):
     episodes: list[AgentEpisode]
     unassigned_intervals: list[UnassignedInterval] = Field(default_factory=list)
+    # Filled by the executor after parsing, not by the model: token counts and quota
+    # headroom for the run. Not part of OUTPUT_SCHEMA.
+    usage: dict[str, Any] = Field(default_factory=dict)
 
 
 class TimelineEpisodeExecutor(Protocol):
@@ -102,4 +116,6 @@ class TimelineEpisodeExecutor(Protocol):
         workspace: Path,
         manifest: TimelineEvidenceManifest,
         existing_episodes: list[dict[str, Any]],
+        pinned_episodes: list[dict[str, Any]] | None = None,
+        reasoning_effort: str | None = None,
     ) -> TimelineAgentResult: ...

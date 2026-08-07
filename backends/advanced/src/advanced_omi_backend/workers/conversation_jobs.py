@@ -47,6 +47,9 @@ from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
 )
+from advanced_omi_backend.services.device_context import (
+    request_conversation_context_jobs,
+)
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.plugin_service import (
     dispatch_plugin_event,
@@ -2149,9 +2152,6 @@ async def dispatch_conversation_complete_event_job(
     # Context collection is purpose-bound: only after a conversation has settled
     # do we ask connected ScreenPipe companions for this time range.
     try:
-        from advanced_omi_backend.services.device_context import (
-            request_conversation_context_jobs,
-        )
 
         await request_conversation_context_jobs(conversation)
     except Exception as exc:

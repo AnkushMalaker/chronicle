@@ -20,6 +20,7 @@ import websockets
 
 from advanced_omi_backend.config_loader import get_backend_config
 from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.services.plugin_service import get_plugin_router
 
@@ -301,7 +302,6 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
                     "audio_sha256": hashlib.sha256(audio_data).hexdigest(),
                     "request_sha256": hashlib.sha256(fingerprint.encode()).hexdigest(),
                 }
-                from advanced_omi_backend.models.conversation import Conversation
 
                 cache = Conversation.get_pymongo_collection().database[
                     "transcription_response_cache"

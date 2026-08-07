@@ -1,10 +1,16 @@
+import wave
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import numpy as np
+
+import advanced_omi_backend.utils.vad_analysis as vad_analysis
 from advanced_omi_backend.services.device_audio_ingest import (
+    _profile_wav,
     audio_stream_key,
     group_audio_sessions,
 )
+from advanced_omi_backend.utils.vad_analysis import SpeechDetectionReason
 
 
 def item(
@@ -144,14 +150,6 @@ def test_mongo_naive_and_aware_timestamps_group_together():
 
 
 def test_profile_wav_reads_wav_and_reports_vad_verdict(tmp_path, monkeypatch):
-    import wave
-
-    import numpy as np
-
-    import advanced_omi_backend.utils.vad_analysis as vad_analysis
-    from advanced_omi_backend.services.device_audio_ingest import _profile_wav
-    from advanced_omi_backend.utils.vad_analysis import SpeechDetectionReason
-
     path = tmp_path / "session.wav"
     with wave.open(str(path), "wb") as handle:
         handle.setnchannels(1)
@@ -188,9 +186,6 @@ def test_profile_wav_reads_wav_and_reports_vad_verdict(tmp_path, monkeypatch):
 
 
 def test_profile_wav_reports_decode_failure(tmp_path):
-    from advanced_omi_backend.services.device_audio_ingest import _profile_wav
-    from advanced_omi_backend.utils.vad_analysis import SpeechDetectionReason
-
     missing = tmp_path / "missing.wav"
     result = _profile_wav(missing)
 

@@ -19,7 +19,11 @@ from uuid import uuid4
 from motor.motor_asyncio import AsyncIOMotorCollection
 
 from advanced_omi_backend.database import get_database
-from advanced_omi_backend.llm_client import async_chat_with_tools, get_llm_client
+from advanced_omi_backend.llm_client import (
+    async_chat_with_tools,
+    async_chat_with_tools_stream,
+    get_llm_client,
+)
 from advanced_omi_backend.models.user import get_user_by_id
 from advanced_omi_backend.observability.otel_setup import (
     get_tracer,
@@ -30,7 +34,10 @@ from advanced_omi_backend.observability.otel_setup import (
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.services.memory import get_memory_service
-from advanced_omi_backend.services.memory.base import MemoryEntry
+from advanced_omi_backend.services.memory.base import (
+    MemoryEntry,
+    VaultSearchUnavailable,
+)
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
 
 logger = logging.getLogger(__name__)
@@ -66,6 +73,20 @@ MEMORY_SEARCH_TOOL = {
 }
 
 
+def _status_event(stage: str, **fields) -> Dict:
+    """Build one progress event describing what the turn is currently doing.
+
+    A turn on a local model can run for minutes across several tool rounds, and
+    the reply itself is the last thing to arrive. These events are what the UI
+    shows in the meantime so the wait is never an unexplained blank screen.
+    """
+    return {
+        "type": "status",
+        "data": {"stage": stage, **fields},
+        "timestamp": time.time(),
+    }
+
+
 def _format_memory_tool_result(memories: List["MemoryEntry"]) -> Dict:
     """Shape the search_memories result for the chat LLM.
 
@@ -91,6 +112,26 @@ def _format_memory_tool_result(memories: List["MemoryEntry"]) -> Dict:
     return {
         "answer": None,
         "notes": [{"path": m.id, "excerpt": m.content} for m in memories if m.content],
+    }
+
+
+def _failed_memory_tool_result(reason: str) -> Dict:
+    """Shape a *failed* search so the model cannot read it as an empty vault.
+
+    A bare empty result is ambiguous, and the model resolves that ambiguity
+    confidently and wrongly — telling the user their vault holds nothing when in
+    fact retrieval broke. The instruction is explicit because the distinction
+    matters more than brevity here.
+    """
+    return {
+        "error": "vault_search_failed",
+        "detail": reason,
+        "instruction": (
+            "The vault search did not run to completion, so it is UNKNOWN whether "
+            "the vault contains anything relevant. Tell the user the search "
+            "failed and that they may retry. Do NOT state or imply that the "
+            "vault is empty, or that no information about the subject exists."
+        ),
     }
 
 
@@ -354,7 +395,12 @@ class ChatService:
     async def get_relevant_memories(
         self, query: str, user_id: str, limit: Optional[int] = None
     ) -> List[MemoryEntry]:
-        """Get relevant memories for the user's query."""
+        """Get relevant memories for the user's query.
+
+        Raises ``VaultSearchUnavailable`` when the search could not run. That must
+        not be swallowed into an empty list: the caller has to tell the model the
+        search failed, otherwise the model reports an empty vault instead.
+        """
         try:
             memory_limit = limit if limit is not None else MAX_MEMORY_CONTEXT
             memories = await self.memory_service.search_memories(
@@ -364,9 +410,11 @@ class ChatService:
                 f"Retrieved {len(memories)} relevant memories for query: {query[:50]}..."
             )
             return memories
+        except VaultSearchUnavailable:
+            raise
         except Exception as e:
             logger.error(f"Failed to retrieve memories for user {user_id}: {e}")
-            return []
+            raise VaultSearchUnavailable(str(e)) from e
 
     async def _get_tool_mode_system_prompt(self) -> str:
         """Get system prompt for tool-based memory mode."""
@@ -436,23 +484,55 @@ class ChatService:
             all_memory_ids = []
 
             # Tool-calling loop
-            for _ in range(MAX_TOOL_ROUNDS):
-                response = await async_chat_with_tools(
+            for round_index in range(MAX_TOOL_ROUNDS):
+                yield _status_event(
+                    "thinking", round=round_index + 1, max_rounds=MAX_TOOL_ROUNDS
+                )
+
+                # Every round streams, because whether a round produces a tool call
+                # or the final prose is only known once the provider has answered.
+                streamed_text = ""
+                streamed_any = False
+                terminal: Dict = {}
+                async for chunk in async_chat_with_tools_stream(
                     messages,
                     tools=[MEMORY_SEARCH_TOOL],
                     operation="chat",
-                )
-                choice = response.choices[0]
+                ):
+                    if chunk["type"] == "content":
+                        if not streamed_any:
+                            yield _status_event("writing")
+                        streamed_text += chunk["text"]
+                        streamed_any = True
+                        yield {
+                            "type": "token",
+                            "data": streamed_text,
+                            "timestamp": time.time(),
+                        }
+                    else:
+                        terminal = chunk
 
-                if choice.finish_reason == "tool_calls" or choice.message.tool_calls:
-                    # Append assistant message with tool calls
-                    assistant_msg = choice.message.model_dump()
-                    messages.append(assistant_msg)
+                tool_calls = terminal.get("tool_calls") or []
 
-                    for tool_call in choice.message.tool_calls:
-                        fn_name = tool_call.function.name
+                if tool_calls:
+                    # A tool round that also emitted prose was narrating its intent,
+                    # not answering. Retract it so the partial text cannot be mistaken
+                    # for the reply while the search runs.
+                    if streamed_any:
+                        yield {"type": "token_reset", "timestamp": time.time()}
+
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": terminal.get("content") or None,
+                            "tool_calls": tool_calls,
+                        }
+                    )
+
+                    for tool_call in tool_calls:
+                        fn_name = tool_call["function"]["name"]
                         try:
-                            fn_args = json.loads(tool_call.function.arguments)
+                            fn_args = json.loads(tool_call["function"]["arguments"])
                         except json.JSONDecodeError:
                             fn_args = {}
 
@@ -462,17 +542,42 @@ class ChatService:
                             if memory_limit is not None:
                                 limit = min(limit, memory_limit)
 
-                            memories = await self.get_relevant_memories(
-                                query, user_id, limit=limit
-                            )
-                            memory_ids = [m.id for m in memories if m.id]
-                            all_memory_ids.extend(memory_ids)
+                            yield _status_event("searching", query=query)
 
-                            tool_result = _format_memory_tool_result(memories)
+                            try:
+                                memories = await self.get_relevant_memories(
+                                    query, user_id, limit=limit
+                                )
+                            except VaultSearchUnavailable as search_error:
+                                # Say the search broke. Reporting this as zero
+                                # results is what makes the model announce that
+                                # the vault is empty when it is not.
+                                logger.warning(
+                                    f"Vault search unavailable for session "
+                                    f"{session_id}: {search_error}"
+                                )
+                                tool_result = _failed_memory_tool_result(
+                                    str(search_error)
+                                )
+                                yield _status_event(
+                                    "searched", query=query, failed=True
+                                )
+                            else:
+                                memory_ids = [m.id for m in memories if m.id]
+                                all_memory_ids.extend(memory_ids)
+
+                                tool_result = _format_memory_tool_result(memories)
+                                yield _status_event(
+                                    "searched",
+                                    query=query,
+                                    note_count=len(tool_result.get("sources") or []),
+                                    found=bool(tool_result.get("answer")),
+                                )
+
                             messages.append(
                                 {
                                     "role": "tool",
-                                    "tool_call_id": tool_call.id,
+                                    "tool_call_id": tool_call["id"],
                                     "content": json.dumps(tool_result, default=str),
                                 }
                             )
@@ -480,7 +585,7 @@ class ChatService:
                             messages.append(
                                 {
                                     "role": "tool",
-                                    "tool_call_id": tool_call.id,
+                                    "tool_call_id": tool_call["id"],
                                     "content": json.dumps(
                                         {"error": f"Unknown tool: {fn_name}"}
                                     ),
@@ -489,7 +594,7 @@ class ChatService:
                     continue
 
                 # Plain text response — done
-                response_content = (choice.message.content or "").strip()
+                response_content = (terminal.get("content") or "").strip()
 
                 # Deduplicate memory IDs
                 unique_memory_ids = list(dict.fromkeys(all_memory_ids))
@@ -503,11 +608,9 @@ class ChatService:
                     "timestamp": time.time(),
                 }
 
-                yield {
-                    "type": "token",
-                    "data": response_content,
-                    "timestamp": time.time(),
-                }
+                # No terminal token event: the round already streamed its text.
+                # Re-emitting it here would duplicate the reply for any consumer
+                # that appends rather than replaces.
 
                 # Save assistant message
                 assistant_message = ChatMessage(

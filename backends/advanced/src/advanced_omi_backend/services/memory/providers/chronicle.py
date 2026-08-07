@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
 from ..audit import record_vault_change
-from ..base import MemoryEntry, MemoryServiceBase
+from ..base import MemoryEntry, MemoryServiceBase, VaultSearchUnavailable
 from ..config import MemoryConfig
 from ..conversation_note import (
     ConversationNoteError,
@@ -37,6 +37,7 @@ from ..telemetry import (
 )
 from ..vault_manager import ConvDocVaultManager
 from ..vault_scaffold import is_scaffold_note, seed_vault_scaffold
+from ..vault_verify import render_findings, verify_vault_changes
 
 memory_logger = logging.getLogger("memory_service")
 
@@ -83,10 +84,12 @@ class MemoryService(MemoryServiceBase):
         ).lower()
         write_class = self._write_agent_class(write_backend)
         if write_backend == "pi":
+            # Lazy: ..agent imports llm_client, which imports this package's config back.
             from ..agent.pi_agent import validate_pi_executor_config
 
             validate_pi_executor_config("memory_write")
         elif write_backend == "codex":
+            # Lazy: ..agent imports llm_client, which imports this package's config back.
             from ..agent.codex_agent import validate_codex_executor_config
 
             validate_codex_executor_config()
@@ -96,12 +99,14 @@ class MemoryService(MemoryServiceBase):
             recovery_backend = recovery_backend.lower()
             recovery_class = self._write_agent_class(recovery_backend)
             if recovery_backend == "pi":
+                # Lazy: ..agent imports llm_client, which imports this package's config back.
                 from ..agent.pi_agent import validate_pi_executor_config
 
                 validate_pi_executor_config(
                     "memory_write", force_fallback=recovery_class is write_class
                 )
             elif recovery_backend == "codex":
+                # Lazy: ..agent imports llm_client, which imports this package's config back.
                 from ..agent.codex_agent import validate_codex_executor_config
 
                 validate_codex_executor_config()
@@ -110,6 +115,7 @@ class MemoryService(MemoryServiceBase):
             getattr(self.config, "search_agent_backend", "direct") or "direct"
         ).lower()
         if search_backend == "pi":
+            # Lazy: ..agent imports llm_client, which imports this package's config back.
             from ..agent.pi_agent import validate_pi_executor_config
 
             validate_pi_executor_config("memory_search")
@@ -133,6 +139,7 @@ class MemoryService(MemoryServiceBase):
         if name == "direct":
             return MemoryAgent
         if name == "codex":
+            # Lazy: ..agent imports llm_client, which imports this package's config back.
             from ..agent.codex_agent import CodexMemoryAgent, codex_executor_available
 
             available, detail = codex_executor_available()
@@ -142,6 +149,7 @@ class MemoryService(MemoryServiceBase):
                 "memory write backend 'codex' is unavailable: " f"{detail}"
             )
         if name == "pi":
+            # Lazy: ..agent imports llm_client, which imports this package's config back.
             from ..agent.pi_agent import PiMemoryAgent, pi_executor_available
 
             available, detail = pi_executor_available()
@@ -314,6 +322,288 @@ class MemoryService(MemoryServiceBase):
         )
         return True, result.touched
 
+    # =========================================================================
+    # ADD DAY MEMORY
+    # =========================================================================
+
+    async def add_day_memory(
+        self,
+        day_digest: str,
+        local_date: str,
+        user_id: str,
+        *,
+        source_date: Optional[str] = None,
+    ) -> Tuple[bool, List[str]]:
+        """Record one settled local day of timeline episodes into the vault.
+
+        The conversation path (``add_memory``) is the wrong unit for capture evidence:
+        ScreenPipe audio is cut into bounded compute spans, so one meeting can span
+        several recordings. An episode already carries the right bounds, so the day of
+        episodes — not the recordings under it — is what gets remembered.
+
+        The record lands in ``Daily/<local_date>.md`` rather than under
+        ``Conversations/``, which stays one note per conversation. Durable
+        People/Topic/Category edits are unchanged.
+        """
+        write_backend = (
+            getattr(self.config, "write_agent_backend", "direct") or "direct"
+        ).lower()
+        recovery_backend = getattr(self.config, "write_recovery_backend", None)
+        with memory_span(
+            "memory_write_day",
+            attributes={
+                "openinference.span.kind": "CHAIN",
+                "gen_ai.operation.name": "invoke_agent",
+                "gen_ai.conversation.id": local_date,
+                "session.id": local_date,
+                "langfuse.session.id": local_date,
+                "chronicle.user_id": str(user_id),
+                "langfuse.user.id": str(user_id),
+                "chronicle.pipeline.stage": "memory_write",
+                "chronicle.memory.operation": "write_day",
+                "chronicle.memory.local_date": local_date,
+                "chronicle.memory.primary_backend": write_backend,
+                "chronicle.memory.recovery_backend": recovery_backend or "none",
+                "chronicle.memory.transcript_chars": len(day_digest or ""),
+            },
+        ) as span:
+            set_observation_io(
+                span,
+                input={
+                    "local_date": local_date,
+                    "transcript": text_payload(day_digest),
+                },
+            )
+            await self._ensure_initialized()
+            success, touched = await self._add_day_memory_agent(
+                day_digest,
+                local_date,
+                user_id,
+                source_date=source_date,
+            )
+            set_safe_span_attributes(
+                span,
+                {
+                    "chronicle.memory.success": success,
+                    "chronicle.memory.touched_count": len(touched),
+                },
+            )
+            set_observation_io(
+                span,
+                output={"success": success, "touched_count": len(touched)},
+            )
+            return success, touched
+
+    async def _add_day_memory_agent(
+        self,
+        day_digest: str,
+        local_date: str,
+        user_id: str,
+        *,
+        source_date: Optional[str] = None,
+    ) -> Tuple[bool, List[str]]:
+        """Write path for a settled day, with one recovery attempt.
+
+        Deliberately simpler than ``_run_agent_with_note_guarantee``: that guarantee is
+        built around a conversation note whose id the caller owns, and its
+        source-preserving fallback writes a ``Conversations/`` note that would be wrong
+        here. A day has no such deterministic fallback — an unwritten day stays
+        unwritten, and the caller records it as failed so it can be retried.
+        """
+        # Lazy: ..agent imports llm_client, which imports this package's config back.
+        from ..agent.memory_agent import day_note_path
+
+        if not day_digest or len(day_digest.strip()) < 10:
+            memory_logger.info("Skipping empty day digest for %s", local_date)
+            return True, []
+
+        t0 = time.perf_counter()
+        trusted_date = source_date or datetime.now(timezone.utc).isoformat()
+        user_root = self.vault.user_root(user_id)
+        seed_vault_scaffold(user_root)  # idempotent: .base + hub notes
+        existing_before = self._vault_note_set(user_root)
+        day_rel = day_note_path(local_date)
+
+        def day_note_written(agent_result) -> bool:
+            """Did *this run* record the day note — not merely: does the file exist.
+
+            Existence proves nothing here. Every date already has a ``Daily/<date>.md``
+            from the retired per-observation curation, so an existence check passes for
+            a run that edited some People notes and never wrote the day at all. Two of
+            four backfilled days reported success that way before this was tightened.
+            """
+
+            return agent_result is not None and day_rel in (agent_result.touched or [])
+
+        def deliberate_no_op(agent_result) -> bool:
+            """Did the agent finish cleanly and decide nothing needed recording.
+
+            A distinct outcome from failing to write. A day whose note already holds
+            the episodes — every date carries 65-177 entries from the retired
+            per-observation curation — is *correctly* left alone by an agent told not
+            to duplicate what a note already has. Treating that as incomplete ran the
+            recovery backend for nothing and then reported the day failed, so it was
+            retried until it settled as skipped: two full agent runs per attempt to
+            reach a conclusion the first run had already reached on purpose.
+            """
+
+            return (
+                agent_result is not None
+                and not agent_result.truncated
+                and not agent_result.stalled
+                and not agent_result.errors
+                and bool((agent_result.summary or "").strip())
+                and not agent_result.touched
+            )
+
+        result = None
+        for attempt, guidance in (
+            ("primary", ""),
+            (
+                "recovery",
+                "RECOVERY REQUIREMENT: the previous attempt did not finish recording "
+                f"this day. You MUST write the day note at exactly "
+                f"{day_note_path(local_date)}. Inspect what is already there and add "
+                "only what is missing; do not duplicate facts already recorded.",
+            ),
+        ):
+            agent_class = (
+                self._write_agent_class()
+                if attempt == "primary"
+                else self._recovery_agent_class()
+            )
+            if agent_class is None:
+                break
+            with memory_attempt(attempt):
+                try:
+                    result = await agent_class(user_root).run(
+                        day_digest,
+                        local_date,
+                        date=trusted_date,
+                        guidance=guidance,
+                        record="day",
+                    )
+                except Exception as exc:  # noqa: BLE001 - recovery/caller handles it
+                    diagnostic = _safe_exception_diagnostic(exc)
+                    memory_logger.error(
+                        "Day memory %s backend failed for %s (%s)",
+                        attempt,
+                        local_date,
+                        diagnostic,
+                    )
+                    result = None
+                    continue
+            if (day_note_written(result) or deliberate_no_op(result)) and not (
+                result.truncated or result.stalled
+            ):
+                # A deliberate no-op ends the run here: there is nothing for the
+                # recovery backend to recover.
+                break
+
+        # The agent is told to call verify_vault itself, but correctness must not depend
+        # on it choosing to. Re-run the same checks here and give anything left back as
+        # guidance for one repair pass — the findings name the note and the fix.
+        findings = verify_vault_changes(user_root, existing_before)
+        repair_class = self._write_agent_class()
+        if findings and result is not None and repair_class is not None:
+            memory_logger.info(
+                "🧹 Day %s: %d vault problem(s) left after the write; repairing",
+                local_date,
+                len(findings),
+            )
+            with memory_attempt("verify_repair"):
+                try:
+                    repair = await repair_class(user_root).run(
+                        day_digest,
+                        local_date,
+                        date=trusted_date,
+                        guidance=(
+                            "REPAIR ONLY. The day is already recorded; do not add new "
+                            "content. Fix exactly these problems and nothing else, then "
+                            f"call verify_vault to confirm:\n{render_findings(findings)}"
+                        ),
+                        record="day",
+                    )
+                except Exception as exc:  # noqa: BLE001 - a failed repair is not fatal
+                    memory_logger.warning(
+                        "Day %s verify repair failed (%s)",
+                        local_date,
+                        _safe_exception_diagnostic(exc),
+                    )
+                else:
+                    result.touched = list(
+                        dict.fromkeys([*result.touched, *repair.touched])
+                    )
+            findings = verify_vault_changes(user_root, existing_before)
+        if findings:
+            # Not fatal: the day *is* recorded, and failing here would burn the day's
+            # attempt budget and eventually skip it entirely over a schema nit. Loud
+            # instead, so a rule the model cannot satisfy is visible rather than silent.
+            memory_logger.warning(
+                "🧹 Day %s recorded with %d unresolved vault problem(s): %s",
+                local_date,
+                len(findings),
+                "; ".join(f"{f.path} [{f.rule}]" for f in findings),
+            )
+
+        touched = list(result.touched) if result else []
+        await self._record_agent_touches(
+            user_id,
+            local_date,
+            user_root,
+            touched,
+            existing_before,
+            removed=result.removed if result else None,
+        )
+        if result is None:
+            # Every backend raised. The note-exists check below cannot catch this: a
+            # Daily note for this date may already exist from an earlier write, so its
+            # presence says nothing about whether *this* run recorded anything. Without
+            # this the day latches as `written` with an empty vault and is never retried.
+            memory_logger.error(
+                "❌ add_day_memory %s: no write backend completed (%.2fs)",
+                local_date,
+                time.perf_counter() - t0,
+            )
+            return False, touched
+        if deliberate_no_op(result):
+            memory_logger.info(
+                "🗓️ add_day_memory %s: agent recorded nothing — it judged the day "
+                "already covered (%.2fs): %s",
+                local_date,
+                time.perf_counter() - t0,
+                (result.summary or "").strip()[:300],
+            )
+            return True, []
+        if not day_note_written(result):
+            memory_logger.error(
+                "❌ add_day_memory %s: the day note %s was not written this run "
+                "(touched %d other note(s)) (%.2fs)",
+                local_date,
+                day_rel,
+                len(touched),
+                time.perf_counter() - t0,
+            )
+            return False, touched
+        if result is not None and (result.truncated or result.stalled):
+            memory_logger.error(
+                "❌ add_day_memory %s: partial mutations preserved, but no agent "
+                "completed deliberately (%.2fs)",
+                local_date,
+                time.perf_counter() - t0,
+            )
+            return False, touched
+        memory_logger.info(
+            "✅ add_day_memory %s: touched=%d rounds=%d tools=%d errors=%d (%.2fs)",
+            local_date,
+            len(touched),
+            result.rounds if result else 0,
+            result.tool_calls if result else 0,
+            len(result.errors) if result else 0,
+            time.perf_counter() - t0,
+        )
+        return True, touched
+
     async def _run_agent_with_note_guarantee(
         self,
         agent_class,
@@ -445,6 +735,7 @@ class MemoryService(MemoryServiceBase):
         # failing the whole memory job with nothing recorded.
         with memory_attempt("recovery"):
             if recovery_class is None:
+                # Lazy: ..agent imports llm_client, which imports this package's config back.
                 from ..agent.memory_agent import MemoryAgentResult
 
                 recovery = MemoryAgentResult(
@@ -809,16 +1100,21 @@ class MemoryService(MemoryServiceBase):
         one MemoryEntry per note the agent read (capped), with the synthesised answer
         as the top entry so chat gets both the conclusion and the supporting notes.
         """
+        # Lazy: ..agent imports llm_client, which imports this package's config back.
         from ..agent.memory_agent import is_search_failure_answer
 
         result, backend = await self._run_search_agent(query, user_id, limit)
 
         if result.errors:
+            # Log the errors themselves, not just a count. A count tells you a
+            # search degraded but not which tool call failed or why, which makes
+            # a flaky retrieval agent undiagnosable from logs alone.
             memory_logger.warning(
-                "Vault search backend=%s completed with %d error(s) (user: %s)",
+                "Vault search backend=%s completed with %d error(s) (user: %s): %s",
                 backend,
                 len(result.errors),
                 user_id,
+                "; ".join(result.errors),
             )
         if result.warnings:
             memory_logger.info(
@@ -838,7 +1134,13 @@ class MemoryService(MemoryServiceBase):
                 backend,
                 user_id,
             )
-            return []
+            # Raise rather than return []. An empty list is indistinguishable from
+            # a vault that genuinely holds nothing, and callers that assume the
+            # latter go on to tell the user their vault is empty.
+            raise VaultSearchUnavailable(
+                f"The {backend} retrieval agent did not produce a usable answer"
+                + (f" ({len(result.errors)} tool error(s))" if result.errors else "")
+            )
 
         results: List[MemoryEntry] = []
         if result.answer:
@@ -878,6 +1180,7 @@ class MemoryService(MemoryServiceBase):
 
     async def _run_search_agent(self, query: str, user_id: str, limit: int):
         """Run and trace one configured retrieval backend without exposing note text."""
+        # Lazy: ..agent imports llm_client, which imports this package's config back.
         from ..agent.memory_agent import is_search_failure_answer
 
         backend = (
@@ -912,6 +1215,7 @@ class MemoryService(MemoryServiceBase):
                     operation="memory_search",
                 )
             elif backend == "pi":
+                # Lazy: ..agent imports llm_client, which imports this package's config back.
                 from ..agent.pi_agent import search_vault_with_pi
 
                 result = await search_vault_with_pi(

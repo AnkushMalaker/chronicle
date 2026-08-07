@@ -2,7 +2,7 @@
 
 import json
 
-PROMPT_VERSION = "timeline-episodes-v10"
+PROMPT_VERSION = "timeline-episodes-v11"
 
 
 OUTPUT_SCHEMA = {
@@ -20,6 +20,7 @@ OUTPUT_SCHEMA = {
                     "summary": {"type": "string"},
                     "started_at": {"type": "string", "format": "date-time"},
                     "ended_at": {"type": "string", "format": "date-time"},
+                    "conversational": {"type": "boolean"},
                     "salience": {
                         "type": "string",
                         "enum": ["background", "routine", "notable", "highlight"],
@@ -94,6 +95,7 @@ OUTPUT_SCHEMA = {
                     "summary",
                     "started_at",
                     "ended_at",
+                    "conversational",
                     "salience",
                     "activity_mode",
                     "confidence",
@@ -160,6 +162,14 @@ Rules:
   captured. Uncertainty about a claim belongs in `confidence` and the assertion's role,
   not in blurring who was there.
 - Use quiet, idle, ambient, or unknown episodes when evidence genuinely supports them.
+- `conversational` records whether people actually talked with each other during this
+  episode. Set it true only when cited transcript evidence shows two or more participants
+  exchanging speech — a meeting, standup, call, or in-person discussion. Set it false for
+  media dialogue, podcasts, videos, game audio, a single person dictating or thinking
+  aloud, and any episode with no transcript evidence at all. Judge the exchange, not the
+  application: a call inside a browser is conversational, a video call left running with
+  nobody speaking is not. This is a factual question about what the audio contains, not a
+  judgement about whether the episode matters — `salience` carries that separately.
 - `output` audio/transcripts are media or system content, never the user's statements.
 - `input` audio is uncertain unless speaker evidence supports user attribution.
 - Acoustic quiet, voice inactivity, and missing capture are three different facts.

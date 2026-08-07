@@ -80,6 +80,9 @@ from advanced_omi_backend.utils.silence_condense import (
 )
 from advanced_omi_backend.utils.vad_analysis import detect_speech_pcm
 
+from .conversation_jobs import open_conversation_job
+from .speaker_jobs import check_enrolled_speakers_job
+
 logger = logging.getLogger(__name__)
 
 
@@ -1231,7 +1234,6 @@ async def stream_speech_detection_job(
 
     Note: user_email is fetched from the database when needed.
     """
-    from .conversation_jobs import open_conversation_job
 
     set_otel_session(session_id)
     logger.info(f"🔍 Starting speech detection for session {session_id[:12]}")
@@ -1450,7 +1452,6 @@ async def stream_speech_detection_job(
             # Add session event for speaker check starting
             await store.record_event(session_id, "speaker_check_starting")
             await store.set_speaker_check(session_id, SpeakerCheckStatus.CHECKING)
-            from .speaker_jobs import check_enrolled_speakers_job
 
             # Enqueue speaker check as a separate trackable job
             speaker_check_job = transcription_queue.enqueue(
@@ -1507,7 +1508,9 @@ async def stream_speech_detection_job(
                         )
                     break
                 elif speaker_check_job.is_failed:
-                    logger.warning(f"⚠️ Speaker check job failed, assuming not enrolled")
+                    logger.warning(
+                        f"⚠️ Speaker check job failed, assuming not enrolled"
+                    )
 
                     # Update session event for speaker check failed
                     await store.record_event(session_id, "speaker_check_failed")

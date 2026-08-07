@@ -574,6 +574,7 @@ async def enqueue_local_mining(user: User, speaker_name: str, paths: List[str]):
     """Queue server-side corpus mining (admin): ingest files already on the
     backend's data volume — e.g. backup WAVs of purged conversations — and
     chain discovery for the speaker."""
+    # Lazy import: the workers package imports back from the controllers.
     from advanced_omi_backend.workers.speaker_mining_jobs import mine_local_corpus_job
 
     client = SpeakerRecognitionClient()

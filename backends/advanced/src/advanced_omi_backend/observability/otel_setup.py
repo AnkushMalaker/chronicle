@@ -95,6 +95,8 @@ def clear_otel_session() -> None:
     if token is None:
         return
     try:
+        # Optional dependency: see the module NOTE — a missing OTel install is
+        # swallowed by the surrounding except.
         from opentelemetry.context import detach
 
         detach(token)
@@ -468,6 +470,8 @@ def set_span_attrs(**kwargs: Any) -> None:
     if not _otel_initialised:
         return
     try:
+        # Optional dependency: see the module NOTE — a missing OTel install is
+        # swallowed by the surrounding except.
         from opentelemetry import trace
 
         span = trace.get_current_span()
@@ -506,6 +510,8 @@ def set_trace_io(
     if not _otel_initialised:
         return
     try:
+        # Optional dependency: see the module NOTE — a missing OTel install is
+        # swallowed by the surrounding except.
         from opentelemetry import trace
 
         span = trace.get_current_span()

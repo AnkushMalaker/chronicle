@@ -236,6 +236,29 @@ async def reprocess_speakers(
     )
 
 
+@router.post("/backfill-speakers")
+async def backfill_speakers(
+    external_source_type: str | None = Query(
+        default=None,
+        description="Restrict to one capture source, e.g. 'screenpipe'",
+    ),
+    limit: int = Query(default=25, ge=1, le=200),
+    dry_run: bool = Query(default=False),
+    current_user: User = Depends(current_superuser),
+):
+    """Re-run speaker identification on conversations that never had it.
+
+    Continuous capture was ingested with the post-conversation chain skipped, leaving
+    anonymous "Speaker 0" turns that the timeline agent cannot attribute to a person.
+
+    Batched on purpose: speaker jobs share ``transcription_queue`` with live capture.
+    Call repeatedly, or raise ``limit``, to work through a backlog.
+    """
+    return await conversation_controller.backfill_speaker_recognition(
+        current_user, external_source_type, limit, dry_run
+    )
+
+
 @router.post("/{conversation_id}/activate-transcript/{version_id}")
 async def activate_transcript_version(
     conversation_id: str,

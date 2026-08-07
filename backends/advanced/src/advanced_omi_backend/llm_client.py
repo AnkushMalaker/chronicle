@@ -490,6 +490,122 @@ async def async_chat_with_tools(
         )
 
 
+def _accumulate_tool_call_delta(acc: Dict[int, Dict], delta_tool_calls) -> None:
+    """Fold one streamed ``delta.tool_calls`` fragment into the accumulator.
+
+    Providers split a single tool call across many chunks: the id and function
+    name usually arrive once, while ``arguments`` streams in as JSON fragments
+    that are only parseable once concatenated.
+    """
+    for tc in delta_tool_calls or []:
+        entry = acc.setdefault(
+            tc.index,
+            {"id": None, "type": "function", "function": {"name": "", "arguments": ""}},
+        )
+        if tc.id:
+            entry["id"] = tc.id
+        if tc.function:
+            if tc.function.name:
+                entry["function"]["name"] += tc.function.name
+            if tc.function.arguments:
+                entry["function"]["arguments"] += tc.function.arguments
+
+
+async def async_chat_with_tools_stream(
+    messages: list,
+    tools: list | None = None,
+    model: str | None = None,
+    temperature: float | None = None,
+    operation: str | None = None,
+):
+    """Streaming counterpart of :func:`async_chat_with_tools`.
+
+    Yields ``{"type": "content", "text": <delta>}`` as text arrives, then exactly
+    one terminal ``{"type": "done", "content", "tool_calls", "finish_reason"}``.
+    Callers that need the assembled result read the terminal event; callers that
+    only want to show progress read the content deltas.
+
+    Both branches of a tool-calling round stream through here, because the caller
+    cannot know in advance whether a round will produce a tool call or prose.
+
+    Fallback differs from the non-streaming path on purpose: once a delta has been
+    handed to the caller it has usually reached the user, so retrying against the
+    fallback model would duplicate or contradict text already on screen. We
+    therefore only fall back when the primary failed before emitting anything.
+    """
+
+    async def _stream_once(op, model_override):
+        client = op.get_client(is_async=True)
+        api_params = op.to_api_params()
+        if temperature is not None:
+            api_params["temperature"] = temperature
+        if model_override is not None:
+            api_params["model"] = model_override
+        api_params["messages"] = messages
+        if tools:
+            api_params["tools"] = tools
+        api_params["stream"] = True
+        return await client.chat.completions.create(**api_params)
+
+    async def _drain(stream):
+        """Yield content deltas, accumulating tool calls, then the terminal event."""
+        content_parts: list[str] = []
+        tool_call_acc: Dict[int, Dict] = {}
+        finish_reason = None
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+            delta = choice.delta
+            if delta is None:
+                continue
+            if delta.content:
+                content_parts.append(delta.content)
+                yield {"type": "content", "text": delta.content}
+            if getattr(delta, "tool_calls", None):
+                _accumulate_tool_call_delta(tool_call_acc, delta.tool_calls)
+        yield {
+            "type": "done",
+            "content": "".join(content_parts),
+            "tool_calls": [tool_call_acc[i] for i in sorted(tool_call_acc)],
+            "finish_reason": finish_reason,
+        }
+
+    if not operation:
+        raise ValueError("async_chat_with_tools_stream requires an operation name")
+
+    registry = get_models_registry()
+    if not registry:
+        raise RuntimeError("No models registry configured; cannot stream chat")
+
+    op = registry.get_llm_operation(operation)
+    emitted = False
+    try:
+        stream = await _stream_once(op, model)
+        async for event in _drain(stream):
+            emitted = emitted or event["type"] == "content"
+            yield event
+        return
+    except Exception as e:
+        if emitted:
+            raise
+        if not isinstance(e, _FALLBACK_EXCEPTIONS) and not _is_context_length_error(e):
+            raise
+        fb_op = registry.get_fallback_llm_operation(operation, primary=op)
+        if fb_op is None:
+            raise
+        logger.warning(
+            f"Primary LLM {op.model_name!r} failed for streaming operation "
+            f"{operation!r} ({e}); retrying with fallback LLM {fb_op.model_name!r}"
+        )
+
+    stream = await _stream_once(fb_op, None)
+    async for event in _drain(stream):
+        yield event
+
+
 async def async_health_check() -> Dict:
     """Async LLM health check."""
     client = get_llm_client()

@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 _SESSION_GAP = timedelta(seconds=60)
 _CLOSE_DELAY = timedelta(seconds=90)
+# Ingest attempts allowed for one session start before its chunks are dropped.
+_MAX_INGEST_ATTEMPTS = 5
 _MAX_SESSION = timedelta(minutes=30)
 # Chunks the collector tagged with the same meeting interval belong to one
 # conversation: tolerate longer silences and only split at a safety cap
@@ -223,6 +225,25 @@ def _coverage_profile(
     return covered, max(0.0, duration - covered), fractions
 
 
+async def _session_ingest_attempts(
+    session: list[DeviceInputItem], direction: str
+) -> int:
+    """Ingest attempts recorded for this session start.
+
+    A retry re-mixes a longer range, so it writes a *different* span row. Counting
+    per (first, last) would therefore always read 1. Sum across every span sharing
+    the session's first source item, which is stable while the session grows.
+    """
+    spans = await AudioEvidenceSpan.find(
+        AudioEvidenceSpan.user_id == session[0].user_id,
+        AudioEvidenceSpan.source_id == session[0].source_id,
+        AudioEvidenceSpan.direction == direction,
+        AudioEvidenceSpan.first_source_item_id == session[0].source_item_id,
+        AudioEvidenceSpan.state == "failed",
+    ).to_list()
+    return sum(max(1, span.attempts) for span in spans)
+
+
 async def _save_evidence_span(
     session: list[DeviceInputItem],
     direction: str,
@@ -279,6 +300,7 @@ async def _save_evidence_span(
     if existing is not None:
         for field, value in values.items():
             setattr(existing, field, value)
+        existing.attempts += 1
         await existing.save()
         return existing
     span = AudioEvidenceSpan(
@@ -287,6 +309,7 @@ async def _save_evidence_span(
         first_source_item_id=source_item_ids[0],
         last_source_item_id=source_item_ids[-1],
         direction=direction if direction in {"input", "output"} else "unknown",
+        attempts=1,
         **values,
     )
     await span.insert()
@@ -318,104 +341,146 @@ async def process_device_audio() -> dict[str, Any]:
         if user is None:
             continue
         for session in group_audio_sessions(source_items):
-            session_end = max(
-                _as_utc(item.ended_at or item.captured_at) for item in session
-            )
-            if session_end > utcnow() - _CLOSE_DELAY:
-                continue
-            with tempfile.TemporaryDirectory(
-                prefix="chronicle-screenpipe-"
-            ) as temp_dir:
-                output = (
-                    Path(temp_dir)
-                    / f"screenpipe-{source_id}-{session[0].source_item_id}.wav"
+            try:
+                session_end = max(
+                    _as_utc(item.ended_at or item.captured_at) for item in session
                 )
-                await _mix_session(session, Path(temp_dir), output)
-                profile = _profile_wav(output)
-                speech_detection = (
-                    _speech_detection(profile) if require_speech else None
-                )
-                if speech_detection is not None and speech_detection.has_speech is None:
-                    reason = speech_detection.reason.value
-                    unscored_sessions += 1
-                    unscored_reasons[reason] = unscored_reasons.get(reason, 0) + 1
-                if speech_detection is not None and speech_detection.should_reject:
-                    await _save_evidence_span(
-                        session, direction, profile, state="no_speech"
-                    )
-                    # Silent session: never enters the conversation pipeline.
-                    logger.info(
-                        "🔇 ScreenPipe session %s-%s (%d chunks) has no speech "
-                        "— rejecting without transcription (reason=%s, scored=%s)",
-                        source_id,
-                        direction,
-                        len(session),
-                        speech_detection.reason.value,
-                        speech_detection.scored,
-                    )
-                    for item in session:
-                        await item.delete()
-                    rejected_no_speech += 1
+                if session_end > utcnow() - _CLOSE_DELAY:
                     continue
-                with output.open("rb") as handle:
-                    result = await upload_and_process_audio_files(
-                        user,
-                        [UploadFile(file=handle, filename=output.name)],
-                        device_name=f"{source_id}-{direction}",
-                        source="screenpipe",
-                        external_source_id=(
-                            f"screenpipe:{source_id}:{direction}:"
-                            f"{session[0].source_item_id}-{session[-1].source_item_id}"
-                        ),
-                        external_source_type="screenpipe",
-                        data_purpose="capture_evidence",
-                        memory_excluded=True,
-                        memory_exclusion_reason="continuous_screenpipe_capture",
-                        skip_post_processing=True,
+                with tempfile.TemporaryDirectory(
+                    prefix="chronicle-screenpipe-"
+                ) as temp_dir:
+                    output = (
+                        Path(temp_dir)
+                        / f"screenpipe-{source_id}-{session[0].source_item_id}.wav"
                     )
-            if (
-                not isinstance(result, dict)
-                or not result.get("files")
-                or result["files"][0].get("status") != "started"
-            ):
-                await _save_evidence_span(session, direction, profile, state="failed")
+                    await _mix_session(session, Path(temp_dir), output)
+                    profile = _profile_wav(output)
+                    speech_detection = (
+                        _speech_detection(profile) if require_speech else None
+                    )
+                    if (
+                        speech_detection is not None
+                        and speech_detection.has_speech is None
+                    ):
+                        reason = speech_detection.reason.value
+                        unscored_sessions += 1
+                        unscored_reasons[reason] = unscored_reasons.get(reason, 0) + 1
+                    if speech_detection is not None and speech_detection.should_reject:
+                        await _save_evidence_span(
+                            session, direction, profile, state="no_speech"
+                        )
+                        # Silent session: never enters the conversation pipeline.
+                        logger.info(
+                            "🔇 ScreenPipe session %s-%s (%d chunks) has no speech "
+                            "— rejecting without transcription (reason=%s, scored=%s)",
+                            source_id,
+                            direction,
+                            len(session),
+                            speech_detection.reason.value,
+                            speech_detection.scored,
+                        )
+                        for item in session:
+                            await item.delete()
+                        rejected_no_speech += 1
+                        continue
+                    with output.open("rb") as handle:
+                        result = await upload_and_process_audio_files(
+                            user,
+                            [UploadFile(file=handle, filename=output.name)],
+                            device_name=f"{source_id}-{direction}",
+                            source="screenpipe",
+                            external_source_id=(
+                                f"screenpipe:{source_id}:{direction}:"
+                                f"{session[0].source_item_id}-{session[-1].source_item_id}"
+                            ),
+                            external_source_type="screenpipe",
+                            data_purpose="capture_evidence",
+                            memory_excluded=True,
+                            memory_exclusion_reason="continuous_screenpipe_capture",
+                            # Speaker recognition DOES run: without it the timeline agent
+                            # only ever sees "Speaker 0", so it cannot name who was present
+                            # and falls back to "a friend". Memory extraction and LLM
+                            # title/summary stay off — this is evidence, not a conversation.
+                            skip_memory_extraction=True,
+                            skip_title_summary=True,
+                        )
+                if (
+                    not isinstance(result, dict)
+                    or not result.get("files")
+                    or result["files"][0].get("status") != "started"
+                ):
+                    await _save_evidence_span(
+                        session, direction, profile, state="failed"
+                    )
+                    # A failed upload leaves the chunks staged so the next tick can retry.
+                    # The retried session has grown by then, so it mixes to a new range and
+                    # re-uploads from scratch: every pass leaks a Conversation holding a
+                    # full copy of the audio, and nothing ever converges. Bound the retries
+                    # per session *start*, which is the identity that survives the growth.
+                    attempts = await _session_ingest_attempts(session, direction)
+                    if attempts >= _MAX_INGEST_ATTEMPTS:
+                        logger.error(
+                            "🛑 ScreenPipe session %s-%s (start=%s) failed to ingest %d "
+                            "times — dropping %d staged chunks so it stops retrying",
+                            source_id,
+                            direction,
+                            session[0].source_item_id,
+                            attempts,
+                            len(session),
+                        )
+                        await _save_evidence_span(
+                            session, direction, profile, state="abandoned"
+                        )
+                        for item in session:
+                            await item.delete()
+                    continue
+                conversation_id = result["files"][0]["conversation_id"]
+                await _save_evidence_span(
+                    session,
+                    direction,
+                    profile,
+                    state="transcribed" if profile.scored else "unscored",
+                    conversation_id=conversation_id,
+                )
+                session_start = min(_as_utc(item.captured_at) for item in session)
+                conversation = await Conversation.find_one(
+                    Conversation.conversation_id == conversation_id
+                )
+                if conversation is not None:
+                    conversation.created_at = session_start
+                    await conversation.save()
+                observations = await DeviceInputItem.find(
+                    DeviceInputItem.user_id == user_id,
+                    DeviceInputItem.source_id == source_id,
+                    DeviceInputItem.kind == "observation",
+                    DeviceInputItem.captured_at <= session_end,
+                    {
+                        "$or": [
+                            {"ended_at": None},
+                            {"ended_at": {"$gte": session_start}},
+                        ]
+                    },
+                ).to_list()
+                for observation in observations:
+                    if conversation_id not in observation.related_conversation_ids:
+                        observation.related_conversation_ids.append(conversation_id)
+                        observation.related_conversation_ids.sort()
+                        observation.curation = "pending"
+                        await observation.save()
+                for item in session:
+                    await item.delete()
+                processed += 1
+            except Exception:
+                # One unlucky session used to abort the whole run, leaving every
+                # later session's chunks staged behind it indefinitely.
+                logger.exception(
+                    "Failed to ingest ScreenPipe session %s-%s (start=%s)",
+                    source_id,
+                    direction,
+                    session[0].source_item_id,
+                )
                 continue
-            conversation_id = result["files"][0]["conversation_id"]
-            await _save_evidence_span(
-                session,
-                direction,
-                profile,
-                state="transcribed" if profile.scored else "unscored",
-                conversation_id=conversation_id,
-            )
-            session_start = min(_as_utc(item.captured_at) for item in session)
-            conversation = await Conversation.find_one(
-                Conversation.conversation_id == conversation_id
-            )
-            if conversation is not None:
-                conversation.created_at = session_start
-                await conversation.save()
-            observations = await DeviceInputItem.find(
-                DeviceInputItem.user_id == user_id,
-                DeviceInputItem.source_id == source_id,
-                DeviceInputItem.kind == "observation",
-                DeviceInputItem.captured_at <= session_end,
-                {
-                    "$or": [
-                        {"ended_at": None},
-                        {"ended_at": {"$gte": session_start}},
-                    ]
-                },
-            ).to_list()
-            for observation in observations:
-                if conversation_id not in observation.related_conversation_ids:
-                    observation.related_conversation_ids.append(conversation_id)
-                    observation.related_conversation_ids.sort()
-                    observation.curation = "pending"
-                    await observation.save()
-            for item in session:
-                await item.delete()
-            processed += 1
     return {
         "pending_chunks": len(pending),
         "processed_sessions": processed,

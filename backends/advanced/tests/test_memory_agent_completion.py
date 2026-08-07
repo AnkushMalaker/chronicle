@@ -6,6 +6,7 @@ import httpx
 import openai
 import pytest
 
+import advanced_omi_backend.services.memory.agent as agent_module
 from advanced_omi_backend import llm_client
 from advanced_omi_backend.services.memory import agent as memory_agent_package
 from advanced_omi_backend.services.memory.agent import (
@@ -411,9 +412,15 @@ async def test_memory_provider_never_returns_search_failure_as_context(
         SimpleNamespace(search_agent_backend=backend, data_path=str(tmp_path))
     )
 
-    results = await service._search_vault_grep("Question?", "user-1", limit=10)
+    # Raising, rather than returning [], is the contract: an empty list reads as
+    # "the vault holds nothing", which is how a broken agent got reported to the
+    # user as an empty vault. The sentinel answer and its notes must not leak
+    # into the message either way.
+    with pytest.raises(chronicle.VaultSearchUnavailable) as excinfo:
+        await service._search_vault_grep("Question?", "user-1", limit=10)
 
-    assert results == []
+    assert failure_answer not in str(excinfo.value)
+    assert "Unrelated" not in str(excinfo.value)
 
 
 @pytest.mark.asyncio
@@ -567,8 +574,6 @@ The speakers discussed a concrete plan for the project.
                 touched=touched,
                 summary="done",
             )
-
-    import advanced_omi_backend.services.memory.agent as agent_module
 
     monkeypatch.setattr(agent_module, "MemoryAgent", FakeMemoryAgent)
 

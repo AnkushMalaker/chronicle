@@ -424,7 +424,12 @@ def test_gateway_derives_mutating_tools_from_canonical_schema_difference():
     }
 
     assert write_tools - read_only_tools
-    assert pi_agent._MUTATING_VAULT_TOOLS == write_tools - read_only_tools
+    # verify_vault is write-set-only because a retrieval run has nothing to verify, not
+    # because it mutates — the gateway must not serialise or audit it as a write.
+    assert pi_agent._MUTATING_VAULT_TOOLS == (
+        write_tools - read_only_tools - {"verify_vault"}
+    )
+    assert "verify_vault" not in pi_agent._MUTATING_VAULT_TOOLS
 
 
 @pytest.mark.asyncio
@@ -813,13 +818,16 @@ async def test_write_uses_isolated_canonical_gateway_and_reports_audit_state(
         "--offline",
         "--no-context-files",
         "--no-extensions",
-        "--no-skills",
         "--no-prompt-templates",
         "--no-themes",
         "--no-builtin-tools",
         "--tools",
     ):
         assert flag in command
+    # A tool-using run is taught the vault's shape by a generated skill rather than by
+    # more system prompt, so skills are loaded, not disabled.
+    assert "--no-skills" not in command
+    assert "--skill" in command
     assert "--api-key" not in command
     assert "super-secret-key" not in command
     assert "Chronicle write system prompt" not in command

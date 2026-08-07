@@ -38,7 +38,7 @@ def test_prompt_version_is_pinned():
     the only thing a second copy can achieve.
     """
 
-    assert PROMPT_VERSION == "timeline-episodes-v10"
+    assert PROMPT_VERSION == "timeline-episodes-v11"
 
 
 def test_prompt_treats_observations_as_coarse_sessions_without_cross_app_merging():
@@ -47,6 +47,23 @@ def test_prompt_treats_observations_as_coarse_sessions_without_cross_app_merging
     assert "coarse application session" in prompt
     assert "Do not merge distinct foreground applications" in prompt
     assert "manufacture periodic sub-events" in prompt
+
+
+def test_conversational_is_required_and_asks_about_exchange_not_application():
+    """It gates promoting capture-evidence recordings back into Recordings and search.
+
+    A model that reads it as "was audio present" or "did this matter" would either
+    promote every podcast or leave a real standup unsearchable.
+    """
+
+    episode = OUTPUT_SCHEMA["properties"]["episodes"]["items"]
+    assert episode["properties"]["conversational"] == {"type": "boolean"}
+    assert "conversational" in episode["required"]
+
+    prompt = build_prompt("result.json")
+    assert "two or more participants" in prompt
+    assert "media dialogue, podcasts, videos, game audio" in prompt
+    assert "a call inside a browser is conversational" in prompt
 
 
 def test_prompt_tells_the_agent_to_leave_confirmed_intervals_alone():

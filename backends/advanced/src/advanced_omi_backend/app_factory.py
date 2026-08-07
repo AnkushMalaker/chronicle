@@ -75,9 +75,6 @@ from advanced_omi_backend.services.memory.syncthing_audit import (
 )
 from advanced_omi_backend.services.observability import run_event_ingest_drain
 from advanced_omi_backend.services.observability.health_poller import run_health_poller
-from advanced_omi_backend.services.observation_curation import (
-    process_observation_curation,
-)
 from advanced_omi_backend.services.person_photos import sync_person_photos
 from advanced_omi_backend.services.plugin_service import (
     cleanup_plugin_router,
@@ -93,6 +90,7 @@ from advanced_omi_backend.services.status_reconciler import (
 from advanced_omi_backend.services.timeline.discovery import (
     process_current_timeline_days,
 )
+from advanced_omi_backend.services.timeline.memory import process_episode_memory
 from advanced_omi_backend.services.timeline.thumbnails import process_episode_thumbnails
 from advanced_omi_backend.task_manager import get_task_manager, init_task_manager
 from advanced_omi_backend.users import (
@@ -319,10 +317,10 @@ async def lifespan(app: FastAPI):
             register_cron_job("immich_memories", scan_immich_memories)
             register_cron_job("person_photos", sync_person_photos)
             register_cron_job("device_audio_ingest", process_device_audio)
-            register_cron_job("observation_curation", process_observation_curation)
             register_cron_job("screen_context_retention", purge_screen_context)
             register_cron_job("timeline_analysis", process_current_timeline_days)
             register_cron_job("episode_thumbnails", process_episode_thumbnails)
+            register_cron_job("episode_memory", process_episode_memory)
 
             scheduler = get_scheduler()
             await scheduler.start()

@@ -47,6 +47,7 @@ class MemoryCause(str, Enum):
     """*Why* a memory vault change happened (descriptive provenance)."""
 
     AUTO_EXTRACTION = "auto_extraction"  # automatic post-conversation pipeline
+    DAY_EPISODES = "day_episodes"  # settled-day timeline episodes (capture evidence)
     MEMORY_REPLAY = "memory_replay"  # manual re-extract, same inputs
     MEMORY_REBUILD = "memory_rebuild"  # clean vault replay from durable transcripts
     TRANSCRIPT_REPROCESS = "transcript_reprocess"  # re-ran ASR
@@ -68,6 +69,7 @@ class UpdateStrategy(str, Enum):
 # separately by the human-readable label, so several causes share one kind.
 _CAUSE_KIND = {
     MemoryCause.AUTO_EXTRACTION: "extraction",
+    MemoryCause.DAY_EPISODES: "extraction",
     MemoryCause.MEMORY_REPLAY: "reprocess",
     MemoryCause.MEMORY_REBUILD: "reprocess",
     MemoryCause.TRANSCRIPT_REPROCESS: "reprocess",
@@ -80,6 +82,7 @@ _CAUSE_KIND = {
 
 _CAUSE_LABEL = {
     MemoryCause.AUTO_EXTRACTION: "AI extraction",
+    MemoryCause.DAY_EPISODES: "Day episodes",
     MemoryCause.MEMORY_REPLAY: "Memory replay",
     MemoryCause.MEMORY_REBUILD: "Memory rebuild",
     MemoryCause.TRANSCRIPT_REPROCESS: "Transcript reprocess",

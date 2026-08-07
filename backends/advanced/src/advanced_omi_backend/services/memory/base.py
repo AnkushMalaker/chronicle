@@ -14,7 +14,22 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-__all__ = ["MemoryEntry", "MemoryServiceBase", "LLMProviderBase"]
+__all__ = [
+    "MemoryEntry",
+    "MemoryServiceBase",
+    "LLMProviderBase",
+    "VaultSearchUnavailable",
+]
+
+
+class VaultSearchUnavailable(RuntimeError):
+    """The retrieval agent failed; whether the vault has matches is unknown.
+
+    Distinct from a search that ran and found nothing, which is an ordinary empty
+    result. Conflating the two is how a broken agent gets reported to the user as
+    "your vault is empty" — so callers must handle this rather than treat it as
+    zero results.
+    """
 
 
 @dataclass
@@ -126,6 +141,33 @@ class MemoryServiceBase(ABC):
         pass
 
     @abstractmethod
+    async def add_day_memory(
+        self,
+        day_digest: str,
+        local_date: str,
+        user_id: str,
+        *,
+        source_date: Optional[str] = None,
+    ) -> Tuple[bool, List[str]]:
+        """Record one settled local day of timeline episodes.
+
+        The day, not the recordings under it, is the memory unit for capture evidence:
+        continuous audio is cut into bounded compute spans, so one meeting can span
+        several recordings while an episode already carries the right bounds.
+
+        Args:
+            day_digest: Rendered episodes for the day, with transcripts for the
+                conversational ones
+            local_date: The user-local date being recorded, ISO ``YYYY-MM-DD``
+            user_id: User identifier
+            source_date: Trusted timestamp for the day's record
+
+        Returns:
+            Tuple of (success: bool, touched_note_paths: List[str])
+        """
+        pass
+
+    @abstractmethod
     async def search_memories(
         self, query: str, user_id: str, limit: int = 10, score_threshold: float = 0.0
     ) -> List[MemoryEntry]:
@@ -138,7 +180,14 @@ class MemoryServiceBase(ABC):
             score_threshold: Minimum similarity score (0.0 = no threshold)
 
         Returns:
-            List of matching MemoryEntry objects ordered by relevance
+            List of matching MemoryEntry objects ordered by relevance. An empty
+            list means the search ran and found nothing — never that it failed.
+
+        Raises:
+            VaultSearchUnavailable: The search could not be completed, so whether
+                matches exist is unknown. Callers must not degrade this to an
+                empty result; doing so is how a broken search gets reported to
+                the user as an empty vault.
         """
         pass
 

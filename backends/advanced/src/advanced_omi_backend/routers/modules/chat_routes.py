@@ -462,6 +462,45 @@ async def _stream_openai_format(
                 )
                 yield f"data: {chunk.model_dump_json()}\n\n"
 
+            elif event_type == "status":
+                # Progress only — no delta, so the OpenAI shape stays valid for
+                # third-party clients, which ignore chronicle_metadata entirely.
+                chunk = ChatCompletionChunk(
+                    id=completion_id,
+                    created=created,
+                    model=model_name,
+                    choices=[
+                        ChatCompletionChunkChoice(
+                            delta=ChatCompletionChunkDelta(),
+                        )
+                    ],
+                    chronicle_metadata={
+                        "session_id": session_id,
+                        "status": event["data"],
+                    },
+                )
+                yield f"data: {chunk.model_dump_json()}\n\n"
+
+            elif event_type == "token_reset":
+                # The streamed text belonged to a tool round and has been retracted.
+                # Re-baseline the delta cursor so the next round starts from empty.
+                previous_text = ""
+                chunk = ChatCompletionChunk(
+                    id=completion_id,
+                    created=created,
+                    model=model_name,
+                    choices=[
+                        ChatCompletionChunkChoice(
+                            delta=ChatCompletionChunkDelta(),
+                        )
+                    ],
+                    chronicle_metadata={
+                        "session_id": session_id,
+                        "reset_content": True,
+                    },
+                )
+                yield f"data: {chunk.model_dump_json()}\n\n"
+
             elif event_type == "token":
                 # Internal events carry accumulated text; compute delta
                 accumulated = event["data"]
@@ -542,6 +581,10 @@ async def _non_streaming_response(
             metadata.update(event["data"])
         elif event_type == "token":
             full_content = event["data"]  # accumulated text
+        elif event_type == "token_reset":
+            # Retracted tool-round narration must not survive into the reply when
+            # a later round ends without producing any text of its own.
+            full_content = ""
         elif event_type == "complete":
             metadata["message_id"] = event["data"].get("message_id")
             metadata["memories_used"] = event["data"].get("memories_used", [])

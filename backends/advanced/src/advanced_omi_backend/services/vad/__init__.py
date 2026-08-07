@@ -10,13 +10,12 @@ from typing import Callable, Dict
 
 from advanced_omi_backend.config_loader import get_service_config
 from advanced_omi_backend.services.vad.base import VADProvider
+from advanced_omi_backend.services.vad.ten_vad import TenVadProvider
 
 DEFAULT_PROVIDER = "ten_vad"
 
 
 def _make_ten_vad() -> VADProvider:
-    from advanced_omi_backend.services.vad.ten_vad import TenVadProvider
-
     return TenVadProvider()
 
 

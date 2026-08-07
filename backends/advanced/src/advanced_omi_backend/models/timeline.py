@@ -76,7 +76,11 @@ class AudioEvidenceSpan(Document):
     direction: Literal["input", "output", "unknown"] = "unknown"
     meeting_id: Optional[str] = None
     conversation_id: Optional[str] = None
-    state: Literal["transcribed", "no_speech", "unscored", "failed"]
+    state: Literal["transcribed", "no_speech", "unscored", "failed", "abandoned"]
+    # Ingest attempts for this range. A failed upload leaves the staged chunks in
+    # place so the next tick can retry; without a bound that retry is forever, and
+    # each pass leaks another Conversation holding a full copy of the audio.
+    attempts: int = Field(default=0, ge=0)
     covered_seconds: float = Field(ge=0)
     missing_seconds: float = Field(ge=0)
     bucket_seconds: float = Field(default=10.0, gt=0)
@@ -196,6 +200,10 @@ class TimelineEpisode(Document):
     kind: str
     title: str = Field(min_length=1, max_length=160)
     summary: str = Field(max_length=1200)
+    # People actually talked with each other here. Promotes the cited capture-evidence
+    # recordings back into the user-facing Recordings list and search — see
+    # services/timeline/discovery.py. Factual; ``salience`` carries importance.
+    conversational: bool = False
     # Agent output is provisional until a person edits it. A "confirmed" default would
     # pin every generated episode and make reanalysis a no-op.
     status: Literal["provisional", "confirmed", "superseded"] = "provisional"
@@ -224,6 +232,11 @@ class TimelineEpisode(Document):
     # fields the person owns, so agent-derived fields stay free to refresh.
     confirmed_at: Optional[datetime] = None
     confirmed_fields: list[str] = Field(default_factory=list)
+    # Per-episode record of the settled-day vault write, for resumability within a day
+    # and for showing provenance. The authoritative latch is ``TimelineDay.memory_state``
+    # — episode rows are per-run and do not survive regeneration.
+    memory_state: Literal["", "written", "skipped"] = ""
+    vault_paths: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
     revised_at: datetime = Field(default_factory=utcnow)
 
@@ -255,6 +268,22 @@ class TimelineDay(Document):
     active_run_created_at: Optional[datetime] = None
     evidence_revision: Optional[str] = None
     coverage: dict[str, Any] = Field(default_factory=dict)
+    # Authoritative latch for the settled-day vault write. Memory is written once per
+    # (user, local_date): a later re-analysis changes ``active_run_id`` but must not
+    # re-trigger a write, because the vault already holds the day and regeneration is
+    # non-deterministic. ``claimed`` is held only while the agent runs.
+    # ``no_changes`` is terminal like ``written``: the agent read the day and judged it
+    # already recorded. Distinct from ``written`` so a day the vault never gained
+    # anything from is visible, and from ``skipped`` which means there was no analysis
+    # to record at all.
+    memory_state: Literal["", "claimed", "written", "skipped", "no_changes"] = ""
+    memory_run_id: Optional[str] = None
+    memory_claimed_at: Optional[datetime] = None
+    memory_written_at: Optional[datetime] = None
+    # Bounded retry. A day that keeps failing settles into ``skipped`` with its last
+    # diagnostic rather than being re-attempted on every tick forever.
+    memory_attempts: int = 0
+    memory_error: Optional[str] = None
     revised_at: datetime = Field(default_factory=utcnow)
 
     class Settings:
@@ -268,5 +297,9 @@ class TimelineDay(Document):
                 ],
                 unique=True,
                 name="timeline_day_identity",
-            )
+            ),
+            IndexModel(
+                [("memory_state", ASCENDING), ("local_date", ASCENDING)],
+                name="timeline_day_memory_state",
+            ),
         ]

@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -42,9 +43,10 @@ from ..telemetry import (
     set_safe_span_attributes,
     text_payload,
 )
+from ..vault_lock import VaultLockTimeout, vault_run_lock
 from ..vault_templates import CONVERSATION_TEMPLATE, PERSON_TEMPLATE, TOPIC_TEMPLATE
 from . import codex_quota
-from .memory_agent import MemoryAgentResult, _for_prompt, _get_prompt
+from .memory_agent import MemoryAgentResult, _for_prompt, _get_prompt, build_write_task
 
 logger = logging.getLogger("memory_service.agent.codex")
 
@@ -171,6 +173,7 @@ Be precise and conservative: capture what was actually said, link things, avoid 
 def _codex_settings() -> object:
     """The ``memory.backends.codex`` mapping (soft dependency — {} if absent)."""
     try:
+        # Soft dependency: the except below runs on hosts with no registry.
         from advanced_omi_backend.model_registry import get_models_registry
 
         reg = get_models_registry()
@@ -313,6 +316,7 @@ class CodexMemoryAgent:
         title: Optional[str] = None,
         vault_summary: str = "",
         guidance: str = "",
+        record: str = "conversation",
     ) -> MemoryAgentResult:
         available, detail = codex_executor_available()
         if not available:
@@ -350,25 +354,21 @@ class CodexMemoryAgent:
             DEFAULT_CODEX_AGENT_SYSTEM_PROMPT,
             vault_summary,
         )
-        guidance_block = f"\n\n{guidance}" if guidance else ""
-        prompt = (
-            f"{system_prompt}\n\n"
-            f"{_UNTRUSTED_SOURCE_INVARIANT}\n\n"
-            f"New conversation to record.\n"
-            f"conversation_id: {conversation_id}\n"
-            f"date: {date}\n"
-            f"duration_minutes: {duration_minutes if duration_minutes is not None else 'unknown'}\n\n"
-            f"source_title: {title or 'unknown'}\n\n"
-            f"Transcript (speaker-labelled):\n{transcript}"
-            f"{guidance_block}"
+        task = build_write_task(
+            transcript,
+            conversation_id,
+            date=date,
+            duration_minutes=duration_minutes,
+            title=title,
+            guidance=guidance,
+            record=record,
         )
+        prompt = f"{system_prompt}\n\n{_UNTRUSTED_SOURCE_INVARIANT}\n\n{task}"
 
         timeout = settings["timeout_seconds"]
         sandbox_mode = settings["sandbox_mode"]
         model = settings["model"]
         reasoning_effort = settings["reasoning_effort"]
-
-        from ..vault_lock import VaultLockTimeout
 
         try:
             attributes = {
@@ -478,9 +478,6 @@ class CodexMemoryAgent:
         model: str,
         reasoning_effort: str,
     ) -> MemoryAgentResult:
-        import subprocess
-
-        from ..vault_lock import vault_run_lock
 
         with vault_run_lock(self.root.name, ttl_seconds=timeout + 60):
             before = self._snapshot()

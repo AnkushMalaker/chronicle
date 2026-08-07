@@ -57,6 +57,9 @@ def _discover_service_url(service_name: str) -> str:
         return cached[1]
     url = ""
     try:
+        # `discovery` is the repo-root module the compose file mounts into the
+        # container; it is not importable in a plain checkout, so importing it at
+        # module level would make model_registry unimportable outside Docker.
         from discovery import resolve_service_url
 
         url = resolve_service_url(None, service_name, default="") or ""

@@ -16,6 +16,9 @@ while their transcripts are stranded on a different conversation document.
 import pytest
 from fakeredis import FakeStrictRedis
 from rq import Queue
+from rq.job import Job, JobStatus
+
+from advanced_omi_backend.controllers import queue_controller as module
 
 pytestmark = pytest.mark.unit
 
@@ -24,7 +27,6 @@ pytestmark = pytest.mark.unit
 def qc(monkeypatch):
     """queue_controller with its Redis + audio queue pointed at fakeredis."""
     fake = FakeStrictRedis()
-    from advanced_omi_backend.controllers import queue_controller as module
 
     monkeypatch.setattr(module, "redis_conn", fake)
     monkeypatch.setattr(module, "audio_queue", Queue("audio", connection=fake))
@@ -55,7 +57,6 @@ def test_ended_job_allows_a_fresh_enqueue(qc):
     Single-flight must gate on LIVENESS, not merely on the id ever having existed —
     otherwise a clean session end would permanently block the next session.
     """
-    from rq.job import Job, JobStatus
 
     first = qc.enqueue_audio_persistence("sess-1", "user-1", "sess-1")
     # Simulate the job terminating (worker finished/abandoned it).

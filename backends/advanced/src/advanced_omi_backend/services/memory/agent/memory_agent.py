@@ -207,6 +207,72 @@ Be precise and conservative: capture what was actually said, link things, avoid 
 )
 
 
+def day_note_path(local_date: str) -> str:
+    """Vault-relative path of the note a ``record="day"`` write must produce."""
+
+    return f"Daily/{local_date}.md"
+
+
+_DAY_RECORD_REQUIREMENT = """\
+This is a DAY of captured activity, not a single conversation. It is already segmented
+into semantic episodes; each one names what happened, when, and the evidence behind it.
+Transcripts are supplied for the episodes where people actually conversed.
+
+- Record the day at exactly `{note_path}`. Create it from the day's episodes if it does
+  not exist; otherwise `edit_section` to add only what is missing. NEVER write anything
+  under `Conversations/` for a day — that folder is one note per conversation.
+- Then update the People, Topics, and other category notes the day touches, exactly as
+  you would for a conversation: smallest edits, link profusely, never duplicate a fact
+  the note already holds.
+- Be selective. A day contains far more than is worth remembering. Routine and
+  background episodes usually deserve at most a line in the day note and no durable note
+  of their own; record durable facts for what was genuinely new, decided, or learned.
+- An assertion's `role` tells you who a claim belongs to. `media_content`,
+  `application_state`, and `assistant_generated` are NOT things the user said, did, or
+  believes. Only `user_action`/`user_statement` support a fact about the user, and
+  `third_party` a fact about someone else.
+- An episode summary is an observation about the day, not a quote. Do not attribute it
+  to a speaker."""
+
+
+def build_write_task(
+    transcript: str,
+    source_id: str,
+    *,
+    date: str,
+    duration_minutes: Optional[float] = None,
+    title: Optional[str] = None,
+    guidance: str = "",
+    record: str = "conversation",
+) -> str:
+    """Build the write agent's user task.
+
+    Shared by the direct, Codex, and Pi executors so the three cannot drift. ``record``
+    selects the unit being written: one conversation, or one local day of episodes.
+    """
+
+    guidance_block = f"\n\n{guidance}" if guidance else ""
+    if record == "day":
+        return (
+            f"One captured day to record.\n"
+            f"local_date: {source_id}\n"
+            f"date: {date}\n\n"
+            f"{_DAY_RECORD_REQUIREMENT.format(note_path=day_note_path(source_id))}\n\n"
+            f"Day episodes:\n{transcript}"
+            f"{guidance_block}"
+        )
+    return (
+        f"New conversation to record.\n"
+        f"conversation_id: {source_id}\n"
+        f"date: {date}\n"
+        f"duration_minutes: "
+        f"{duration_minutes if duration_minutes is not None else 'unknown'}\n\n"
+        f"source_title: {title or 'unknown'}\n\n"
+        f"Transcript (speaker-labelled):\n{transcript}"
+        f"{guidance_block}"
+    )
+
+
 @dataclass
 class MemoryAgentResult:
     conversation_id: str
@@ -376,21 +442,21 @@ class MemoryAgent:
         title: Optional[str] = None,
         vault_summary: str = "",
         guidance: str = "",
+        record: str = "conversation",
     ) -> MemoryAgentResult:
         date = date or datetime.now(timezone.utc).isoformat()
         system_prompt = await _get_prompt(
             AGENT_SYSTEM_PROMPT_ID, DEFAULT_AGENT_SYSTEM_PROMPT, vault_summary
         )
 
-        guidance_block = f"\n\n{guidance}" if guidance else ""
-        task = (
-            f"New conversation to record.\n"
-            f"conversation_id: {conversation_id}\n"
-            f"date: {date}\n"
-            f"duration_minutes: {duration_minutes if duration_minutes is not None else 'unknown'}\n\n"
-            f"source_title: {title or 'unknown'}\n\n"
-            f"Transcript (speaker-labelled):\n{transcript}"
-            f"{guidance_block}"
+        task = build_write_task(
+            transcript,
+            conversation_id,
+            date=date,
+            duration_minutes=duration_minutes,
+            title=title,
+            guidance=guidance,
+            record=record,
         )
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": system_prompt},

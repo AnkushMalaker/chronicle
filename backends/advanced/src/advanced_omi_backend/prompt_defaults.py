@@ -8,6 +8,9 @@ Call ``register_all_defaults(registry)`` once at startup.
 """
 
 from advanced_omi_backend.prompt_registry import PromptRegistry
+from advanced_omi_backend.services.memory.agent.codex_agent import (
+    DEFAULT_CODEX_AGENT_SYSTEM_PROMPT,
+)
 
 
 def register_all_defaults(registry: PromptRegistry) -> None:
@@ -701,10 +704,6 @@ Rules:
         "(grep/glob/read). Supports a {{vault_summary}} slot.",
         category="memory",
         variables=["vault_summary"],
-    )
-
-    from advanced_omi_backend.services.memory.agent.codex_agent import (
-        DEFAULT_CODEX_AGENT_SYSTEM_PROMPT,
     )
 
     registry.register_default(

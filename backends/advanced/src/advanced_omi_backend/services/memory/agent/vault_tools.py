@@ -45,12 +45,26 @@ from ..vault_scaffold import (
     validate_category_name,
     write_category,
 )
+from ..vault_verify import (
+    Finding,
+    new_duplicate_sections,
+    new_note_schema_problems,
+    render_findings,
+    section_counts,
+    verify_vault_changes,
+)
 from .edit_engine import Edit, EditError, apply_edits
 from .section_edit import SectionEditError, apply_section_edit
 
 logger = logging.getLogger("memory_service.agent.tools")
 
 _GREP_MAX_LINES = 200  # default head limit, like Claude Code's grep
+# A note has no bound on its length, so a read of one needs its own. Sized so a full
+# window is a few thousand tokens: enough to work with, small enough that several reads
+# still leave room for the transcript in a 32k-64k local context.
+_READ_DEFAULT_LINES = 400
+_READ_MAX_LINES = 2000
+_READ_MAX_CHARS = 20000
 
 
 class VaultToolError(Exception):
@@ -98,10 +112,9 @@ def _safe_relpath(path: str) -> str:
 
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 
-
-def _section_counts(text: str) -> Counter:
-    """Count occurrences of each top-level ``## Section`` heading (case-insensitive)."""
-    return Counter(m.group(1).lower() for m in _H2_RE.finditer(text))
+# The rules themselves live in ..vault_verify so the same logic can run both here (at
+# the mutation boundary) and afterwards over a whole-vault diff.
+_section_counts = section_counts
 
 
 # Sections whose bullets carry accumulated facts and must survive a person-note
@@ -143,10 +156,9 @@ def _assert_no_new_section_dupes(rel: str, before: str, after: str) -> None:
     We compare against ``before`` and only reject *new* duplication, so an edit to
     an already-duplicated note can still proceed (e.g. while repairing it).
     """
-    bc = _section_counts(before)
-    ac = _section_counts(after)
-    offenders = sorted(h for h, n in ac.items() if n > 1 and n > bc.get(h, 0))
+    offenders = new_duplicate_sections(before, after)
     if offenders:
+        ac = _section_counts(after)
         pretty = ", ".join(f"'## {h}' (×{ac[h]})" for h in offenders)
         raise VaultToolError(
             f"Refusing to write '{rel}': it would duplicate section heading(s) "
@@ -157,18 +169,6 @@ def _assert_no_new_section_dupes(rel: str, before: str, after: str) -> None:
         )
 
 
-_NEW_NOTE_SCHEMA = {
-    "People": {
-        "sections": ("about", "conversations", "mentions"),
-        "embed": "![[Conversations.base#Person]]",
-    },
-    "Topics": {
-        "sections": ("about", "conversations"),
-        "embed": "![[Conversations.base#Topic]]",
-    },
-}
-
-
 def _assert_new_note_schema(rel: str, content: str) -> None:
     """Reject incomplete new People/Topic notes at the mutation boundary.
 
@@ -177,28 +177,10 @@ def _assert_new_note_schema(rel: str, content: str) -> None:
     gives the agent no signal to repair it. A tool error is recoverable in the same
     agent turn, so require the stable spine sections and aggregation embed up front.
     """
-    parts = Path(rel).parts
-    if len(parts) != 2:
+    problems = new_note_schema_problems(rel, content)
+    if not problems:
         return
-    schema = _NEW_NOTE_SCHEMA.get(parts[0])
-    if schema is None:
-        return
-
-    counts = _section_counts(content)
-    missing = [name for name in schema["sections"] if counts.get(name, 0) == 0]
-    embed = schema["embed"]
-    if not missing and embed in content:
-        return
-
-    problems: List[str] = []
-    if missing:
-        problems.append(
-            "missing section(s) "
-            + ", ".join(f"'## {name.title()}'" for name in missing)
-        )
-    if embed not in content:
-        problems.append(f"missing exact embed {embed!r}")
-    template_name = "Person" if parts[0] == "People" else "Topic"
+    template_name = "Person" if Path(rel).parts[0] == "People" else "Topic"
     raise VaultToolError(
         f"Refusing to create '{rel}': {'; '.join(problems)}. Read and fill the "
         f"canonical Templates/{template_name} Template.md, preserving every required "
@@ -233,6 +215,27 @@ class VaultTools:
         # {"old_path", "new_path", "before"} — the audit step turns these into
         # ``rename`` ledger entries so a note vanishing is never invisible.
         self.removed: List[dict] = []
+        # Vault contents as this run found them. ``verify_vault`` diffs against it, so
+        # the agent is only ever shown problems it introduced. Captured lazily: a
+        # search-only run never pays for it.
+        self._baseline: Dict[str, str] | None = None
+
+    def baseline(self) -> Dict[str, str]:
+        """Snapshot of the vault at the start of this run, taken once."""
+
+        if self._baseline is None:
+            self._baseline = {
+                rel: path.read_text(encoding="utf-8", errors="replace")
+                for rel, path in (
+                    (p.relative_to(self.root).as_posix(), p) for p in self._all_md()
+                )
+            }
+        return self._baseline
+
+    def verify_vault(self) -> str:
+        """Report this run's vault problems, phrased so the agent can fix them."""
+
+        return render_findings(verify_vault_changes(self.root, self.baseline()))
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
@@ -242,6 +245,11 @@ class VaultTools:
         Every mutating tool runs its full resolve-check-write sequence inside this lock
         so exists/case-collision checks cannot race a concurrent agent's write.
         """
+        # Every mutator passes through here before touching a file, so this is where
+        # "the vault as this run found it" is still true. Capturing it lazily inside
+        # verify_vault instead would snapshot the agent's own writes and report clean.
+        # Taken outside the lock: it is pure reads and can be slow on a large vault.
+        self.baseline()
         try:
             with vault_note_lock(self.root.name):
                 yield
@@ -440,14 +448,62 @@ class VaultTools:
 
     # --- read / write -------------------------------------------------------
 
-    def read_note(self, path: str) -> str:
+    def read_note(
+        self, path: str, offset: int = 0, limit: int = _READ_DEFAULT_LINES
+    ) -> str:
+        """Read a window of a note, numbered from ``offset``.
+
+        Returning whole files is what broke the settled-day write: ``Daily/<date>.md``
+        had grown to 215 KB (~55k tokens) and one call consumed 84% of a 65k context,
+        so every attempt failed on context size before it could edit anything. A note
+        has no bound on its length, so a read of one must have its own.
+
+        Windowed rather than simply truncated: the agent can page to the part it needs.
+        Most of the time it needs none of this — ``edit_section`` appends by heading
+        without reading the note at all.
+        """
         fp = self._abs(path)
         if not fp.exists():
             raise VaultToolError(
                 f"Note '{path}' does not exist. Use glob or grep to find the right "
                 f"path, or write_note to create it."
             )
-        return fp.read_text(encoding="utf-8")
+        try:
+            offset = max(0, int(offset))
+            limit = int(limit)
+        except (TypeError, ValueError):
+            raise VaultToolError("read_note offset and limit must be integers.")
+        if limit <= 0:
+            limit = _READ_DEFAULT_LINES
+        limit = min(limit, _READ_MAX_LINES)
+
+        # keepends, so an unwindowed read returns the file byte-for-byte — edit_note
+        # matches old_text exactly, and a silently dropped trailing newline would make
+        # an edit copied from a read fail to apply.
+        lines = fp.read_text(encoding="utf-8").splitlines(keepends=True)
+        total = len(lines)
+        window = lines[offset : offset + limit]
+
+        # A single very long line can still blow the window, so cap the characters too.
+        body = "".join(window)
+        char_capped = False
+        if len(body) > _READ_MAX_CHARS:
+            body = body[:_READ_MAX_CHARS]
+            char_capped = True
+
+        shown_to = offset + len(window)
+        if offset == 0 and shown_to >= total and not char_capped:
+            return body
+        notes = [f"[showing lines {offset + 1}-{shown_to} of {total}]"]
+        if char_capped:
+            notes.append(f"[truncated at {_READ_MAX_CHARS} characters]")
+        if shown_to < total:
+            notes.append(
+                f"[continue with read_note(path, offset={shown_to}) — or prefer "
+                f"grep to find the part you need, and edit_section to append without "
+                f"reading the whole note]"
+            )
+        return f"{body}\n\n" + "\n".join(notes)
 
     def edit_note(self, path: str, edits: List[Dict[str, str]]) -> str:
         parsed = [Edit(e["old_text"], e["new_text"]) for e in edits]
@@ -761,7 +817,11 @@ class VaultTools:
         if name == "glob":
             return self.glob(args["pattern"])
         if name == "read_note":
-            return self.read_note(args["path"])
+            return self.read_note(
+                args["path"],
+                offset=args.get("offset", 0),
+                limit=args.get("limit", _READ_DEFAULT_LINES),
+            )
         if name == "edit_note":
             return self.edit_note(args["path"], args["edits"])
         if name == "edit_section":
@@ -779,6 +839,8 @@ class VaultTools:
             return self.rename_person(args["old_name"], args["new_name"])
         if name == "create_category":
             return self.create_category(args["name"], args.get("properties"))
+        if name == "verify_vault":
+            return self.verify_vault()
         raise VaultToolError(f"Unknown tool: {name}")
 
 
@@ -844,11 +906,29 @@ _READ_TOOL = {
     "type": "function",
     "function": {
         "name": "read_note",
-        "description": "Read a note's full markdown by vault-relative path "
-        "(e.g. 'People/Alice.md'). Read before you edit.",
+        "description": (
+            "Read a window of a note by vault-relative path (e.g. 'People/Alice.md'). "
+            f"Returns up to {_READ_DEFAULT_LINES} lines from `offset`; long notes are "
+            "reported with their total length and how to page on. To ADD a fact you do "
+            "not need to read the note at all — `edit_section` appends by heading. Use "
+            "`grep` to locate the part you care about rather than paging a long note."
+        ),
         "parameters": {
             "type": "object",
-            "properties": {"path": {"type": "string"}},
+            "properties": {
+                "path": {"type": "string"},
+                "offset": {
+                    "type": "integer",
+                    "description": "0-based first line to return (default 0).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        f"Lines to return (default {_READ_DEFAULT_LINES}, max "
+                        f"{_READ_MAX_LINES})."
+                    ),
+                },
+            },
             "required": ["path"],
         },
     },
@@ -988,6 +1068,21 @@ _CREATE_CATEGORY_TOOL = {
     },
 }
 
+_VERIFY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "verify_vault",
+        "description": (
+            "Check every note you created or edited this run against the vault's "
+            "rules — note schema, duplicated sections, illegal paths, and notes that "
+            "differ from an existing one only by capitalisation. Returns the problems "
+            "and how to fix each. Call this before your final message and fix "
+            "everything it reports; it only ever reports problems YOU introduced."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
 # Full write-agent toolset.
 VAULT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     _GREP_TOOL,
@@ -998,6 +1093,7 @@ VAULT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     _WRITE_TOOL,
     _RENAME_TOOL,
     _CREATE_CATEGORY_TOOL,
+    _VERIFY_TOOL,
 ]
 
 # Read-only subset for search.

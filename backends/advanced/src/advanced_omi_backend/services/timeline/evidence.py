@@ -377,26 +377,45 @@ def _transcript_item(conversation: Conversation) -> TimelineEvidenceItem | None:
         started_at=started_at,
         ended_at=ended_at,
         role=role,
-        excerpt=transcript[:30000],
+        # Speaker-attributed, so the agent can name who spoke rather than inferring it.
+        # This replaces a parallel `segments` blob that repeated the same text with
+        # per-segment timestamps — 119KB for one conversation, and the largest single
+        # contributor to a workspace too big for the agent to read.
+        excerpt=_attributed_transcript(version, transcript),
         content_hash=(version.version_id if version else None),
         metadata={
             "direction": direction,
             "conversation_id": conversation.conversation_id,
-            "segments": [
+            "speakers": sorted(
                 {
-                    "started_at": (
-                        started_at + timedelta(seconds=segment.start)
-                    ).isoformat(),
-                    "ended_at": (
-                        started_at + timedelta(seconds=segment.end)
-                    ).isoformat(),
-                    "speaker": segment.speaker,
-                    "text": segment.text,
+                    segment.speaker
+                    for segment in (version.segments if version else [])
+                    if segment.speaker
                 }
-                for segment in (version.segments if version else [])
-            ],
+            ),
         },
     )
+
+
+def _attributed_transcript(version: Any, fallback: str) -> str:
+    """`speaker: text` lines, falling back to the plain transcript when undiarized."""
+
+    segments = version.segments if version else []
+    if not segments:
+        return fallback[:30000]
+    lines: list[str] = []
+    budget = 30000
+    for segment in segments:
+        text = (segment.text or "").strip()
+        if not text:
+            continue
+        line = f"{segment.speaker or 'unknown'}: {text}"
+        if len(line) > budget:
+            lines.append(line[:budget])
+            break
+        lines.append(line)
+        budget -= len(line) + 1
+    return "\n".join(lines) or fallback[:30000]
 
 
 def _window_items(
@@ -463,6 +482,10 @@ async def assemble_day_evidence(
         Conversation.user_id == user_id,
         Conversation.external_source_type == "screenpipe",
         Conversation.created_at < range_end,
+        # A deleted recording is not evidence. Without this an episode can cite —
+        # and a promoted recording can point at — audio the user can no longer play,
+        # which is what a duplicate sweep leaves behind.
+        {"deleted": {"$ne": True}},
     ).to_list()
 
     device_evidence: list[TimelineEvidenceItem] = []

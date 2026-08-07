@@ -14,6 +14,8 @@ from advanced_omi_backend.models.api_key import (
     hash_secret,
     parse_token,
 )
+from advanced_omi_backend.routers.modules.api_key_routes import _resolve_owner
+from advanced_omi_backend.routers.modules.user_routes import UserAdminRead
 
 
 def test_generated_token_round_trips_to_its_stored_hash():
@@ -167,15 +169,11 @@ class _FakeOwner:
 
 
 def test_resolve_owner_defaults_to_the_caller():
-    from advanced_omi_backend.routers.modules.api_key_routes import _resolve_owner
-
     me = _FakeOwner(PydanticObjectId())
     assert _resolve_owner(None, me) == me.id
 
 
 def test_resolve_owner_lets_a_user_name_themselves():
-    from advanced_omi_backend.routers.modules.api_key_routes import _resolve_owner
-
     me = _FakeOwner(PydanticObjectId())
     assert _resolve_owner(str(me.id), me) == me.id
 
@@ -183,7 +181,6 @@ def test_resolve_owner_lets_a_user_name_themselves():
 def test_resolve_owner_blocks_a_non_admin_targeting_someone_else():
     """A key grants its owner's full access, so minting one for another user
     is an impersonation primitive — admins only."""
-    from advanced_omi_backend.routers.modules.api_key_routes import _resolve_owner
 
     me = _FakeOwner(PydanticObjectId())
     victim = PydanticObjectId()
@@ -193,16 +190,12 @@ def test_resolve_owner_blocks_a_non_admin_targeting_someone_else():
 
 
 def test_resolve_owner_allows_an_admin_targeting_someone_else():
-    from advanced_omi_backend.routers.modules.api_key_routes import _resolve_owner
-
     admin = _FakeOwner(PydanticObjectId(), is_superuser=True)
     other = PydanticObjectId()
     assert _resolve_owner(str(other), admin) == other
 
 
 def test_resolve_owner_rejects_a_malformed_user_id():
-    from advanced_omi_backend.routers.modules.api_key_routes import _resolve_owner
-
     admin = _FakeOwner(PydanticObjectId(), is_superuser=True)
     with pytest.raises(HTTPException) as exc:
         _resolve_owner("not-an-object-id", admin)
@@ -212,7 +205,6 @@ def test_resolve_owner_rejects_a_malformed_user_id():
 def test_admin_user_listing_never_serialises_the_password_hash():
     """/api/users previously returned the Beanie document, shipping
     hashed_password to the browser."""
-    from advanced_omi_backend.routers.modules.user_routes import UserAdminRead
 
     fields = set(UserAdminRead.model_fields)
     assert "hashed_password" not in fields
@@ -221,7 +213,6 @@ def test_admin_user_listing_never_serialises_the_password_hash():
 
 def test_admin_user_listing_keeps_the_underscore_id_alias():
     """The WebUI reads user._id; a bare `id` would silently break every row."""
-    from advanced_omi_backend.routers.modules.user_routes import UserAdminRead
 
     row = UserAdminRead(
         id="507f1f77bcf86cd799439011",

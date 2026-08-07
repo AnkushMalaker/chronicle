@@ -51,7 +51,9 @@ from .memory_agent import (
     VaultSearchResult,
     _get_prompt,
     _search_final_synthesis_prompt,
+    build_write_task,
 )
+from .vault_skill import write_skill
 from .vault_tools import (
     VAULT_SEARCH_TOOL_SCHEMAS,
     VAULT_TOOL_SCHEMAS,
@@ -80,7 +82,17 @@ if not _READ_ONLY_VAULT_TOOLS < _ALL_VAULT_TOOLS:
     raise RuntimeError(
         "Pi vault schemas must define a nonempty write-only tool difference"
     )
-_MUTATING_VAULT_TOOLS = _ALL_VAULT_TOOLS - _READ_ONLY_VAULT_TOOLS
+# verify_vault only reads; it is absent from the search agent's set because a read-only
+# retrieval run has nothing to verify, not because it mutates.
+_MUTATING_VAULT_TOOLS = _ALL_VAULT_TOOLS - _READ_ONLY_VAULT_TOOLS - {"verify_vault"}
+
+# Pi keeps `--no-builtin-tools`. Its native `read` looked like the obvious fix for our
+# unbounded read_note, but in the pinned 0.83.0 `resolveReadPathAsync` only resolves the
+# path against cwd — absolute paths pass straight through and there is no confinement
+# check (upstream added one in a later release). The memory agent reads untrusted
+# transcript content, so granting it would let an injected transcript read /codex-home,
+# .env, or another user's vault and write the contents into a synced note. read_note is
+# bounded instead; see vault_tools.read_note.
 _THINKING_LEVELS = {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
 _PROXY_ENV_NAMES = {
     "ALL_PROXY",
@@ -1226,11 +1238,20 @@ async def _invoke_pi(
                 "--offline",
                 "--no-context-files",
                 "--no-extensions",
-                "--no-skills",
                 "--no-prompt-templates",
                 "--no-themes",
                 "--no-builtin-tools",
             ]
+            if schemas:
+                # The vault's shape travels as a skill rather than more system prompt,
+                # so it is generated from the same templates the vault is scaffolded
+                # from and cannot drift from what verify_vault enforces.
+                skill_path = write_skill(temp_dir)
+                skill_path.chmod(0o600)
+                command.extend(["--skill", str(skill_path)])
+            else:
+                # Final synthesis: no tools, and nothing to teach.
+                command.append("--no-skills")
             command.extend(["-e", str(extension_path)])
             if schemas:
                 tool_names = ",".join(
@@ -1394,22 +1415,21 @@ class PiMemoryAgent:
         title: Optional[str] = None,
         vault_summary: str = "",
         guidance: str = "",
+        record: str = "conversation",
     ) -> MemoryAgentResult:
         config = _resolve_pi_config(self.operation, force_fallback=self.force_fallback)
         date = date or datetime.now(timezone.utc).isoformat()
         system_prompt = await _get_prompt(
             AGENT_SYSTEM_PROMPT_ID, DEFAULT_AGENT_SYSTEM_PROMPT, vault_summary
         )
-        guidance_block = f"\n\n{guidance}" if guidance else ""
-        task = (
-            f"New conversation to record.\n"
-            f"conversation_id: {conversation_id}\n"
-            f"date: {date}\n"
-            f"duration_minutes: "
-            f"{duration_minutes if duration_minutes is not None else 'unknown'}\n\n"
-            f"source_title: {title or 'unknown'}\n\n"
-            f"Transcript (speaker-labelled):\n{transcript}"
-            f"{guidance_block}"
+        task = build_write_task(
+            transcript,
+            conversation_id,
+            date=date,
+            duration_minutes=duration_minutes,
+            title=title,
+            guidance=guidance,
+            record=record,
         )
         with memory_span(
             "pi_memory_agent",

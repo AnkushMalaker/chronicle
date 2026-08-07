@@ -27,7 +27,11 @@ from advanced_omi_backend.controllers import (
     data_audit_controller,
     guided_enrollment_controller,
 )
+from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.users import User
+from advanced_omi_backend.workers.background_suppression_jobs import (
+    backfill_all_suppressions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -497,7 +501,6 @@ async def guided_enrollment_gallery_audio(
         current_user = await get_user_from_token_param(token)
     if not current_user:
         raise HTTPException(status_code=401, detail="Authentication required")
-    from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 
     audio = await SpeakerRecognitionClient().get_enrollment_segment_audio(segment_id)
     if audio is None:
@@ -781,9 +784,6 @@ async def background_suppressions_backfill(
     current_user: User = Depends(current_active_user),
 ):
     """Score all corpus-indexed conversations into the ledger (shadow mode)."""
-    from advanced_omi_backend.workers.background_suppression_jobs import (
-        backfill_all_suppressions,
-    )
 
     return await backfill_all_suppressions(str(current_user.user_id))
 

@@ -915,10 +915,12 @@ cron_jobs:
     description: "Assemble uploaded device audio into speech-driven conversations"
     enabled: true
     schedule: "*/2 * * * *"
-  observation_curation:
-    description: "Curate novel ScreenPipe observations into durable vault context"
+  episode_memory:
+    description: "Record a settled day's timeline episodes into the memory vault"
     enabled: true
-    schedule: "*/5 * * * *"
+    # Cheap to run and a no-op until a past day has settled, so an hourly tick just
+    # means a completed day is recorded soon after it stops changing.
+    schedule: "20 * * * *"
   episode_thumbnails:
     description: "Give timeline episodes a representative frame from their own interval"
     enabled: true
@@ -935,12 +937,6 @@ cron_jobs:
     # Analysis is also available on demand from the Timeline page.
     schedule: "0 */4 * * *"
 
-observation_curation:
-  codex:
-    model: gpt-5.6-luna
-    reasoning_effort: low
-    timeout_seconds: 600
-
 timeline:
   # Window size is a capacity knob, not a semantic one — the prompt treats windows as
   # coverage units that must never become episode boundaries. It sets how many files
@@ -955,7 +951,7 @@ timeline:
   executor: codex
   # Run identity. Must match services/timeline/prompt.py's PROMPT_VERSION; changing the
   # prompt text without bumping both leaves completed days cached on the old rules.
-  prompt_version: timeline-episodes-v10
+  prompt_version: timeline-episodes-v11
   codex:
     model: gpt-5.6-luna
     # `low` was chosen for cost, but a pass that returns no episodes costs a full run
@@ -969,6 +965,31 @@ timeline:
     timeout_seconds: 1800
     max_used_percent: 80
     retry_hours: 6
+  thumbnails:
+    # Vision pass that picks which sampled frame depicts an episode.
+    codex:
+      model: gpt-5.6-luna
+      reasoning_effort: low
+      timeout_seconds: 600
+  # Settled-day vault write. A day is the memory unit for capture evidence because
+  # continuous audio is cut into bounded compute spans, so one meeting can span several
+  # recordings while an episode already has the right bounds.
+  memory:
+    # Only past days within this window are considered, so enabling this on an existing
+    # deployment records the recent days rather than rewriting months of vault at once.
+    lookback_days: 2
+    max_days_per_run: 2
+    # A re-analysis that landed this recently means the day is still moving; regeneration
+    # is non-deterministic, so writing then would record the same stretch twice under
+    # different boundaries.
+    settle_minutes: 60
+    claim_timeout_minutes: 120
+    # After this many failures a day settles into `skipped` with its diagnostic instead
+    # of being re-attempted on every tick forever.
+    max_attempts: 3
+    # ~15K tokens, the size audited memory prompts already reach successfully. A larger
+    # day sheds its lowest-salience non-conversational episodes, and logs which.
+    max_digest_chars: 60000
 
 # Data Audit / auto-clean "level" (thresholds for the auto_clean cron job).
 # Kept separate from cron_jobs.auto_clean so toggling the schedule in the UI

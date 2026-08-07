@@ -25,11 +25,36 @@ from advanced_omi_backend.models.timeline import TimelineDay, TimelineEpisode, u
 from advanced_omi_backend.services.memory.agent.codex_agent import (
     codex_executor_available,
 )
-from advanced_omi_backend.services.observation_curation import (
-    _observation_codex_settings,
-)
+
+from .executor import settings_dict
 
 logger = logging.getLogger(__name__)
+
+_CODEX_REASONING_EFFORTS = {"minimal", "none", "low", "medium", "high"}
+_CODEX_TIMEOUT_SECONDS = 600
+
+
+def thumbnail_codex_settings(settings: Any = None) -> dict[str, Any]:
+    """Validated Codex settings for the frame-picking vision pass."""
+
+    if settings is None:
+        settings = (settings_dict().get("thumbnails") or {}).get("codex") or {}
+    model = str(settings.get("model") or "").strip()
+    if not model:
+        raise ValueError(
+            "timeline.thumbnails.codex.model must be explicitly configured"
+        )
+    reasoning = str(settings.get("reasoning_effort") or "").strip().lower()
+    if reasoning and reasoning not in _CODEX_REASONING_EFFORTS:
+        allowed = ", ".join(sorted(_CODEX_REASONING_EFFORTS))
+        raise ValueError(
+            f"timeline.thumbnails.codex.reasoning_effort must be one of {allowed}"
+        )
+    timeout = int(settings.get("timeout_seconds", _CODEX_TIMEOUT_SECONDS))
+    if timeout <= 0:
+        raise ValueError("timeline.thumbnails.codex.timeout_seconds must be positive")
+    return {"model": model, "reasoning_effort": reasoning, "timeout_seconds": timeout}
+
 
 # One request covers a whole episode, so this is a per-episode cost, not per-frame.
 FRAMES_PER_EPISODE = 6
@@ -88,7 +113,7 @@ async def _request_frames(episode: TimelineEpisode, source_id: str) -> None:
 async def choose_episode_frame(episode: TimelineEpisode) -> dict[str, Any]:
     """Run the vision pass over an episode's fetched frames."""
 
-    settings = _observation_codex_settings()
+    settings = thumbnail_codex_settings()
     available, detail = codex_executor_available()
     if not available:
         raise RuntimeError(detail)

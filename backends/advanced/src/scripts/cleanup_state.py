@@ -28,6 +28,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from langfuse import Langfuse
+
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -840,7 +842,6 @@ async def connect_services():
     langfuse_secret = os.getenv("LANGFUSE_SECRET_KEY")
     if langfuse_host and langfuse_public and langfuse_secret:
         try:
-            from langfuse import Langfuse
 
             langfuse_client = Langfuse()
         except Exception:

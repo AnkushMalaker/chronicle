@@ -793,9 +793,10 @@ def start_post_conversation_jobs(
     end_reason: str = "file_upload",
     skip_speaker_recognition: bool = False,
     skip_memory_extraction: bool = False,
+    skip_title_summary: bool = False,
     memory_cause: MemoryCause = MemoryCause.AUTO_EXTRACTION,
     memory_strategy: UpdateStrategy = UpdateStrategy.FULL,
-) -> Dict[str, str]:
+) -> Dict[str, Optional[str]]:
     """
     Start post-conversation processing jobs after conversation is created.
 
@@ -819,6 +820,12 @@ def start_post_conversation_jobs(
             by split/merge, whose transcripts already carry speaker labels
         skip_memory_extraction: Skip memory extraction even when globally enabled —
             used for annotation/training datasets that should not enter user memory
+        skip_title_summary: Skip LLM title/summary generation — used by continuous
+            capture, which is timeline evidence rather than a titled conversation
+
+    The terminal event-dispatch job is never skippable: it owns ``end_reason``,
+    ``completed_at``, and the reconciled ``processing_status``, so a conversation whose
+    chain omits it never settles.
 
     Returns:
         Dict with job IDs for speaker_recognition, memory, title_summary, event_dispatch
@@ -954,36 +961,36 @@ def start_post_conversation_jobs(
     # and to ensure fresh memories are available for context-enriched summaries
     title_dependency = memory_job if memory_job else speaker_dependency
     title_job_id = f"title_summary_{conversation_id[:12]}"
-    logger.info(
-        f"🔍 DEBUG: Creating title/summary job with job_id={title_job_id}, conversation_id={conversation_id[:12]}"
-    )
-
-    title_summary_job = default_queue.enqueue(
-        generate_title_summary_job,
-        conversation_id,
-        job_timeout=300,  # 5 minutes
-        result_ttl=JOB_RESULT_TTL,
-        job_id=title_job_id,
-        description=f"Generate title and summary for conversation {conversation_id[:8]}",
-        **post_conv_enqueue_kwargs(
-            "title_summary", job_meta, depends_on=title_dependency
-        ),
-    )
-    if memory_job:
+    title_summary_job = None
+    if skip_title_summary:
         logger.info(
-            f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on memory job {memory_job.id})"
-        )
-    elif speaker_job:
-        logger.info(
-            f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on speaker job {speaker_job.id})"
-        )
-    elif depends_on_job:
-        logger.info(
-            f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (depends on {depends_on_job.id})"
+            f"⏭️  Title/summary skipped by caller for conversation {conversation_id[:8]}"
         )
     else:
         logger.info(
-            f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, meta={title_summary_job.meta} (no dependencies, starts immediately)"
+            f"🔍 DEBUG: Creating title/summary job with job_id={title_job_id}, conversation_id={conversation_id[:12]}"
+        )
+
+        title_summary_job = default_queue.enqueue(
+            generate_title_summary_job,
+            conversation_id,
+            job_timeout=300,  # 5 minutes
+            result_ttl=JOB_RESULT_TTL,
+            job_id=title_job_id,
+            description=f"Generate title and summary for conversation {conversation_id[:8]}",
+            **post_conv_enqueue_kwargs(
+                "title_summary", job_meta, depends_on=title_dependency
+            ),
+        )
+        upstream = memory_job or speaker_job or depends_on_job
+        logger.info(
+            f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, "
+            f"meta={title_summary_job.meta} "
+            + (
+                f"(depends on {upstream.id})"
+                if upstream
+                else "(no dependencies, starts immediately)"
+            )
         )
 
     # Step 5: Dispatch conversation.complete event (runs after both memory and title/summary complete)
@@ -1042,7 +1049,7 @@ def start_post_conversation_jobs(
                 for j in [
                     "speaker_recognition" if speaker_job else None,
                     "memory_extraction" if memory_job else None,
-                    "title_summary",
+                    "title_summary" if title_summary_job else None,
                     "event_dispatch",
                 ]
                 if j
@@ -1053,7 +1060,7 @@ def start_post_conversation_jobs(
     return {
         "speaker_recognition": speaker_job.id if speaker_job else None,
         "memory": memory_job.id if memory_job else None,
-        "title_summary": title_summary_job.id,
+        "title_summary": title_summary_job.id if title_summary_job else None,
         "event_dispatch": event_dispatch_job.id,
     }
 

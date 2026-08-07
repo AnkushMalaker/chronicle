@@ -1,5 +1,6 @@
 """Idempotent timeline run coordination and generation publishing."""
 
+import logging
 import tempfile
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
@@ -10,6 +11,12 @@ from zoneinfo import ZoneInfo
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from advanced_omi_backend.controllers.queue_controller import (
+    JOB_RESULT_TTL,
+    default_queue,
+    post_conv_enqueue_kwargs,
+)
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.timeline import (
     TimelineAnalysisRun,
     TimelineAssertion,
@@ -19,13 +26,27 @@ from advanced_omi_backend.models.timeline import (
     utcnow,
 )
 from advanced_omi_backend.models.user import User
+from advanced_omi_backend.observability.tracing import (
+    chronicle_span,
+    set_span_attributes,
+    set_span_usage,
+)
+from advanced_omi_backend.workers.conversation_jobs import generate_title_summary_job
 
 from .codex_executor import TimelineQuotaDeferred
 from .contracts import TimelineAgentResult, TimelineEvidenceManifest
 from .evidence import assemble_day_evidence, day_bounds
-from .executor import build_executor, settings_dict, validate_agent_result
+from .executor import (
+    TimelineIncompleteSegmentation,
+    build_executor,
+    settings_dict,
+    validate_agent_result,
+)
+from .prompt import PROMPT_VERSION
 from .timezone import canonical_timezone
 from .workspace import write_workspace
+
+logger = logging.getLogger(__name__)
 
 
 async def request_timeline_analysis(
@@ -46,7 +67,9 @@ async def request_timeline_analysis(
     revision = manifest.evidence_revision
     if force:
         revision = f"{revision}:force:{uuid.uuid4().hex}"
-    prompt_version = str(settings.get("prompt_version") or "timeline-episodes-v1")
+    # Falls back to the prompt module's own version rather than a literal, so an
+    # unconfigured deployment still tracks the shipped rules instead of pinning "v1".
+    prompt_version = str(settings.get("prompt_version") or PROMPT_VERSION)
     existing = await TimelineAnalysisRun.find_one(
         TimelineAnalysisRun.user_id == user_id,
         TimelineAnalysisRun.local_date == local_date,
@@ -83,21 +106,52 @@ async def request_timeline_analysis(
         return existing
 
 
-async def _claim_next_run() -> TimelineAnalysisRun | None:
-    now = utcnow()
+def _claimable(now: datetime) -> dict[str, Any]:
     stale = now - timedelta(hours=2)
+    return {
+        "$or": [
+            {"state": "pending"},
+            {"state": "quota_deferred", "retry_after": {"$lte": now}},
+            {
+                "state": {"$in": ["preparing", "running", "validating"]},
+                "claimed_at": {"$lt": stale},
+            },
+        ]
+    }
+
+
+async def process_timeline_run(run_id: str) -> dict[str, int]:
+    """Analyze one specific run now, regardless of what else is queued.
+
+    On-demand analysis used the shared oldest-first claim, so pressing "Analyze day"
+    could spend its work on somebody else's backlogged run and leave the requested day
+    untouched — indefinitely, if the backlog kept growing.
+    """
+
+    now = utcnow()
     collection = TimelineAnalysisRun.get_pymongo_collection()
     document = await collection.find_one_and_update(
+        {"run_id": run_id, **_claimable(now)},
         {
-            "$or": [
-                {"state": "pending"},
-                {"state": "quota_deferred", "retry_after": {"$lte": now}},
-                {
-                    "state": {"$in": ["preparing", "running", "validating"]},
-                    "claimed_at": {"$lt": stale},
-                },
-            ]
+            "$set": {"state": "preparing", "claimed_at": now, "error": None},
+            "$inc": {"attempts": 1},
         },
+        return_document=ReturnDocument.AFTER,
+    )
+    if document is None:
+        # Already running or finished — the caller's day is being handled either way.
+        return {"processed": 0, "failed": 0, "deferred": 0}
+    run = await TimelineAnalysisRun.find_one(TimelineAnalysisRun.run_id == run_id)
+    if run is None:
+        return {"processed": 0, "failed": 0, "deferred": 0}
+    return await _run_claimed(run)
+
+
+async def _claim_next_run() -> TimelineAnalysisRun | None:
+    now = utcnow()
+    collection = TimelineAnalysisRun.get_pymongo_collection()
+    document = await collection.find_one_and_update(
+        _claimable(now),
         {
             "$set": {"state": "preparing", "claimed_at": now, "error": None},
             "$inc": {"attempts": 1},
@@ -140,6 +194,20 @@ async def _active_episodes(run: TimelineAnalysisRun) -> list[TimelineEpisode]:
     ).to_list()
 
 
+def _pinned_payload(episodes: list[TimelineEpisode]) -> list[dict[str, Any]]:
+    return [
+        {
+            "episode_key": episode.episode_key,
+            "started_at": episode.started_at.isoformat(),
+            "ended_at": episode.ended_at.isoformat(),
+            "kind": episode.kind,
+            "title": episode.title,
+            "summary": episode.summary,
+        }
+        for episode in episodes
+    ]
+
+
 def _evidence_ref(item) -> TimelineEvidenceRef:
     return TimelineEvidenceRef(
         evidence_id=item.evidence_id,
@@ -152,7 +220,247 @@ def _evidence_ref(item) -> TimelineEvidenceRef:
         excerpt=item.excerpt,
         content_hash=item.content_hash,
         ephemeral=item.ephemeral,
+        metadata=dict(getattr(item, "metadata", {}) or {}),
     )
+
+
+# Escalation ladder for a segmentation pass that came back empty. Low effort is the
+# configured default because it is cheap and usually enough on a short day; it degrades
+# badly as a day accumulates windows, which is exactly when the retry matters.
+_EFFORT_ESCALATION = {"none": "low", "low": "medium", "medium": "high", "high": "high"}
+
+
+async def _analyze_with_escalation(
+    manifest: TimelineEvidenceManifest,
+    workspace: Path,
+    existing: list[TimelineEpisode],
+    pinned: list[TimelineEpisode],
+    *,
+    configured_effort: Any,
+    span: Any = None,
+) -> TimelineAgentResult:
+    """Run segmentation, retrying once at higher reasoning effort if it says nothing.
+
+    An empty result is a model failure, not an account of the day (see
+    ``TimelineIncompleteSegmentation``). Retrying at the same effort would mostly
+    reproduce it, so the one retry escalates instead.
+    """
+
+    executor = build_executor()
+    effort = str(configured_effort) if configured_effort else "low"
+    attempts: list[str] = []
+    last_error: Exception | None = None
+
+    for attempt_effort in (effort, _EFFORT_ESCALATION.get(effort, "high")):
+        if attempts and attempt_effort == attempts[-1]:
+            break  # Already at the top of the ladder; a second identical run is waste.
+        attempts.append(attempt_effort)
+        result = await executor.analyze(
+            workspace,
+            manifest,
+            _existing_payload(existing),
+            _pinned_payload(pinned),
+            reasoning_effort=attempt_effort,
+        )
+        try:
+            validate_agent_result(
+                result,
+                manifest,
+                [(episode.started_at, episode.ended_at) for episode in pinned],
+            )
+        except TimelineIncompleteSegmentation as error:
+            last_error = error
+            logger.warning(
+                "🕳️ Timeline segmentation returned nothing at effort=%s (%d windows); "
+                "%s",
+                attempt_effort,
+                len(manifest.windows),
+                "retrying at higher effort" if len(attempts) == 1 else "giving up",
+            )
+            continue
+        set_span_attributes(
+            span,
+            {
+                "chronicle.timeline.effort": attempt_effort,
+                "chronicle.timeline.segmentation_attempts": len(attempts),
+            },
+        )
+        return result
+
+    set_span_attributes(
+        span,
+        {
+            "chronicle.timeline.effort": attempts[-1] if attempts else effort,
+            "chronicle.timeline.segmentation_attempts": len(attempts),
+        },
+    )
+    raise last_error or TimelineIncompleteSegmentation("segmentation produced nothing")
+
+
+class TimelineEmptyGeneration(RuntimeError):
+    """An empty result would have blanked a day that already had episodes."""
+
+
+async def _guard_empty_generation(
+    run: TimelineAnalysisRun,
+    manifest: TimelineEvidenceManifest,
+    publishing: int,
+) -> None:
+    """Refuse to let a zero-episode generation supersede a good one.
+
+    A run that returns no episodes still publishes, and publishing switches
+    ``TimelineDay.active_run_id`` — so one flaky segmentation pass silently empties a day
+    the user could see a minute earlier. Raising leaves the previous generation active;
+    the run is recorded as failed and a later evidence revision produces a fresh attempt.
+
+    An empty result is still allowed when the day had nothing to lose, or when the
+    evidence itself shrank (deleted captures), where emptiness is the honest answer.
+    """
+
+    if publishing:
+        return
+    day = await TimelineDay.find_one(
+        TimelineDay.user_id == run.user_id,
+        TimelineDay.local_date == run.local_date,
+        TimelineDay.timezone == run.timezone,
+    )
+    if day is None or not day.active_run_id:
+        return
+    previous = await TimelineEpisode.find(
+        TimelineEpisode.user_id == run.user_id,
+        TimelineEpisode.run_id == day.active_run_id,
+    ).count()
+    if not previous:
+        return
+    prior_evidence = int((day.coverage or {}).get("evidence_count") or 0)
+    if len(manifest.evidence) < prior_evidence:
+        return
+    raise TimelineEmptyGeneration(
+        f"analysis produced no episodes from {len(manifest.evidence)} evidence items "
+        f"while the active generation has {previous}; keeping the previous generation"
+    )
+
+
+def _carry_forward(
+    run: TimelineAnalysisRun,
+    pinned: list[TimelineEpisode],
+    manifest: TimelineEvidenceManifest,
+) -> list[TimelineEpisode]:
+    """Re-materialize confirmed episodes as rows of the new generation.
+
+    Identity (``episode_key``), human-authored fields, and confirmation survive verbatim.
+    Evidence refs are refreshed from the new manifest where the cited evidence still
+    exists, so a pinned episode picks up re-assembled evidence without losing citations
+    that have since aged out.
+    """
+
+    evidence = {item.evidence_id: item for item in manifest.evidence}
+    carried: list[TimelineEpisode] = []
+    for episode in pinned:
+        refs = [
+            (
+                _evidence_ref(evidence[ref.evidence_id])
+                if ref.evidence_id in evidence
+                else ref
+            )
+            for ref in episode.evidence_refs
+        ]
+        payload = episode.model_dump(exclude={"id", "revision_id"})
+        payload.update(
+            {
+                "episode_id": str(uuid.uuid4()),
+                "run_id": run.run_id,
+                "evidence_refs": refs,
+                "source_ids": sorted({ref.source_id for ref in refs if ref.source_id}),
+                # A carried episode never parents a freshly drafted one: the draft's
+                # parent indices address only this run's generated episodes.
+                "parent_episode_id": None,
+                "revised_at": utcnow(),
+            }
+        )
+        carried.append(TimelineEpisode(**payload))
+    return carried
+
+
+def _cited_conversation_ids(episode: TimelineEpisode) -> set[str]:
+    """Every conversation this episode points at, agent-named or assembly-recorded.
+
+    ``related_conversation_ids`` is the agent's answer and can omit or invent one;
+    ``evidence_refs[].metadata['conversation_id']`` is recorded at assembly time and is
+    the reliable half. Take the union — the caller only acts on ids that resolve to a
+    real capture-evidence recording, which discards anything invented.
+    """
+
+    cited = {str(item) for item in episode.related_conversation_ids if item}
+    for ref in episode.evidence_refs:
+        conversation_id = ref.metadata.get("conversation_id")
+        if conversation_id:
+            cited.add(str(conversation_id))
+    return cited
+
+
+async def _promote_conversational_recordings(
+    episodes: list[TimelineEpisode],
+) -> list[str]:
+    """Return capture-evidence recordings to the user-facing Recordings list.
+
+    ScreenPipe audio is ingested as ``capture_evidence`` because most of it is ambient,
+    but a standup or 1:1 captured that way is a real conversation the user expects to
+    find. The segmentation agent is what can tell the two apart, so promotion happens
+    here rather than at ingest.
+
+    Memory is deliberately *not* enqueued: these recordings are remembered through the
+    settled-day episode pass (services/timeline/memory.py), not the per-conversation
+    chain. Only title/summary runs, so a promoted recording is not left untitled.
+    """
+
+    cited: set[str] = set()
+    for episode in episodes:
+        if episode.conversational:
+            cited |= _cited_conversation_ids(episode)
+    if not cited:
+        return []
+
+    collection = Conversation.get_pymongo_collection()
+    query = {
+        "conversation_id": {"$in": sorted(cited)},
+        "data_purpose": "capture_evidence",
+    }
+    promoted = [
+        document["conversation_id"]
+        async for document in collection.find(query, {"conversation_id": 1})
+    ]
+    if not promoted:
+        return []
+
+    await collection.update_many(
+        {"conversation_id": {"$in": promoted}},
+        {
+            "$set": {
+                "data_purpose": "conversation",
+                "memory_excluded": False,
+                "memory_exclusion_reason": None,
+            }
+        },
+    )
+    for conversation_id in promoted:
+        default_queue.enqueue(
+            generate_title_summary_job,
+            conversation_id,
+            job_timeout=300,
+            result_ttl=JOB_RESULT_TTL,
+            job_id=f"title_summary_{conversation_id[:12]}",
+            description=f"Title/summary for promoted recording {conversation_id[:8]}",
+            **post_conv_enqueue_kwargs(
+                "title_summary", {"conversation_id": conversation_id}
+            ),
+        )
+    logger.info(
+        "🗣️ Promoted %d capture-evidence recording(s) to conversations: %s",
+        len(promoted),
+        ", ".join(item[:8] for item in promoted),
+    )
+    return promoted
 
 
 async def _publish(
@@ -160,6 +468,7 @@ async def _publish(
     manifest: TimelineEvidenceManifest,
     result: TimelineAgentResult,
     images: dict[str, bytes],
+    pinned: list[TimelineEpisode] | None = None,
 ) -> None:
     evidence = {item.evidence_id: item for item in manifest.evidence}
     episode_ids = [str(uuid.uuid4()) for _ in result.episodes]
@@ -181,6 +490,7 @@ async def _publish(
                 kind=episode.kind,
                 title=episode.title,
                 summary=episode.summary,
+                conversational=episode.conversational,
                 salience=episode.salience,
                 confidence=episode.confidence,
                 activity_mode=episode.activity_mode,
@@ -206,8 +516,15 @@ async def _publish(
                 ),
             )
         )
-    if documents:
-        await TimelineEpisode.insert_many(documents)
+    carried = _carry_forward(run, pinned or [], manifest)
+    await _guard_empty_generation(run, manifest, len(documents) + len(carried))
+    if documents or carried:
+        await TimelineEpisode.insert_many(documents + carried)
+        # Promotion is one-way and idempotent: it only ever moves a recording out of
+        # capture_evidence, and re-running finds nothing left to move. A later
+        # generation that no longer calls the episode conversational therefore does not
+        # re-hide a recording the user has already seen.
+        await _promote_conversational_recordings(documents + carried)
     coverage = {
         "started_at": manifest.started_at.isoformat(),
         "ended_at": manifest.ended_at.isoformat(),
@@ -256,7 +573,7 @@ async def _publish(
             },
         },
     )
-    run.output_episode_ids = episode_ids
+    run.output_episode_ids = episode_ids + [episode.episode_id for episode in carried]
 
 
 async def _process_run(run: TimelineAnalysisRun) -> None:
@@ -279,12 +596,15 @@ async def _process_run(run: TimelineAnalysisRun) -> None:
     run.state = "running"
     await run.save()
     existing = await _active_episodes(run)
+    # Keyed on the confirmation timestamp, not ``status``: episodes published before
+    # confirm-and-pin defaulted to "confirmed" without a person ever touching them, and
+    # pinning those would freeze whole days against reanalysis.
+    pinned = [episode for episode in existing if episode.confirmed_at is not None]
     with tempfile.TemporaryDirectory(prefix="chronicle-timeline-") as temp_dir:
         workspace = Path(temp_dir)
         write_workspace(
             workspace,
             manifest,
-            images,
             max_text_chars_per_window=int(
                 settings.get("max_text_chars_per_window", 30000)
             ),
@@ -292,43 +612,86 @@ async def _process_run(run: TimelineAnalysisRun) -> None:
                 settings.get("max_anchor_images_per_window", 4)
             ),
         )
-        result = await build_executor().analyze(
-            workspace, manifest, _existing_payload(existing)
-        )
+        with chronicle_span(
+            "timeline.analyze_day",
+            tracer_name="chronicle.timeline",
+            attributes={
+                "chronicle.timeline.run_id": run.run_id,
+                "chronicle.timeline.local_date": str(run.local_date),
+                "chronicle.timeline.timezone": run.timezone,
+                "chronicle.timeline.executor": run.executor,
+                "chronicle.timeline.prompt_version": run.prompt_version,
+                "gen_ai.request.model": str(
+                    (settings.get("codex") or {}).get("model") or ""
+                ),
+                "chronicle.timeline.evidence_count": len(manifest.evidence),
+                "chronicle.timeline.window_count": len(manifest.windows),
+                "chronicle.timeline.pinned_episodes": len(pinned),
+                "user.id": run.user_id,
+            },
+        ) as span:
+            result = await _analyze_with_escalation(
+                manifest,
+                workspace,
+                existing,
+                pinned,
+                configured_effort=(settings.get("codex") or {}).get("reasoning_effort"),
+                span=span,
+            )
+            set_span_usage(span, result.usage)
+            set_span_attributes(
+                span,
+                {
+                    "chronicle.timeline.episodes_drafted": len(result.episodes),
+                    "chronicle.timeline.unassigned_intervals": len(
+                        result.unassigned_intervals
+                    ),
+                },
+            )
     run.state = "validating"
+    run.usage = dict(result.usage)
     await run.save()
-    validate_agent_result(result, manifest)
-    await _publish(run, manifest, result, images)
+    # Already validated inside _analyze_with_escalation — it must run per attempt to
+    # decide whether to retry, and it mutates the result, so a second call here would
+    # double up the materialized unassigned intervals.
+    await _publish(run, manifest, result, images, pinned)
     run.state = "complete"
     run.completed_at = utcnow()
     await run.save()
 
 
-async def process_timeline_analysis_runs(max_runs: int = 1) -> dict[str, int]:
-    processed = failed = deferred = 0
+async def _run_claimed(run: TimelineAnalysisRun) -> dict[str, int]:
+    """Execute one already-claimed run, recording how it ended."""
+
     settings = settings_dict()
     retry_hours = int((settings.get("codex") or {}).get("retry_hours", 6))
+    try:
+        await _process_run(run)
+        return {"processed": 1, "failed": 0, "deferred": 0}
+    except TimelineQuotaDeferred as error:
+        run.state = "quota_deferred"
+        run.retry_after = utcnow() + timedelta(hours=retry_hours)
+        run.error = str(error)[:2000]
+        run.usage = error.usage
+        await run.save()
+        return {"processed": 0, "failed": 0, "deferred": 1}
+    except Exception as error:
+        run.state = "failed"
+        run.error = f"{type(error).__name__}: {error}"[:4000]
+        run.completed_at = utcnow()
+        await run.save()
+        return {"processed": 0, "failed": 1, "deferred": 0}
+
+
+async def process_timeline_analysis_runs(max_runs: int = 1) -> dict[str, int]:
+    totals = {"processed": 0, "failed": 0, "deferred": 0}
     for _ in range(max_runs):
         run = await _claim_next_run()
         if run is None:
             break
-        try:
-            await _process_run(run)
-            processed += 1
-        except TimelineQuotaDeferred as error:
-            run.state = "quota_deferred"
-            run.retry_after = utcnow() + timedelta(hours=retry_hours)
-            run.error = str(error)[:2000]
-            run.usage = error.usage
-            await run.save()
-            deferred += 1
-        except Exception as error:
-            run.state = "failed"
-            run.error = f"{type(error).__name__}: {error}"[:4000]
-            run.completed_at = utcnow()
-            await run.save()
-            failed += 1
-    return {"processed": processed, "failed": failed, "deferred": deferred}
+        for key, value in (await _run_claimed(run)).items():
+            totals[key] += value
+    return totals
 
 
 async def process_current_timeline_days() -> dict[str, int]:

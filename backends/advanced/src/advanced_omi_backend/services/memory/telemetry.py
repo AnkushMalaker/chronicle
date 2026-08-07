@@ -130,6 +130,7 @@ def current_otel_context() -> Any:
     """Capture the active OTEL context for work that will cross a thread boundary."""
 
     try:
+        # Lazy: keeps OpenTelemetry an optional dependency (see module docstring).
         from opentelemetry.context import get_current
 
         return get_current()
@@ -169,6 +170,7 @@ def memory_span(
     span = None
     token = None
     try:
+        # Resolved per call so a later init_otel() swaps in the real provider.
         from advanced_omi_backend.observability.otel_setup import get_tracer
 
         tracer = get_tracer("chronicle.memory")
@@ -183,6 +185,7 @@ def memory_span(
                 },
             )
             try:
+                # Lazy: keeps OpenTelemetry an optional dependency (see module docstring).
                 from opentelemetry.context import attach
                 from opentelemetry.trace import set_span_in_context
 
@@ -205,6 +208,7 @@ def memory_span(
         )
         if span is not None:
             try:
+                # Lazy: keeps OpenTelemetry an optional dependency (see module docstring).
                 from opentelemetry.trace import Status, StatusCode
 
                 span.set_status(Status(StatusCode.ERROR))
@@ -214,6 +218,7 @@ def memory_span(
     finally:
         if token is not None:
             try:
+                # Lazy: keeps OpenTelemetry an optional dependency (see module docstring).
                 from opentelemetry.context import detach
 
                 detach(token)
@@ -248,6 +253,7 @@ def record_llm_usage_span(
     if not clean_usage:
         return
     try:
+        # Resolved per call so a later init_otel() swaps in the real provider.
         from advanced_omi_backend.observability.otel_setup import get_tracer
 
         tracer = get_tracer("chronicle.memory")
