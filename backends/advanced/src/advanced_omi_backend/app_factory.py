@@ -93,9 +93,7 @@ from advanced_omi_backend.services.status_reconciler import (
 from advanced_omi_backend.services.timeline.discovery import (
     process_current_timeline_days,
 )
-from advanced_omi_backend.services.timeline.thumbnails import (
-    process_episode_thumbnails,
-)
+from advanced_omi_backend.services.timeline.thumbnails import process_episode_thumbnails
 from advanced_omi_backend.task_manager import get_task_manager, init_task_manager
 from advanced_omi_backend.users import (
     User,

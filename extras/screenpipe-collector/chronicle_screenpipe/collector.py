@@ -466,9 +466,7 @@ class Collector:
         )
         frame_ids: list[int] = []
         for index in range(count):
-            slice_start = datetime.fromtimestamp(
-                begin + index * width, tz=timezone.utc
-            )
+            slice_start = datetime.fromtimestamp(begin + index * width, tz=timezone.utc)
             slice_end = datetime.fromtimestamp(
                 begin + (index + 1) * width, tz=timezone.utc
             )
