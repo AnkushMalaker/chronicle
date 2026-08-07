@@ -16,6 +16,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 @pytest.fixture
 def dialog():
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    # Imported after importorskip so a machine without PySide6 skips this fixture
+    # instead of failing at collection time.
     from chronicle_tray.capture_settings_dialog import CaptureSettingsDialog
 
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])

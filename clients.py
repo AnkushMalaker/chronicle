@@ -20,6 +20,7 @@ import it, and client installs happen before any project venv exists.
 import json
 import os
 import plistlib
+import shlex
 import shutil
 import socket
 import subprocess
@@ -226,7 +227,6 @@ def _install_linux(name: str, extras=()) -> None:
         raise RuntimeError(
             "no systemd user instance — on WSL set systemd=true in /etc/wsl.conf"
         )
-    import shlex
 
     uv = _find_uv()
     project = _component_project(name)

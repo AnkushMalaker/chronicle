@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from chronicle_tray.logs import configure_logging, log_buffer
+from chronicle_tray.logs import MemoryLogHandler, configure_logging, log_buffer
 
 
 def test_log_buffer_keeps_formatted_lines():
@@ -33,8 +33,6 @@ def test_configure_logging_does_not_add_the_buffer_twice():
 
 
 def test_log_buffer_is_bounded():
-    from chronicle_tray.logs import MemoryLogHandler
-
     handler = MemoryLogHandler(capacity=3)
     handler.setFormatter(logging.Formatter("%(message)s"))
     for index in range(5):
@@ -49,6 +47,8 @@ def test_log_buffer_is_bounded():
 
 def test_screenpipe_menu_offers_capture_toggles_and_a_settings_dialog():
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    # Imported after importorskip so a machine without PySide6 skips this test
+    # instead of failing at collection time.
     from chronicle_tray.sections.screenpipe import ScreenPipeSection
 
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -75,6 +75,8 @@ def test_screenpipe_menu_offers_capture_toggles_and_a_settings_dialog():
 
 def test_tray_menu_offers_view_logs():
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    # Imported after importorskip so a machine without PySide6 skips this test
+    # instead of failing at collection time.
     from chronicle_tray.app import ChronicleTray
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -96,10 +98,15 @@ def test_screenpipe_controls_only_use_real_client_components(monkeypatch):
     pause timer) actually fired.
     """
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    # Imported after importorskip so a machine without PySide6 skips this test
+    # instead of failing at collection time.
     from chronicle_tray.paths import add_repo_root
-    from chronicle_tray.sections import screenpipe as section_module
+    from chronicle_tray.sections import (
+        screenpipe as section_module,  # same reason: needs PySide6 at import time
+    )
 
     add_repo_root()
+    # Imported after add_repo_root() puts the repository root on sys.path.
     import clients
 
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -132,6 +139,8 @@ def test_screenpipe_controls_only_use_real_client_components(monkeypatch):
 
 def test_screenpipe_menu_surfaces_external_owner_and_disables_controls(monkeypatch):
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    # Imported after importorskip so a machine without PySide6 skips this test
+    # instead of failing at collection time.
     from chronicle_tray.sections import screenpipe as section_module
 
     class FakeClients:

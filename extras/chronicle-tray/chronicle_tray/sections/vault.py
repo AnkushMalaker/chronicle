@@ -17,6 +17,12 @@ from urllib.parse import quote
 import httpx
 from chronicle_client import load_client_env
 from chronicle_tray.sections import Section
+from chronicle_vault_sync import (
+    SyncthingManager,
+    VaultSyncConfig,
+    broker_pair,
+    save_vault_dir,
+)
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMenu
@@ -52,8 +58,6 @@ class SharedState:
 
 class VaultSyncManager:
     def __init__(self, state: SharedState) -> None:
-        from chronicle_vault_sync import SyncthingManager, VaultSyncConfig
-
         self.state = state
         self.config = VaultSyncConfig.from_env()
         self.syncthing = SyncthingManager()
@@ -64,8 +68,6 @@ class VaultSyncManager:
         threading.Thread(target=self._pair, daemon=True).start()
 
     def _pair(self) -> None:
-        from chronicle_vault_sync import broker_pair
-
         if not self._lock.acquire(blocking=False):
             return
         try:
@@ -105,8 +107,6 @@ class VaultSyncManager:
             self._lock.release()
 
     def set_vault_dir(self, path: str) -> None:
-        from chronicle_vault_sync import save_vault_dir
-
         save_vault_dir(path)
         self.config.local_vault_dir = path
         self.state.update(vault_dir=path)

@@ -1,0 +1,29 @@
+name: Code Style
+
+# Enforces the Chronicle-specific style rules that pre-commit runs locally, so
+# a `git push --no-verify` cannot land them.
+
+on:
+  pull_request:
+    paths:
+      - "**/*.py"
+      - ".github/workflows/code-style.yml"
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  import-placement:
+    name: Imports at top of file
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check nested imports are explained
+        run: python3 scripts/check_import_placement.py

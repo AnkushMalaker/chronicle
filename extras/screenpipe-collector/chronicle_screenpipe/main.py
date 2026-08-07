@@ -80,6 +80,7 @@ def install_service() -> None:
     # unified tray, `services.py client`, and the node agent's update path).
     repo_root = Path(__file__).resolve().parents[3]
     sys.path.insert(0, str(repo_root))
+    # Imported after the sys.path insert above, per the comment there.
     import clients
 
     clients.install_component("screenpipe-collector")

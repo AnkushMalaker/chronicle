@@ -24,6 +24,7 @@ COLLECTOR_CONFIG = Path.home() / ".config/chronicle-screenpipe/config.json"
 
 def _clients():
     add_repo_root()
+    # Imported after the repo root joins sys.path, where clients.py lives.
     import clients
 
     return clients

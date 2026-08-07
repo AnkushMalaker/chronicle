@@ -442,6 +442,7 @@ def _frontmatter(text: str) -> tuple[dict[str, Any] | None, str | None]:
     if len(boundaries) < 2:
         return None, "missing YAML frontmatter"
     try:
+        # Soft dependency: the except below covers hosts without it.
         import yaml
 
         value = yaml.safe_load(text[boundaries[0].end() : boundaries[1].start()]) or {}
@@ -668,6 +669,7 @@ def _safe_runtime_metadata(executor: str, modules: Mapping[str, Any]) -> dict[st
     metadata: dict[str, Any] = {"operation": "memory_write"}
     if executor == "direct":
         try:
+            # Soft dependency: the except below covers hosts without it.
             from advanced_omi_backend.model_registry import get_models_registry
 
             registry = get_models_registry()
@@ -693,6 +695,7 @@ def _safe_runtime_metadata(executor: str, modules: Mapping[str, Any]) -> dict[st
             {"executor_available": bool(available), "executor_detail": str(detail)}
         )
         try:
+            # Soft dependency: the except below covers hosts without it.
             from advanced_omi_backend.model_registry import get_models_registry
 
             registry = get_models_registry()
@@ -747,6 +750,7 @@ def _load_agent(executor: str, args: argparse.Namespace) -> tuple[type, dict[str
     backend = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(backend / "src"))
 
+    # Imported here: backends/advanced/src only joins sys.path at runtime (above).
     from advanced_omi_backend.services.memory import vault_lock
     from advanced_omi_backend.services.memory.agent import vault_tools
     from advanced_omi_backend.services.memory.agent.memory_agent import MemoryAgent
@@ -759,12 +763,14 @@ def _load_agent(executor: str, args: argparse.Namespace) -> tuple[type, dict[str
     if executor == "direct":
         agent_type = MemoryAgent
     elif executor == "pi":
+        # Imported here: backends/advanced/src only joins sys.path at runtime (above).
         from advanced_omi_backend.services.memory.agent import pi_agent
 
         pi_agent.vault_run_lock = _isolated_vault_lock
         modules["pi_agent"] = pi_agent
         agent_type = pi_agent.PiMemoryAgent
     else:
+        # Imported here: backends/advanced/src only joins sys.path at runtime (above).
         from advanced_omi_backend.services.memory.agent import codex_agent
 
         configured = codex_agent._validated_codex_settings()
@@ -796,6 +802,7 @@ async def _run_case(
     expected: Mapping[str, BenchmarkCase],
     initial_scaffold: Mapping[str, Any],
 ) -> dict[str, Any]:
+    # Imported here: backends/advanced/src only joins sys.path at runtime (above).
     from advanced_omi_backend.services.memory.conversation_note import (
         ConversationNoteError,
         canonicalize_conversation_note,
@@ -947,6 +954,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     backend = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(backend / "src"))
+    # Imported here: backends/advanced/src only joins sys.path at runtime (above).
     from advanced_omi_backend.services.memory.vault_scaffold import seed_vault_scaffold
 
     seed_vault_scaffold(vault)

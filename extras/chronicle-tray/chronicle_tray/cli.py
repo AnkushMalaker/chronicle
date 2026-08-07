@@ -17,6 +17,7 @@ _MAC_LOG = Path.home() / "Library" / "Logs" / "Chronicle" / "tray.log"
 
 def _clients():
     add_repo_root()
+    # Imported after the repo root joins sys.path, where clients.py lives.
     import clients
 
     return clients
@@ -40,6 +41,7 @@ def main() -> None:
     command = args.command or "run"
 
     if command == "run":
+        # Imported here so `--help` and the subcommands below do not need PySide6.
         from chronicle_tray.app import run
 
         run()

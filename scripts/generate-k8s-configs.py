@@ -3,6 +3,7 @@
 Generate Kubernetes configuration files (ConfigMap and Secret)
 """
 
+import base64
 import os
 import sys
 from pathlib import Path
@@ -57,8 +58,6 @@ def generate_k8s_manifests(namespace: str = "chronicle"):
         f.write("    app.kubernetes.io/name: chronicle\n")
         f.write("    app.kubernetes.io/component: secrets\n")
         f.write("data:\n")
-
-        import base64
 
         for var_name in sorted(secret_vars.keys()):
             var_value = secret_vars[var_name]

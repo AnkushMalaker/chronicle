@@ -6,6 +6,7 @@ restarts are stubbed out, so perform_update()'s checkout/rollback logic is
 what's under test.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -262,7 +263,6 @@ class TestPerformUpdate:
         assert ok is True
         # Prebuilt → no local build, registry env set for compose to consume.
         assert calls == [{"build": False}]
-        import os
 
         assert os.environ["CHRONICLE_TAG"] == "v0.2.0"
         assert os.environ["CHRONICLE_REGISTRY"].startswith("ghcr.io/")

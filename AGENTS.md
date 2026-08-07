@@ -607,6 +607,19 @@ tailscale ip -4
   - ALL imports must be at the top of the file after the docstring
   - Use lazy imports sparingly and only when absolutely necessary for circular import issues
   - Group imports: standard library, third-party, local imports
+  - **Enforced** by `scripts/check_import_placement.py`, which runs as a pre-commit
+    and pre-push hook and in the `Code Style` CI workflow. An import nested inside a
+    function or class fails the check unless a comment on the same line, or directly
+    above it, explains why (≥4 words; `# noqa`-style directives don't count). One
+    comment covers a contiguous run of imports:
+    ```python
+    def build_router():
+        # Imported here to break the circular import with plugins.router.
+        from advanced_omi_backend.plugins.router import PluginRouter
+    ```
+    An import guarded by `try/except ImportError` needs no comment — the structure
+    already says "optional dependency". The repository is currently clean, so any
+    failure is something the change introduced.
 - **Error Handling Guidelines**:
   - **Always raise errors, never silently ignore**: Use explicit error handling with proper exceptions rather than silent failures
   - **Understand data structures**: Research and understand input/response or class structure instead of adding defensive `hasattr()` checks

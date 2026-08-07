@@ -134,6 +134,7 @@ def _backfill_job_response(job: ProcessingJob) -> dict:
 
 async def _run_segment_backfill(job_id: int, user_id: int) -> None:
     """Populate missing per-clip embeddings using the service's loaded GPU model."""
+    # Lazy: service.py includes this router, so a top-level import is circular.
     from .. import service
 
     session = get_db_session()
@@ -412,6 +413,7 @@ async def score_enrollment_candidate(
 
     try:
         duration = get_audio_info(str(tmp_path)).get("duration_seconds")
+        # Lazy: service.py includes this router, so a top-level import is circular.
         from .. import service
 
         wav = service.audio_backend.load_wave(tmp_path)
@@ -485,6 +487,7 @@ async def embed_enrollment_candidate(
         tmp_path = Path(tmp.name)
     try:
         duration = get_audio_info(str(tmp_path)).get("duration_seconds")
+        # Lazy: service.py includes this router, so a top-level import is circular.
         from .. import service
 
         wav = service.audio_backend.load_wave(tmp_path)
@@ -503,6 +506,7 @@ async def embed_enrollment_candidate(
 @router.get("/enrollment/candidates/embedding-info")
 async def enrollment_embedding_info():
     """Fingerprint used to invalidate cached evaluation embeddings."""
+    # Lazy: service.py includes this router, so a top-level import is circular.
     from .. import service
 
     return {

@@ -40,6 +40,7 @@ def main() -> int:
     # 1. Fresh RQ worker registrations. Redis can retain registrations from dead
     #    containers, so Worker.all() alone is not a liveness signal.
     try:
+        # Soft dependency: this healthcheck must still run without rq installed.
         from rq import Worker
 
         rq_count = sum(

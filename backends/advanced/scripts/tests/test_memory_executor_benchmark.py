@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from advanced_omi_backend import model_registry
+
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(SCRIPTS.parent / "src"))
@@ -392,8 +394,6 @@ async def test_run_case_does_not_recount_preexisting_invariant_issue(tmp_path):
 
 
 def test_pi_runtime_metadata_uses_resolved_override_and_effective_limits(monkeypatch):
-    from advanced_omi_backend import model_registry
-
     ambient_operation = SimpleNamespace(
         model_name="ambient-memory-write-model",
         model_provider="ambient-provider",
@@ -432,8 +432,6 @@ def test_pi_runtime_metadata_uses_resolved_override_and_effective_limits(monkeyp
 
 
 def test_codex_runtime_metadata_uses_actual_codex_model(monkeypatch):
-    from advanced_omi_backend import model_registry
-
     ambient_operation = SimpleNamespace(
         model_name="ambient-memory-write-model",
         model_provider="ambient-provider",

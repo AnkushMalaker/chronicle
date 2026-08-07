@@ -145,9 +145,11 @@ def _restart_recorder() -> None:
     """Restart the recorder service if it is installed and running; a node
     that has never installed the service just gets the new binary."""
     try:
+        # Imported after the repo root joins sys.path, where clients.py lives.
         from chronicle_tray.paths import add_repo_root
 
         add_repo_root()
+        # Imported after add_repo_root(), where the repo-root clients.py lives.
         import clients
 
         status = clients.component_status("screenpipe")

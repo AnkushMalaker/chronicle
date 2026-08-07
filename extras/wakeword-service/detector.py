@@ -32,6 +32,7 @@ queue the trigger clip lands in, which a human reviews, not dispatch).
 """
 
 import asyncio
+import importlib.resources as ir
 import logging
 import os
 import time
@@ -50,6 +51,7 @@ def _load_interp(path: str):
     (and its heavy torch import) is loaded LAZILY — only when a ``.pt`` model is
     configured — so the stock CPU image never needs torch."""
     if path.endswith(".pt"):
+        # Lazy, per the docstring above: importing this pulls in torch.
         from hubert_detector import HubertInterpreter
 
         return HubertInterpreter.load_model(path)
@@ -376,7 +378,6 @@ class HermesDetector:
         if silero_vad_model_path:
             self._vad_model_path = silero_vad_model_path
         else:
-            import importlib.resources as ir
 
             self._vad_model_path = str(
                 ir.files("pipecat.audio.vad.data").joinpath("silero_vad.onnx")

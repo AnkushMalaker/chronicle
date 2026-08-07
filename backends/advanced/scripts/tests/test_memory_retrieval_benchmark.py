@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from advanced_omi_backend import model_registry
+
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
@@ -62,8 +64,6 @@ def test_load_questions_requires_unique_ids(tmp_path):
 def test_direct_runtime_metadata_records_effective_operation_without_secrets(
     monkeypatch,
 ):
-    from advanced_omi_backend import model_registry
-
     operation = SimpleNamespace(
         model_name="qwen-upstream",
         model_def=SimpleNamespace(
@@ -102,8 +102,6 @@ def test_direct_runtime_metadata_records_effective_operation_without_secrets(
 
 
 def test_pi_runtime_metadata_records_resolved_override_without_secrets(monkeypatch):
-    from advanced_omi_backend import model_registry
-
     registry = object()
     monkeypatch.setattr(model_registry, "get_models_registry", lambda: registry)
     resolved = SimpleNamespace(

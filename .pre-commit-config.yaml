@@ -1,4 +1,17 @@
+default_install_hook_types: [pre-commit, pre-push]
+
 repos:
+  # Code style rules that are Chronicle-specific (AGENTS.md → Code Style)
+  - repo: local
+    hooks:
+      - id: import-placement
+        name: imports at top of file (or explained)
+        entry: python3 scripts/check_import_placement.py
+        language: system
+        types: [python]
+        exclude: \.venv/
+        stages: [pre-commit, pre-push]
+
   # Code formatting
   - repo: https://github.com/psf/black
     rev: 26.5.1

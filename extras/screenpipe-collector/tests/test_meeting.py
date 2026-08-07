@@ -5,6 +5,7 @@ from chronicle_screenpipe import meeting as meeting_module
 from chronicle_screenpipe.meeting import (
     CaptureApp,
     MeetingTracker,
+    RecorderMeetingLog,
     classify_capture,
     pipewire_capture_apps,
 )
@@ -168,8 +169,6 @@ def _recorder_row(row_id: int, start: str, end: str | None, app="Zoom", title=No
 
 
 def test_recorder_open_row_emits_an_open_event():
-    from chronicle_screenpipe.meeting import RecorderMeetingLog
-
     log = RecorderMeetingLog()
     events = log.sync([_recorder_row(7, at(0), None, app="Google Meet")], at(10))
     assert [event["event"] for event in events] == ["open"]
@@ -180,8 +179,6 @@ def test_recorder_open_row_emits_an_open_event():
 
 
 def test_recorder_close_is_emitted_once_when_the_row_gains_an_end():
-    from chronicle_screenpipe.meeting import RecorderMeetingLog
-
     log = RecorderMeetingLog()
     log.sync([_recorder_row(7, at(0), None)], at(10))
     events = log.sync([_recorder_row(7, at(0), at(600), title="Weekly sync")], at(700))
@@ -192,8 +189,6 @@ def test_recorder_close_is_emitted_once_when_the_row_gains_an_end():
 
 
 def test_meeting_recorded_while_the_collector_was_down_backfills_both_events():
-    from chronicle_screenpipe.meeting import RecorderMeetingLog
-
     log = RecorderMeetingLog()
     events = log.sync([_recorder_row(3, at(0), at(1200))], at(2000))
     assert [event["event"] for event in events] == ["open", "close"]
@@ -202,8 +197,6 @@ def test_meeting_recorded_while_the_collector_was_down_backfills_both_events():
 
 
 def test_recent_recorder_rows_suppress_the_pipewire_tracker():
-    from chronicle_screenpipe.meeting import RecorderMeetingLog
-
     log = RecorderMeetingLog()
     assert log.owns_detection(at(0)) is False
     log.sync([_recorder_row(1, at(0), at(60))], at(100))

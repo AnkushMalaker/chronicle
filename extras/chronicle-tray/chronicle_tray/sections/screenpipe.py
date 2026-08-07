@@ -45,6 +45,7 @@ COLLECTOR = "screenpipe-collector"
 
 def _clients():
     add_repo_root()
+    # Imported after the repo root joins sys.path, where clients.py lives.
     import clients
 
     return clients
@@ -381,12 +382,8 @@ class ScreenPipeSection(Section):
                 actions["start"].setEnabled(
                     recorder_status["installed"] and not active and not external_owner
                 )
-                actions["stop"].setEnabled(
-                    active and runtime_owner == "chronicle"
-                )
-                actions["restart"].setEnabled(
-                    active and runtime_owner == "chronicle"
-                )
+                actions["stop"].setEnabled(active and runtime_owner == "chronicle")
+                actions["restart"].setEnabled(active and runtime_owner == "chronicle")
                 continue
             active = _component_state(component) == "active"
             actions["start"].setEnabled(not active)

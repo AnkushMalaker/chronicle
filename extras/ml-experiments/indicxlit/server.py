@@ -21,6 +21,7 @@ _DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
 def get_engine():
     global _engine
     if _engine is None:
+        # Imported on first use: loading the transliteration engine is expensive.
         from ai4bharat.transliteration import XlitEngine
 
         _engine = XlitEngine(src_script_type="indic", beam_width=4, rescore=True)

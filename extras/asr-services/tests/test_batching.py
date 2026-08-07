@@ -15,6 +15,7 @@ Run GPU tests:
 """
 
 import difflib
+import json
 import os
 import sys
 import tempfile
@@ -28,6 +29,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common.batching import (
+    _clip_segments,
+    _clip_words,
     extract_context_tail,
     split_audio_file,
     stitch_transcription_results,
@@ -465,7 +468,6 @@ class TestBoundaryClipping:
 
     def test_clip_helpers_drop_degenerate(self):
         """Segments/words that become start >= end after clipping are dropped."""
-        from common.batching import _clip_segments, _clip_words
 
         segs = [
             Segment(text="survives", start=10.0, end=20.0),
@@ -550,6 +552,8 @@ class TestBatchedTranscriptionQuality:
     @pytest.fixture(scope="class")
     def transcriber(self):
         """Load VibeVoice model once for all tests in this class."""
+        # Imported here so the module does not require torch: only this GPU-only
+        # class needs the VibeVoice provider.
         from providers.vibevoice.transcriber import VibeVoiceTranscriber
 
         t = VibeVoiceTranscriber()
@@ -693,8 +697,6 @@ class TestGroundTruthFixture:
                 f"Ground truth fixture not found: {self.FIXTURE_PATH}\n"
                 f"Run: uv run python tests/capture_vibevoice_ground_truth.py"
             )
-        import json
-
         with open(self.FIXTURE_PATH) as f:
             return json.load(f)
 

@@ -317,6 +317,7 @@ def _runtime_metadata(executor: str, pi_module: Any = None) -> dict[str, Any]:
     metadata: dict[str, Any] = {"operation": "memory_search"}
     if executor == "direct":
         try:
+            # Soft dependency: the except below covers hosts without it.
             from advanced_omi_backend.model_registry import get_models_registry
 
             registry = get_models_registry()
@@ -342,6 +343,7 @@ def _runtime_metadata(executor: str, pi_module: Any = None) -> dict[str, Any]:
             {"executor_available": bool(available), "executor_detail": str(detail)}
         )
         try:
+            # Soft dependency: the except below covers hosts without it.
             from advanced_omi_backend.model_registry import get_models_registry
 
             registry = get_models_registry()
@@ -375,9 +377,11 @@ def load_search_executor(
     backend = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(backend / "src"))
     if executor == "direct":
+        # Imported here: backends/advanced/src only joins sys.path at runtime (above).
         from advanced_omi_backend.services.memory.agent.memory_agent import search_vault
 
         return search_vault, _runtime_metadata(executor)
+    # Imported here: backends/advanced/src only joins sys.path at runtime (above).
     from advanced_omi_backend.services.memory.agent import pi_agent
 
     return pi_agent.search_vault_with_pi, _runtime_metadata(executor, pi_agent)
