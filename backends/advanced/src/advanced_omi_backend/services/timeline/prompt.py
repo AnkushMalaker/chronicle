@@ -2,7 +2,7 @@
 
 import json
 
-PROMPT_VERSION = "timeline-episodes-v6"
+PROMPT_VERSION = "timeline-episodes-v10"
 
 
 OUTPUT_SCHEMA = {
@@ -143,6 +143,22 @@ Rules:
   because they are adjacent. Use separate episodes, or a parent session with supported
   child events, when the evidence distinguishes them.
 - Episodes may overlap; long passive media and simultaneous foreground work can coexist.
+- One activity spans every modality that evidences it. When screen and audio evidence
+  cover the same stretch of the same activity, cite both from one episode. Do not emit an
+  audio episode running alongside a screen episode for the same minutes — that is a
+  modality split, not two events.
+- Only create a standalone audio episode when no concurrent foreground activity explains
+  the sound. "Background audio continued" beside a game, call, or meeting episode covering
+  those same minutes is the split this rule forbids.
+- Role is a property of each evidence item, not of the episode. One episode may cite
+  `media_content` output audio, `uncertain` microphone input, and `application_state`
+  screen evidence together; the people and application named by any of them belong in
+  that episode's entities.
+- When cited evidence names a person, use that name in the title, summary, and entities.
+  Never replace a name that appears in the evidence with a placeholder such as "a
+  friend", "someone", or "another person". Use a generic term only when no name was
+  captured. Uncertainty about a claim belongs in `confidence` and the assertion's role,
+  not in blurring who was there.
 - Use quiet, idle, ambient, or unknown episodes when evidence genuinely supports them.
 - `output` audio/transcripts are media or system content, never the user's statements.
 - `input` audio is uncertain unless speaker evidence supports user attribution.
@@ -158,11 +174,17 @@ Rules:
 - Account for every evidence-bearing interval with one or more episodes or an explicit
   `unassigned_interval`. Unassigned intervals must be positive and inside this day.
 - Never return both `episodes` and `unassigned_intervals` empty when evidence exists.
-- `representative_evidence_id` is optional and, when set, must name image evidence
-  already cited by that episode. Use null when no suitable image is available.
+- `representative_evidence_id` is how an episode gets its picture on the timeline. Set
+  it whenever the episode cites any evidence carrying an `image_filename`, choosing the
+  frame that best depicts what the episode was; only use null when none of the evidence
+  it cites has one. It must name evidence that episode already cites.
 - Never invent an evidence ID. Chronicle tracks authoritative window coverage itself;
   do not echo window IDs into the result.
 - Salience is display value, not confidence.
 - Express optional episode metadata as short string key/value entries in `attributes`.
 - Prefer a few coherent episodes over arbitrary periodic fragments.
+- Confirmed episodes, when supplied, are settled by the person whose day this is. Treat
+  their intervals as already accounted for: do not re-segment them, do not emit an
+  episode overlapping them, and do not list their time as unassigned. You may still cite
+  evidence inside a confirmed interval from an episode that mostly lies outside it.
 """

@@ -926,7 +926,10 @@ cron_jobs:
   timeline_analysis:
     description: "Reconcile changed current-day capture evidence into semantic episodes"
     enabled: true
-    schedule: "*/30 * * * *"
+    # Every run regenerates the whole day from scratch — there is no incremental merge —
+    # so a tight cadence re-does the same work and reshuffles episode ids each time.
+    # Analysis is also available on demand from the Timeline page.
+    schedule: "0 */4 * * *"
 
 observation_curation:
   codex:
@@ -935,15 +938,26 @@ observation_curation:
     timeout_seconds: 600
 
 timeline:
-  window_minutes: 20
+  # Window size is a capacity knob, not a semantic one — the prompt treats windows as
+  # coverage units that must never become episode boundaries. It sets how many files
+  # one agent pass must read: 20min/3overlap put a full day at 85 windows, which never
+  # once produced episodes, while days under ~18 windows nearly always succeeded.
+  # 60min puts a full day at 26. The per-window text cap is raised to match so fewer,
+  # larger windows do not truncate more evidence than the old layout carried.
+  window_minutes: 60
   overlap_minutes: 3
-  max_text_chars_per_window: 30000
+  max_text_chars_per_window: 60000
   max_anchor_images_per_window: 4
   executor: codex
-  prompt_version: timeline-episodes-v6
+  # Run identity. Must match services/timeline/prompt.py's PROMPT_VERSION; changing the
+  # prompt text without bumping both leaves completed days cached on the old rules.
+  prompt_version: timeline-episodes-v10
   codex:
     model: gpt-5.6-luna
-    reasoning_effort: low
+    # `low` was chosen for cost, but a pass that returns no episodes costs a full run
+    # (~600k input tokens) and delivers nothing — the cheap setting was the expensive
+    # one. An empty result now escalates one step and retries.
+    reasoning_effort: medium
     # Reuse the memory agent's container-aware sandbox choice. Rootless Podman
     # deployments set that to danger-full-access because the container itself is
     # the isolation boundary and nested bubblewrap cannot start there.
