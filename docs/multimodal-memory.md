@@ -4,8 +4,11 @@
 
 This document records design learnings from the July 2026 audit of Chronicle's
 ScreenPipe observation pipeline. The semantic episode ledger and evidence broker are
-now implemented for the Timeline; vault promotion and configurable zoom remain future
-work. See [Semantic timeline episodes](backend/timeline-episodes.md) for current behavior.
+implemented for the Timeline, and the layer-4 → layer-5 step now exists: a settled day of
+episodes is written to the vault by `services/timeline/memory.py`, and the per-observation
+curation pass this document argues against has been retired. Configurable zoom remains
+future work. See [Semantic timeline episodes](backend/timeline-episodes.md) for current
+behavior.
 
 > **Partly superseded.** The layering below still holds, but three assumptions in
 > the "Deterministic local signal layer" section were tested against the real

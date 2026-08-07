@@ -329,11 +329,16 @@ Chronicle keeps its own filter in `services/device_context.py` as a fallback, be
 than this fork.
 
 The backend correlates observations with overlapping input/output audio conversations
-and nearby Immich candidates. A separate Codex curation pass may discard routine context,
-link a duplicate, append a Daily note, update a durable topic/project/event/media note, or
-promote a content-addressed image into `_media/`. System-output dialogue is always treated
-as media content rather than personal speech. If the visual Codex executor is unavailable,
-curation remains pending.
+and nearby Immich candidates. Observations are then **evidence for timeline episodes**,
+not vault content in their own right: what reaches the vault is decided per *day of
+episodes*, by the settled-day pass in
+[timeline-episodes.md](backend/timeline-episodes.md#the-day-not-the-conversation-is-the-memory-unit).
+System-output dialogue is always treated as media content rather than personal speech.
+
+An earlier per-observation Codex curation pass wrote a Daily note per observation. It has
+been retired: an observation is a coarse application session, so curating one was the
+"an observation is not an event" error — it split a single activity across many notes and
+could never see the day around it.
 
 ## Capture mode
 
@@ -418,6 +423,6 @@ systemctl --user unmask 'app-screenpipe\x20\x2d\x20Development@autostart.service
 - `extras/screenpipe-collector/chronicle_screenpipe/meeting.py`: PipeWire meeting detection and audio-chunk tagging
 - `backends/advanced/src/advanced_omi_backend/routers/modules/device_input_routes.py`: capture-node ingestion API
 - `backends/advanced/src/advanced_omi_backend/services/device_audio_ingest.py`: meeting-aware audio sessionization into conversations
-- `backends/advanced/src/advanced_omi_backend/services/observation_curation.py`: sparse preview and vault curation
+- `backends/advanced/src/advanced_omi_backend/services/timeline/memory.py`: settled-day episode memory into the vault
 - `extras/vault-sync/vault_core.py` and `syncthing_manager.py`: vault sync core and Syncthing pairing/control
 - `extras/chronicle-tray/chronicle_tray/sections/vault.py`: unified tray UI adapter (imports the vault-sync core in place)

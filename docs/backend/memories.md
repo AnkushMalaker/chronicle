@@ -120,6 +120,16 @@ Given the conversation transcript and metadata, the selected write backend:
 
 This is LLM-driven extraction: the agent decides what is worth remembering and where it belongs in the vault.
 
+### Capture evidence is remembered by the day, not the conversation
+
+Continuous ScreenPipe audio does not take this path. It is assembled into bounded compute spans — 30 minutes, or two hours given a collector meeting interval — so one meeting can span several recordings, and remembering per recording would inherit those arbitrary cuts. A timeline episode already carries the semantic bounds.
+
+`add_day_memory` therefore records one **settled local day** of episodes in a single write, anchored on `Daily/<local_date>.md` rather than under `Conversations/`, which stays one note per conversation. Durable People/Topic/Category edits are unchanged, and the write shares the conversation path's executor selection, recovery backend, bounded rounds, Langfuse spans, and audit ledger (`MemoryCause.DAY_EPISODES`).
+
+Unlike the conversation path there is no deterministic source-preserving fallback: a conversation note can always be written from its transcript, but a day has no such artifact. A day that cannot be written stays unwritten and is retried, then settles into `skipped` with its diagnostic.
+
+A ScreenPipe recording that the timeline agent judged **conversational** — a standup, a 1:1 — is separately promoted back into the Recordings list and search. See [Semantic timeline episodes](timeline-episodes.md#a-conversational-episode-promotes-the-recordings-it-cites).
+
 ## Read path: the retrieval agent
 
 Search is served by the **read agent** (`_search_vault_grep`). Both the direct and Pi

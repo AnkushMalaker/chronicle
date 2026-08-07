@@ -18,7 +18,7 @@ PY
 
 Use `uv run --with playwright` for Python browser automation. If Chromium is not already available, install it ephemerally with `uvx --from playwright playwright install chromium`; do not add Playwright to `package.json` or a Python project environment. Use the exact dashboard host allowed by Chronicle CORS—normally `http://localhost:5173`, not `127.0.0.1`.
 
-Use a 1440×1000 viewport, a fixed device scale factor, `full_page=True`, and wait for `networkidle` plus any page-specific loading indicator. Save images to `artifacts/screenshots/` unless the task requests a committed asset. For a LAN deployment with a self-signed development certificate, pass `--ignore-https-errors`; never use it for an untrusted public host.
+Use a 1440×1000 viewport, a fixed device scale factor, `full_page=True`, and wait for `domcontentloaded` plus any page-specific loading indicator (Vite's HMR socket means `networkidle` never fires against the dev server). Save images to `artifacts/screenshots/` unless the task requests a committed asset. For a LAN deployment with a self-signed development certificate, pass `--ignore-https-errors`; never use it for an untrusted public host.
 
 ## Chronicle authentication
 
@@ -34,11 +34,12 @@ Never put a token, password, or authenticated screenshot with personal data in a
 ## Dashboard workflow
 
 1. Start the dashboard and backend using the repository’s normal commands. Confirm the actual URL and port.
-2. Read `backends/advanced/webui/src/App.tsx` and build the route inventory from its `<Route>` entries. At present the inventory includes `/login`, `/`, `/live-record`, `/chat`, `/conversations`, `/conversations/:id`, `/memory-ledger`, `/users`, `/system`, `/system-errors`, `/settings`, `/upload`, `/queue`, `/plugins`, `/finetuning`, `/network`, `/data-audit`, `/speaker-enrollment`, and `/wakeword-lab`.
-3. Use a real conversation ID for `/conversations/:id`; discover one through the UI or an authenticated API request. Never invent an ID and call that page complete.
-4. Capture `/login` unauthenticated. Log in through the UI, then capture every protected route with the same viewport, theme, and browser state.
-5. Wait for the page heading/content and loading indicators to settle. Use `full_page=True`, and save predictable names such as `01-login.png`, `02-conversations.png`, and `03-conversation-detail-<id>.png`.
-6. Record failures separately. A redirect to login, error boundary, blank page, missing fixture, or unresolved loading state is a failed capture—not a screenshot of the requested page.
+2. Read `backends/advanced/webui/src/App.tsx` and build the route inventory from its `<Route>` entries. At present the inventory includes `/login`, `/`, `/live-record`, `/chat`, `/recordings`, `/recordings/:id`, `/timeline`, `/timeline/:episodeId`, `/memory-ledger`, `/users`, `/system`, `/system-errors`, `/settings`, `/upload`, `/queue`, `/plugins`, `/finetuning`, `/network`, `/data-audit`, `/speaker-enrollment`, and `/wakeword-lab`. `/conversations` and `/conversations/:id` still resolve, but only as redirects to their `/recordings` equivalents.
+3. Use a real recording ID for `/recordings/:id` and a real episode ID for `/timeline/:episodeId`; discover them through the UI or an authenticated API request. Never invent an ID and call that page complete.
+4. Vite's HMR socket keeps the page from ever reaching `networkidle`. Wait on `domcontentloaded` plus the page's own content, not on network quiet.
+5. Capture `/login` unauthenticated. Log in through the UI, then capture every protected route with the same viewport, theme, and browser state.
+6. Wait for the page heading/content and loading indicators to settle. Use `full_page=True`, and save predictable names such as `01-login.png`, `02-recordings.png`, and `03-recording-detail-<id>.png`.
+7. Record failures separately. A redirect to login, error boundary, blank page, missing fixture, or unresolved loading state is a failed capture—not a screenshot of the requested page.
 
 Use the generic framework for any set of public or authenticated routes:
 
@@ -60,7 +61,7 @@ uv run --with playwright python skills/screenshots/scripts/capture_dashboard.py 
   --backend-url https://<deployment-host> \
   --ignore-https-errors \
   --authenticate \
-  --route conversation=/conversations/<conversation-id>
+  --route recording=/recordings/<recording-id>
 ```
 
 ## Expo screens
