@@ -387,3 +387,29 @@ async def test_discard_without_a_chosen_frame_still_clears_media(monkeypatch):
     fields, unset = seen[-1]
     assert "media_data" in unset
     assert not set(fields) & set(unset)
+
+
+def test_duplicate_candidates_are_labelled_not_addressed_by_objectid():
+    """The agent must never be asked to echo a 24-hex ObjectId back.
+
+    Asked to, it splices one together from ids it has seen: on a real observation it
+    answered `6a74cf7d2937696bb7cc71d9` — the prefix of the observation's own id on the
+    suffix of a candidate's. That resolves to nothing, and the resulting ValueError
+    discarded the whole decision, chosen thumbnail included.
+    """
+
+    candidates = [
+        {"id": "6a74c9ec2937696bb7cc71d9", "captured_at": "2026-08-06T17:52:34Z"},
+        {"id": "6a74c9e22937696bb7cc71d7", "captured_at": "2026-08-06T17:51:00Z"},
+    ]
+    refs = {f"c{i + 1}": c["id"] for i, c in enumerate(candidates)}
+    payload = [
+        {**{k: v for k, v in c.items() if k != "id"}, "ref": ref}
+        for ref, c in zip(refs, candidates)
+    ]
+
+    assert [entry["ref"] for entry in payload] == ["c1", "c2"]
+    assert not any("id" in entry for entry in payload)
+    assert refs["c2"] == "6a74c9e22937696bb7cc71d7"
+    # An invented label resolves to nothing rather than to the wrong observation.
+    assert refs.get("c9") is None

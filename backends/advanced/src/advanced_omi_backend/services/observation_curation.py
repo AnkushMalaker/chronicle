@@ -76,7 +76,7 @@ _DECISION_SCHEMA = {
             ],
         },
         "reason": {"type": "string"},
-        "duplicate_observation_id": {"type": ["string", "null"]},
+        "duplicate_ref": {"type": ["string", "null"]},
         "note_path": {"type": ["string", "null"]},
         "selected_frame_id": {"type": ["integer", "null"]},
         "title": {"type": "string"},
@@ -88,7 +88,7 @@ _DECISION_SCHEMA = {
     "required": [
         "decision",
         "reason",
-        "duplicate_observation_id",
+        "duplicate_ref",
         "note_path",
         "selected_frame_id",
         "title",
@@ -122,7 +122,8 @@ Use `text_update` for a small Daily/YYYY-MM-DD.md entry. Use `dedicated_note` on
 durable event/project/topic/place/media experience; choose a safe relative `.md` path.
 Use `promote_image` only when the ScreenPipe preview or one of the supplied Immich
 thumbnail candidates adds durable value to the note itself; set `immich_item_id` only
-for the latter. Use `duplicate` only when the supplied canonical observation id is clear.
+for the latter. Use `duplicate` only when one `duplicate_candidates` entry is clearly the same
+context; set `duplicate_ref` to that entry's `ref` label exactly as given.
 Never write a fake conversation note for screen context.
 """
 
@@ -304,6 +305,15 @@ async def run_codex_observation_agent(
         raise RuntimeError(detail)
     binary = detail
     root.mkdir(parents=True, exist_ok=True)
+    # Refer to duplicate candidates by a short label rather than their ObjectId. Asked
+    # to echo a 24-hex id back, the model splices one together from ids it has seen:
+    # it answered `6a74cf7d2937696bb7cc71d9` — the prefix of the observation's own id
+    # on the suffix of a candidate's — which resolves to nothing and failed the whole
+    # curation, losing the decision and its chosen thumbnail with it.
+    duplicate_refs = {
+        f"c{index + 1}": candidate["id"]
+        for index, candidate in enumerate(duplicate_candidates)
+    }
     payload = {
         "observation_id": str(item.id),
         "source_item_id": item.source_item_id,
@@ -318,7 +328,10 @@ async def run_codex_observation_agent(
         ],
         "related_audio": audio,
         "nearby_immich": immich,
-        "duplicate_candidates": duplicate_candidates,
+        "duplicate_candidates": [
+            {**{k: v for k, v in candidate.items() if k != "id"}, "ref": ref}
+            for ref, candidate in zip(duplicate_refs, duplicate_candidates)
+        ],
         "existing_vault_paths": ConvDocVaultManager().list_docs(item.user_id)[:200],
     }
     prompt = (
@@ -393,7 +406,14 @@ async def run_codex_observation_agent(
             raise RuntimeError(
                 f"Codex observation curation failed: {stderr.decode(errors='replace')[-2000:]}"
             )
-        return json.loads(output_path.read_text(encoding="utf-8"))
+        decision = json.loads(output_path.read_text(encoding="utf-8"))
+        # Translate the label back before anyone downstream sees the decision, so the
+        # rest of the pipeline keeps working in real observation ids.
+        chosen = decision.get("duplicate_ref")
+        decision["duplicate_observation_id"] = (
+            duplicate_refs.get(chosen) if chosen else None
+        )
+        return decision
 
 
 async def _ensure_preview_shortlist(item: DeviceInputItem) -> bool:
