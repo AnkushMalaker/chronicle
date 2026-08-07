@@ -170,9 +170,19 @@ its store, so a missing frame is expected, does not fail the batch, and is recor
 
 The curation agent is then shown every fetched frame and picks the one that represents
 the session (`selected_frame_id`), or none. That selection — not the scorer's guess —
-becomes the observation's `media_data`, and the image it chooses is fetched at a bounded
-1280px only if it is promoted into the vault. ScreenPipe remains the high-resolution
-source and Chronicle never uploads a frame sequence.
+becomes the observation's `media_data`, and the rest of the shortlist is dropped: it
+existed to be judged, and storing every frame costs several times the one that was
+picked. ScreenPipe remains the high-resolution source and Chronicle never uploads a
+frame sequence.
+
+**A chosen frame is timeline evidence, so it survives a `discard`.** Discarding means
+the vault needs no note about the observation, not that the day's visual timeline should
+have a blank where it happened — `services/timeline/evidence.py` turns `media_data` into
+an evidence item's `image_filename`, which is what an episode's `representative_image`
+is drawn from. Only `promote_image`/`retain_image` puts an image *inside* a note, and
+that path additionally fetches the frame at a bounded 1280px and content-addresses it
+under `_media/`. The two decisions are independent: most observations should yield a
+timeline thumbnail and no vault image.
 
 The request is bounded: a shortlist is asked for at most twice, after which curation
 proceeds on text alone. It must be, because a frame ScreenPipe has pruned returns 404

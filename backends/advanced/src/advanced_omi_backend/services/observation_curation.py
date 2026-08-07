@@ -106,10 +106,11 @@ screens, passive media, and low-information context should normally be discarded
 
 Images named `frame-<id>.jpg` are a shortlist sampled across this observation's span,
 not a sequence to describe. Read them for what the session actually was — the game or
-document on screen, what was being done — and set `selected_frame_id` to the one that
-best represents it, or null if none is worth keeping. Prefer clearly legible content
-over an exact moment; "good enough" is the bar. Frames are also evidence you may cite
-in the summary, not only thumbnail choices.
+document on screen, what was being done — and set `selected_frame_id` to the frame that
+best depicts it. This is the observation's thumbnail on the visual timeline and is kept
+whatever you decide below, so choose one even when the observation itself is routine and
+you discard it; use null only when no frame depicts anything. Prefer clearly legible
+content over an exact moment; "good enough" is the bar.
 
 The screenshot is sparse supporting evidence, not permission to invent. `output` audio
 is system/media audio: character dialogue, lyrics, presenters, and game dialogue are
@@ -120,7 +121,8 @@ transcript's speaker evidence supports it.
 Use `text_update` for a small Daily/YYYY-MM-DD.md entry. Use `dedicated_note` only for a
 durable event/project/topic/place/media experience; choose a safe relative `.md` path.
 Use `promote_image` only when the ScreenPipe preview or one of the supplied Immich
-thumbnail candidates adds durable value; set `immich_item_id` only for the latter. Use `duplicate` only when the supplied canonical observation id is clear.
+thumbnail candidates adds durable value to the note itself; set `immich_item_id` only
+for the latter. Use `duplicate` only when the supplied canonical observation id is clear.
 Never write a fake conversation note for screen context.
 """
 
@@ -598,30 +600,43 @@ async def apply_curation_decision(
     action = decision["decision"]
 
     updates: dict[str, Any] = {"agent_reason": agent_reason}
-    # The frame the agent chose becomes the observation's representative image, so
-    # every downstream consumer — vault promotion, the 1280px source-media fetch, the
-    # timeline thumbnail — uses the frame that was actually judged to depict this
-    # session, not the one that scored highest before anyone looked at it.
+    # The frame the agent chose becomes the observation's representative image. It is
+    # kept whatever the decision below is, because it is *timeline* evidence, not vault
+    # content: discarding an observation means the vault does not need a note about it,
+    # not that the day's visual timeline should have a blank where it happened. Only
+    # `promote_image`/`retain_image` puts an image inside a note.
     #
-    # Applied in memory here because the promotion path below reads `item.media_data`,
-    # but written only on the branches that keep an image: discard and duplicate
-    # `$unset` these same paths, and Mongo rejects a `$set` and `$unset` of one path
-    # in a single update.
+    # The shortlist itself is dropped once it has been chosen from — it exists to be
+    # judged, and keeping 2-6 frames per observation is several times the storage of
+    # the one that was picked.
     selected = _selected_preview(item, decision)
-    selection_updates: dict[str, Any] = {}
     if selected is not None:
         item.media_data = selected["data"]
         item.media_content_type = selected["content_type"]
         item.media_filename = f"frame-{selected['frame_id']}.jpg"
         item.content_hash = hashlib.sha256(selected["data"]).hexdigest()
-        selection_updates = {
-            "media_data": item.media_data,
-            "media_filename": item.media_filename,
-            "media_content_type": item.media_content_type,
-            "content_hash": item.content_hash,
-            "metadata.preview_frame_id": selected["frame_id"],
-            "metadata.thumbnail_available": True,
-        }
+        updates.update(
+            {
+                "media_data": item.media_data,
+                "media_filename": item.media_filename,
+                "media_content_type": item.media_content_type,
+                "content_hash": item.content_hash,
+                "metadata.preview_frame_id": selected["frame_id"],
+                "metadata.thumbnail_available": True,
+            }
+        )
+    if item.media_previews:
+        updates["media_previews"] = []
+        item.media_previews = []
+    # Paths the discard/duplicate branches clear when no thumbnail was chosen. Mongo
+    # rejects a `$set` and `$unset` of the same path in one update, so a chosen frame
+    # takes precedence and nothing is unset.
+    _MEDIA_PATHS = (
+        "media_data",
+        "media_filename",
+        "media_content_type",
+        "content_hash",
+    )
     unset: tuple[str, ...] = ()
     if action == "duplicate":
         target_id = decision.get("duplicate_observation_id")
@@ -638,24 +653,13 @@ async def apply_curation_decision(
             raise ValueError("agent selected an invalid duplicate observation")
         updates["duplicate_of"] = str(target.id)
         updates["curation"] = "duplicate"
-        if item.lifecycle == "closed":
-            unset = (
-                "media_data",
-                "media_filename",
-                "media_content_type",
-                "content_hash",
-            )
+        if item.lifecycle == "closed" and selected is None:
+            unset = _MEDIA_PATHS
     elif action == "discard":
         updates["curation"] = "discarded"
-        if item.lifecycle == "closed":
-            unset = (
-                "media_data",
-                "media_filename",
-                "media_content_type",
-                "content_hash",
-            )
+        if item.lifecycle == "closed" and selected is None:
+            unset = _MEDIA_PATHS
     else:
-        updates.update(selection_updates)
         retain_image = bool(decision.get("retain_image")) or action == "promote_image"
         immich_item_id = decision.get("immich_item_id") if retain_image else None
         if (

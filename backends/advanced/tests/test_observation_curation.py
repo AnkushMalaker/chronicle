@@ -326,12 +326,12 @@ def test_only_a_shortlisted_frame_can_be_selected():
 
 
 @pytest.mark.asyncio
-async def test_discarding_a_selected_frame_does_not_set_and_unset_one_path(monkeypatch):
-    """A discarded observation drops its image; it must not also write one.
+async def test_discarded_observation_keeps_the_chosen_timeline_thumbnail(monkeypatch):
+    """Discard means "the vault needs no note", not "the timeline needs a blank".
 
-    Mongo rejects a `$set` and `$unset` of the same path in one update, so applying
-    the agent's frame choice unconditionally made every discard of a closed
-    observation fail with "Updating the path 'media_data' would create a conflict".
+    The chosen frame is timeline evidence, so it survives a discard. It must also not
+    be written and cleared in one update: Mongo rejects a `$set` and `$unset` of the
+    same path, which previously failed every discard of a closed observation.
     """
 
     item = observation(
@@ -352,6 +352,35 @@ async def test_discarding_a_selected_frame_does_not_set_and_unset_one_path(monke
     await apply_curation_decision(
         item,
         {"decision": "discard", "reason": "Routine", "selected_frame_id": 7},
+        observation_revision(item),
+    )
+
+    fields, unset = seen[-1]
+    assert fields["curation"] == "discarded"
+    assert fields["media_data"] == b"jpeg"
+    assert fields["metadata.preview_frame_id"] == 7
+    assert not unset
+    assert not set(fields) & set(unset)
+    # The shortlist is spent once it has been chosen from.
+    assert fields["media_previews"] == []
+
+
+@pytest.mark.asyncio
+async def test_discard_without_a_chosen_frame_still_clears_media(monkeypatch):
+    """Nothing depicted the observation, so there is no thumbnail worth storing."""
+
+    item = observation(lifecycle="closed", curation="curating")
+    seen: list[tuple[dict, tuple]] = []
+
+    async def capture(target, fields, *, unset=()):
+        seen.append((fields, unset))
+        return True
+
+    monkeypatch.setattr(observation_curation, "_apply_curation_fields", capture)
+
+    await apply_curation_decision(
+        item,
+        {"decision": "discard", "reason": "Routine", "selected_frame_id": None},
         observation_revision(item),
     )
 
