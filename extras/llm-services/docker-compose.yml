@@ -30,6 +30,9 @@ services:
       LLAMA_ARG_CACHE_TYPE_K: ${LLAMA_ARG_CACHE_TYPE_K:-f16}
       LLAMA_ARG_CACHE_TYPE_V: ${LLAMA_ARG_CACHE_TYPE_V:-f16}
       LLAMA_ARG_MMPROJ_AUTO: ${LLAMA_ARG_MMPROJ_AUTO:-true}
+      # `--reasoning-budget`: -1 is llama.cpp's unrestricted default. Bound it for a
+      # thinking model so a runaway trace cannot eat the context the caller needs.
+      LLAMA_ARG_THINK_BUDGET: ${LLAMA_ARG_THINK_BUDGET:--1}
       LLAMA_ARG_HOST: "0.0.0.0"
     entrypoint:
       - /bin/sh

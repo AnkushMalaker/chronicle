@@ -86,6 +86,7 @@ DEFAULT_SERVER_PROFILE = {
     "LLAMA_ARG_CACHE_TYPE_K": "f16",
     "LLAMA_ARG_CACHE_TYPE_V": "f16",
     "LLAMA_ARG_MMPROJ_AUTO": "true",
+    "LLAMA_ARG_THINK_BUDGET": "-1",
 }
 QWEN_TEXT_SERVER_PROFILE = {
     **DEFAULT_SERVER_PROFILE,
@@ -96,6 +97,10 @@ QWEN_TEXT_SERVER_PROFILE = {
     # `-hf` otherwise auto-downloads and loads Qwen's ~0.93GB vision projector.
     # Chronicle's local memory service is text-only.
     "LLAMA_ARG_MMPROJ_AUTO": "false",
+    # Thinking is unrestricted by default, and a memory prompt already reaches ~15K
+    # of the served window. Cap the trace so an unbounded one cannot crowd out the
+    # transcript and tool results the agent still has to read.
+    "LLAMA_ARG_THINK_BUDGET": "2000",
 }
 
 # Embedding model options
@@ -610,6 +615,11 @@ class LLMServicesSetup:
             "KV Cache",
             f"K={self.config.get('LLAMA_ARG_CACHE_TYPE_K', 'f16')}, "
             f"V={self.config.get('LLAMA_ARG_CACHE_TYPE_V', 'f16')}",
+        )
+        think_budget = str(self.config.get("LLAMA_ARG_THINK_BUDGET", "-1"))
+        table.add_row(
+            "Thinking Budget",
+            "unrestricted" if think_budget == "-1" else f"{think_budget} tokens",
         )
         table.add_row(
             "Vision Projector",

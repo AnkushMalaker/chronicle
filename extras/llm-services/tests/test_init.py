@@ -403,6 +403,8 @@ def test_qwen_uses_a30_text_agent_server_profile(init_module):
         "LLAMA_ARG_CACHE_TYPE_K": "q8_0",
         "LLAMA_ARG_CACHE_TYPE_V": "q8_0",
         "LLAMA_ARG_MMPROJ_AUTO": "false",
+        # Bounded so a runaway thinking trace cannot crowd the served window.
+        "LLAMA_ARG_THINK_BUDGET": "2000",
     }
 
 
@@ -420,6 +422,8 @@ def test_non_qwen_profile_restores_safe_llamacpp_defaults(init_module):
         "LLAMA_ARG_CACHE_TYPE_K": "f16",
         "LLAMA_ARG_CACHE_TYPE_V": "f16",
         "LLAMA_ARG_MMPROJ_AUTO": "true",
+        # llama.cpp's own default: unrestricted.
+        "LLAMA_ARG_THINK_BUDGET": "-1",
     }
 
 
