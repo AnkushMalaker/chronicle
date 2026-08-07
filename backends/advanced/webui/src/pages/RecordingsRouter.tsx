@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import Conversations from './Conversations'
+import Recordings from './Recordings'
 import Archive from './Archive'
 
-export default function ConversationsRouter() {
+export default function RecordingsRouter() {
   const [activeTab, setActiveTab] = useState<'classic' | 'archive'>('classic')
 
   return (
@@ -39,7 +39,7 @@ export default function ConversationsRouter() {
 
       {/* Content */}
       {activeTab === 'classic' ? (
-        <Conversations />
+        <Recordings />
       ) : (
         <Archive />
       )}

@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react'
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, Navigate, useParams } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AuthProvider } from './contexts/AuthContext'
 import { ThemeProvider } from './contexts/ThemeContext'
@@ -9,10 +9,17 @@ import LoginPage from './pages/LoginPage'
 import ProtectedRoute from './components/auth/ProtectedRoute'
 import { ErrorBoundary, PageErrorBoundary } from './components/ErrorBoundary'
 
+/** Preserves the id when an old `/conversations/:id` link is followed. */
+function ConversationRedirect() {
+  const { id } = useParams()
+  return <Navigate to={`/recordings/${id}`} replace />
+}
+
 // Lazy-loaded page components (code-split into separate chunks)
 const Chat = lazy(() => import('./pages/Chat'))
-const ConversationsRouter = lazy(() => import('./pages/ConversationsRouter'))
-const ConversationDetail = lazy(() => import('./pages/ConversationDetail'))
+const RecordingsRouter = lazy(() => import('./pages/RecordingsRouter'))
+const RecordingDetail = lazy(() => import('./pages/RecordingDetail'))
+const EpisodeDetail = lazy(() => import('./pages/EpisodeDetail'))
 const Users = lazy(() => import('./pages/Users'))
 const System = lazy(() => import('./pages/System'))
 const Settings = lazy(() => import('./pages/Settings'))
@@ -69,7 +76,7 @@ function App() {
                 <Route index element={
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
-                      <ConversationsRouter />
+                      <RecordingsRouter />
                     </Suspense>
                   </PageErrorBoundary>
                 } />
@@ -87,23 +94,32 @@ function App() {
                     </Suspense>
                   </PageErrorBoundary>
                 } />
-                <Route path="conversations/:id" element={
+                <Route path="recordings/:id" element={
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
-                      <ConversationDetail />
+                      <RecordingDetail />
                     </Suspense>
                   </PageErrorBoundary>
                 } />
-                <Route path="conversations" element={
+                <Route path="recordings" element={
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}>
-                      <ConversationsRouter />
+                      <RecordingsRouter />
                     </Suspense>
                   </PageErrorBoundary>
                 } />
+                {/* A recording is the artifact; "conversation" is now an episode kind.
+                    Old links (bookmarks, vault notes) keep working. */}
+                <Route path="conversations/:id" element={<ConversationRedirect />} />
+                <Route path="conversations" element={<Navigate to="/recordings" replace />} />
                 <Route path="timeline" element={
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}><Timeline /></Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="timeline/:episodeId" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}><EpisodeDetail /></Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="memory-ledger" element={

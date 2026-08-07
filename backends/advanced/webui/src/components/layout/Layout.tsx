@@ -40,7 +40,7 @@ export default function Layout() {
   const navigationItems = [
     { path: '/live-record', label: 'Live Record', icon: Radio },
     { path: '/chat', label: 'Chat', icon: MessageCircle },
-    { path: '/conversations', label: 'Conversations', icon: MessageSquare },
+    { path: '/recordings', label: 'Recordings', icon: MessageSquare },
     { path: '/timeline', label: 'Timeline', icon: CalendarDays },
     { path: '/memory-ledger', label: 'Memory Ledger', icon: ScrollText },
     { path: '/users', label: 'User Management', icon: Users },

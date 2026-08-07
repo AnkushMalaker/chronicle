@@ -47,6 +47,16 @@ const MAX_CACHED_WINDOWS = 30 // bounded LRU (~19 MB of decoded PCM)
 export interface Range {
   start: number
   end: number
+  /**
+   * Recording this range's audio comes from. Omitted means the active id.
+   *
+   * A timeline episode is one event that can span several recordings — continuous
+   * capture is cut into bounded compute spans, so an hour-long standup is commonly
+   * three of them. Letting a range name its own recording is what makes such an
+   * episode play as one continuous thing instead of three fragments. The window cache
+   * is already keyed by recording, so ranges from different ones coexist safely.
+   */
+  cid?: string
 }
 
 export interface SegmentMarker {
@@ -149,6 +159,12 @@ function setProgram(ranges: Range[]) {
     acc += r.end - r.start
   }
   programDuration = acc
+}
+
+// Which recording range `i` reads from. Ranges without their own id belong to the
+// active recording, which is every program except a cross-recording episode.
+function rangeCid(i: number): string {
+  return program[i]?.cid ?? (activeCid as string)
 }
 
 // program-time → { range index, audio time }
@@ -309,10 +325,11 @@ function pump() {
       continue
     }
 
-    const buf = windowCache.get(wkey(activeCid!, w))
+    const cid = rangeCid(i)
+    const buf = windowCache.get(wkey(cid, w))
     if (!buf) {
       // Not decoded yet — fetch and re-kick the pump when ready, then wait.
-      ensureBuffer(activeCid!, w)
+      ensureBuffer(cid, w)
         .then(() => {
           if (epoch === myEpoch) pump()
         })
@@ -330,7 +347,7 @@ function pump() {
 
     const offset = a0 - windowAudioStart
     const isLast = cursor + segDur >= programDuration - 1e-6
-    const key = wkey(activeCid!, w)
+    const key = wkey(cid, w)
 
     const src = ctx.createBufferSource()
     src.buffer = buf
@@ -362,7 +379,7 @@ function prefetch() {
   for (let n = 0; n < PREFETCH_WINDOWS && pt < programDuration - 1e-6; n++) {
     const { i, audioTime: a0 } = programToRange(pt)
     const w = Math.floor(a0 / WINDOW)
-    ensureBuffer(activeCid, w).catch(() => {})
+    ensureBuffer(rangeCid(i), w).catch(() => {})
     const a1 = Math.min((w + 1) * WINDOW, program[i].end)
     pt += Math.max(1e-6, a1 - a0)
   }
@@ -419,9 +436,9 @@ function beginPlayback(pt0: number) {
 
   // Anchor only AFTER the first window decodes, so first-window decode latency can
   // never underrun the schedule.
-  const { audioTime: a0 } = programToRange(cursor)
+  const { i: i0, audioTime: a0 } = programToRange(cursor)
   const w = Math.floor(a0 / WINDOW)
-  ensureBuffer(activeCid!, w)
+  ensureBuffer(rangeCid(i0), w)
     .then(() => {
       if (epoch !== myEpoch || !ctx) return
       anchorCtxTime = ctx.currentTime + LEAD
@@ -502,6 +519,20 @@ function playProgram(
 function seek(audioTime: number) {
   if (!activeCid) return
   beginPlayback(audioToProgram(audioTime))
+}
+
+/**
+ * Seek by position within the program rather than by audio time.
+ *
+ * `seek` maps an audio time back onto the program, which only works while every range
+ * shares one recording's timeline. A cross-recording episode program has several
+ * timelines that each restart near zero, so an audio time does not identify a position
+ * in it — `audioToProgram(1900)` on a two-recording program runs off the end and seeks
+ * to the finish. Callers holding such a program must use this instead.
+ */
+function seekProgram(programTime: number) {
+  if (!activeCid) return
+  beginPlayback(clamp(programTime, 0, programDuration))
 }
 
 function setRate(r: number) {
@@ -603,6 +634,7 @@ export const gaplessPlayer = {
   playSegment,
   playProgram,
   seek,
+  seekProgram,
   setRate,
   pause,
   resume,

@@ -63,7 +63,7 @@ const SORT_OPTIONS = [
   { label: 'Title (A-Z)', sortBy: 'title', sortOrder: 'asc' },
 ] as const
 
-export default function Conversations() {
+export default function Recordings() {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const [debugMode, setDebugMode] = useState(false)
@@ -604,7 +604,7 @@ export default function Conversations() {
           <div className="flex items-center space-x-2">
             <MessageSquare className="h-6 w-6 text-blue-600 flex-shrink-0" />
             <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-              Conversations
+              Recordings
             </h1>
           </div>
           <div className="flex flex-wrap items-center gap-2 sm:gap-4">
@@ -656,7 +656,7 @@ export default function Conversations() {
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search conversations, IDs, or people..."
+              placeholder="Search recordings, IDs, or people..."
               className="w-full pl-9 pr-9 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
             />
             {searchQuery && (
@@ -783,7 +783,7 @@ export default function Conversations() {
           return displayConversations.length === 0 ? (
           <div className="text-center text-gray-500 dark:text-gray-400 py-12">
             <MessageSquare className="h-12 w-12 mx-auto mb-4 opacity-50" />
-            <p>{searchResults !== null ? 'No matching conversations' : 'No conversations found'}</p>
+            <p>{searchResults !== null ? 'No matching recordings' : 'No recordings found'}</p>
           </div>
         ) : (
           displayConversations.map((conversation) => (
@@ -792,7 +792,7 @@ export default function Conversations() {
               onClick={(event) => {
                 const target = event.target as HTMLElement
                 if (target.closest('button, a, input, textarea, select, [role="button"]')) return
-                navigate(`/conversations/${conversation.conversation_id}`)
+                navigate(`/recordings/${conversation.conversation_id}`)
               }}
               className={`rounded-lg p-6 border cursor-pointer ${
                 conversation.is_orphan
@@ -1187,7 +1187,7 @@ export default function Conversations() {
       {!searchResults && totalPages > 1 && (
         <div className="flex items-center justify-between mt-6 px-2">
           <span className="text-sm text-gray-600 dark:text-gray-400">
-            {totalConversations} conversation{totalConversations !== 1 ? 's' : ''} total
+            {totalConversations} recording{totalConversations !== 1 ? 's' : ''} total
           </span>
           <div className="flex items-center gap-2">
             <button

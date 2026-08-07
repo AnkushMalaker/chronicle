@@ -123,7 +123,7 @@ function EventRow({
 
         {event.conversation_id && (
           <Link
-            to={`/conversations/${event.conversation_id}`}
+            to={`/recordings/${event.conversation_id}`}
             onClick={e => e.stopPropagation()}
             className="flex-shrink-0 hidden md:inline-flex items-center gap-0.5 text-xs text-blue-600 hover:underline dark:text-blue-400"
             title="Open related conversation"

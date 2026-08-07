@@ -20,6 +20,7 @@ export interface UseGaplessPlayer extends ControlSnapshot {
   togglePlay: typeof gaplessPlayer.togglePlay
   setRate: typeof gaplessPlayer.setRate
   seek: typeof gaplessPlayer.seek
+  seekProgram: typeof gaplessPlayer.seekProgram
   pause: typeof gaplessPlayer.pause
   resume: typeof gaplessPlayer.resume
   stop: typeof gaplessPlayer.stop
@@ -41,6 +42,7 @@ export function useGaplessPlayer(): UseGaplessPlayer {
       togglePlay: gaplessPlayer.togglePlay,
       setRate: gaplessPlayer.setRate,
       seek: gaplessPlayer.seek,
+      seekProgram: gaplessPlayer.seekProgram,
       pause: gaplessPlayer.pause,
       resume: gaplessPlayer.resume,
       stop: gaplessPlayer.stop,

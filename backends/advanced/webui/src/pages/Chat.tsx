@@ -19,6 +19,37 @@ interface MemoryContext {
   memory_count: number
 }
 
+// Progress emitted by the backend while a turn runs. A turn on a local model can
+// take minutes across several tool rounds, so this is what the user sees until
+// the reply itself starts arriving.
+interface TurnStatus {
+  stage: 'thinking' | 'searching' | 'searched' | 'writing'
+  round?: number
+  max_rounds?: number
+  query?: string
+  note_count?: number
+  found?: boolean
+  failed?: boolean
+}
+
+function describeStatus(status: TurnStatus): string {
+  switch (status.stage) {
+    case 'thinking':
+      return status.round && status.round > 1
+        ? `Thinking (step ${status.round} of ${status.max_rounds})…`
+        : 'Thinking…'
+    case 'searching':
+      return 'Searching your vault…'
+    case 'searched':
+      // "failed" and "found nothing" are different facts and must read differently.
+      if (status.failed) return 'Vault search failed — results unknown'
+      if (!status.found) return 'Vault search came back empty'
+      return `Read ${status.note_count} ${status.note_count === 1 ? 'note' : 'notes'} from your vault`
+    case 'writing':
+      return 'Writing response…'
+  }
+}
+
 export default function Chat() {
   const queryClient = useQueryClient()
 
@@ -35,6 +66,9 @@ export default function Chat() {
   const [isSending, setIsSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [streamingMessage, setStreamingMessage] = useState('')
+  const [turnStatus, setTurnStatus] = useState<TurnStatus | null>(null)
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null)
+  const [turnElapsed, setTurnElapsed] = useState(0)
   const [memoryContext, setMemoryContext] = useState<MemoryContext | null>(null)
   const [showMemoryPanel, setShowMemoryPanel] = useState(false)
   const [extractionMessage, setExtractionMessage] = useState('')
@@ -78,6 +112,20 @@ export default function Chat() {
       scrollToBottom()
     }
   }, [messages, streamingMessage, isSending])
+
+  // Tick the elapsed counter while a turn is in flight. Local-model turns run for
+  // minutes, so a moving number is what distinguishes "working" from "hung".
+  useEffect(() => {
+    if (turnStartedAt === null) {
+      setTurnElapsed(0)
+      return
+    }
+    setTurnElapsed(0)
+    const id = setInterval(() => {
+      setTurnElapsed(Math.floor((Date.now() - turnStartedAt) / 1000))
+    }, 1000)
+    return () => clearInterval(id)
+  }, [turnStartedAt])
 
   const createNewSession = async () => {
     try {
@@ -139,6 +187,8 @@ export default function Chat() {
     setIsSending(true)
     setStreamingMessage('')
     setMemoryContext(null)
+    setTurnStatus(null)
+    setTurnStartedAt(Date.now())
 
     try {
       // Create session if none exists
@@ -202,11 +252,21 @@ export default function Chat() {
                 throw new Error(chunk.error.message || 'Unknown error')
               }
 
-              // Chronicle metadata (memory context, session info)
+              // Chronicle metadata (memory context, progress, session info)
               if (chunk.chronicle_metadata) {
                 const meta = chunk.chronicle_metadata
                 if (meta.memory_count !== undefined) {
                   setMemoryContext({ memory_ids: meta.memory_ids || [], memory_count: meta.memory_count })
+                }
+                if (meta.status) {
+                  setTurnStatus(meta.status as TurnStatus)
+                }
+                if (meta.reset_content) {
+                  // The text so far was a tool round narrating itself, and the
+                  // backend has retracted it. Drop it rather than let it read as
+                  // the answer while the next round runs.
+                  accumulatedContent = ''
+                  setStreamingMessage('')
                 }
               }
 
@@ -220,6 +280,7 @@ export default function Chat() {
               // Finish reason
               if (chunk.choices?.[0]?.finish_reason === 'stop') {
                 setStreamingMessage('')
+                setTurnStatus(null)
               }
             } catch (parseError) {
               console.error('Failed to parse streaming event:', parseError)
@@ -238,6 +299,8 @@ export default function Chat() {
       setStreamingMessage('')
     } finally {
       setIsSending(false)
+      setTurnStatus(null)
+      setTurnStartedAt(null)
     }
   }
 
@@ -253,7 +316,7 @@ export default function Chat() {
   }
 
   return (
-    <div className="flex h-full max-h-screen bg-gray-50 dark:bg-gray-900 relative">
+    <div className="flex h-[calc(100vh-12rem)] bg-gray-50 dark:bg-gray-900 relative">
       {/* Backdrop for the mobile sessions slide-over */}
       {showSessions && (
         <div
@@ -442,17 +505,39 @@ export default function Chat() {
                 </div>
               ))}
 
-              {/* Streaming Message */}
-              {streamingMessage && (
+              {/* In-flight turn: partial reply and/or what the backend is doing.
+                  Shown from the moment the request is sent, because the first
+                  token can be minutes away on a local model. */}
+              {(isSending || streamingMessage) && (
                 <div className="flex items-start space-x-3">
                   <div className="w-8 h-8 rounded-full bg-gray-300 dark:bg-gray-600 text-gray-700 dark:text-gray-300 flex items-center justify-center">
                     <Bot className="h-4 w-4" />
                   </div>
                   <div className="max-w-2xl p-3 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border border-gray-200 dark:border-gray-700">
-                    <div className="whitespace-pre-wrap">{streamingMessage}</div>
-                    <div className="text-xs mt-2 text-gray-500 dark:text-gray-400">
-                      <span className="animate-pulse">●</span> Typing...
+                    {streamingMessage && (
+                      <div className="whitespace-pre-wrap">{streamingMessage}</div>
+                    )}
+                    <div
+                      className={`flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 ${streamingMessage ? 'mt-2' : ''}`}
+                      aria-live="polite"
+                    >
+                      {turnStatus?.stage === 'searching' ? (
+                        <BookOpen className="h-3 w-3 shrink-0 animate-pulse" />
+                      ) : (
+                        <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+                      )}
+                      <span>{turnStatus ? describeStatus(turnStatus) : 'Sending…'}</span>
+                      {turnElapsed > 0 && (
+                        <span className="tabular-nums text-gray-400 dark:text-gray-500">
+                          {turnElapsed}s
+                        </span>
+                      )}
                     </div>
+                    {turnStatus?.stage === 'searching' && turnStatus.query && (
+                      <div className="mt-1 text-xs italic text-gray-400 dark:text-gray-500 break-words">
+                        “{turnStatus.query}”
+                      </div>
+                    )}
                   </div>
                 </div>
               )}

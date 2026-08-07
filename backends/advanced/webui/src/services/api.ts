@@ -244,16 +244,23 @@ export interface TimelineEvidenceRef {
   role: string
   excerpt: string | null
   ephemeral: boolean
+  /** Assembly-time context. `conversation_id` is what lets an episode link to a recording. */
+  metadata: Record<string, unknown>
 }
 
 export interface TimelineEpisode {
   episode_id: string
+  /** Durable identity across analysis runs; `episode_id` names one generation's row. */
+  episode_key: string
   started_at: string
   ended_at: string
   kind: string
   title: string
   summary: string
   status: 'provisional' | 'confirmed' | 'superseded'
+  confirmed_at: string | null
+  /** Fields a person has edited; later runs must not regenerate them. */
+  confirmed_fields: string[]
   salience: 'background' | 'routine' | 'notable' | 'highlight'
   confidence: number
   activity_mode: 'foreground' | 'background' | 'ambient' | 'idle'
@@ -263,6 +270,10 @@ export interface TimelineEpisode {
   evidence: TimelineEvidenceRef[]
   related_episode_ids: string[]
   related_conversation_ids: string[]
+  // Every live recording overlapping the episode, in wall-clock order. Wider than
+  // the cited set, which is only the evidence the agent reasoned over. Detail
+  // endpoint only.
+  audio_recording_ids?: string[]
   parent_episode_id: string | null
   has_thumbnail: boolean
 }
@@ -288,7 +299,12 @@ export interface TimelineDay {
     ended_at?: string
     window_count?: number
     evidence_count?: number
-    unassigned_intervals?: Array<{ started_at: string; ended_at: string; reason: string }>
+    unassigned_intervals?: Array<{
+      started_at: string
+      ended_at: string
+      reason: string
+      cause?: 'no_capture' | 'unexplained'
+    }>
   }
   analysis: TimelineAnalysis | null
   episodes: TimelineEpisode[]
@@ -305,6 +321,29 @@ export const timelineApi = {
     api.put<{ timezone: string }>('/api/timeline/timezone', { timezone }),
   getThumbnail: (episodeId: string) =>
     api.get<Blob>(`/api/timeline/episodes/${episodeId}/thumbnail`, { responseType: 'blob' }),
+  getEpisode: (episodeId: string) =>
+    api.get<TimelineEpisode>(`/api/timeline/episodes/${episodeId}`),
+  /** Any edit confirms the episode, pinning it against future reanalysis. */
+  updateEpisode: (episodeId: string, changes: TimelineEpisodeUpdate) =>
+    api.patch<TimelineEpisode>(`/api/timeline/episodes/${episodeId}`, changes),
+  /** Cut an episode in two at `at`; evidence is repartitioned by overlap. */
+  splitEpisode: (episodeId: string, at: string) =>
+    api.post<{ episodes: TimelineEpisode[] }>(`/api/timeline/episodes/${episodeId}/split`, { at }),
+  /** Collapse episodes into the earliest one, unioning their evidence. */
+  mergeEpisodes: (episodeIds: string[]) =>
+    api.post<TimelineEpisode>('/api/timeline/episodes/merge', { episode_ids: episodeIds }),
+  deleteEpisode: (episodeId: string) =>
+    api.delete<void>(`/api/timeline/episodes/${episodeId}`),
+}
+
+export interface TimelineEpisodeUpdate {
+  title?: string
+  summary?: string
+  kind?: string
+  entities?: string[]
+  salience?: TimelineEpisode['salience']
+  started_at?: string
+  ended_at?: string
 }
 
 // One recorded change to the memory vault (the audit ledger). Content lives in

@@ -1,5 +1,5 @@
 import { useState, useRef, useMemo, useEffect } from 'react'
-import { useParams, useNavigate, useLocation } from 'react-router-dom'
+import { useParams, useNavigate, useLocation, useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft, Calendar, User, Trash2, RefreshCw, MoreVertical,
@@ -55,7 +55,7 @@ interface Conversation {
   diarization_source?: 'provider' | 'pyannote'
 }
 
-export default function ConversationDetail() {
+export default function RecordingDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const location = useLocation()
@@ -63,8 +63,23 @@ export default function ConversationDetail() {
 
   // Pages that link here pass their own path in location.state.from so "Back"
   // returns to where the user actually came from (e.g. Data Audit).
-  const backTo: string = location.state?.from || '/conversations'
-  const backLabel = backTo === '/data-audit' ? 'Back to Data Audit' : 'Back to Conversations'
+  const backTo: string = location.state?.from || '/recordings'
+  const backLabel =
+    backTo === '/data-audit'
+      ? 'Back to Data Audit'
+      : backTo.startsWith('/timeline')
+        ? 'Back to Timeline'
+        : 'Back to Recordings'
+
+  // A timeline episode links here with the slice of the recording it covers. The whole
+  // recording still loads; the window is foregrounded rather than isolated.
+  const [searchParams] = useSearchParams()
+  const focusWindow = useMemo(() => {
+    const start = Number(searchParams.get('start'))
+    const end = Number(searchParams.get('end'))
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return undefined
+    return { start, end }
+  }, [searchParams])
 
   const {
     data: conversationData,
@@ -672,6 +687,7 @@ export default function ConversationDetail() {
               duration={conversation.audio_total_duration}
               hasAudio={!!conversation.audio_chunks_count && conversation.audio_chunks_count > 0}
               showWaveform
+              focusWindow={focusWindow}
               isLive={isLive}
               enrolledSpeakers={enrolledSpeakers}
               speakerRecognition={conversation.speaker_recognition}

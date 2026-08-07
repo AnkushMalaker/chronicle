@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { ChevronDown, ChevronRight, Clock3, Layers3 } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { CheckCircle2, ChevronDown, ChevronRight, Clock3, Layers3 } from 'lucide-react'
 import { TimelineEpisode, timelineApi } from '../../services/api'
 
 function durationLabel(startedAt: string, endedAt: string) {
@@ -41,10 +42,23 @@ export default function EpisodeCard({ episode, nested = false }: { episode: Time
             <time>{end.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>
             <span>· {durationLabel(episode.started_at, episode.ended_at)}</span>
           </div>
-          <h3 className="mt-1.5 text-lg font-semibold text-gray-900 dark:text-gray-100">{episode.title}</h3>
+          <h3 className="mt-1.5 text-lg font-semibold text-gray-900 dark:text-gray-100">
+            <Link
+              to={`/timeline/${episode.episode_id}`}
+              className="rounded outline-none hover:text-blue-700 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:text-blue-400"
+            >
+              {episode.title}
+            </Link>
+          </h3>
         </div>
         <div className="text-right text-xs text-gray-500 dark:text-gray-400">
-          <div>{episode.kind.replace(/_/g, ' ')}</div>
+          <div className="flex items-center justify-end gap-1.5">
+            {/* `confirmed_at`, not `status`: only a person's edit sets the timestamp. */}
+            {episode.confirmed_at && (
+              <CheckCircle2 className="h-3.5 w-3.5 text-green-600 dark:text-green-400" aria-label="Confirmed" />
+            )}
+            {episode.kind.replace(/_/g, ' ')}
+          </div>
           <div>{episode.activity_mode} · {Math.round(episode.confidence * 100)}% confidence</div>
         </div>
       </div>

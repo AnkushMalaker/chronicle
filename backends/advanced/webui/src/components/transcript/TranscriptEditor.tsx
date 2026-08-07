@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Play, Pause, X, Check, RefreshCw, Trash2, Eye, EyeOff, Plus, Users, AlignLeft, Infinity, Scissors, ChevronLeft, ChevronRight } from 'lucide-react'
 import { annotationsApi } from '../../services/api'
 import { useGaplessPlayer } from '../../hooks/useGaplessPlayer'
@@ -27,6 +27,12 @@ interface TranscriptEditorProps {
   hasAudio: boolean
   /** Show the audio waveform + enable timing edits (detail page). List can omit it. */
   showWaveform?: boolean
+  /**
+   * Seconds-from-start window to foreground, used when a timeline episode links here.
+   * The rest of the recording stays present and editable, just dimmed — an episode is a
+   * view onto a recording, not a truncation of it.
+   */
+  focusWindow?: { start: number; end: number }
   isLive?: boolean
   enrolledSpeakers: { speaker_id: string; name: string }[]
   hideUnknownSpeakers?: boolean
@@ -88,6 +94,7 @@ export default function TranscriptEditor({
   duration,
   hasAudio,
   showWaveform = true,
+  focusWindow,
   isLive = false,
   enrolledSpeakers,
   hideUnknownSpeakers = false,
@@ -96,6 +103,24 @@ export default function TranscriptEditor({
 }: TranscriptEditorProps) {
   const player = useGaplessPlayer()
   const [zoomDisabled] = useWaveformZoomDisabled()
+  const focusAnchor = useRef<HTMLDivElement | null>(null)
+
+  const firstFocusedIndex = useMemo(() => {
+    if (!focusWindow) return -1
+    return segments.findIndex(
+      (segment) => segment.end > focusWindow.start && segment.start < focusWindow.end
+    )
+  }, [focusWindow, segments])
+
+  const isOutsideFocus = useCallback(
+    (segment: Segment) =>
+      !!focusWindow && (segment.end <= focusWindow.start || segment.start >= focusWindow.end),
+    [focusWindow]
+  )
+
+  useEffect(() => {
+    focusAnchor.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [firstFocusedIndex])
 
   const [diar, setDiar] = useState<any[]>([])
   const [text, setText] = useState<any[]>([])
@@ -1068,13 +1093,16 @@ export default function TranscriptEditor({
             const delA = pendingDeletion.find((a) => a.segment_index === idx)
             const displayText = textA ? textA.corrected_text : segment.text
 
+            const dimmed = isOutsideFocus(segment)
+            const anchor = idx === firstFocusedIndex ? focusAnchor : undefined
+
             if (isEvent || isNote) {
               return (
-                <div key={idx}>
+                <div key={idx} ref={anchor}>
                   <div
                     className={`group flex items-center gap-2 py-1.5 px-3 rounded ${
                       isEvent ? 'bg-amber-50 dark:bg-amber-900/25 border-l-2 border-amber-500' : 'bg-green-50 dark:bg-green-900/25 border-l-2 border-green-500'
-                    }`}
+                    } ${dimmed ? 'opacity-40' : ''}`}
                     onMouseEnter={isEvent ? () => setHoverMarker({ start: segment.start, end: segment.end }) : undefined}
                     onMouseLeave={isEvent ? () => setHoverMarker(null) : undefined}
                   >
@@ -1092,11 +1120,11 @@ export default function TranscriptEditor({
             }
 
             return (
-              <div key={idx}>
+              <div key={idx} ref={anchor}>
                 <div
                   className={`group flex items-start gap-2 py-1 rounded hover:bg-gray-50 dark:hover:bg-gray-700/50 ${
                     delA ? 'bg-red-50 dark:bg-red-900/10 opacity-60' : (!preview && textA) ? 'bg-yellow-50 dark:bg-yellow-900/10' : ''
-                  }`}
+                  } ${dimmed ? 'opacity-40' : ''}`}
                   onMouseEnter={() => setHoverMarker({ start: segment.start, end: segment.end })}
                   onMouseLeave={() => setHoverMarker(null)}
                 >
