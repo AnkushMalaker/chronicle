@@ -455,7 +455,12 @@ class Collector:
         ~500 frames, and enumerating them to pick six would be pure waste.
         """
 
-        begin, finish = timestamp_seconds(start), timestamp_seconds(end)
+        # Job timestamps arrive naive (Mongo stores UTC and drops the suffix), and a
+        # naive string read by `timestamp_seconds` would be interpreted in the node's
+        # local zone — silently shifting every slice by the UTC offset and querying a
+        # stretch of the day the episode never covered.
+        begin = timestamp_seconds(iso_timestamp(start))
+        finish = timestamp_seconds(iso_timestamp(end))
         if finish <= begin:
             return []
         width = (finish - begin) / count

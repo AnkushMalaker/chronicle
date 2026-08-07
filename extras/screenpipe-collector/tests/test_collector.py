@@ -1,4 +1,5 @@
 import sqlite3
+import time
 import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -366,6 +367,52 @@ def test_interval_frames_are_sampled_evenly_across_the_span(monkeypatch):
     assert queries[0][0].startswith("2026-08-06T17:00")
     assert queries[-1][1].startswith("2026-08-06T18:00")
     assert all(queries[i][1] == queries[i + 1][0] for i in range(5))
+
+
+def test_a_naive_job_interval_is_read_as_utc_not_node_local_time(monkeypatch):
+    """Jobs deliver naive timestamps, and the node's own zone must not shift them.
+
+    Mongo stores UTC and drops the suffix, so `start_at` arrives as
+    "2026-08-06T17:00:00". Parsing that without normalizing makes `.timestamp()`
+    interpret it in the node's local zone — on an IST node every slice moved 5h30m
+    earlier and queried a stretch of the day the episode never covered, so a
+    55-minute gaming session resolved zero frames.
+    """
+
+    queries = []
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": []}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        queries.append(params["start_time"])
+        return _Response()
+
+    monkeypatch.setattr(collector_module.httpx, "get", fake_get)
+    # A zone far from UTC, so a local-time reading cannot coincidentally pass.
+    monkeypatch.setenv("TZ", "Asia/Kolkata")
+    time.tzset()
+    try:
+        collector = Collector.__new__(Collector)
+        collector.config = Config(
+            backend_url="http://backend",
+            source_id="screenpipe-1",
+            token="t",
+            screenpipe_dir=Path("/tmp"),
+        )
+
+        collector._frames_across_interval(
+            "2026-08-06T17:00:00", "2026-08-06T18:00:00", 6
+        )
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+    assert queries[0].startswith("2026-08-06T17:00")
 
 
 def test_an_interval_with_no_frames_yields_an_empty_shortlist(monkeypatch):
