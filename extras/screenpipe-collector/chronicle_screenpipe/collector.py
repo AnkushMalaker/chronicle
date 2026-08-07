@@ -446,6 +446,52 @@ class Collector:
         except sqlite3.Error:
             logger.warning("could not read capture triggers", exc_info=True)
 
+    def _serve_preview_batch(self, job: dict) -> bool:
+        """Fetch every shortlisted frame of one observation and upload them together.
+
+        Frames are served best-effort: ScreenPipe prunes its store, so a missing frame
+        is expected and must not fail the batch. Chronicle only needs a "good enough"
+        spread to choose from, and the backend records which ids could not be served.
+        """
+
+        payload = job.get("payload", {})
+        width = int(payload.get("width") or 640)
+        headers = (
+            {"Authorization": f"Bearer {self.config.screenpipe_token}"}
+            if self.config.screenpipe_token
+            else None
+        )
+        files = []
+        for frame_id in payload["frame_ids"]:
+            try:
+                frame = httpx.get(
+                    f"{self.config.screenpipe_url.rstrip('/')}/frames/{frame_id}/thumbnail",
+                    params={"width": width, "quality": 75},
+                    headers=headers,
+                    timeout=30,
+                )
+                frame.raise_for_status()
+            except httpx.HTTPError:
+                logger.info("frame %s is no longer available", frame_id)
+                continue
+            files.append(
+                (
+                    "files",
+                    (
+                        f"frame-{frame_id}.jpg",
+                        frame.content,
+                        frame.headers.get("content-type", "image/jpeg"),
+                    ),
+                )
+            )
+        if not files:
+            raise RuntimeError("no shortlisted frame could be served")
+        done = self.client.post(
+            f"/api/device-input/jobs/{job['id']}/previews", files=files
+        )
+        done.raise_for_status()
+        return True
+
     def process_job(self) -> bool:
         response = self.client.get("/api/device-input/jobs/next")
         response.raise_for_status()
@@ -454,7 +500,10 @@ class Collector:
             return False
         try:
             if job["kind"] in {"thumbnail", "source_media"}:
-                frame_id = job.get("payload", {}).get("frame_id")
+                payload = job.get("payload", {})
+                if payload.get("frame_ids"):
+                    return self._serve_preview_batch(job)
+                frame_id = payload.get("frame_id")
                 if frame_id is None:
                     raise RuntimeError("thumbnail job is missing frame_id")
                 headers = (

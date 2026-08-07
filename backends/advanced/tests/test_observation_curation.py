@@ -2,12 +2,16 @@ from datetime import datetime, timezone
 
 import pytest
 
-from advanced_omi_backend.models.device_input import DeviceInputItem
+from advanced_omi_backend.models.device_input import (
+    MAX_FRAME_CANDIDATES,
+    DeviceInputItem,
+)
 from advanced_omi_backend.routers.modules.device_input_routes import (
     ObservationSample,
     _append_observation_sample,
     _merge_frame_candidates,
 )
+from advanced_omi_backend.services import observation_curation
 from advanced_omi_backend.services.observation_curation import (
     _append_vault_observation,
     _observation_codex_settings,
@@ -66,7 +70,7 @@ def test_samples_are_idempotent_by_fingerprint_and_timestamp():
     assert len(item.samples) == 2
 
 
-def test_frame_candidates_are_ranked_deduplicated_and_bounded():
+def test_frame_candidates_are_deduplicated_keeping_the_best_score():
     result = _merge_frame_candidates(
         [{"frame_id": 1, "score": 0.5}, {"frame_id": 2, "score": 0.8}],
         [
@@ -75,7 +79,43 @@ def test_frame_candidates_are_ranked_deduplicated_and_bounded():
             {"frame_id": 4, "score": 0.1},
         ],
     )
-    assert [candidate["frame_id"] for candidate in result] == [1, 2, 3]
+    assert [candidate["frame_id"] for candidate in result] == [1, 2, 3, 4]
+    assert result[0]["score"] == 0.9
+
+
+def test_frame_shortlist_spans_the_observation_rather_than_the_top_scores():
+    """A shortlist must sample the session, not cluster on its best-scoring moment.
+
+    Consecutive frames of an unchanged window score almost identically, so ranking by
+    score alone collapses the shortlist onto neighbours: measured here, observations
+    longer than 15 minutes had all their candidates inside 5.8% of their span.
+    """
+
+    # One high-scoring burst at the start, then sparse frames across an hour.
+    burst = [
+        {
+            "frame_id": index,
+            "score": 0.99,
+            "captured_at": f"2026-07-23T10:00:{index:02d}Z",
+        }
+        for index in range(10)
+    ]
+    spread = [
+        {
+            "frame_id": 100 + minute,
+            "score": 0.4,
+            "captured_at": f"2026-07-23T10:{minute:02d}:00Z",
+        }
+        for minute in (10, 20, 30, 40, 50)
+    ]
+    result = _merge_frame_candidates(burst, spread)
+
+    assert len(result) == MAX_FRAME_CANDIDATES
+    # The burst is represented, but it cannot crowd out the rest of the hour.
+    assert sum(1 for candidate in result if candidate["frame_id"] < 100) == 1
+    assert [
+        candidate["frame_id"] for candidate in result if candidate["frame_id"] >= 100
+    ] == [100 + minute for minute in (10, 20, 30, 40, 50)]
 
 
 def test_revision_changes_for_new_sample_and_close():
@@ -209,3 +249,77 @@ async def test_current_curation_updates_only_curation_owned_fields(monkeypatch):
     assert applied is True
     assert collection.document["metadata"]["frame_count"] == 632
     assert collection.document["curation"] == "discarded"
+
+
+class _NoOpenJobs:
+    """`DeviceInputJob` stand-in: nothing is in flight and inserts are recorded."""
+
+    # The query builder reads these off the class before find_one is ever called.
+    source_id = None
+    kind = None
+
+    def __init__(self, queued):
+        self.queued = queued
+
+    @staticmethod
+    async def find_one(*args, **kwargs):
+        return None
+
+    def __call__(self, **fields):
+        self.queued.append(fields)
+        return self
+
+    async def insert(self):
+        return self
+
+
+@pytest.mark.asyncio
+async def test_preview_shortlist_is_requested_once_per_observation_then_gives_up(
+    monkeypatch,
+):
+    """A pruned frame must not defer an observation forever.
+
+    ScreenPipe drops frames, so a 404 is permanent. Re-requesting the top candidate
+    every cron tick previously accumulated 13,113 failed jobs and left 83% of all
+    observations at ``pending``, never written to the vault. One job now carries the
+    whole shortlist, and after a bounded number of tries curation proceeds on text.
+    """
+
+    item = observation(
+        frame_candidates=[
+            {"frame_id": 14965, "score": 1.5},
+            {"frame_id": 14966, "score": 1.2},
+        ],
+    )
+    queued: list[dict] = []
+    monkeypatch.setattr(observation_curation, "DeviceInputJob", _NoOpenJobs(queued))
+    collection = _ObservationCollection(item.model_dump(by_alias=True))
+    monkeypatch.setattr(DeviceInputItem, "get_pymongo_collection", lambda: collection)
+
+    for _ in range(observation_curation._MAX_SHORTLIST_ATTEMPTS):
+        assert await observation_curation._ensure_preview_shortlist(item) is True
+        # Every candidate travels in one request, so the node is asked once, not once
+        # per frame.
+        assert queued[-1]["payload"]["frame_ids"] == [14965, 14966]
+        item.metadata = collection.document["metadata"]
+
+    assert await observation_curation._ensure_preview_shortlist(item) is False
+    assert len(queued) == observation_curation._MAX_SHORTLIST_ATTEMPTS
+
+
+def test_only_a_shortlisted_frame_can_be_selected():
+    """The agent's pick is honoured only for an image it was actually shown."""
+
+    item = observation(
+        media_previews=[
+            {"frame_id": 7, "data": b"jpeg", "content_type": "image/jpeg"},
+        ],
+    )
+    assert observation_curation._selected_preview(item, {"selected_frame_id": 7})
+    assert (
+        observation_curation._selected_preview(item, {"selected_frame_id": 9}) is None
+    )
+    assert (
+        observation_curation._selected_preview(item, {"selected_frame_id": None})
+        is None
+    )

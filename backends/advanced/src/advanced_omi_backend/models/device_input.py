@@ -12,6 +12,12 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# How many frames of one observation are shortlisted for the curation agent to choose
+# between. Mirrors the collector's own cap; the backend re-applies it when merging
+# shortlists so a long-lived observation cannot accumulate an unbounded list.
+MAX_FRAME_CANDIDATES = 6
+
+
 class CaptureSource(Document):
     user_id: str
     source_id: str
@@ -77,6 +83,11 @@ class DeviceInputItem(Document):
     ] = None
     samples: list[dict[str, Any]] = Field(default_factory=list)
     frame_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    # Fetched previews the curation agent looks at and chooses between; the one it
+    # picks is copied into ``media_data`` above. Distinct concepts: this is the
+    # shortlist, that is the selection. Entries hold ``frame_id``, ``data``,
+    # ``content_type``, and ``captured_at``.
+    media_previews: list[dict[str, Any]] = Field(default_factory=list)
     related_conversation_ids: list[str] = Field(default_factory=list)
     duplicate_of: Optional[str] = None
     curation_revision: Optional[str] = None

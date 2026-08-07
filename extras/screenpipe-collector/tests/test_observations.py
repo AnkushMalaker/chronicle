@@ -1,7 +1,9 @@
 from chronicle_screenpipe.observations import (
+    MAX_FRAME_CANDIDATES,
     ObservationTracker,
     content_fingerprint,
     normalize_text,
+    stratify_candidates,
     text_is_novel,
 )
 
@@ -228,3 +230,47 @@ def test_contextless_ocr_opens_after_stability_when_it_is_the_only_source():
     assert [event["event"] for event in opened] == ["open"]
     assert opened[0]["sample"]["text"] == "Visual-only application text"
     assert opened[0]["sample"]["text_source"] == "ocr"
+
+
+def test_shortlist_samples_the_session_instead_of_the_best_scoring_burst():
+    """Frame candidates must span the observation, not cluster on one moment.
+
+    Consecutive frames of an unchanged window score almost identically, so keeping the
+    top N by score alone returns neighbours. Measured on a live deployment, that left
+    observations longer than 15 minutes represented by frames spanning 5.8% of their
+    duration — a 45-minute session summarised from a single 2.5-minute slice.
+    """
+
+    burst = [
+        {
+            "frame_id": index,
+            "score": 0.99,
+            "captured_at": f"2026-07-23T10:00:{index:02d}Z",
+        }
+        for index in range(12)
+    ]
+    spread = [
+        {
+            "frame_id": 100 + minute,
+            "score": 0.30,
+            "captured_at": f"2026-07-23T10:{minute:02d}:00Z",
+        }
+        for minute in (10, 20, 30, 40, 50)
+    ]
+
+    result = stratify_candidates(burst + spread)
+
+    assert len(result) == MAX_FRAME_CANDIDATES
+    assert sum(1 for candidate in result if candidate["frame_id"] < 100) == 1
+    # Every later slice of the hour keeps its representative despite scoring lower.
+    assert [c["frame_id"] for c in result if c["frame_id"] >= 100] == [
+        100 + minute for minute in (10, 20, 30, 40, 50)
+    ]
+
+
+def test_short_shortlist_is_returned_whole():
+    candidates = [
+        {"frame_id": 3, "score": 0.1, "captured_at": "2026-07-23T10:00:03Z"},
+        {"frame_id": 1, "score": 0.9, "captured_at": "2026-07-23T10:00:01Z"},
+    ]
+    assert [c["frame_id"] for c in stratify_candidates(candidates)] == [1, 3]

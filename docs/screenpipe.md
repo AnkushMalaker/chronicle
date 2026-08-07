@@ -152,10 +152,40 @@ Open state and unsent samples are stored atomically in
 `~/.local/state/chronicle-screenpipe/observations.json`. Backend lifecycle upserts and
 sample fingerprints make retries idempotent.
 
-Each observation carries at most three ranked local frame pointers. Chronicle normally
-requests zero or one 640px preview; the curator may request one different preview. A
-selected ScreenPipe image is then fetched at a bounded 1280px size. ScreenPipe remains
-the high-resolution source and Chronicle never uploads a frame sequence.
+### The frame shortlist, and who chooses from it
+
+Each observation carries up to six local frame pointers, **stratified across its span**:
+the observation is divided into equal slices and the best-scoring frame of each slice is
+kept. Ranking by score alone does not work here — consecutive frames of an unchanged
+window score almost identically, so the top few are usually neighbours. Measured on this
+deployment before the change, observations longer than 15 minutes had all their
+candidates inside 5.8% of their duration (154s median): a 45-minute session was
+represented by one 2.5-minute slice of itself.
+
+Chronicle requests that shortlist as **one** job (`observation_preview_shortlist`,
+`payload.frame_ids`), and the collector answers with all of the frames it can still
+serve in a single `POST /jobs/{id}/previews`. Frames are best-effort: ScreenPipe prunes
+its store, so a missing frame is expected, does not fail the batch, and is recorded in
+`metadata.preview_shortlist_missing`.
+
+The curation agent is then shown every fetched frame and picks the one that represents
+the session (`selected_frame_id`), or none. That selection — not the scorer's guess —
+becomes the observation's `media_data`, and the image it chooses is fetched at a bounded
+1280px only if it is promoted into the vault. ScreenPipe remains the high-resolution
+source and Chronicle never uploads a frame sequence.
+
+The request is bounded: a shortlist is asked for at most twice, after which curation
+proceeds on text alone. It must be, because a frame ScreenPipe has pruned returns 404
+forever. The previous per-frame retry had no cap and re-requested a single dead frame on
+every cron tick — 13,113 failed jobs, 821 of them for one frame id — and because
+curation refused to proceed without an image, **83% of all observations sat at
+`pending` and were never written to the vault at all**. A stalled visual fetch must
+degrade to a text memory, never to no memory.
+
+> **Deployment order.** A collector older than this change does not understand
+> `frame_ids` and fails the job. That is bounded rather than fatal — two failures and
+> the observation curates on text — but a node keeps producing image-less memories
+> until its collector is updated.
 
 ## Meeting detection and audio session bounds
 

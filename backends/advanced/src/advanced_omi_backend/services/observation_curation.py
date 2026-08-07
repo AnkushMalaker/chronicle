@@ -33,6 +33,10 @@ _OPEN_CURATION_INTERVAL = timedelta(minutes=15)
 _AUDIO_LOOKBACK = timedelta(minutes=35)
 _IMMICH_MARGIN = timedelta(minutes=30)
 _CODEX_TIMEOUT_SECONDS = 600
+_CURATION_BATCH = 25
+# A shortlist request is one node round trip for all of an observation's frames, so a
+# couple of tries covers a node that was briefly offline without ever looping.
+_MAX_SHORTLIST_ATTEMPTS = 2
 _CODEX_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 
@@ -69,13 +73,12 @@ _DECISION_SCHEMA = {
                 "text_update",
                 "dedicated_note",
                 "promote_image",
-                "alternative_preview",
             ],
         },
         "reason": {"type": "string"},
         "duplicate_observation_id": {"type": ["string", "null"]},
-        "alternative_frame_id": {"type": ["integer", "null"]},
         "note_path": {"type": ["string", "null"]},
+        "selected_frame_id": {"type": ["integer", "null"]},
         "title": {"type": "string"},
         "summary": {"type": "string"},
         "facts": {"type": "array", "items": {"type": "string"}},
@@ -86,8 +89,8 @@ _DECISION_SCHEMA = {
         "decision",
         "reason",
         "duplicate_observation_id",
-        "alternative_frame_id",
         "note_path",
+        "selected_frame_id",
         "title",
         "summary",
         "facts",
@@ -101,6 +104,13 @@ You curate one Chronicle screen observation into a personal Obsidian vault. Retu
 the requested structured decision. Be highly selective: routine navigation, repeated
 screens, passive media, and low-information context should normally be discarded.
 
+Images named `frame-<id>.jpg` are a shortlist sampled across this observation's span,
+not a sequence to describe. Read them for what the session actually was — the game or
+document on screen, what was being done — and set `selected_frame_id` to the one that
+best represents it, or null if none is worth keeping. Prefer clearly legible content
+over an exact moment; "good enough" is the bar. Frames are also evidence you may cite
+in the summary, not only thumbnail choices.
+
 The screenshot is sparse supporting evidence, not permission to invent. `output` audio
 is system/media audio: character dialogue, lyrics, presenters, and game dialogue are
 NEVER facts about the user. You may retain a media title/episode/progress and an explicit
@@ -110,9 +120,7 @@ transcript's speaker evidence supports it.
 Use `text_update` for a small Daily/YYYY-MM-DD.md entry. Use `dedicated_note` only for a
 durable event/project/topic/place/media experience; choose a safe relative `.md` path.
 Use `promote_image` only when the ScreenPipe preview or one of the supplied Immich
-thumbnail candidates adds durable value; set `immich_item_id` only for the latter. Use
-`alternative_preview` only if this image is unusable and a genuinely different ranked
-frame exists. Use `duplicate` only when the supplied canonical observation id is clear.
+thumbnail candidates adds durable value; set `immich_item_id` only for the latter. Use `duplicate` only when the supplied canonical observation id is clear.
 Never write a fake conversation note for screen context.
 """
 
@@ -303,6 +311,9 @@ async def run_codex_observation_agent(
         "metadata": item.metadata,
         "samples": item.samples,
         "frame_candidates": item.frame_candidates,
+        "shortlisted_frame_ids": [
+            preview["frame_id"] for preview in item.media_previews
+        ],
         "related_audio": audio,
         "nearby_immich": immich,
         "duplicate_candidates": duplicate_candidates,
@@ -337,7 +348,15 @@ async def run_codex_observation_agent(
             command.extend(
                 ["-c", f'model_reasoning_effort="{settings["reasoning_effort"]}"']
             )
-        if item.media_data:
+        # Every shortlisted frame, so the agent judges the images rather than
+        # inheriting the scorer's pick. Named by frame id: the decision names the id
+        # it chose, which is what gets kept as the observation's representative.
+        for preview in item.media_previews:
+            suffix = ".png" if preview.get("content_type") == "image/png" else ".jpg"
+            image_path = workspace / f"frame-{preview['frame_id']}{suffix}"
+            image_path.write_bytes(preview["data"])
+            command.extend(["--image", str(image_path)])
+        if not item.media_previews and item.media_data:
             suffix = Path(item.media_filename or "preview.jpg").suffix or ".jpg"
             image_path = workspace / f"preview{suffix}"
             image_path.write_bytes(item.media_data)
@@ -375,54 +394,71 @@ async def run_codex_observation_agent(
         return json.loads(output_path.read_text(encoding="utf-8"))
 
 
-async def _queue_alternative(item: DeviceInputItem, frame_id: int) -> bool:
-    if int(item.metadata.get("preview_count") or 0) >= 2:
-        return False
-    valid_ids = {candidate.get("frame_id") for candidate in item.frame_candidates}
-    if frame_id not in valid_ids or frame_id == item.metadata.get("preview_frame_id"):
-        return False
-    await DeviceInputJob(
-        user_id=item.user_id,
-        source_id=item.source_id,
-        kind="thumbnail",
-        start_at=item.captured_at,
-        end_at=item.ended_at,
-        purpose="observation_alternative_preview",
-        payload={
-            "item_id": str(item.id),
-            "frame_id": frame_id,
-            "width": 640,
-            "preview_index": 2,
-        },
-    ).insert()
-    return True
+async def _ensure_preview_shortlist(item: DeviceInputItem) -> bool:
+    """Ask the node for this observation's whole shortlist; report if one is pending.
 
+    One job carries every candidate frame, so the node is asked once per observation
+    instead of once per frame, and the agent gets a spread to choose between rather
+    than the scorer's single guess.
 
-async def _ensure_preview_retry(item: DeviceInputItem) -> None:
-    if int(item.metadata.get("preview_count") or 0) >= 1:
-        return
+    The request is made at most ``_MAX_SHORTLIST_ATTEMPTS`` times. ScreenPipe prunes
+    its frame store, so frames that 404 are gone for good: the previous unbounded
+    per-frame retry re-requested one dead frame every cron tick — 13,113 failed jobs,
+    821 of them for a single frame id — and held 83% of all observations at
+    ``pending``, never written to the vault.
+
+    Returning False means no image is coming and the caller should curate the text.
+    """
+
+    if item.media_previews:
+        return False
+    attempts = int(item.metadata.get("preview_attempts") or 0)
+    if attempts >= _MAX_SHORTLIST_ATTEMPTS or not item.frame_candidates:
+        return False
     existing = await DeviceInputJob.find_one(
         DeviceInputJob.source_id == item.source_id,
         DeviceInputJob.kind == "thumbnail",
         {"payload.item_id": str(item.id)},
         {"status": {"$in": ["pending", "claimed"]}},
     )
-    if existing or not item.frame_candidates:
-        return
+    if existing:
+        return True
     await DeviceInputJob(
         user_id=item.user_id,
         source_id=item.source_id,
         kind="thumbnail",
         start_at=item.captured_at,
         end_at=item.ended_at,
-        purpose="observation_preview_retry",
+        purpose="observation_preview_shortlist",
         payload={
             "item_id": str(item.id),
-            "frame_id": item.frame_candidates[0]["frame_id"],
+            "frame_ids": [candidate["frame_id"] for candidate in item.frame_candidates],
             "width": 640,
-            "preview_index": 1,
         },
     ).insert()
+    await DeviceInputItem.get_pymongo_collection().update_one(
+        {"_id": item.id},
+        {"$set": {"metadata.preview_attempts": attempts + 1}},
+    )
+    return True
+
+
+def _selected_preview(
+    item: DeviceInputItem, decision: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The shortlisted frame the agent chose, if it named one it was actually shown."""
+
+    frame_id = decision.get("selected_frame_id")
+    if frame_id is None:
+        return None
+    return next(
+        (
+            preview
+            for preview in item.media_previews
+            if preview["frame_id"] == int(frame_id)
+        ),
+        None,
+    )
 
 
 async def _queue_source_media(item: DeviceInputItem) -> None:
@@ -560,21 +596,27 @@ async def apply_curation_decision(
 ) -> bool:
     agent_reason = str(decision.get("reason") or "")
     action = decision["decision"]
-    if action == "alternative_preview":
-        frame_id = decision.get("alternative_frame_id")
-        if isinstance(frame_id, int) and await _queue_alternative(item, frame_id):
-            await _apply_curation_fields(
-                item,
-                {
-                    "agent_reason": agent_reason,
-                    "curation": "pending",
-                    "metadata.alternative_preview_requested": True,
-                },
-            )
-            return False
-        action = "discard"
 
     updates: dict[str, Any] = {"agent_reason": agent_reason}
+    # Promote the frame the agent chose to the observation's representative image, so
+    # every downstream consumer — vault promotion, the 1280px source-media fetch, the
+    # timeline thumbnail — uses the frame that was actually judged to depict this
+    # session, not the one that scored highest before anyone looked at it.
+    selected = _selected_preview(item, decision)
+    if selected is not None:
+        item.media_data = selected["data"]
+        item.media_content_type = selected["content_type"]
+        item.media_filename = f"frame-{selected['frame_id']}.jpg"
+        updates.update(
+            {
+                "media_data": selected["data"],
+                "media_filename": item.media_filename,
+                "media_content_type": selected["content_type"],
+                "content_hash": hashlib.sha256(selected["data"]).hexdigest(),
+                "metadata.preview_frame_id": selected["frame_id"],
+                "metadata.thumbnail_available": True,
+            }
+        )
     unset: tuple[str, ...] = ()
     if action == "duplicate":
         target_id = decision.get("duplicate_observation_id")
@@ -689,11 +731,24 @@ async def apply_curation_decision(
     return await _apply_curation_fields(item, updates, unset=unset)
 
 
-async def process_observation_curation() -> dict[str, Any]:
-    pending = await DeviceInputItem.find(
-        DeviceInputItem.kind == "observation",
-        DeviceInputItem.curation == "pending",
-    ).to_list()
+async def process_observation_curation(limit: int = _CURATION_BATCH) -> dict[str, Any]:
+    """Curate a bounded batch of pending observations, newest first.
+
+    Each curated observation is one Codex call, so an unbounded pass over a backlog
+    runs for hours inside a five-minute cron slot. Newest first because ScreenPipe
+    prunes its frame store: recent observations are the ones whose preview can still
+    be fetched, and draining them keeps the queue from growing faster than it empties.
+    """
+
+    pending = (
+        await DeviceInputItem.find(
+            DeviceInputItem.kind == "observation",
+            DeviceInputItem.curation == "pending",
+        )
+        .sort("-captured_at")
+        .limit(limit)
+        .to_list()
+    )
     processed = 0
     waiting = 0
     failed = 0
@@ -711,8 +766,11 @@ async def process_observation_curation() -> dict[str, Any]:
         visual_expected = bool(item.frame_candidates) and not item.metadata.get(
             "inactive"
         )
-        if visual_expected and not item.media_data:
-            await _ensure_preview_retry(item)
+        # Wait for the shortlist only while one is still coming. An observation whose
+        # frames ScreenPipe has already pruned still carries app identity, window
+        # title, and OCR text, and curating that is strictly better than holding the
+        # observation out of the vault forever waiting for images that cannot arrive.
+        if visual_expected and await _ensure_preview_shortlist(item):
             waiting += 1
             continue
         if not await _claim_curation(item):

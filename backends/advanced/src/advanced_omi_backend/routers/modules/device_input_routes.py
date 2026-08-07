@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
@@ -26,6 +27,7 @@ from advanced_omi_backend.auth import current_active_user
 from advanced_omi_backend.config import get_screen_context_settings
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import (
+    MAX_FRAME_CANDIDATES,
     CaptureSource,
     DeviceInputItem,
     DeviceInputJob,
@@ -150,7 +152,9 @@ class ObservationEvent(BaseModel):
     captured_at: datetime
     ended_at: Optional[datetime] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
-    frame_candidates: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
+    frame_candidates: list[dict[str, Any]] = Field(
+        default_factory=list, max_length=MAX_FRAME_CANDIDATES
+    )
     sample: Optional[ObservationSample] = None
 
 
@@ -276,9 +280,40 @@ async def ingest_activity(
     return {"accepted": accepted, "duplicates": duplicates}
 
 
+def _frame_id_from_filename(filename: str | None) -> int | None:
+    """Read the frame id out of a ``frame-<id>.<ext>`` upload name."""
+
+    match = re.fullmatch(r"frame-(\d+)\.[A-Za-z0-9]+", filename or "")
+    return int(match.group(1)) if match else None
+
+
+def _candidate_seconds(candidate: dict[str, Any]) -> float:
+    """Capture time of a candidate; frames without one sort to the head."""
+
+    raw = candidate.get("captured_at")
+    if isinstance(raw, datetime):
+        return _as_utc(raw).timestamp()
+    if isinstance(raw, str):
+        try:
+            return _as_utc(
+                datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            ).timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
 def _merge_frame_candidates(
     existing: list[dict[str, Any]], incoming: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
+    """Union two shortlists, keeping one frame per slice of the observation's span.
+
+    Truncating the union by score would undo the collector's stratification on every
+    sample append: an observation that accumulates candidates over hours would end up
+    holding whichever few frames happened to score highest, which are typically
+    neighbours. Bucketing by capture time keeps the shortlist spanning the session.
+    """
+
     by_frame: dict[int, dict[str, Any]] = {}
     for candidate in [*existing, *incoming]:
         frame_id = candidate.get("frame_id")
@@ -289,13 +324,23 @@ def _merge_frame_candidates(
             current.get("score") or 0
         ):
             by_frame[frame_id] = candidate
-    return sorted(
-        by_frame.values(),
-        key=lambda candidate: (
-            -float(candidate.get("score") or 0),
-            int(candidate["frame_id"]),
-        ),
-    )[:3]
+    if len(by_frame) <= MAX_FRAME_CANDIDATES:
+        return sorted(by_frame.values(), key=lambda candidate: candidate["frame_id"])
+    moments = {
+        frame_id: _candidate_seconds(candidate)
+        for frame_id, candidate in by_frame.items()
+    }
+    start, end = min(moments.values()), max(moments.values())
+    width = (end - start) / MAX_FRAME_CANDIDATES or 1.0
+    best: dict[int, dict[str, Any]] = {}
+    for frame_id, candidate in by_frame.items():
+        bucket = min(int((moments[frame_id] - start) / width), MAX_FRAME_CANDIDATES - 1)
+        current = best.get(bucket)
+        if current is None or float(candidate.get("score") or 0) > float(
+            current.get("score") or 0
+        ):
+            best[bucket] = candidate
+    return sorted(best.values(), key=lambda candidate: candidate["frame_id"])
 
 
 def _append_observation_sample(
@@ -577,6 +622,76 @@ async def complete_job(
     }
     await job.save()
     return {"ok": True, "stored": len(kept), "filtered": report}
+
+
+@router.post("/jobs/{job_id}/previews")
+async def complete_preview_batch_job(
+    job_id: str,
+    files: list[UploadFile] = File(...),
+    source: CaptureSource = Depends(_device_source),
+):
+    """Store the shortlist of frames the curation agent will choose between.
+
+    One request carries every frame of one observation, so a shortlist costs a single
+    node round trip instead of one job per frame. This deliberately does not set
+    ``media_data``: which frame represents the observation is the agent's decision,
+    made after looking at them, not the scorer's.
+
+    Each filename must be ``frame-<frame_id>.<ext>`` — that is how a stored preview is
+    tied back to the candidate it came from.
+    """
+
+    job = await DeviceInputJob.get(job_id)
+    if job is None or job.source_id != source.source_id or job.kind != "thumbnail":
+        raise HTTPException(status_code=404, detail="Preview job not found")
+    item_id = job.payload.get("item_id")
+    item = await DeviceInputItem.get(item_id) if item_id else None
+    if item is None or item.source_id != source.source_id:
+        raise HTTPException(status_code=404, detail="Timeline item not found")
+    requested = {int(frame_id) for frame_id in job.payload.get("frame_ids") or []}
+    captured_at = {
+        int(candidate["frame_id"]): candidate.get("captured_at")
+        for candidate in item.frame_candidates
+        if isinstance(candidate.get("frame_id"), int)
+    }
+    previews: list[dict[str, Any]] = []
+    for upload in files[:MAX_FRAME_CANDIDATES]:
+        content_type = (upload.content_type or "").split(";", 1)[0]
+        if not content_type.startswith("image/"):
+            raise HTTPException(status_code=415, detail="Previews must be images")
+        frame_id = _frame_id_from_filename(upload.filename)
+        if frame_id is None or frame_id not in requested:
+            raise HTTPException(
+                status_code=422, detail="Preview filename must name a requested frame"
+            )
+        data = await upload.read(_MAX_IMAGE_BYTES + 1)
+        if len(data) > _MAX_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=413, detail="Preview exceeds the media limit"
+            )
+        previews.append(
+            {
+                "frame_id": frame_id,
+                "data": data,
+                "content_type": content_type,
+                "captured_at": captured_at.get(frame_id),
+            }
+        )
+    item.media_previews = sorted(previews, key=lambda preview: preview["frame_id"])
+    item.metadata = {
+        **item.metadata,
+        "preview_shortlist_count": len(previews),
+        # Frames that could not be served are gone from ScreenPipe's store for good.
+        # Recording the shortfall stops the curation gate waiting on them.
+        "preview_shortlist_missing": sorted(
+            requested - {preview["frame_id"] for preview in previews}
+        ),
+    }
+    await item.save()
+    job.status = "complete"
+    job.completed_at = utcnow()
+    await job.save()
+    return {"ok": True, "item_id": str(item.id), "previews": len(previews)}
 
 
 @router.post("/jobs/{job_id}/thumbnail")
