@@ -34,7 +34,7 @@ from advanced_omi_backend.models.device_input import (
     PairingCode,
     utcnow,
 )
-from advanced_omi_backend.models.timeline import AudioEvidenceSpan
+from advanced_omi_backend.models.timeline import AudioEvidenceSpan, TimelineEpisode
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services.device_context import (
     request_conversation_context_jobs,
@@ -59,6 +59,8 @@ _ALLOWED_AUDIO_TYPES = {
     "audio/ogg",
 }
 _MAX_IMAGE_BYTES = 25 * 1024 * 1024
+# Frames an episode may stage for its picker; mirrors FRAMES_PER_EPISODE.
+_MAX_EPISODE_FRAMES = 6
 
 
 def _digest(value: str) -> str:
@@ -624,6 +626,49 @@ async def complete_job(
     return {"ok": True, "stored": len(kept), "filtered": report}
 
 
+async def _store_episode_frames(
+    job: DeviceInputJob, episode_id: str, files: list[UploadFile]
+) -> dict[str, Any]:
+    """Stage frames sampled across an episode's interval for its picker.
+
+    Unlike an observation shortlist there is no pre-agreed set of ids to validate
+    against — the node resolved these from its own frame store — so the filename is
+    read for the id and nothing else is assumed.
+    """
+
+    episode = await TimelineEpisode.find_one(
+        TimelineEpisode.episode_id == episode_id,
+        TimelineEpisode.user_id == job.user_id,
+    )
+    if episode is None:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    frames: list[dict[str, Any]] = []
+    for upload in files[:_MAX_EPISODE_FRAMES]:
+        content_type = (upload.content_type or "").split(";", 1)[0]
+        if not content_type.startswith("image/"):
+            raise HTTPException(status_code=415, detail="Frames must be images")
+        frame_id = _frame_id_from_filename(upload.filename)
+        if frame_id is None:
+            raise HTTPException(
+                status_code=422, detail="Frame filename must name an id"
+            )
+        data = await upload.read(_MAX_IMAGE_BYTES + 1)
+        if len(data) > _MAX_IMAGE_BYTES:
+            raise HTTPException(status_code=413, detail="Frame exceeds the media limit")
+        frames.append(
+            {"frame_id": frame_id, "data": data, "content_type": content_type}
+        )
+    episode.frame_shortlist = sorted(frames, key=lambda frame: frame["frame_id"])
+    # An interval the recorder never covered yields nothing; say so rather than
+    # leaving the episode waiting on a request that already came back empty.
+    episode.thumbnail_state = "requested" if frames else "unavailable"
+    await episode.save()
+    job.status = "complete"
+    job.completed_at = utcnow()
+    await job.save()
+    return {"ok": True, "episode_id": episode_id, "frames": len(frames)}
+
+
 @router.post("/jobs/{job_id}/previews")
 async def complete_preview_batch_job(
     job_id: str,
@@ -644,6 +689,9 @@ async def complete_preview_batch_job(
     job = await DeviceInputJob.get(job_id)
     if job is None or job.source_id != source.source_id or job.kind != "thumbnail":
         raise HTTPException(status_code=404, detail="Preview job not found")
+    episode_id = job.payload.get("episode_id")
+    if episode_id:
+        return await _store_episode_frames(job, episode_id, files)
     item_id = job.payload.get("item_id")
     item = await DeviceInputItem.get(item_id) if item_id else None
     if item is None or item.source_id != source.source_id:

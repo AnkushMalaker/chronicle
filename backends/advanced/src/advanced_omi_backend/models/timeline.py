@@ -45,6 +45,9 @@ class TimelineEvidenceRef(BaseModel):
     excerpt: Optional[str] = None
     content_hash: Optional[str] = None
     ephemeral: bool = False
+    # Assembly-time metadata (``conversation_id``, image content type, app/window
+    # identity). Persisted so an episode can link back to the artifact it cites.
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class TimelineAssertion(BaseModel):
@@ -181,6 +184,9 @@ class TimelineAnalysisRun(Document):
 
 class TimelineEpisode(Document):
     episode_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    # Durable identity across analysis runs. ``episode_id`` names this row; a confirmed
+    # episode keeps its ``episode_key`` when it is carried into the next generation.
+    episode_key: str = Field(default_factory=lambda: str(uuid.uuid4()))
     run_id: str
     user_id: str
     local_date: date
@@ -190,7 +196,9 @@ class TimelineEpisode(Document):
     kind: str
     title: str = Field(min_length=1, max_length=160)
     summary: str = Field(max_length=1200)
-    status: Literal["provisional", "confirmed", "superseded"] = "confirmed"
+    # Agent output is provisional until a person edits it. A "confirmed" default would
+    # pin every generated episode and make reanalysis a no-op.
+    status: Literal["provisional", "confirmed", "superseded"] = "provisional"
     salience: Literal["background", "routine", "notable", "highlight"] = "routine"
     confidence: float = Field(ge=0, le=1)
     activity_mode: Literal["foreground", "background", "ambient", "idle"]
@@ -204,6 +212,18 @@ class TimelineEpisode(Document):
     parent_episode_id: Optional[str] = None
     representative_image: Optional[bytes] = None
     representative_image_type: Optional[str] = None
+    # Frames sampled across this episode's own interval, fetched from the node's full
+    # ScreenPipe store rather than inherited from whatever an observation happened to
+    # shortlist. Transient: the picker keeps one as `representative_image` and clears
+    # the rest. `thumbnail_state` drives the pass — "" not yet requested, "requested"
+    # awaiting the node, "chosen"/"unavailable" terminal.
+    frame_shortlist: list[dict[str, Any]] = Field(default_factory=list)
+    thumbnail_state: Literal["", "requested", "chosen", "unavailable"] = ""
+    # Human confirmation. A confirmed episode is an anchor: later runs carry it forward
+    # verbatim instead of regenerating its interval. ``confirmed_fields`` records which
+    # fields the person owns, so agent-derived fields stay free to refresh.
+    confirmed_at: Optional[datetime] = None
+    confirmed_fields: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
     revised_at: datetime = Field(default_factory=utcnow)
 
@@ -223,6 +243,7 @@ class TimelineEpisode(Document):
             IndexModel([("episode_id", ASCENDING)], unique=True),
             IndexModel([("user_id", ASCENDING), ("local_date", DESCENDING)]),
             IndexModel([("run_id", ASCENDING), ("started_at", ASCENDING)]),
+            IndexModel([("user_id", ASCENDING), ("episode_key", ASCENDING)]),
         ]
 
 

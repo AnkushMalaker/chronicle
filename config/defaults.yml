@@ -919,6 +919,10 @@ cron_jobs:
     description: "Curate novel ScreenPipe observations into durable vault context"
     enabled: true
     schedule: "*/5 * * * *"
+  episode_thumbnails:
+    description: "Give timeline episodes a representative frame from their own interval"
+    enabled: true
+    schedule: "*/10 * * * *"
   screen_context_retention:
     description: "Expire conversation screen context whose conversation is gone"
     enabled: true

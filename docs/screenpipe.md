@@ -184,6 +184,36 @@ that path additionally fetches the frame at a bounded 1280px and content-address
 under `_media/`. The two decisions are independent: most observations should yield a
 timeline thumbnail and no vault image.
 
+### An episode's picture comes from its own interval
+
+An observation's shortlist is fixed while that observation is open, which makes it the
+wrong source for a *timeline episode*: the episode is a longer, semantic span, and it
+inherits only whatever frames happened to be shortlisted inside it. Measured here, the
+55-minute episode "Rematch multiplayer gaming" (17:34–18:29) cited exactly two
+image-bearing observations, both from its first twenty minutes, so its picture was the
+game's **main menu** while the in-match frames sat unused on observations at 18:36 and
+18:55 — outside its bounds.
+
+ScreenPipe holds every frame, not just the shortlisted ones: `GET /search` reports **516
+frames** for one 30-minute stretch of that session. So an episode asks the node to sample
+*its own* interval instead. `process_episode_thumbnails` (`services/timeline/thumbnails.py`,
+cron `episode_thumbnails`) runs in two phases so a tick never blocks on the node:
+
+1. An episode with no frames gets an `episode_frames` job carrying its interval and a
+   count. The collector divides that interval into equal slices and resolves one frame
+   per slice with a narrow `limit=1` query — enumerating all 516 to choose six would be
+   pure waste — then uploads them through the same `POST /jobs/{id}/previews` batch.
+2. When the frames land, a bounded vision pass picks the one that depicts the episode,
+   told to prefer activity in progress over menus, launchers, and loading screens. The
+   choice becomes `representative_image` and the rest are dropped.
+
+`thumbnail_state` (`""` → `requested` → `chosen`/`unavailable`) makes both terminal
+states durable, so an interval the recorder never covered is not re-requested forever.
+
+This is independent of `representative_evidence_id`, which the segmentation agent still
+sets from evidence it cites; the dedicated pass exists because that agent can only
+nominate frames some observation already fetched.
+
 The request is bounded: a shortlist is asked for at most twice, after which curation
 proceeds on text alone. It must be, because a frame ScreenPipe has pruned returns 404
 forever. The previous per-frame retry had no cap and re-requested a single dead frame on

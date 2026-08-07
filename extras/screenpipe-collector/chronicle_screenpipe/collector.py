@@ -446,6 +446,57 @@ class Collector:
         except sqlite3.Error:
             logger.warning("could not read capture triggers", exc_info=True)
 
+    def _frames_across_interval(self, start: str, end: str, count: int) -> list[int]:
+        """Pick `count` frame ids spread evenly across [start, end).
+
+        ScreenPipe holds every frame, so an interval can be sampled directly instead of
+        being limited to whatever was shortlisted per observation while it was open. One
+        narrow query per slice keeps this bounded — a 30-minute gaming session holds
+        ~500 frames, and enumerating them to pick six would be pure waste.
+        """
+
+        begin, finish = timestamp_seconds(start), timestamp_seconds(end)
+        if finish <= begin:
+            return []
+        width = (finish - begin) / count
+        headers = (
+            {"Authorization": f"Bearer {self.config.screenpipe_token}"}
+            if self.config.screenpipe_token
+            else None
+        )
+        frame_ids: list[int] = []
+        for index in range(count):
+            slice_start = datetime.fromtimestamp(
+                begin + index * width, tz=timezone.utc
+            )
+            slice_end = datetime.fromtimestamp(
+                begin + (index + 1) * width, tz=timezone.utc
+            )
+            try:
+                found = httpx.get(
+                    f"{self.config.screenpipe_url.rstrip('/')}/search",
+                    params={
+                        "content_type": "ocr",
+                        "start_time": slice_start.isoformat().replace("+00:00", "Z"),
+                        "end_time": slice_end.isoformat().replace("+00:00", "Z"),
+                        "limit": 1,
+                    },
+                    headers=headers,
+                    timeout=30,
+                )
+                found.raise_for_status()
+                rows = found.json().get("data") or []
+            except (httpx.HTTPError, ValueError):
+                logger.info("no frame resolvable for slice %s", index)
+                continue
+            for row in rows:
+                frame_id = (row.get("content") or {}).get("frame_id")
+                # A slice that captured nothing simply contributes no frame; the
+                # shortlist is allowed to be shorter than asked for.
+                if isinstance(frame_id, int) and frame_id not in frame_ids:
+                    frame_ids.append(frame_id)
+        return frame_ids
+
     def _serve_preview_batch(self, job: dict) -> bool:
         """Fetch every shortlisted frame of one observation and upload them together.
 
@@ -461,8 +512,13 @@ class Collector:
             if self.config.screenpipe_token
             else None
         )
+        # Explicit ids name an observation's own frames; an interval means "sample this
+        # stretch of the day", which only the node can resolve.
+        frame_ids = payload.get("frame_ids") or self._frames_across_interval(
+            job["start_at"], job["end_at"], int(payload.get("count") or 6)
+        )
         files = []
-        for frame_id in payload["frame_ids"]:
+        for frame_id in frame_ids:
             try:
                 frame = httpx.get(
                     f"{self.config.screenpipe_url.rstrip('/')}/frames/{frame_id}/thumbnail",
@@ -501,7 +557,7 @@ class Collector:
         try:
             if job["kind"] in {"thumbnail", "source_media"}:
                 payload = job.get("payload", {})
-                if payload.get("frame_ids"):
+                if payload.get("frame_ids") or payload.get("count"):
                     return self._serve_preview_batch(job)
                 frame_id = payload.get("frame_id")
                 if frame_id is None:

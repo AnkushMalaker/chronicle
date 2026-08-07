@@ -1,8 +1,10 @@
 import sqlite3
 import wave
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from chronicle_screenpipe import collector as collector_module
 from chronicle_screenpipe.collector import (
     Checkpoints,
     Collector,
@@ -10,7 +12,7 @@ from chronicle_screenpipe.collector import (
     audio_duration,
     infer_audio_direction,
 )
-from chronicle_screenpipe.meeting import CaptureApp, MeetingTracker
+from chronicle_screenpipe.meeting import CaptureApp, MeetingTracker, RecorderMeetingLog
 
 
 def test_checkpoints_are_atomic(tmp_path: Path):
@@ -25,8 +27,6 @@ def test_audio_direction_from_screenpipe_filename():
 
 
 def test_wav_duration_is_read_from_media(tmp_path: Path):
-    import wave
-
     target = tmp_path / "sample.wav"
     with wave.open(str(target), "wb") as audio:
         audio.setnchannels(1)
@@ -110,8 +110,6 @@ def test_collect_audio_tags_chunks_with_the_active_meeting(tmp_path: Path):
 
 
 def test_collect_meetings_reads_the_recorders_meetings_table(tmp_path: Path):
-    from datetime import datetime, timedelta, timezone
-
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     db.execute(
@@ -171,8 +169,6 @@ def test_collect_meetings_reads_the_recorders_meetings_table(tmp_path: Path):
 
 
 def test_recorder_meetings_take_precedence_over_the_live_tracker():
-    from chronicle_screenpipe.meeting import RecorderMeetingLog
-
     tracker = MeetingTracker()
     zoom = [CaptureApp(name="Zoom", binary="zoom")]
     tracker.tick(zoom, None, "2026-07-22T10:00:00+00:00")
@@ -275,7 +271,6 @@ def test_paging_counts_rows_scanned_not_rows_returned(monkeypatch):
     `limit` bounds rows ScreenPipe *scans*, so paging on `len(page)` would stop
     at the first page the recorder collapsed anything out of.
     """
-    from chronicle_screenpipe import collector as collector_module
 
     pages = [
         {"data": [{"content": {"frame_id": i}} for i in range(300)], "deduped": 200},
@@ -326,3 +321,71 @@ def test_dedupe_can_be_turned_off():
     )
 
     assert config.search_dedupe is None
+
+
+def test_interval_frames_are_sampled_evenly_across_the_span(monkeypatch):
+    """An episode samples its own interval, not an observation's shortlist.
+
+    ScreenPipe holds every frame — ~500 for a half-hour session — so one narrow query
+    per slice returns a spread without enumerating them all.
+    """
+
+    queries = []
+
+    class _Response:
+        def __init__(self, frame_id):
+            self._frame_id = frame_id
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"content": {"frame_id": self._frame_id}}]}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        queries.append((params["start_time"], params["end_time"]))
+        assert params["limit"] == 1
+        return _Response(1000 + len(queries))
+
+    monkeypatch.setattr(collector_module.httpx, "get", fake_get)
+    collector = Collector.__new__(Collector)
+    collector.config = Config(
+        backend_url="http://backend",
+        source_id="screenpipe-1",
+        token="t",
+        screenpipe_dir=Path("/tmp"),
+    )
+
+    frames = collector._frames_across_interval(
+        "2026-08-06T17:00:00Z", "2026-08-06T18:00:00Z", 6
+    )
+
+    assert frames == [1001, 1002, 1003, 1004, 1005, 1006]
+    assert len(queries) == 6
+    # Contiguous 10-minute slices covering the whole hour, in order.
+    assert queries[0][0].startswith("2026-08-06T17:00")
+    assert queries[-1][1].startswith("2026-08-06T18:00")
+    assert all(queries[i][1] == queries[i + 1][0] for i in range(5))
+
+
+def test_an_interval_with_no_frames_yields_an_empty_shortlist(monkeypatch):
+    """A stretch the recorder never covered contributes nothing, and must not raise."""
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        raise collector_module.httpx.HTTPError("no rows")
+
+    monkeypatch.setattr(collector_module.httpx, "get", fake_get)
+    collector = Collector.__new__(Collector)
+    collector.config = Config(
+        backend_url="http://backend",
+        source_id="screenpipe-1",
+        token="t",
+        screenpipe_dir=Path("/tmp"),
+    )
+
+    assert (
+        collector._frames_across_interval(
+            "2026-08-06T17:00:00Z", "2026-08-06T18:00:00Z", 6
+        )
+        == []
+    )

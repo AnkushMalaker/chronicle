@@ -23,7 +23,15 @@ from advanced_omi_backend.auth import (
     fastapi_users,
     websocket_auth,
 )
-from advanced_omi_backend.client_manager import get_client_manager
+from advanced_omi_backend.client_manager import (
+    get_client_manager,
+    initialize_redis_for_client_manager,
+)
+from advanced_omi_backend.controllers.data_audit_controller import run_auto_clean_cron
+from advanced_omi_backend.controllers.queue_controller import redis_conn
+from advanced_omi_backend.controllers.websocket_controller import cleanup_client_state
+from advanced_omi_backend.cron_scheduler import get_scheduler, register_cron_job
+from advanced_omi_backend.llm_client import get_llm_client
 from advanced_omi_backend.middleware.app_middleware import setup_middleware
 from advanced_omi_backend.models.annotation import Annotation
 from advanced_omi_backend.models.api_key import ApiKey
@@ -44,6 +52,9 @@ from advanced_omi_backend.models.timeline import (
     TimelineEpisode,
 )
 from advanced_omi_backend.models.waveform import WaveformData
+from advanced_omi_backend.observability.otel_setup import init_otel
+from advanced_omi_backend.prompt_defaults import register_all_defaults
+from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.redis_factory import create_async_redis
 from advanced_omi_backend.routers.api_router import router as api_router
 from advanced_omi_backend.routers.modules.health_routes import router as health_router
@@ -51,9 +62,39 @@ from advanced_omi_backend.routers.modules.websocket_routes import (
     router as websocket_router,
 )
 from advanced_omi_backend.services.audio_service import get_audio_stream_service
+from advanced_omi_backend.services.audio_stream import AudioStreamProducer
+from advanced_omi_backend.services.device_audio_ingest import process_device_audio
+from advanced_omi_backend.services.device_context import purge_screen_context
+from advanced_omi_backend.services.immich_discovery import scan_immich_memories
 from advanced_omi_backend.services.memory import (
     get_memory_service,
     shutdown_memory_service,
+)
+from advanced_omi_backend.services.memory.syncthing_audit import (
+    start_syncthing_audit_listener,
+)
+from advanced_omi_backend.services.observability import run_event_ingest_drain
+from advanced_omi_backend.services.observability.health_poller import run_health_poller
+from advanced_omi_backend.services.observation_curation import (
+    process_observation_curation,
+)
+from advanced_omi_backend.services.person_photos import sync_person_photos
+from advanced_omi_backend.services.plugin_service import (
+    cleanup_plugin_router,
+    init_plugin_router,
+    initialize_plugins,
+    run_plugin_recovery,
+    set_plugin_router,
+)
+from advanced_omi_backend.services.reaper import run_reaper
+from advanced_omi_backend.services.status_reconciler import (
+    reconcile_conversation_statuses,
+)
+from advanced_omi_backend.services.timeline.discovery import (
+    process_current_timeline_days,
+)
+from advanced_omi_backend.services.timeline.thumbnails import (
+    process_episode_thumbnails,
 )
 from advanced_omi_backend.task_manager import get_task_manager, init_task_manager
 from advanced_omi_backend.users import (
@@ -61,6 +102,15 @@ from advanced_omi_backend.users import (
     UserRead,
     UserUpdate,
     register_client_to_user,
+)
+from advanced_omi_backend.workers.annotation_jobs import surface_error_suggestions
+from advanced_omi_backend.workers.finetuning_jobs import (
+    run_asr_finetuning_job,
+    run_asr_jargon_extraction_job,
+    run_speaker_finetuning_job,
+)
+from advanced_omi_backend.workers.prompt_optimization_jobs import (
+    run_prompt_optimization_job,
 )
 
 logger = logging.getLogger(__name__)
@@ -122,7 +172,6 @@ async def lifespan(app: FastAPI):
 
     async def _init_redis_rq():
         try:
-            from advanced_omi_backend.controllers.queue_controller import redis_conn
 
             redis_conn.ping()
             application_logger.info("Redis connection established for RQ")
@@ -147,7 +196,6 @@ async def lifespan(app: FastAPI):
 
     async def _init_otel():
         try:
-            from advanced_omi_backend.observability.otel_setup import init_otel
 
             init_otel()
         except Exception as e:
@@ -155,8 +203,6 @@ async def lifespan(app: FastAPI):
 
     async def _init_prompt_registry():
         try:
-            from advanced_omi_backend.prompt_defaults import register_all_defaults
-            from advanced_omi_backend.prompt_registry import get_prompt_registry
 
             registry = get_prompt_registry()
             register_all_defaults(registry)
@@ -183,7 +229,6 @@ async def lifespan(app: FastAPI):
 
     async def _init_llm_client():
         try:
-            from advanced_omi_backend.llm_client import get_llm_client
 
             get_llm_client()
             application_logger.info("LLM client initialized from config.yml")
@@ -204,17 +249,12 @@ async def lifespan(app: FastAPI):
     async def _init_redis_audio_producer():
         try:
             app.state.redis_audio_stream = create_async_redis(decode_responses=False)
-            from advanced_omi_backend.services.audio_stream import AudioStreamProducer
 
             app.state.audio_stream_producer = AudioStreamProducer(
                 app.state.redis_audio_stream
             )
             application_logger.info(
                 "Redis client for audio streaming producer initialized"
-            )
-
-            from advanced_omi_backend.client_manager import (
-                initialize_redis_for_client_manager,
             )
 
             initialize_redis_for_client_manager()
@@ -228,7 +268,6 @@ async def lifespan(app: FastAPI):
     async def _deferred_prompt_seed():
         """Seed prompts into Langfuse with retry backoff."""
         try:
-            from advanced_omi_backend.prompt_registry import get_prompt_registry
 
             registry = get_prompt_registry()
         except Exception:
@@ -272,40 +311,6 @@ async def lifespan(app: FastAPI):
 
     async def _init_cron_scheduler():
         try:
-            from advanced_omi_backend.controllers.data_audit_controller import (
-                run_auto_clean_cron,
-            )
-            from advanced_omi_backend.cron_scheduler import (
-                get_scheduler,
-                register_cron_job,
-            )
-            from advanced_omi_backend.services.device_audio_ingest import (
-                process_device_audio,
-            )
-            from advanced_omi_backend.services.device_context import (
-                purge_screen_context,
-            )
-            from advanced_omi_backend.services.immich_discovery import (
-                scan_immich_memories,
-            )
-            from advanced_omi_backend.services.observation_curation import (
-                process_observation_curation,
-            )
-            from advanced_omi_backend.services.person_photos import sync_person_photos
-            from advanced_omi_backend.services.timeline.discovery import (
-                process_current_timeline_days,
-            )
-            from advanced_omi_backend.workers.annotation_jobs import (
-                surface_error_suggestions,
-            )
-            from advanced_omi_backend.workers.finetuning_jobs import (
-                run_asr_finetuning_job,
-                run_asr_jargon_extraction_job,
-                run_speaker_finetuning_job,
-            )
-            from advanced_omi_backend.workers.prompt_optimization_jobs import (
-                run_prompt_optimization_job,
-            )
 
             register_cron_job("speaker_finetuning", run_speaker_finetuning_job)
             register_cron_job("asr_finetuning", run_asr_finetuning_job)
@@ -319,6 +324,7 @@ async def lifespan(app: FastAPI):
             register_cron_job("observation_curation", process_observation_curation)
             register_cron_job("screen_context_retention", purge_screen_context)
             register_cron_job("timeline_analysis", process_current_timeline_days)
+            register_cron_job("episode_thumbnails", process_episode_thumbnails)
 
             scheduler = get_scheduler()
             await scheduler.start()
@@ -328,12 +334,6 @@ async def lifespan(app: FastAPI):
 
     async def _init_plugins():
         try:
-            from advanced_omi_backend.services.plugin_service import (
-                init_plugin_router,
-                initialize_plugins,
-                run_plugin_recovery,
-                set_plugin_router,
-            )
 
             plugin_router = init_plugin_router()
 
@@ -380,9 +380,6 @@ async def lifespan(app: FastAPI):
     # recorded into the memory audit ledger by a background listener. No-ops when
     # vault sync isn't configured.
     try:
-        from advanced_omi_backend.services.memory.syncthing_audit import (
-            start_syncthing_audit_listener,
-        )
 
         app.state.syncthing_audit_task = start_syncthing_audit_listener()
     except Exception as e:
@@ -393,7 +390,6 @@ async def lifespan(app: FastAPI):
     # "connected" devices), orphaned audio streams the idle-timeout path missed, and
     # orphaned deferred RQ jobs whose dependency was deleted (never promotable).
     try:
-        from advanced_omi_backend.services.reaper import run_reaper
 
         app.state.reaper_task = asyncio.create_task(run_reaper())
     except Exception as e:
@@ -404,10 +400,6 @@ async def lifespan(app: FastAPI):
     # catch-all log handler) into Mongo + SSE, and poll service health to record
     # crash-loop / down / recovered transitions.
     try:
-        from advanced_omi_backend.services.observability import run_event_ingest_drain
-        from advanced_omi_backend.services.observability.health_poller import (
-            run_health_poller,
-        )
 
         app.state.system_event_drain_task = asyncio.create_task(
             run_event_ingest_drain()
@@ -427,9 +419,6 @@ async def lifespan(app: FastAPI):
     # (/api/admin/conversations/reconcile-status) are the remaining backstops. Run as a
     # background task so the (full-collection) scan doesn't block startup.
     try:
-        from advanced_omi_backend.services.status_reconciler import (
-            reconcile_conversation_statuses,
-        )
 
         app.state.status_reconciler_task = asyncio.create_task(
             reconcile_conversation_statuses()
@@ -454,9 +443,6 @@ async def lifespan(app: FastAPI):
         client_manager = get_client_manager()
         for client_id in client_manager.get_all_client_ids():
             try:
-                from advanced_omi_backend.controllers.websocket_controller import (
-                    cleanup_client_state,
-                )
 
                 await cleanup_client_state(client_id)
             except Exception as e:
@@ -541,9 +527,6 @@ async def lifespan(app: FastAPI):
 
         # Shutdown plugins
         try:
-            from advanced_omi_backend.services.plugin_service import (
-                cleanup_plugin_router,
-            )
 
             await cleanup_plugin_router()
             application_logger.info("Plugins shut down")
@@ -552,7 +535,6 @@ async def lifespan(app: FastAPI):
 
         # Shutdown cron scheduler
         try:
-            from advanced_omi_backend.cron_scheduler import get_scheduler
 
             scheduler = get_scheduler()
             await scheduler.stop()
