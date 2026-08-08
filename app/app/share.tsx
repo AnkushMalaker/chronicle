@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Image, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useShareIntent } from 'expo-share-intent';
+import { useShareIntentContext } from 'expo-share-intent';
 
 import { Body, Button, ButtonRow, InlineAlert, Screen, TextField } from '@/components/ui';
 import { useSharedAppSettings } from '@/contexts/AppSettingsContext';
@@ -23,7 +23,9 @@ export default function ShareScreen() {
   const t = useTheme();
   const s = createStyles(t);
   const { webSocketUrl } = useSharedAppSettings();
-  const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntent();
+  // Shares the root provider's state, so resetting here does not strand the
+  // navigator holding a stale copy of the same intent.
+  const { isReady, hasShareIntent, shareIntent, resetShareIntent } = useShareIntentContext();
 
   const [caption, setCaption] = useState('');
   const [phase, setPhase] = useState<Phase>('ready');
@@ -37,11 +39,14 @@ export default function ShareScreen() {
   }, [resetShareIntent, router]);
 
   // Nothing to confirm: the intent was consumed or arrived without an image.
+  // `isReady` is load-bearing on iOS — the deep link lands here before the
+  // native module has been read, so acting sooner bounces straight back home
+  // on every share.
   useEffect(() => {
-    if (!hasShareIntent && phase === 'ready' && !imageUri) {
+    if (isReady && !hasShareIntent && phase === 'ready' && !imageUri) {
       router.replace('/');
     }
-  }, [hasShareIntent, imageUri, phase, router]);
+  }, [hasShareIntent, imageUri, isReady, phase, router]);
 
   const send = useCallback(async () => {
     if (!imageUri) return;

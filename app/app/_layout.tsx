@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
-import { Stack, useRouter } from 'expo-router';
-import { useShareIntent } from 'expo-share-intent';
+import { Stack, usePathname, useRouter } from 'expo-router';
+import { ShareIntentProvider, useShareIntentContext } from 'expo-share-intent';
 
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { AppSettingsProvider } from '@/contexts/AppSettingsContext';
@@ -33,33 +33,49 @@ function ThemedStack() {
   );
 }
 
-export default function RootLayout() {
+/**
+ * Opens the confirm sheet for a share that arrived without a deep link.
+ *
+ * Android delivers the share as an Intent straight to the native module, so
+ * there is no URL for `+native-intent` to rewrite and nothing navigates on its
+ * own. iOS does arrive by URL and is already on `/share` by the time the intent
+ * surfaces here, hence the guard — without it the modal would be pushed twice.
+ */
+function ShareIntentNavigator() {
   const router = useRouter();
-  // Listening here rather than on the home screen so a share opens the confirm
-  // sheet even when the app was launched cold straight into another route.
-  const { hasShareIntent } = useShareIntent({ resetOnBackground: true });
+  const pathname = usePathname();
+  const { hasShareIntent } = useShareIntentContext();
 
+  useEffect(() => {
+    if (hasShareIntent && pathname !== '/share') {
+      logInfo('RootLayout', 'share intent received');
+      router.push('/share');
+    }
+  }, [hasShareIntent, pathname, router]);
+
+  return <ThemedStack />;
+}
+
+export default function RootLayout() {
   useEffect(() => {
     initLogger().then(() => logInfo('RootLayout', 'app mounted'));
   }, []);
 
-  useEffect(() => {
-    if (hasShareIntent) {
-      logInfo('RootLayout', 'share intent received');
-      router.push('/share');
-    }
-  }, [hasShareIntent, router]);
-
   return (
-    // The provider sits outside the boundary so the crash screen is themed too.
-    <ThemeProvider>
-      <ErrorBoundary>
-        <ConnectionLogProvider>
-          <AppSettingsProvider>
-            <ThemedStack />
-          </AppSettingsProvider>
-        </ConnectionLogProvider>
-      </ErrorBoundary>
-    </ThemeProvider>
+    // One provider rather than a hook per screen: each `useShareIntent` call
+    // holds its own copy of the intent and clears the shared native state when
+    // it resets, so two of them race to consume the same payload.
+    <ShareIntentProvider options={{ resetOnBackground: true }}>
+      {/* The theme provider sits outside the boundary so the crash screen is themed too. */}
+      <ThemeProvider>
+        <ErrorBoundary>
+          <ConnectionLogProvider>
+            <AppSettingsProvider>
+              <ShareIntentNavigator />
+            </AppSettingsProvider>
+          </ConnectionLogProvider>
+        </ErrorBoundary>
+      </ThemeProvider>
+    </ShareIntentProvider>
   );
 }
