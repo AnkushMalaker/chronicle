@@ -125,6 +125,63 @@ def test_hermes_is_a_topic_not_a_person(tmp_path):
     assert "Topics/Hermes.md" in detail
 
 
+def test_required_note_never_written_is_reported(tmp_path):
+    """DeepSeek V4 Pro updated two People notes for a day and skipped the day note.
+
+    It stopped after ten rounds with no error, no truncation and no stall — it simply
+    believed it was finished, which is exactly what a self-reported checklist cannot
+    catch and a filesystem check can.
+    """
+
+    before = _snapshot(tmp_path)
+    _write(tmp_path, "People/Vatsal.md", PERSON_NOTE)
+
+    findings = verify_vault_changes(tmp_path, before, required=["Daily/2026-08-06.md"])
+
+    assert [f.rule for f in findings] == ["record_missing"]
+    assert findings[0].path == "Daily/2026-08-06.md"
+
+
+def test_required_note_written_this_run_is_accepted(tmp_path):
+    before = _snapshot(tmp_path)
+    _write(tmp_path, "Daily/2026-08-06.md", "## 11:41 Standup\n- shipped it\n")
+
+    assert (
+        verify_vault_changes(tmp_path, before, required=["Daily/2026-08-06.md"]) == []
+    )
+
+
+def test_required_note_left_untouched_from_a_previous_run_is_reported(tmp_path):
+    """A day note already on disk is not evidence that *this* run recorded the day."""
+
+    _write(tmp_path, "Daily/2026-08-06.md", "## 09:00 Yesterday's write\n- old\n")
+    before = _snapshot(tmp_path)
+    _write(tmp_path, "People/Vatsal.md", PERSON_NOTE)
+
+    findings = verify_vault_changes(tmp_path, before, required=["Daily/2026-08-06.md"])
+
+    assert [f.rule for f in findings] == ["record_missing"]
+
+
+def test_verify_vault_does_not_demand_the_record_note_from_a_run_that_touched_nothing(
+    tmp_path,
+):
+    """An agent that judged the day already covered made a legitimate no-op.
+
+    Demanding the record note there would turn a correct decision into a redundant
+    write, which is the opposite of what the check is for.
+    """
+
+    tools = VaultTools(tmp_path, required_notes=["Daily/2026-08-06.md"])
+    tools.baseline()
+
+    assert "passed" in tools.verify_vault()
+
+    tools.write_note("People/Vatsal.md", PERSON_NOTE)
+
+    assert "Daily/2026-08-06.md" in tools.verify_vault()
+
+
 def test_render_findings_is_actionable_and_says_so_when_clean(tmp_path):
     assert "passed" in render_findings([])
 

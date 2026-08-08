@@ -27,7 +27,7 @@ import shutil
 import subprocess
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, Iterator, List
+from typing import Any, Dict, Iterator, List, Sequence
 
 from ..person_merge import PersonMergeService
 from ..telemetry import (
@@ -191,7 +191,15 @@ def _assert_new_note_schema(rel: str, content: str) -> None:
 class VaultTools:
     """Filesystem-scoped tool implementations for one user's vault."""
 
-    def __init__(self, vault_root: Path, *, trace_context: Any = None):
+    def __init__(
+        self,
+        vault_root: Path,
+        *,
+        trace_context: Any = None,
+        required_notes: Sequence[str] = (),
+    ):
+        # Notes this run must create or edit; verify_vault reports any that it has not.
+        self.required_notes = tuple(required_notes)
         self.root = Path(vault_root).absolute()
         self.root.mkdir(parents=True, exist_ok=True)
         if self.root.is_symlink():
@@ -233,9 +241,21 @@ class VaultTools:
         return self._baseline
 
     def verify_vault(self) -> str:
-        """Report this run's vault problems, phrased so the agent can fix them."""
+        """Report this run's vault problems, phrased so the agent can fix them.
 
-        return render_findings(verify_vault_changes(self.root, self.baseline()))
+        A required note is only demanded once the run has edited something. An agent
+        that touched nothing has judged the source already covered, which is a
+        legitimate outcome; demanding the record note there would turn a correct no-op
+        into a redundant write.
+        """
+
+        return render_findings(
+            verify_vault_changes(
+                self.root,
+                self.baseline(),
+                required=self.required_notes if self.touched else (),
+            )
+        )
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:

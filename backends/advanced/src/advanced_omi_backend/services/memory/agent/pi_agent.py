@@ -52,6 +52,7 @@ from .memory_agent import (
     _get_prompt,
     _search_final_synthesis_prompt,
     build_write_task,
+    required_notes,
 )
 from .vault_skill import write_skill
 from .vault_tools import (
@@ -408,8 +409,13 @@ class _VaultToolGateway:
         *,
         max_tool_calls: int = MAX_PI_WRITE_TOOL_CALLS,
         on_limit: Optional[Callable[[], None]] = None,
+        required_notes: Sequence[str] = (),
     ):
-        self.tools = VaultTools(vault_root, trace_context=current_otel_context())
+        self.tools = VaultTools(
+            vault_root,
+            trace_context=current_otel_context(),
+            required_notes=required_notes,
+        )
         self.schemas = list(schemas)
         self.allowed_names = {
             str(schema.get("function", {}).get("name", "")) for schema in self.schemas
@@ -1175,6 +1181,7 @@ async def _invoke_pi(
     config: _PiRuntimeConfig,
     max_tool_rounds: int = MAX_TOOL_ROUNDS,
     max_tool_calls: int = MAX_PI_WRITE_TOOL_CALLS,
+    required_notes: Sequence[str] = (),
 ) -> tuple[_PiEventResult, _VaultToolGateway]:
     """Run Pi and preserve gateway audit state for every post-start failure."""
     started_ns = time.time_ns()
@@ -1187,6 +1194,7 @@ async def _invoke_pi(
         schemas,
         max_tool_calls=max_tool_calls,
         on_limit=lambda: loop.call_soon_threadsafe(limit_signal.set),
+        required_notes=required_notes,
     )
     events: Optional[_PiEventResult] = None
     redaction_values = [
@@ -1465,6 +1473,7 @@ class PiMemoryAgent:
                 config=config,
                 max_tool_rounds=MAX_TOOL_ROUNDS,
                 max_tool_calls=MAX_PI_WRITE_TOOL_CALLS,
+                required_notes=required_notes(record, conversation_id),
             )
             result = MemoryAgentResult(
                 conversation_id=conversation_id,

@@ -411,7 +411,7 @@ class MemoryService(MemoryServiceBase):
         unwritten, and the caller records it as failed so it can be retried.
         """
         # Lazy: ..agent imports llm_client, which imports this package's config back.
-        from ..agent.memory_agent import day_note_path
+        from ..agent.memory_agent import day_note_path, required_notes
 
         if not day_digest or len(day_digest.strip()) < 10:
             memory_logger.info("Skipping empty day digest for %s", local_date)
@@ -503,7 +503,21 @@ class MemoryService(MemoryServiceBase):
         # The agent is told to call verify_vault itself, but correctness must not depend
         # on it choosing to. Re-run the same checks here and give anything left back as
         # guidance for one repair pass — the findings name the note and the fix.
-        findings = verify_vault_changes(user_root, existing_before)
+        #
+        # The day note is required only of a run that edited something. An agent that
+        # touched nothing judged the day already covered, which is a legitimate outcome;
+        # one that wrote People notes and skipped the day note left the record itself
+        # unwritten, which is the case worth repairing.
+        def _required() -> tuple[str, ...]:
+            return (
+                required_notes("day", local_date)
+                if result is not None and result.touched
+                else ()
+            )
+
+        findings = verify_vault_changes(
+            user_root, existing_before, required=_required()
+        )
         repair_class = self._write_agent_class()
         if findings and result is not None and repair_class is not None:
             memory_logger.info(
@@ -518,9 +532,18 @@ class MemoryService(MemoryServiceBase):
                         local_date,
                         date=trusted_date,
                         guidance=(
-                            "REPAIR ONLY. The day is already recorded; do not add new "
-                            "content. Fix exactly these problems and nothing else, then "
-                            f"call verify_vault to confirm:\n{render_findings(findings)}"
+                            # "already recorded" is false when the finding IS that the
+                            # day note is missing, and telling the agent not to add
+                            # content would then forbid the very fix being asked for.
+                            (
+                                "REPAIR ONLY. Fix exactly these problems and nothing "
+                                "else, then call verify_vault to confirm:\n"
+                                if any(f.rule == "record_missing" for f in findings)
+                                else "REPAIR ONLY. The day is already recorded; do not "
+                                "add new content. Fix exactly these problems and "
+                                "nothing else, then call verify_vault to confirm:\n"
+                            )
+                            + render_findings(findings)
                         ),
                         record="day",
                     )

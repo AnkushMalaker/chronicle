@@ -27,7 +27,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping
+from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 from .vault_scaffold import VaultPathError, safe_vault_relative_path
 
@@ -163,12 +163,24 @@ def _markdown_files(root: Path) -> Dict[str, str]:
     return out
 
 
-def verify_vault_changes(root: Path, before: Mapping[str, str]) -> List[Finding]:
+def verify_vault_changes(
+    root: Path,
+    before: Mapping[str, str],
+    *,
+    required: Sequence[str] = (),
+) -> List[Finding]:
     """Check what changed in ``root`` since the ``before`` snapshot.
 
     ``before`` maps vault-relative path to content — the shape both
     ``CodexMemoryAgent._snapshot`` and ``ChronicleMemoryProvider._vault_note_set``
     already produce, so callers have it in hand.
+
+    ``required`` names notes this run must have created or edited. A day write is the
+    case that needs it: DeepSeek V4 Pro updated two People notes for 2026-08-06, never
+    wrote `Daily/2026-08-06.md`, and stopped after ten rounds with no error, no
+    truncation, and no stall — it simply believed it was finished. Reporting that as a
+    finding lets the agent fix it mid-run instead of the provider discovering it after
+    the process has exited.
 
     Case collisions are checked across the whole vault rather than only the changed
     set: the offending pair is one new note plus one that was already there, and only
@@ -177,6 +189,19 @@ def verify_vault_changes(root: Path, before: Mapping[str, str]) -> List[Finding]
 
     after = _markdown_files(root)
     findings: List[Finding] = []
+
+    for rel in required:
+        if rel in after and after[rel] != before.get(rel):
+            continue
+        findings.append(
+            Finding(
+                rel,
+                "record_missing",
+                "this run has not written it. That note is the record itself — edits to "
+                "People/Topic notes do not stand in for it. Create it from the source, "
+                "or edit_section it to add what is missing, before you finish.",
+            )
+        )
 
     for rel, content in sorted(after.items()):
         was = before.get(rel)

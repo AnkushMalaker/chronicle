@@ -213,6 +213,18 @@ def day_note_path(local_date: str) -> str:
     return f"Daily/{local_date}.md"
 
 
+def required_notes(record: str, source_id: str) -> tuple[str, ...]:
+    """Notes a write of this kind must produce, for ``verify_vault`` to check.
+
+    Only the day write has one. A conversation always yields its note — the
+    deterministic source-preserving fallback writes it even when the agent fails — so
+    there is nothing there for an agent to be reminded of. A day has no such artifact:
+    if the agent does not write it, nothing does.
+    """
+
+    return (day_note_path(source_id),) if record == "day" else ()
+
+
 _DAY_RECORD_REQUIREMENT = """\
 This is a DAY of captured activity, not a single conversation. It is already segmented
 into semantic episodes; each one names what happened, when, and the evidence behind it.
@@ -445,6 +457,7 @@ class MemoryAgent:
         record: str = "conversation",
     ) -> MemoryAgentResult:
         date = date or datetime.now(timezone.utc).isoformat()
+        self.tools.required_notes = required_notes(record, conversation_id)
         system_prompt = await _get_prompt(
             AGENT_SYSTEM_PROMPT_ID, DEFAULT_AGENT_SYSTEM_PROMPT, vault_summary
         )

@@ -21,6 +21,7 @@ local one on identical days.
 import argparse
 import asyncio
 import csv
+import difflib
 import hashlib
 import logging
 import os
@@ -79,6 +80,11 @@ FIELDS = [
     "outcome",
     "summary_chars",
     "summary_sha256",
+    # The refusal itself. A hash tells you two runs agreed; only the text tells you
+    # what the model believed, which is the whole question when it declines to write.
+    "summary",
+    "touched_notes",
+    "diff_path",
 ]
 
 
@@ -119,6 +125,36 @@ async def _load_day(user_id: str, local_date: date, timezone_name: Optional[str]
     return day, episodes
 
 
+def _write_diff(
+    path: Path, label: str, before: dict[str, str], root: Path, touched: list[str]
+) -> None:
+    """Record what this trial actually changed, note by note.
+
+    Paired with the digest that produced it, this is the (input, output) evidence for
+    comparing one model's judgement against another's.
+    """
+
+    chunks = [f"# {label}\n"]
+    for rel in sorted(touched):
+        after = root / rel
+        text = (
+            after.read_text(encoding="utf-8", errors="replace")
+            if after.is_file()
+            else ""
+        )
+        diff = difflib.unified_diff(
+            (before.get(rel, "")).splitlines(keepends=True),
+            text.splitlines(keepends=True),
+            fromfile=f"a/{rel}",
+            tofile=f"b/{rel}",
+            n=2,
+        )
+        chunks.append(f"\n## {rel}\n\n```diff\n{''.join(diff)}```\n")
+    if not touched:
+        chunks.append("\nNo notes were changed.\n")
+    path.write_text("".join(chunks), encoding="utf-8")
+
+
 async def _trial(
     service: MemoryService,
     vault_source: Path,
@@ -126,6 +162,8 @@ async def _trial(
     day: TimelineDay,
     digest: str,
     trial: int,
+    label: str,
+    artifacts: Path,
 ) -> dict[str, Any]:
     root = workdir / f"trial-{trial:02d}"
     if root.exists():
@@ -176,12 +214,26 @@ async def _trial(
     else:
         outcome = "failed"
 
+    stem = f"{day.local_date.isoformat()}-{label}-t{trial:02d}"
+    diff_path = artifacts / f"diff-{stem}.md"
+    _write_diff(
+        diff_path,
+        f"{label} · {day.local_date.isoformat()} · trial {trial} · {outcome}\n\n"
+        f"Agent summary:\n\n> {summary or '(none)'}\n",
+        before_snapshot,
+        root,
+        list(touched or []),
+    )
+
     return {
         "trial": trial,
         "day_note_chars_before": len(before_text),
         "day_note_entries_before": before_text.count("\n## "),
         "wrote_day_note": int(wrote_day),
         "notes_touched": len(touched or []),
+        "summary": summary,
+        "touched_notes": "; ".join(sorted(touched or [])),
+        "diff_path": diff_path.name,
         "rounds": getattr(result, "rounds", ""),
         "tool_calls": getattr(result, "tool_calls", ""),
         "agent_errors": len(getattr(result, "errors", []) or []),
@@ -207,6 +259,11 @@ async def main() -> None:
         "--keep-vaults",
         action="store_true",
         help="Keep each trial's vault copy for inspection.",
+    )
+    parser.add_argument(
+        "--label",
+        default=None,
+        help="Short name for this model in row/artifact names (default: the model id).",
     )
     parser.add_argument(
         "--executor",
@@ -301,7 +358,16 @@ async def main() -> None:
 
         vault_source = service.vault.user_root(user_id)
         for trial in range(1, args.trials + 1):
-            row = await _trial(service, vault_source, args.workdir, day, digest, trial)
+            row = await _trial(
+                service,
+                vault_source,
+                args.workdir,
+                day,
+                digest,
+                trial,
+                args.label or model.replace("/", "-"),
+                args.output.parent,
+            )
             row.update(
                 local_date=raw,
                 executor=executor,
