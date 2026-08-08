@@ -51,9 +51,20 @@ jobs:
 
       # Cloud build. `--local` compiled the whole app on a 2-core runner, which
       # took hours and routinely had to be cancelled.
+      # Cheap (a few seconds) and often the fastest way to see why the previous
+      # attempt failed, without waiting out another full build.
+      - name: Report the previous Android build
+        continue-on-error: true
+        run: |
+          eas build:list --platform android --limit 3 --non-interactive --json \
+            | jq '.[] | {id, status, error, createdAt}'
+
       - name: Build Android APK
         run: |
-          set -uo pipefail
+          # `set +e`, not just `set -uo pipefail`: GitHub runs the step as
+          # `bash -e`, so without this the script aborts on the failing build and
+          # the diagnostics below never run.
+          set +e
           eas build --platform android --profile local --non-interactive --wait --json \
             > "$RUNNER_TEMP/build.json"
           rc=$?
