@@ -102,7 +102,7 @@
         {
           "android": {
             "usesCleartextTraffic": true,
-            "compileSdkVersion": 35,
+            "compileSdkVersion": 36,
             "targetSdkVersion": 35,
             "extraMavenRepos": [
               "../../node_modules/@notifee/react-native/android/libs"
