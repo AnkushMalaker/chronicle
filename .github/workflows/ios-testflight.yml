@@ -54,9 +54,23 @@ jobs:
           printf '%s\n' "$ASC_API_KEY_P8" > asc-api-key.p8
           chmod 600 asc-api-key.p8
           openssl pkey -in asc-api-key.p8 -noout -check
+          # Read the key/issuer ids from eas.json rather than repeating them, so the
+          # build and submit steps can never disagree about which key they mean.
+          node -e '
+            const ios = require("./eas.json").submit.testflight.ios;
+            const out = require("fs");
+            out.appendFileSync(process.env.GITHUB_ENV,
+              `EXPO_ASC_KEY_ID=${ios.ascApiKeyId}\nEXPO_ASC_ISSUER_ID=${ios.ascApiKeyIssuerId}\n`);
+          '
 
       - name: Build and submit to TestFlight
         if: inputs.build_id == ''
+        # The ASC key is exported for the *build*, not just the submit step: a new
+        # target (the share extension) needs its own provisioning profile, and
+        # without Apple auth EAS falls back to an interactive login and fails
+        # non-interactive builds with "Failed to set up credentials".
+        env:
+          EXPO_ASC_API_KEY_PATH: ${{ github.workspace }}/app/asc-api-key.p8
         run: eas build --platform ios --profile testflight --auto-submit --non-interactive
 
       - name: Submit existing build to TestFlight
