@@ -167,10 +167,10 @@ def build_day_digest(
 ) -> tuple[str, list[str]]:
     """Render a day of episodes within a character budget.
 
-    Returns the digest and the titles of any episodes dropped to fit. Conversational
-    episodes are never dropped — they carry the day's actual speech. Everything else is
-    shed lowest-salience-first, and what went is returned so the caller can log it
-    rather than let a silently shortened day read as a complete one.
+    Transcripts are trimmed first, then — only if the summaries alone still overflow —
+    episodes are shed lowest-salience-first. Conversational episodes are never shed;
+    they carry the day's actual speech. Returns the digest and what was given up, so a
+    silently shortened day cannot read to the caller as a complete one.
     """
 
     budget = (
@@ -194,6 +194,45 @@ def build_day_digest(
     def total() -> int:
         return len(header) + sum(len(rendered[episode_id]) + 2 for episode_id in keep)
 
+    dropped: list[str] = []
+
+    # Trim transcripts before dropping episodes. An episode summary costs a few hundred
+    # characters and a transcript tens of thousands, so shedding episodes to make room
+    # for transcripts discards most of the day to save almost nothing — one measured day
+    # dropped 9 of 13 episodes and then had to trim the transcripts anyway, leaving the
+    # agent summarising "all four episodes" of a thirteen-episode day. Losing the tail of
+    # a conversation is recoverable; losing the fact that an episode happened is not.
+    bare = {
+        episode.episode_id: render_episode(episode, zone, {}) for episode in ordered
+    }
+
+    def overhead() -> int:
+        return len(header) + sum(len(bare[episode_id]) + 2 for episode_id in keep)
+
+    cited = [
+        conversation_id
+        for episode in ordered
+        for conversation_id in sorted(_cited_conversation_ids(episode))
+        if transcripts.get(conversation_id)
+    ]
+    if cited and total() > budget:
+        share = max(0, budget - overhead()) // len(cited)
+        trimmed = dict(transcripts)
+        for conversation_id in cited:
+            text = transcripts[conversation_id]
+            if len(text) > share:
+                trimmed[conversation_id] = (
+                    text[:share].rstrip() + "\n[transcript trimmed to fit]"
+                )
+        for episode in ordered:
+            rendered[episode.episode_id] = render_episode(episode, zone, trimmed)
+        dropped.append(
+            f"transcripts trimmed to {share} chars across {len(cited)} recording(s)"
+        )
+
+    # Only the summaries themselves are left. If they still overflow, shed the
+    # lowest-salience non-conversational episodes; conversational ones carry the day's
+    # actual speech and are never dropped.
     droppable = sorted(
         (episode for episode in ordered if not episode.conversational),
         key=lambda item: (
@@ -201,47 +240,11 @@ def build_day_digest(
             (item.ended_at - item.started_at),
         ),
     )
-    dropped: list[str] = []
     for episode in droppable:
         if total() <= budget:
             break
         keep.discard(episode.episode_id)
         dropped.append(episode.title)
-
-    # Conversational episodes are never dropped, so once their transcripts alone
-    # exceed the budget the loop above cannot get under it and the digest ships at
-    # whatever size it happens to be — which is how a day arrived at the write agent
-    # at twice the model's context. Trim the transcripts instead: losing the tail of a
-    # conversation is recoverable, losing the fact that it happened is not.
-    if total() > budget:
-        kept = [episode for episode in ordered if episode.episode_id in keep]
-        bare = {
-            episode.episode_id: render_episode(episode, zone, {}) for episode in kept
-        }
-        overhead = len(header) + sum(
-            len(bare[episode.episode_id]) + 2 for episode in kept
-        )
-        cited = [
-            conversation_id
-            for episode in kept
-            for conversation_id in sorted(_cited_conversation_ids(episode))
-            if transcripts.get(conversation_id)
-        ]
-        if cited:
-            share = max(0, budget - overhead) // len(cited)
-            trimmed = dict(transcripts)
-            for conversation_id in cited:
-                text = transcripts[conversation_id]
-                if len(text) > share:
-                    trimmed[conversation_id] = (
-                        text[:share].rstrip() + "\n[transcript trimmed to fit]"
-                    )
-            for episode in kept:
-                rendered[episode.episode_id] = render_episode(episode, zone, trimmed)
-            dropped.append(
-                f"transcripts trimmed to {share} chars across "
-                f"{len(cited)} recording(s)"
-            )
 
     body = "\n\n".join(
         rendered[episode.episode_id]

@@ -274,6 +274,45 @@ async def test_promotion_is_a_noop_without_a_conversational_episode(monkeypatch)
     )
 
 
+def test_digest_trims_transcripts_before_it_drops_any_episode():
+    """Transcript bulk must never cost the day its other episodes.
+
+    A summary is a few hundred characters and a transcript tens of thousands, so
+    shedding episodes to make room for transcripts throws away most of the day to save
+    almost nothing. One measured day dropped 9 of its 13 episodes and then had to trim
+    the transcripts anyway, leaving the agent to summarise "all four episodes".
+    """
+
+    episodes = [
+        make_episode(
+            "talk",
+            hour=9,
+            conversational=True,
+            title="Standup",
+            evidence_conversation_id="c1",
+        ),
+        *(
+            make_episode(
+                f"bg{index}",
+                hour=10 + index,
+                salience="background",
+                title=f"Background {index}",
+            )
+            for index in range(6)
+        ),
+    ]
+
+    digest, dropped = build_day_digest(
+        episodes, DAY, ZONE, {"c1": "a" * 40_000}, max_chars=5_000
+    )
+
+    assert len(digest) <= 5_000
+    assert all("trimmed" in item for item in dropped)
+    assert "Standup" in digest
+    for index in range(6):
+        assert f"Background {index}" in digest
+
+
 def test_digest_trims_transcripts_when_conversational_episodes_exceed_budget():
     """The budget must hold even when every episode is undroppable.
 
