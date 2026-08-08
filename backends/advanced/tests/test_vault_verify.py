@@ -182,6 +182,36 @@ def test_verify_vault_does_not_demand_the_record_note_from_a_run_that_touched_no
     assert "Daily/2026-08-06.md" in tools.verify_vault()
 
 
+def test_day_write_minting_a_conversation_note_is_reported(tmp_path):
+    """Qwen3.6 wrote Conversations/ads-standup-2026-08-06.md from a day episode.
+
+    Conversations/ is one note per real conversation, keyed by conversation_id. A day
+    write has none, so anything it puts there is invented and shadows the note the
+    conversation path would write.
+    """
+
+    before = _snapshot(tmp_path)
+    _write(
+        tmp_path, "Conversations/ads-standup-2026-08-06.md", "## Summary\n- standup\n"
+    )
+
+    findings = verify_vault_changes(
+        tmp_path, before, forbidden_folders=["Conversations"]
+    )
+
+    assert [f.rule for f in findings] == ["forbidden_folder"]
+    assert "Conversations/" in findings[0].detail
+
+
+def test_a_conversation_note_is_fine_when_no_folder_is_forbidden(tmp_path):
+    """The conversation write path must keep writing exactly this note."""
+
+    before = _snapshot(tmp_path)
+    _write(tmp_path, "Conversations/69d2574e.md", "## Summary\n- a real conversation\n")
+
+    assert verify_vault_changes(tmp_path, before) == []
+
+
 def test_render_findings_is_actionable_and_says_so_when_clean(tmp_path):
     assert "passed" in render_findings([])
 

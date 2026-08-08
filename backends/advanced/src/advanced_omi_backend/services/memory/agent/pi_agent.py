@@ -52,6 +52,7 @@ from .memory_agent import (
     _get_prompt,
     _search_final_synthesis_prompt,
     build_write_task,
+    forbidden_folders,
     required_notes,
 )
 from .vault_skill import write_skill
@@ -410,11 +411,13 @@ class _VaultToolGateway:
         max_tool_calls: int = MAX_PI_WRITE_TOOL_CALLS,
         on_limit: Optional[Callable[[], None]] = None,
         required_notes: Sequence[str] = (),
+        forbidden_folders: Sequence[str] = (),
     ):
         self.tools = VaultTools(
             vault_root,
             trace_context=current_otel_context(),
             required_notes=required_notes,
+            forbidden_folders=forbidden_folders,
         )
         self.schemas = list(schemas)
         self.allowed_names = {
@@ -1182,6 +1185,7 @@ async def _invoke_pi(
     max_tool_rounds: int = MAX_TOOL_ROUNDS,
     max_tool_calls: int = MAX_PI_WRITE_TOOL_CALLS,
     required_notes: Sequence[str] = (),
+    forbidden_folders: Sequence[str] = (),
 ) -> tuple[_PiEventResult, _VaultToolGateway]:
     """Run Pi and preserve gateway audit state for every post-start failure."""
     started_ns = time.time_ns()
@@ -1195,6 +1199,7 @@ async def _invoke_pi(
         max_tool_calls=max_tool_calls,
         on_limit=lambda: loop.call_soon_threadsafe(limit_signal.set),
         required_notes=required_notes,
+        forbidden_folders=forbidden_folders,
     )
     events: Optional[_PiEventResult] = None
     redaction_values = [
@@ -1474,6 +1479,7 @@ class PiMemoryAgent:
                 max_tool_rounds=MAX_TOOL_ROUNDS,
                 max_tool_calls=MAX_PI_WRITE_TOOL_CALLS,
                 required_notes=required_notes(record, conversation_id),
+                forbidden_folders=forbidden_folders(record),
             )
             result = MemoryAgentResult(
                 conversation_id=conversation_id,

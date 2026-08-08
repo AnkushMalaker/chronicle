@@ -168,6 +168,7 @@ def verify_vault_changes(
     before: Mapping[str, str],
     *,
     required: Sequence[str] = (),
+    forbidden_folders: Sequence[str] = (),
 ) -> List[Finding]:
     """Check what changed in ``root`` since the ``before`` snapshot.
 
@@ -182,6 +183,12 @@ def verify_vault_changes(
     finding lets the agent fix it mid-run instead of the provider discovering it after
     the process has exited.
 
+    ``forbidden_folders`` names folders this kind of write must not touch. A day write
+    must not create anything under ``Conversations/`` — that folder is one note per real
+    conversation, keyed by conversation_id — but Qwen3.6 wrote a whole
+    ``Conversations/ads-standup-2026-08-06.md`` from an episode, minting an id matching
+    no conversation and shadowing the real note the conversation path would write.
+
     Case collisions are checked across the whole vault rather than only the changed
     set: the offending pair is one new note plus one that was already there, and only
     the pair is meaningful.
@@ -189,6 +196,7 @@ def verify_vault_changes(
 
     after = _markdown_files(root)
     findings: List[Finding] = []
+    forbidden = tuple(f"{folder.rstrip('/')}/" for folder in forbidden_folders)
 
     for rel in required:
         if rel in after and after[rel] != before.get(rel):
@@ -207,6 +215,18 @@ def verify_vault_changes(
         was = before.get(rel)
         if was == content:
             continue
+
+        if forbidden and rel.startswith(forbidden):
+            folder = rel.split("/", 1)[0]
+            findings.append(
+                Finding(
+                    rel,
+                    "forbidden_folder",
+                    f"this kind of write must not touch {folder}/. Delete this note and "
+                    f"record the same material where it belongs — the day note for what "
+                    f"happened, and People/Topic notes for durable facts.",
+                )
+            )
 
         reason = illegal_path_reason(rel)
         if reason:

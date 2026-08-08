@@ -231,6 +231,18 @@ def required_notes(record: str, source_id: str) -> tuple[str, ...]:
     return (day_note_path(source_id),) if record == "day" else ()
 
 
+def forbidden_folders(record: str) -> tuple[str, ...]:
+    """Folders a write of this kind must not touch.
+
+    Conversations/ is one note per real conversation, keyed by conversation_id. A day
+    write has no conversation_id to key on, so anything it puts there is invented —
+    Qwen3.6 produced a full ``Conversations/ads-standup-2026-08-06.md`` from an episode,
+    which matches no conversation and shadows the note the conversation path writes.
+    """
+
+    return ("Conversations",) if record == "day" else ()
+
+
 _DAY_RECORD_REQUIREMENT = """\
 This is a DAY of captured activity, not a single conversation. It is already segmented
 into semantic episodes; each one names what happened, when, and the evidence behind it.
@@ -471,6 +483,7 @@ class MemoryAgent:
     ) -> MemoryAgentResult:
         date = date or datetime.now(timezone.utc).isoformat()
         self.tools.required_notes = required_notes(record, conversation_id)
+        self.tools.forbidden_folders = forbidden_folders(record)
         system_prompt = await _get_prompt(
             AGENT_SYSTEM_PROMPT_ID, DEFAULT_AGENT_SYSTEM_PROMPT, vault_summary
         )

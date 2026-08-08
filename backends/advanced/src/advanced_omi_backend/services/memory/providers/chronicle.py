@@ -414,6 +414,7 @@ class MemoryService(MemoryServiceBase):
         from ..agent.memory_agent import (
             VERIFY_CAPABLE_BACKENDS,
             day_note_path,
+            forbidden_folders,
             required_notes,
         )
 
@@ -533,7 +534,10 @@ class MemoryService(MemoryServiceBase):
             )
 
         findings = verify_vault_changes(
-            user_root, existing_before, required=_required()
+            user_root,
+            existing_before,
+            required=_required(),
+            forbidden_folders=forbidden_folders("day"),
         )
         repair_class = self._write_agent_class()
         if findings and result is not None and repair_class is not None:
@@ -574,7 +578,12 @@ class MemoryService(MemoryServiceBase):
                     result.touched = list(
                         dict.fromkeys([*result.touched, *repair.touched])
                     )
-            findings = verify_vault_changes(user_root, existing_before)
+            findings = verify_vault_changes(
+                user_root,
+                existing_before,
+                required=_required(),
+                forbidden_folders=forbidden_folders("day"),
+            )
         if findings:
             # Not fatal: the day *is* recorded, and failing here would burn the day's
             # attempt budget and eventually skip it entirely over a schema nit. Loud

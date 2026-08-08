@@ -197,9 +197,13 @@ class VaultTools:
         *,
         trace_context: Any = None,
         required_notes: Sequence[str] = (),
+        forbidden_folders: Sequence[str] = (),
     ):
         # Notes this run must create or edit; verify_vault reports any that it has not.
         self.required_notes = tuple(required_notes)
+        # Folders this run must not touch at all (a day write must not mint a
+        # Conversations/ note, which is keyed by a conversation_id it does not have).
+        self.forbidden_folders = tuple(forbidden_folders)
         self.root = Path(vault_root).absolute()
         self.root.mkdir(parents=True, exist_ok=True)
         if self.root.is_symlink():
@@ -256,6 +260,7 @@ class VaultTools:
                 self.root,
                 self.baseline(),
                 required=self.required_notes if self.touched else (),
+                forbidden_folders=self.forbidden_folders,
             )
         )
 
