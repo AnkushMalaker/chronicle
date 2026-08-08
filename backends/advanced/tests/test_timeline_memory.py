@@ -157,6 +157,30 @@ def test_digest_sheds_lowest_salience_first_and_never_the_conversation():
     assert "Shipped release" in digest
 
 
+def test_digest_header_states_the_count_it_actually_carries():
+    """A header claiming 13 above a body of 4 is a digest that lies to the model."""
+
+    padding = "y" * 800
+    episodes = [
+        make_episode(
+            f"e{index}",
+            hour=9 + index,
+            salience="background",
+            title=f"Thing {index}",
+            summary=padding,
+        )
+        for index in range(4)
+    ]
+
+    digest, dropped = build_day_digest(episodes, DAY, ZONE, {}, max_chars=2_000)
+
+    header = digest.splitlines()[0]
+    included = sum(1 for line in digest.splitlines() if line.startswith("### "))
+    assert len(dropped) > 0
+    assert f"{included} of 4 episode(s)" in header
+    assert "omitted to fit" in header
+
+
 def test_digest_reports_every_dropped_episode_rather_than_truncating_silently():
     padding = "y" * 800
     episodes = [

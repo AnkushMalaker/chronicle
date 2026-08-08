@@ -246,6 +246,16 @@ def build_day_digest(
         keep.discard(episode.episode_id)
         dropped.append(episode.title)
 
+    # A header claiming 13 episodes above a body holding 4 is a digest that lies to the
+    # model, and both a 27B local model and DeepSeek V4 Pro duly reported having covered
+    # "all four episodes" of that thirteen-episode day. Say what is actually here.
+    if len(keep) != len(ordered):
+        header = (
+            f"Local day {local_date.isoformat()} ({timezone_name}), "
+            f"{len(keep)} of {len(ordered)} episode(s) — "
+            f"{len(ordered) - len(keep)} omitted to fit; the day was longer than this."
+        )
+
     body = "\n\n".join(
         rendered[episode.episode_id]
         for episode in ordered

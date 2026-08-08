@@ -36,6 +36,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
 from advanced_omi_backend.models.timeline import (
     TimelineAnalysisRun,
     TimelineDay,
@@ -230,6 +231,9 @@ async def main() -> None:
         document_models=[
             Conversation,
             User,
+            # Without this every mutation logs "Failed to record vault audit", which
+            # is the harness lacking the collection rather than the agent misbehaving.
+            MemoryAuditEntry,
             TimelineDay,
             TimelineEpisode,
             TimelineAnalysisRun,
