@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, ActivityIndicator, Linking } from 'react-native';
-import { useTheme, ThemeColors } from '../theme';
+import { View, Text, StyleSheet, Alert, ActivityIndicator, Linking } from 'react-native';
+
 import { QRScanner } from './QRScanner';
-import { httpUrlToWebSocketUrl } from '../utils/urlConversion';
-import { saveServiceManagerUrl, saveServiceManagerToken } from '../utils/storage';
-import { useBackendHealth, HealthStatus } from '../hooks/useBackendHealth';
+import { Body, Button, Caption, Card, CardWell, TextField } from '@/components/ui';
+import { useBackendHealth, HealthStatus } from '@/hooks/useBackendHealth';
+import { useTheme, type Theme } from '@/theme';
+import { saveServiceManagerUrl, saveServiceManagerToken } from '@/utils/storage';
+import { httpUrlToWebSocketUrl } from '@/utils/urlConversion';
 
 interface BackendStatusProps {
   backendUrl: string;
@@ -17,8 +19,8 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
   onBackendUrlChange,
   jwtToken,
 }) => {
-  const { colors } = useTheme();
-  const s = createStyles(colors);
+  const t = useTheme();
+  const s = createStyles(t);
 
   const { healthStatus, checkBackendHealth } = useBackendHealth(backendUrl, jwtToken);
   const [showQRScanner, setShowQRScanner] = useState(false);
@@ -40,36 +42,38 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
     );
   };
 
+  // These land on text and on a spinner, never on a fill, so every branch reads
+  // from the `.fg` end of the status ramp.
   const getStatusColor = (status: HealthStatus['status']): string => {
     switch (status) {
-      case 'healthy': return colors.success;
-      case 'checking': return colors.warning;
-      case 'auth_required': return colors.warning;
-      case 'not_configured': return colors.warning;
-      case 'offline': return colors.danger;
-      case 'backend_down': return colors.danger;
-      case 'unreachable': return colors.danger;
-      case 'unhealthy': return colors.danger;
-      default: return colors.disabled;
+      case 'healthy': return t.color.status.success.fg;
+      case 'checking': return t.color.status.warning.fg;
+      case 'auth_required': return t.color.status.warning.fg;
+      case 'not_configured': return t.color.status.warning.fg;
+      case 'offline': return t.color.status.danger.fg;
+      case 'backend_down': return t.color.status.danger.fg;
+      case 'unreachable': return t.color.status.danger.fg;
+      case 'unhealthy': return t.color.status.danger.fg;
+      default: return t.color.text.muted;
     }
   };
 
   return (
-    <View style={s.section}>
-      <Text style={s.sectionTitle}>Backend Connection</Text>
-
+    <Card title="Backend Connection">
       {/* Primary path: scan the QR. */}
-      <TouchableOpacity
-        style={s.button}
+      <Button
+        variant="primary"
+        size="lg"
+        fullWidth
         onPress={() => setShowQRScanner(true)}
       >
-        <Text style={s.buttonText}>Scan QR Code</Text>
-      </TouchableOpacity>
-      <Text style={s.qrNote}>
+        Scan QR Code
+      </Button>
+      <Caption style={s.qrNote}>
         Find this QR on your Chronicle dashboard → System page (“Connect App”).
-      </Text>
+      </Caption>
 
-      <View style={s.statusContainer}>
+      <CardWell style={s.statusContainer}>
         <View style={s.statusRow}>
           <Text style={s.statusLabel}>Status:</Text>
           <View style={s.statusValue}>
@@ -77,40 +81,41 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
               {healthStatus.message}
             </Text>
             {healthStatus.status === 'checking' && (
-              <ActivityIndicator size="small" color={getStatusColor(healthStatus.status)} style={{ marginLeft: 8 }} />
+              <ActivityIndicator size="small" color={getStatusColor(healthStatus.status)} style={s.statusSpinner} />
             )}
           </View>
         </View>
         {healthStatus.detail && (
-          <Text style={s.detailText}>{healthStatus.detail}</Text>
+          <Body style={s.detailText}>{healthStatus.detail}</Body>
         )}
         {healthStatus.lastChecked && (
-          <Text style={s.lastCheckedText}>Last checked: {healthStatus.lastChecked.toLocaleTimeString()}</Text>
+          <Caption style={s.lastCheckedText}>Last checked: {healthStatus.lastChecked.toLocaleTimeString()}</Caption>
         )}
-      </View>
+      </CardWell>
 
       {(healthStatus.status === 'unreachable' || healthStatus.status === 'not_configured') && (
-        <TouchableOpacity style={s.qrButton} onPress={openTailscale}>
-          <Text style={s.qrButtonText}>Open Tailscale</Text>
-        </TouchableOpacity>
+        <Button variant="outline" size="lg" fullWidth onPress={openTailscale} style={s.stackedButton}>
+          Open Tailscale
+        </Button>
       )}
 
-      <TouchableOpacity
-        style={[s.qrButton, healthStatus.status === 'checking' ? s.buttonDisabled : null]}
+      <Button
+        variant="outline"
+        size="lg"
+        fullWidth
         onPress={() => checkBackendHealth(true)}
         disabled={healthStatus.status === 'checking'}
+        style={s.stackedButton}
       >
-        <Text style={s.qrButtonText}>{healthStatus.status === 'checking' ? 'Checking...' : 'Test Connection'}</Text>
-      </TouchableOpacity>
+        {healthStatus.status === 'checking' ? 'Checking...' : 'Test Connection'}
+      </Button>
 
       {/* Manual fallback: type the URL. */}
-      <Text style={s.inputLabel}>Or enter the backend URL manually:</Text>
-      <TextInput
-        style={s.textInput}
+      <TextField
+        label="Or enter the backend URL manually:"
         value={backendUrl}
         onChangeText={onBackendUrlChange}
         placeholder="wss://your-machine.ts.net/ws"
-        placeholderTextColor={colors.textTertiary}
         autoCapitalize="none"
         keyboardType="url"
         returnKeyType="done"
@@ -133,131 +138,56 @@ export const BackendStatus: React.FC<BackendStatusProps> = ({
         }}
         onClose={() => setShowQRScanner(false)}
       />
-    </View>
+    </Card>
   );
 };
 
-const createStyles = (colors: ThemeColors) => StyleSheet.create({
-  section: {
-    marginBottom: 25,
-    padding: 15,
-    backgroundColor: colors.card,
-    borderRadius: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    marginBottom: 15,
-    color: colors.text,
-  },
-  inputLabel: {
-    fontSize: 14,
-    color: colors.text,
-    marginBottom: 5,
-    fontWeight: '500',
-  },
-  textInput: {
-    backgroundColor: colors.inputBackground,
-    borderWidth: 1,
-    borderColor: colors.inputBorder,
-    borderRadius: 6,
-    padding: 10,
-    fontSize: 14,
-    width: '100%',
-    marginBottom: 15,
-    color: colors.text,
-  },
-  statusContainer: {
-    marginBottom: 15,
-    padding: 10,
-    backgroundColor: colors.inputBackground,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: colors.inputBorder,
-  },
-  statusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  statusLabel: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: colors.text,
-  },
-  statusValue: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    justifyContent: 'flex-end',
-  },
-  statusText: {
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  detailText: {
-    fontSize: 13,
-    color: colors.textSecondary,
-    marginTop: 8,
-  },
-  qrNote: {
-    fontSize: 12,
-    color: colors.textTertiary,
-    marginTop: 8,
-    marginBottom: 15,
-    textAlign: 'center',
-  },
-  lastCheckedText: {
-    fontSize: 12,
-    color: colors.textTertiary,
-    marginTop: 5,
-    textAlign: 'center',
-    fontStyle: 'italic',
-  },
-  qrButton: {
-    backgroundColor: colors.card,
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: colors.primary,
-  },
-  qrButtonText: {
-    color: colors.primary,
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  button: {
-    backgroundColor: colors.primary,
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    alignItems: 'center',
-    marginBottom: 10,
-    elevation: 2,
-  },
-  buttonDisabled: {
-    backgroundColor: colors.disabled,
-    opacity: 0.7,
-  },
-  buttonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  helpText: {
-    fontSize: 12,
-    color: colors.textTertiary,
-    textAlign: 'center',
-    fontStyle: 'italic',
-  },
-});
+const createStyles = (t: Theme) =>
+  StyleSheet.create({
+    statusContainer: {
+      marginBottom: t.space[4],
+    },
+    statusRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    statusLabel: {
+      fontFamily: t.font.sans,
+      ...t.type.sm,
+      fontWeight: t.weight.medium,
+      color: t.color.text.primary,
+    },
+    statusValue: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      flex: 1,
+      justifyContent: 'flex-end',
+    },
+    statusText: {
+      fontFamily: t.font.sans,
+      ...t.type.sm,
+      fontWeight: t.weight.medium,
+    },
+    statusSpinner: {
+      marginLeft: t.space[2],
+    },
+    detailText: {
+      marginTop: t.space[2],
+    },
+    qrNote: {
+      marginTop: t.space[2],
+      marginBottom: t.space[4],
+      textAlign: 'center',
+    },
+    lastCheckedText: {
+      marginTop: t.space[1],
+      textAlign: 'center',
+      fontStyle: 'italic',
+    },
+    stackedButton: {
+      marginBottom: t.space[2],
+    },
+  });
 
 export default BackendStatus;

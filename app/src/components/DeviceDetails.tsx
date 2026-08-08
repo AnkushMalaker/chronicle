@@ -1,7 +1,9 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, TextInput } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { BleAudioCodec } from 'friend-lite-react-native';
-import { useTheme, ThemeColors } from '../theme';
+
+import { Button, Card, CardWell, Divider, InlineAlert, TextField } from '@/components/ui';
+import { useTheme, type Theme } from '@/theme';
 
 interface DeviceDetailsProps {
   connectedDeviceId: string | null;
@@ -50,82 +52,86 @@ export const DeviceDetails: React.FC<DeviceDetailsProps> = ({
   autoReconnectEnabled = true,
   onToggleAutoReconnect,
 }) => {
-  const { colors } = useTheme();
-  const s = createStyles(colors);
+  const t = useTheme();
+  const s = createStyles(t);
 
   if (!connectedDeviceId) return null;
 
-  return (
-    <View style={s.section}>
-      <Text style={s.sectionTitle}>Device Functions</Text>
+  const isListenerActive = isListeningAudio || isAudioListenerRetrying;
 
-      <TouchableOpacity style={s.button} onPress={onGetAudioCodec}>
-        <Text style={s.buttonText}>Get Audio Codec</Text>
-      </TouchableOpacity>
+  return (
+    <Card title="Device Functions">
+      <Button variant="primary" size="lg" fullWidth onPress={onGetAudioCodec}>
+        Get Audio Codec
+      </Button>
       {currentCodec && (
-        <View style={s.infoContainerSM}>
+        <CardWell style={s.infoWell}>
           <Text style={s.infoTitle}>Current Audio Codec:</Text>
           <Text style={s.infoValue}>{currentCodec}</Text>
-        </View>
+        </CardWell>
       )}
 
       {batteryLevel >= 0 ? (
-        <View style={[s.batteryContainer, isLowBattery ? { borderLeftColor: colors.danger } : null]}>
+        <CardWell style={[s.batteryWell, isLowBattery ? s.batteryWellLow : null]}>
           <View style={s.batteryHeaderRow}>
             <Text style={s.infoTitle}>Battery Level:</Text>
-            <TouchableOpacity onPress={onRefreshBattery} style={s.refreshButton}>
-              <Text style={s.refreshButtonText}>Refresh</Text>
-            </TouchableOpacity>
+            <Button variant="secondary" size="sm" onPress={onRefreshBattery}>
+              Refresh
+            </Button>
           </View>
           <View style={s.batteryLevelDisplayContainer}>
-            <View style={[s.batteryLevelBar, { width: `${batteryLevel}%`, backgroundColor: isLowBattery ? colors.danger : colors.success }]} />
+            <View
+              style={[
+                s.batteryLevelBar,
+                {
+                  width: `${batteryLevel}%`,
+                  backgroundColor: isLowBattery
+                    ? t.color.status.danger.base
+                    : t.color.status.success.base,
+                },
+              ]}
+            />
             <Text style={s.batteryLevelText}>{batteryLevel}%</Text>
           </View>
           {isLowBattery && <Text style={s.lowBatteryText}>Low battery</Text>}
-        </View>
+        </CardWell>
       ) : (
-        <View style={s.batteryContainer}>
+        <CardWell style={s.batteryWell}>
           <Text style={s.infoTitle}>Battery: reading...</Text>
-        </View>
+        </CardWell>
       )}
 
       <View style={s.subSection}>
         <Text style={s.subSectionTitle}>User ID (optional)</Text>
-        <Text style={s.inputLabel}>Enter User ID (for device identification):</Text>
-        <TextInput
-          style={s.textInput}
+        <TextField
+          label="Enter User ID (for device identification):"
           value={userId}
           onChangeText={onSetUserId}
           placeholder="e.g., device_name, user_identifier"
-          placeholderTextColor={colors.textTertiary}
           autoCapitalize="none"
           returnKeyType="done"
           autoCorrect={false}
           editable={!isListeningAudio && !isAudioStreaming}
         />
         {userId && (
-          <View style={s.infoContainerSM}>
+          <CardWell style={s.infoWell}>
             <Text style={s.infoTitle}>Current User ID:</Text>
             <Text style={s.infoValue}>{userId}</Text>
-          </View>
+          </CardWell>
         )}
       </View>
 
       <View style={s.subSection}>
         <View style={s.listenerRow}>
-          <TouchableOpacity
-            style={[
-              s.button,
-              s.listenerButton,
-              isListeningAudio || isAudioListenerRetrying ? { backgroundColor: colors.warning } : null,
-            ]}
-            onPress={isListeningAudio || isAudioListenerRetrying ? onStopAudioListener : onStartAudioListener}
+          <Button
+            variant={isListenerActive ? 'warning' : 'primary'}
+            size="lg"
+            style={s.listenerButton}
+            onPress={isListenerActive ? onStopAudioListener : onStartAudioListener}
           >
-            <Text style={s.buttonText}>
-              {isListeningAudio ? "Stop Audio Listener" :
-               isAudioListenerRetrying ? "Stop Retry" : "Start Audio Listener"}
-            </Text>
-          </TouchableOpacity>
+            {isListeningAudio ? "Stop Audio Listener" :
+             isAudioListenerRetrying ? "Stop Retry" : "Start Audio Listener"}
+          </Button>
 
           {onToggleAutoReconnect && (
             <TouchableOpacity
@@ -149,30 +155,27 @@ export const DeviceDetails: React.FC<DeviceDetailsProps> = ({
         )}
 
         {isAudioListenerRetrying && (
-          <View style={s.retryContainer}>
-            <Text style={s.retryText}>
-              Retrying audio listener... (Attempt {audioListenerRetryAttempts || 0}/10)
-            </Text>
-          </View>
+          <InlineAlert tone="warning" style={s.retryAlert}>
+            Retrying audio listener... (Attempt {audioListenerRetryAttempts || 0}/10)
+          </InlineAlert>
         )}
 
         {isListeningAudio && (
-          <View style={s.infoContainerSM}>
+          <CardWell style={s.infoWell}>
             <Text style={s.infoTitle}>Audio Packets Received:</Text>
             <Text style={s.infoValueLg}>{audioPacketsReceived}</Text>
-          </View>
+          </CardWell>
         )}
       </View>
 
+      <Divider style={s.sectionDivider} />
       <View style={s.customStreamerSection}>
         <Text style={s.subSectionTitle}>Custom Audio Streaming</Text>
-        <Text style={s.inputLabel}>Backend WebSocket URL:</Text>
-        <TextInput
-          style={s.textInput}
+        <TextField
+          label="Backend WebSocket URL:"
           value={webSocketUrl}
           onChangeText={onSetWebSocketUrl}
           placeholder="wss://your-backend.com/ws/audio"
-          placeholderTextColor={colors.textTertiary}
           autoCapitalize="none"
           keyboardType="url"
           returnKeyType="done"
@@ -184,156 +187,116 @@ export const DeviceDetails: React.FC<DeviceDetailsProps> = ({
           <Text style={s.statusText}>Connecting to WebSocket...</Text>
         )}
         {isAudioStreaming && (
-          <Text style={[s.statusText, { color: colors.success }]}>Streaming audio to WebSocket...</Text>
+          <Text style={[s.statusText, s.statusTextStreaming]}>Streaming audio to WebSocket...</Text>
         )}
         {audioStreamerError && (
-          <Text style={[s.statusText, { color: colors.danger, fontWeight: 'bold' }]}>Error: {audioStreamerError}</Text>
+          <Text style={[s.statusText, s.statusTextError]}>Error: {audioStreamerError}</Text>
         )}
       </View>
-    </View>
+    </Card>
   );
 };
 
-const createStyles = (colors: ThemeColors) => StyleSheet.create({
-  section: {
-    marginBottom: 25,
-    padding: 15,
-    backgroundColor: colors.card,
-    borderRadius: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    marginBottom: 15,
-    color: colors.text,
-  },
+const createStyles = (t: Theme) => StyleSheet.create({
   subSection: {
-    marginTop: 20,
+    marginTop: t.space[5],
   },
   subSectionTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 12,
-    color: colors.textSecondary,
-  },
-  button: {
-    backgroundColor: colors.primary,
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    alignItems: 'center',
-    elevation: 2,
-  },
-  buttonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
+    fontFamily: t.font.sans,
+    ...t.type.base,
+    fontWeight: t.weight.semibold,
+    marginBottom: t.space[3],
+    color: t.color.text.secondary,
   },
   listenerRow: {
     flexDirection: 'row',
     alignItems: 'stretch',
-    marginTop: 15,
-    gap: 10,
+    marginTop: t.space[4],
+    gap: t.space[2],
   },
   listenerButton: {
     flex: 1,
-    justifyContent: 'center',
   },
   lockButton: {
     width: 52,
-    borderRadius: 8,
+    borderRadius: t.radius.lg,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: colors.inputBorder,
-    backgroundColor: colors.inputBackground,
+    borderWidth: t.borderWidth,
+    borderColor: t.color.border.base,
+    backgroundColor: t.color.surface.sunken,
   },
   lockButtonOn: {
-    borderColor: colors.primary,
-    backgroundColor: colors.card,
+    borderColor: t.color.accent.base,
+    backgroundColor: t.color.surface.raised,
   },
   lockIcon: {
     fontSize: 22,
   },
   lockHint: {
-    fontSize: 12,
-    color: colors.textTertiary,
-    marginTop: 8,
+    fontFamily: t.font.sans,
+    ...t.type.xs,
+    color: t.color.text.muted,
+    marginTop: t.space[2],
   },
-  infoContainerSM: {
-    marginTop: 10,
-    padding: 10,
-    backgroundColor: colors.inputBackground,
-    borderRadius: 8,
+  infoWell: {
+    marginTop: t.space[3],
     alignItems: 'center',
   },
   infoTitle: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: colors.textSecondary,
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    fontWeight: t.weight.medium,
+    color: t.color.text.secondary,
   },
   infoValue: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: colors.primary,
-    marginTop: 5,
+    fontFamily: t.font.sans,
+    ...t.type.base,
+    fontWeight: t.weight.bold,
+    color: t.color.accent.fg,
+    marginTop: t.space[1],
   },
   infoValueLg: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: colors.warning,
-    marginTop: 5,
+    fontFamily: t.font.sans,
+    ...t.type.lg,
+    fontWeight: t.weight.bold,
+    color: t.color.status.warning.fg,
+    marginTop: t.space[1],
   },
-  batteryContainer: {
-    marginTop: 15,
-    padding: 12,
-    backgroundColor: colors.inputBackground,
-    borderRadius: 8,
+  batteryWell: {
+    marginTop: t.space[4],
     borderLeftWidth: 4,
-    borderLeftColor: colors.success,
+    borderLeftColor: t.color.status.success.base,
+  },
+  batteryWellLow: {
+    borderLeftColor: t.color.status.danger.base,
   },
   batteryHeaderRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 4,
-  },
-  refreshButton: {
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    borderRadius: 4,
-    backgroundColor: colors.separator,
-  },
-  refreshButtonText: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    fontWeight: '500',
+    marginBottom: t.space[1],
   },
   lowBatteryText: {
-    marginTop: 6,
-    fontSize: 12,
-    color: colors.danger,
-    fontWeight: '600',
+    fontFamily: t.font.sans,
+    marginTop: t.space[1.5],
+    ...t.type.xs,
+    color: t.color.status.danger.fg,
+    fontWeight: t.weight.semibold,
     textAlign: 'center',
   },
   batteryLevelDisplayContainer: {
     width: '100%',
     height: 24,
-    backgroundColor: colors.separator,
-    borderRadius: 12,
-    marginTop: 8,
+    backgroundColor: t.color.border.subtle,
+    borderRadius: t.radius.full,
+    marginTop: t.space[2],
     overflow: 'hidden',
     position: 'relative',
   },
   batteryLevelBar: {
     height: '100%',
-    backgroundColor: colors.success,
-    borderRadius: 12,
+    borderRadius: t.radius.full,
     position: 'absolute',
     left: 0,
     top: 0,
@@ -343,52 +306,33 @@ const createStyles = (colors: ThemeColors) => StyleSheet.create({
     width: '100%',
     textAlign: 'center',
     lineHeight: 24,
-    fontSize: 12,
-    fontWeight: 'bold',
-    color: colors.text,
+    fontFamily: t.font.sans,
+    fontSize: t.type.xs.fontSize,
+    fontWeight: t.weight.bold,
+    color: t.color.text.primary,
+  },
+  sectionDivider: {
+    marginTop: t.space[5],
   },
   customStreamerSection: {
-    marginTop: 20,
-    paddingTop: 15,
-    borderTopWidth: 1,
-    borderTopColor: colors.separator,
-  },
-  inputLabel: {
-    fontSize: 14,
-    color: colors.text,
-    marginBottom: 5,
-    fontWeight: '500',
-  },
-  textInput: {
-    backgroundColor: colors.inputBackground,
-    borderWidth: 1,
-    borderColor: colors.inputBorder,
-    borderRadius: 6,
-    padding: 10,
-    fontSize: 14,
-    width: '100%',
-    marginBottom: 10,
-    color: colors.text,
+    paddingTop: t.space[4],
   },
   statusText: {
-    marginTop: 8,
-    fontSize: 13,
-    color: colors.textSecondary,
+    fontFamily: t.font.sans,
+    marginTop: t.space[2],
+    ...t.type.sm,
+    color: t.color.text.secondary,
     textAlign: 'left',
   },
-  retryContainer: {
-    marginTop: 10,
-    padding: 12,
-    backgroundColor: colors.inputBackground,
-    borderRadius: 8,
-    borderLeftWidth: 4,
-    borderLeftColor: colors.warning,
+  statusTextStreaming: {
+    color: t.color.status.success.fg,
   },
-  retryText: {
-    fontSize: 14,
-    color: colors.warning,
-    fontWeight: '500',
-    textAlign: 'center',
+  statusTextError: {
+    color: t.color.status.danger.fg,
+    fontWeight: t.weight.bold,
+  },
+  retryAlert: {
+    marginTop: t.space[3],
   },
 });
 

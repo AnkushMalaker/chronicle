@@ -4,7 +4,8 @@ import { OmiConnection } from 'friend-lite-react-native';
 import { State as BluetoothState } from 'react-native-ble-plx';
 import { Link } from 'expo-router';
 import Constants from 'expo-constants';
-import { useTheme, ThemeColors } from '@/theme';
+import { useTheme, type Theme } from '@/theme';
+import { Button, Card, InlineAlert, SectionLabel, StatusDot, toneDotColor } from '@/components/ui';
 
 // Hooks
 import { useBluetoothManager } from '@/hooks/useBluetoothManager';
@@ -31,8 +32,8 @@ import PhoneAudioButton from '@/components/PhoneAudioButton';
 import PhoneAudioMicPicker from '@/components/PhoneAudioMicPicker';
 
 export default function App() {
-  const { colors } = useTheme();
-  const s = createStyles(colors);
+  const t = useTheme();
+  const s = createStyles(t);
   const omiConnection = useRef(new OmiConnection()).current;
   const [showOnlyOmi, setShowOnlyOmi] = useState(false);
   const [activeTab, setActiveTab] = useState<'backend' | 'connection'>('backend');
@@ -223,7 +224,7 @@ export default function App() {
   const healthLabel = backendDown
     ? (healthStatus.status === 'offline' ? "You're Offline" : 'Backend Unreachable')
     : isOperational ? 'System Operational' : 'Action Needed';
-  const healthTone = backendDown ? colors.danger : isOperational ? colors.success : colors.warning;
+  const healthTone: 'danger' | 'success' | 'warning' = backendDown ? 'danger' : isOperational ? 'success' : 'warning';
   const batteryDisplay = deviceConnection.connectedDeviceId
     ? batteryMonitor.batteryLevel >= 0 ? `${batteryMonitor.batteryLevel}%` : '...'
     : '--';
@@ -237,7 +238,7 @@ export default function App() {
   if (isPermissionsLoading && bluetoothState === BluetoothState.Unknown) {
     return (
       <View style={s.centeredMessageContainer}>
-        <ActivityIndicator size="large" color={colors.primary} />
+        <ActivityIndicator size="large" color={t.color.accent.base} />
         <Text style={s.centeredMessageText}>
           {autoReconnect.isAttemptingAutoReconnect
             ? `Reconnecting to ${autoReconnect.lastKnownDeviceId?.substring(0, 10)}...`
@@ -258,13 +259,13 @@ export default function App() {
             <RefreshControl
               refreshing={refreshing}
               onRefresh={onRefresh}
-              tintColor={colors.primary}
-              colors={[colors.primary]}
-              progressBackgroundColor={colors.card}
+              tintColor={t.color.accent.base}
+              colors={[t.color.accent.base]}
+              progressBackgroundColor={t.color.surface.raised}
             />
           }
         >
-          <View style={s.headerCard}>
+          <Card>
             <View style={s.titleRow}>
               <View style={s.brandRow}>
                 <Text style={s.title}>Chronicle</Text>
@@ -284,14 +285,13 @@ export default function App() {
               </View>
             </View>
 
-            <View style={[s.healthPill, { borderColor: healthTone }]}>
-              <View style={[s.healthDot, { backgroundColor: healthTone }]} />
-              <Text style={[s.healthText, { color: healthTone }]}>{healthLabel}</Text>
+            <View style={[s.healthPill, { borderColor: toneDotColor(t, healthTone) }]}>
+              <StatusDot tone={healthTone} size={8} style={s.healthDot} />
+              <Text style={[s.healthText, { color: t.color.status[healthTone].fg }]}>{healthLabel}</Text>
             </View>
-          </View>
+          </Card>
 
-          <View style={s.heroCard}>
-            <Text style={s.heroTitle}>{activeTab === 'backend' ? 'Backend Dashboard' : 'Connection Center'}</Text>
+          <Card title={activeTab === 'backend' ? 'Backend Dashboard' : 'Connection Center'}>
             <Text style={s.heroSubtitle}>
               {activeTab === 'backend'
                 ? 'Control center for backend, audio streaming, and wakeword behavior.'
@@ -313,7 +313,7 @@ export default function App() {
                 <Text style={s.metricLabel}>Device</Text>
               </View>
             </View>
-          </View>
+          </Card>
 
           {activeTab === 'backend' && (
             <>
@@ -333,7 +333,7 @@ export default function App() {
                 </Link>
               )}
 
-              <Text style={s.sectionLabel}>Audio Deck</Text>
+              <SectionLabel>Audio Deck</SectionLabel>
               <PhoneAudioButton
                 isRecording={phoneAudioRecorder.isRecording || orchestrator.isPhoneAudioMode}
                 isInitializing={phoneAudioRecorder.isInitializing}
@@ -361,103 +361,101 @@ export default function App() {
 
           {activeTab === 'connection' && (
             <>
-              <Text style={s.sectionLabel}>Bluetooth</Text>
+              <SectionLabel>Bluetooth</SectionLabel>
               <BluetoothStatusBanner bluetoothState={bluetoothState} isPermissionsLoading={isPermissionsLoading} permissionGranted={permissionGranted} onRequestPermission={requestBluetoothPermission} />
               <ScanControls scanning={scanning} onScanPress={startScan} onStopScanPress={stopDeviceScanAction} canScan={canScan} />
 
-          {(autoReconnect.isAttemptingAutoReconnect || autoReconnect.isRetryingConnection) && (
-            <View style={s.retryBanner}>
-              <ActivityIndicator size="small" color={colors.warning} />
-              <Text style={s.retryBannerText}>
-                {autoReconnect.isRetryingConnection
-                  ? `Reconnecting in ${autoReconnect.retryBackoffSeconds}s... (attempt ${autoReconnect.connectionRetryCount})`
-                  : `Reconnecting to ${autoReconnect.lastKnownDeviceId?.substring(0, 10) ?? 'device'}...`}
-              </Text>
-              <TouchableOpacity
-                style={[s.button, { backgroundColor: colors.danger, paddingVertical: 6, paddingHorizontal: 10 }]}
-                onPress={autoReconnect.handleCancelAutoReconnect}
-              >
-                <Text style={s.buttonText}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-
-          {!settings.isAuthenticated && (
-            <View style={s.authWarning}>
-              <Text style={s.authWarningText}>Login is required for advanced backend features. Simple backend can be used without authentication.</Text>
-            </View>
-          )}
-
-          {scannedDevices.length > 0 && !deviceConnection.connectedDeviceId && !autoReconnect.isAttemptingAutoReconnect && (
-            <View style={s.section}>
-              <View style={s.sectionHeaderWithFilter}>
-                <Text style={s.sectionTitle}>Found Devices</Text>
-                <View style={s.filterContainer}>
-                  <Text style={s.filterText}>Show only OMI/Friend/Neo/Elato</Text>
-                  <Switch
-                    trackColor={{ false: colors.disabled, true: colors.primary }}
-                    thumbColor={showOnlyOmi ? colors.warning : colors.card}
-                    onValueChange={setShowOnlyOmi}
-                    value={showOnlyOmi}
-                  />
-                </View>
-              </View>
-              {filteredDevices.length > 0 ? (
-                <FlatList
-                  data={filteredDevices}
-                  renderItem={({ item }) => (
-                    <DeviceListItem device={item} onConnect={deviceConnection.connectToDevice} onDisconnect={deviceConnection.disconnectFromDevice} isConnecting={deviceConnection.isConnecting} connectedDeviceId={deviceConnection.connectedDeviceId} />
-                  )}
-                  keyExtractor={(item) => item.id}
-                  style={{ maxHeight: 200 }}
-                />
-              ) : (
-                <View style={s.noDevicesContainer}>
-                  <Text style={s.noDevicesText}>
-                    {showOnlyOmi ? `No OMI/Friend/Neo/Elato devices found. ${scannedDevices.length} other device(s) hidden by filter.` : 'No devices found.'}
+              {(autoReconnect.isAttemptingAutoReconnect || autoReconnect.isRetryingConnection) && (
+                <View style={s.retryBanner}>
+                  <ActivityIndicator size="small" color={t.color.status.warning.base} />
+                  <Text style={s.retryBannerText}>
+                    {autoReconnect.isRetryingConnection
+                      ? `Reconnecting in ${autoReconnect.retryBackoffSeconds}s... (attempt ${autoReconnect.connectionRetryCount})`
+                      : `Reconnecting to ${autoReconnect.lastKnownDeviceId?.substring(0, 10) ?? 'device'}...`}
                   </Text>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    onPress={autoReconnect.handleCancelAutoReconnect}
+                  >
+                    Cancel
+                  </Button>
                 </View>
               )}
-            </View>
-          )}
 
-          {deviceConnection.connectedDeviceId && filteredDevices.find(d => d.id === deviceConnection.connectedDeviceId) && (
-            <View style={s.section}>
-              <Text style={s.sectionTitle}>Connected Device</Text>
-              <DeviceListItem
-                device={filteredDevices.find(d => d.id === deviceConnection.connectedDeviceId)!}
-                onConnect={() => {}}
-                onDisconnect={async () => {
-                  await saveLastConnectedDeviceId(null);
-                  autoReconnect.setLastKnownDeviceId(null);
-                  autoReconnect.setTriedAutoReconnectForCurrentId(true);
-                  try { await deviceConnection.disconnectFromDevice(); } catch { Alert.alert('Error', 'Failed to disconnect.'); }
-                }}
-                isConnecting={deviceConnection.isConnecting}
-                connectedDeviceId={deviceConnection.connectedDeviceId}
-              />
-            </View>
-          )}
+              {!settings.isAuthenticated && (
+                <InlineAlert tone="warning" style={s.authWarning}>
+                  Login is required for advanced backend features. Simple backend can be used without authentication.
+                </InlineAlert>
+              )}
 
-          {deviceConnection.connectedDeviceId && !filteredDevices.find(d => d.id === deviceConnection.connectedDeviceId) && (
-            <View style={s.section}>
-              <View style={s.disconnectContainer}>
-                <Text style={s.connectedText}>Connected to: {deviceConnection.connectedDeviceId.substring(0, 15)}...</Text>
-                <TouchableOpacity
-                  style={[s.button, { backgroundColor: colors.danger }]}
-                  onPress={async () => {
-                    await saveLastConnectedDeviceId(null);
-                    autoReconnect.setLastKnownDeviceId(null);
-                    autoReconnect.setTriedAutoReconnectForCurrentId(true);
-                    try { await deviceConnection.disconnectFromDevice(); } catch { Alert.alert('Error', 'Failed to disconnect.'); }
-                  }}
-                  disabled={deviceConnection.isConnecting}
-                >
-                  <Text style={s.buttonText}>{deviceConnection.isConnecting ? 'Disconnecting...' : 'Disconnect'}</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
+              {scannedDevices.length > 0 && !deviceConnection.connectedDeviceId && !autoReconnect.isAttemptingAutoReconnect && (
+                <Card title="Found Devices">
+                  <View style={s.filterContainer}>
+                    <Text style={s.filterText}>Show only OMI/Friend/Neo/Elato</Text>
+                    <Switch
+                      trackColor={{ false: t.color.disabled, true: t.color.accent.base }}
+                      thumbColor={showOnlyOmi ? t.color.status.warning.base : t.color.surface.raised}
+                      onValueChange={setShowOnlyOmi}
+                      value={showOnlyOmi}
+                    />
+                  </View>
+                  {filteredDevices.length > 0 ? (
+                    <FlatList
+                      data={filteredDevices}
+                      renderItem={({ item }) => (
+                        <DeviceListItem device={item} onConnect={deviceConnection.connectToDevice} onDisconnect={deviceConnection.disconnectFromDevice} isConnecting={deviceConnection.isConnecting} connectedDeviceId={deviceConnection.connectedDeviceId} />
+                      )}
+                      keyExtractor={(item) => item.id}
+                      style={{ maxHeight: 200 }}
+                    />
+                  ) : (
+                    <View style={s.noDevicesContainer}>
+                      <Text style={s.noDevicesText}>
+                        {showOnlyOmi ? `No OMI/Friend/Neo/Elato devices found. ${scannedDevices.length} other device(s) hidden by filter.` : 'No devices found.'}
+                      </Text>
+                    </View>
+                  )}
+                </Card>
+              )}
+
+              {deviceConnection.connectedDeviceId && filteredDevices.find(d => d.id === deviceConnection.connectedDeviceId) && (
+                <Card title="Connected Device">
+                  <DeviceListItem
+                    device={filteredDevices.find(d => d.id === deviceConnection.connectedDeviceId)!}
+                    onConnect={() => {}}
+                    onDisconnect={async () => {
+                      await saveLastConnectedDeviceId(null);
+                      autoReconnect.setLastKnownDeviceId(null);
+                      autoReconnect.setTriedAutoReconnectForCurrentId(true);
+                      try { await deviceConnection.disconnectFromDevice(); } catch { Alert.alert('Error', 'Failed to disconnect.'); }
+                    }}
+                    isConnecting={deviceConnection.isConnecting}
+                    connectedDeviceId={deviceConnection.connectedDeviceId}
+                  />
+                </Card>
+              )}
+
+              {deviceConnection.connectedDeviceId && !filteredDevices.find(d => d.id === deviceConnection.connectedDeviceId) && (
+                <Card>
+                  <View style={s.disconnectContainer}>
+                    <Text style={s.connectedText}>Connected to: {deviceConnection.connectedDeviceId.substring(0, 15)}...</Text>
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      onPress={async () => {
+                        await saveLastConnectedDeviceId(null);
+                        autoReconnect.setLastKnownDeviceId(null);
+                        autoReconnect.setTriedAutoReconnectForCurrentId(true);
+                        try { await deviceConnection.disconnectFromDevice(); } catch { Alert.alert('Error', 'Failed to disconnect.'); }
+                      }}
+                      disabled={deviceConnection.isConnecting}
+                    >
+                      {deviceConnection.isConnecting ? 'Disconnecting...' : 'Disconnect'}
+                    </Button>
+                  </View>
+                </Card>
+              )}
 
               {deviceConnection.connectedDeviceId && (
                 <DeviceDetails
@@ -489,349 +487,272 @@ export default function App() {
         </ScrollView>
       </KeyboardAvoidingView>
       <View style={s.bottomNav}>
-        <TouchableOpacity
-          style={activeTab === 'connection' ? s.navItemActive : s.navItem}
+        <Button
+          variant={activeTab === 'connection' ? 'primary' : 'ghost'}
+          size="md"
+          style={s.navItem}
           onPress={() => setActiveTab('connection')}
         >
-          <Text style={activeTab === 'connection' ? s.navItemActiveText : s.navItemText}>Connection</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={activeTab === 'backend' ? s.navItemActive : s.navItem}
+          Connection
+        </Button>
+        <Button
+          variant={activeTab === 'backend' ? 'primary' : 'ghost'}
+          size="md"
+          style={s.navItem}
           onPress={() => setActiveTab('backend')}
         >
-          <Text style={activeTab === 'backend' ? s.navItemActiveText : s.navItemText}>Backend</Text>
-        </TouchableOpacity>
+          Backend
+        </Button>
       </View>
     </SafeAreaView>
   );
 }
 
-const createStyles = (colors: ThemeColors) => StyleSheet.create({
+const createStyles = (t: Theme) => StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: colors.background,
+    backgroundColor: t.color.surface.page,
   },
   pulseBackground: {
     position: 'absolute',
     width: 440,
     height: 440,
     borderRadius: 220,
-    backgroundColor: colors.primary,
+    backgroundColor: t.color.accent.base,
     opacity: 0.05,
     top: -140,
     right: -140,
   },
   content: {
-    padding: 16,
-    paddingTop: Platform.OS === 'android' ? 30 : 10,
+    padding: t.space[4],
+    paddingTop: Platform.OS === 'android' ? t.space[8] : t.space[3],
     paddingBottom: 110,
-  },
-  headerCard: {
-    marginBottom: 14,
-    padding: 14,
-    borderRadius: 14,
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.cardBorder,
   },
   titleRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: t.space[3],
   },
   brandRow: {
     flexDirection: 'row',
     alignItems: 'baseline',
   },
   title: {
-    fontSize: 26,
-    fontWeight: 'bold',
-    color: colors.text,
+    fontFamily: t.font.sans,
+    ...t.type['2xl'],
+    fontWeight: t.weight.bold,
+    color: t.color.text.primary,
   },
   versionText: {
-    fontSize: 12,
-    color: colors.textTertiary,
-    marginLeft: 8,
+    fontFamily: t.font.sans,
+    ...t.type.xs,
+    color: t.color.text.muted,
+    marginLeft: t.space[2],
   },
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: t.space[2],
   },
   diagButton: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 10,
-    backgroundColor: colors.inputBackground,
-    borderWidth: 1,
-    borderColor: colors.inputBorder,
+    paddingVertical: t.space[1.5],
+    paddingHorizontal: t.space[3],
+    borderRadius: t.radius.lg,
+    backgroundColor: t.color.surface.sunken,
+    borderWidth: t.borderWidth,
+    borderColor: t.color.border.base,
   },
   diagButtonText: {
-    fontSize: 12,
-    color: colors.primary,
-    fontWeight: '700',
+    fontFamily: t.font.sans,
+    ...t.type.xs,
+    color: t.color.accent.fg,
+    fontWeight: t.weight.bold,
   },
   gearButton: {
     width: 34,
     height: 34,
-    borderRadius: 10,
-    backgroundColor: colors.inputBackground,
-    borderWidth: 1,
-    borderColor: colors.inputBorder,
+    borderRadius: t.radius.lg,
+    backgroundColor: t.color.surface.sunken,
+    borderWidth: t.borderWidth,
+    borderColor: t.color.border.base,
     alignItems: 'center',
     justifyContent: 'center',
   },
   gearButtonText: {
-    fontSize: 16,
-    color: colors.primary,
-    fontWeight: '700',
+    fontFamily: t.font.sans,
+    ...t.type.base,
+    color: t.color.accent.fg,
+    fontWeight: t.weight.bold,
   },
   setupCard: {
-    marginBottom: 20,
-    padding: 16,
-    borderRadius: 12,
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.primary,
+    marginBottom: t.space[5],
+    padding: t.space[4],
+    borderRadius: t.radius.xl,
+    backgroundColor: t.color.surface.raised,
+    borderWidth: t.borderWidth,
+    borderColor: t.color.accent.base,
   },
   setupTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: colors.text,
+    fontFamily: t.font.sans,
+    ...t.type.base,
+    fontWeight: t.weight.bold,
+    color: t.color.text.primary,
   },
   setupSubtitle: {
-    marginTop: 6,
-    fontSize: 13,
-    color: colors.textSecondary,
+    marginTop: t.space[1.5],
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    color: t.color.text.secondary,
   },
   setupCta: {
-    marginTop: 12,
-    fontSize: 14,
-    fontWeight: '700',
-    color: colors.primary,
+    marginTop: t.space[3],
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    fontWeight: t.weight.bold,
+    color: t.color.accent.fg,
   },
   healthPill: {
     alignSelf: 'flex-start',
     flexDirection: 'row',
     alignItems: 'center',
-    borderWidth: 1,
-    borderRadius: 16,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+    borderWidth: t.borderWidth,
+    borderRadius: t.radius.full,
+    paddingHorizontal: t.space[3],
+    paddingVertical: t.space[1],
   },
   healthDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginRight: 8,
+    marginRight: t.space[2],
   },
   healthText: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  heroCard: {
-    marginBottom: 16,
-    padding: 14,
-    borderRadius: 14,
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.cardBorder,
-  },
-  heroTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: colors.text,
+    fontFamily: t.font.sans,
+    ...t.type.xs,
+    fontWeight: t.weight.bold,
   },
   heroSubtitle: {
-    marginTop: 4,
-    fontSize: 13,
-    color: colors.textSecondary,
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    color: t.color.text.secondary,
   },
   heroMetricsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 14,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: colors.separator,
+    marginTop: t.space[4],
+    paddingTop: t.space[3],
+    borderTopWidth: t.borderWidth,
+    borderTopColor: t.color.border.subtle,
   },
   metricBlock: {
     flex: 1,
     alignItems: 'center',
   },
   metricValue: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: colors.text,
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    fontWeight: t.weight.bold,
+    color: t.color.text.primary,
   },
   metricLabel: {
-    marginTop: 4,
-    fontSize: 11,
-    color: colors.textTertiary,
+    marginTop: t.space[1],
+    fontFamily: t.font.sans,
+    ...t.type.xs,
+    color: t.color.text.muted,
     textTransform: 'uppercase',
-    letterSpacing: 0.6,
+    letterSpacing: t.tracking.wide,
   },
   metricDivider: {
-    width: 1,
+    width: t.borderWidth,
     height: 28,
-    backgroundColor: colors.separator,
-    marginHorizontal: 4,
-  },
-  sectionLabel: {
-    fontSize: 12,
-    color: colors.textTertiary,
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    marginBottom: 8,
-    marginTop: 2,
-    fontWeight: '700',
-  },
-  section: {
-    marginBottom: 25,
-    padding: 15,
-    backgroundColor: colors.card,
-    borderRadius: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  sectionHeaderWithFilter: {
-    marginBottom: 15,
+    backgroundColor: t.color.border.subtle,
+    marginHorizontal: t.space[1],
   },
   filterContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: 8,
+    marginBottom: t.space[3],
   },
   filterText: {
-    marginRight: 8,
-    fontSize: 14,
-    color: colors.text,
+    marginRight: t.space[2],
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    color: t.color.text.primary,
     flexShrink: 1,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: colors.text,
   },
   centeredMessageContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
-    backgroundColor: colors.background,
+    padding: t.space[5],
+    backgroundColor: t.color.surface.page,
   },
   centeredMessageText: {
-    marginTop: 10,
-    fontSize: 16,
-    color: colors.textSecondary,
+    marginTop: t.space[3],
+    fontFamily: t.font.sans,
+    ...t.type.base,
+    color: t.color.text.secondary,
     textAlign: 'center',
   },
   disconnectContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 5,
+    padding: t.space[1],
   },
   connectedText: {
-    fontSize: 14,
-    color: colors.text,
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    color: t.color.text.primary,
     flex: 1,
-    marginRight: 10,
-  },
-  button: {
-    backgroundColor: colors.primary,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  buttonText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: '600',
+    marginRight: t.space[3],
   },
   noDevicesContainer: {
-    padding: 20,
+    padding: t.space[5],
     alignItems: 'center',
   },
   noDevicesText: {
-    fontSize: 14,
-    color: colors.textTertiary,
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    color: t.color.text.muted,
     textAlign: 'center',
     fontStyle: 'italic',
   },
   retryBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 12,
-    marginBottom: 15,
-    backgroundColor: colors.card,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: colors.warning,
+    padding: t.space[3],
+    marginBottom: t.space[4],
+    backgroundColor: t.color.surface.raised,
+    borderRadius: t.radius.lg,
+    borderWidth: t.borderWidth,
+    borderColor: t.color.status.warning.base,
   },
   retryBannerText: {
     flex: 1,
-    marginLeft: 10,
-    fontSize: 14,
-    color: colors.warning,
-    fontWeight: '500',
+    marginLeft: t.space[3],
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    color: t.color.status.warning.fg,
+    fontWeight: t.weight.medium,
   },
   authWarning: {
-    marginBottom: 20,
-    padding: 15,
-    backgroundColor: colors.inputBackground,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: colors.warning,
-  },
-  authWarningText: {
-    fontSize: 14,
-    color: colors.warning,
-    textAlign: 'center',
-    fontWeight: '500',
+    marginBottom: t.space[5],
   },
   bottomNav: {
     position: 'absolute',
-    left: 14,
-    right: 14,
-    bottom: 14,
+    left: t.space[4],
+    right: t.space[4],
+    bottom: t.space[4],
     flexDirection: 'row',
     justifyContent: 'space-between',
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.cardBorder,
-    borderRadius: 14,
-    padding: 8,
+    gap: t.space[2],
+    backgroundColor: t.color.surface.raised,
+    borderWidth: t.borderWidth,
+    borderColor: t.color.border.base,
+    borderRadius: t.radius.xl,
+    padding: t.space[2],
   },
   navItem: {
     flex: 1,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-  },
-  navItemText: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    fontWeight: '700',
-  },
-  navItemActive: {
-    flex: 1,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 10,
-    backgroundColor: colors.primary,
-  },
-  navItemActiveText: {
-    fontSize: 12,
-    color: 'white',
-    fontWeight: '700',
   },
 });

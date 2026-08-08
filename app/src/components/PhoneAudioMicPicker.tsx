@@ -1,9 +1,12 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Platform } from 'react-native';
-import { useTheme, ThemeColors } from '../theme';
+import { View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+
 import type { AudioDevice } from '@siteed/expo-audio-studio';
-import { AUTO_DEVICE_ID, isBluetoothInput } from '../hooks/usePhoneAudioDevices';
-import type { MicCaptureProfile } from '../utils/storage';
+
+import { Button, Caption, Card, Divider, SectionLabel } from '@/components/ui';
+import { AUTO_DEVICE_ID, isBluetoothInput } from '@/hooks/usePhoneAudioDevices';
+import { useTheme, type Theme } from '@/theme';
+import type { MicCaptureProfile } from '@/utils/storage';
 
 interface PhoneAudioMicPickerProps {
   devices: AudioDevice[];
@@ -41,8 +44,8 @@ const PhoneAudioMicPicker: React.FC<PhoneAudioMicPickerProps> = ({
   captureProfile,
   onSelectCaptureProfile,
 }) => {
-  const { colors } = useTheme();
-  const s = createStyles(colors);
+  const t = useTheme();
+  const s = createStyles(t);
 
   const autoSelected = selectedDeviceId === AUTO_DEVICE_ID;
   const autoSubtitle = effectiveDevice
@@ -72,34 +75,29 @@ const PhoneAudioMicPicker: React.FC<PhoneAudioMicPickerProps> = ({
   };
 
   return (
-    <View style={s.container}>
-      <View style={s.header}>
-        <Text style={s.label}>Microphone</Text>
-        <TouchableOpacity onPress={onRefresh} disabled={loading} activeOpacity={0.7}>
-          {loading ? (
-            <ActivityIndicator size="small" color={colors.textTertiary} />
-          ) : (
-            <Text style={s.refresh}>Refresh</Text>
-          )}
-        </TouchableOpacity>
-      </View>
-
+    <Card
+      title="Microphone"
+      headerRight={
+        <Button variant="link" size="sm" loading={loading} onPress={onRefresh}>
+          {loading ? null : 'Refresh'}
+        </Button>
+      }
+    >
       <View style={s.chipRow}>
         {renderChip(AUTO_DEVICE_ID, 'Auto', 'auto', autoSelected ? autoSubtitle : undefined)}
         {devices.map((d) => renderChip(d.id, deviceLabel(d), d.id))}
       </View>
 
       {devices.length === 0 && !loading && (
-        <Text style={s.hint}>
+        <Caption style={s.hint}>
           No input devices detected. Connect your Bluetooth headset, then tap Refresh.
-        </Text>
+        </Caption>
       )}
 
       {Platform.OS === 'ios' && (
         <>
-          <View style={[s.header, s.processingHeader]}>
-            <Text style={s.label}>Processing</Text>
-          </View>
+          <Divider style={s.divider} />
+          <SectionLabel>Processing</SectionLabel>
           <View style={s.chipRow}>
             {PROFILE_OPTIONS.map(({ id, label, subtitle }) => {
               const isSelected = captureProfile === id;
@@ -123,75 +121,55 @@ const PhoneAudioMicPicker: React.FC<PhoneAudioMicPickerProps> = ({
           </View>
         </>
       )}
-    </View>
+    </Card>
   );
 };
 
-const createStyles = (colors: ThemeColors) =>
+const createStyles = (t: Theme) =>
   StyleSheet.create({
-    container: {
-      marginTop: -4,
-      marginBottom: 10,
-      paddingHorizontal: 20,
-    },
-    header: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-      marginBottom: 8,
-    },
-    label: {
-      fontSize: 13,
-      fontWeight: '600',
-      color: colors.textSecondary,
-    },
-    refresh: {
-      fontSize: 13,
-      color: colors.primary,
-      fontWeight: '500',
-    },
     chipRow: {
       flexDirection: 'row',
       flexWrap: 'wrap',
-      gap: 8,
+      gap: t.space[2],
     },
     chip: {
-      paddingVertical: 6,
-      paddingHorizontal: 12,
-      borderRadius: 16,
-      borderWidth: 1,
-      borderColor: colors.inputBorder,
-      backgroundColor: colors.inputBackground,
+      paddingVertical: t.space[1.5],
+      paddingHorizontal: t.space[3],
+      borderRadius: t.radius.full,
+      borderWidth: t.borderWidth,
+      borderColor: t.color.border.base,
+      backgroundColor: t.color.surface.sunken,
       maxWidth: 220,
     },
     chipSelected: {
-      borderColor: colors.primary,
-      backgroundColor: colors.primary,
+      borderColor: t.color.accent.base,
+      backgroundColor: t.color.accent.navBg,
     },
     chipDisabled: {
       opacity: 0.5,
     },
     chipText: {
-      fontSize: 13,
-      color: colors.text,
-      fontWeight: '500',
+      fontFamily: t.font.sans,
+      ...t.type.sm,
+      color: t.color.text.primary,
+      fontWeight: t.weight.medium,
     },
     chipTextSelected: {
-      color: '#FFFFFF',
+      color: t.color.accent.fg,
     },
     chipSubtitle: {
-      fontSize: 10,
-      color: colors.textTertiary,
-      marginTop: 1,
+      fontFamily: t.font.sans,
+      ...t.type.xs,
+      color: t.color.text.muted,
+      marginTop: t.space.px,
     },
     hint: {
-      marginTop: 8,
-      fontSize: 12,
-      color: colors.textTertiary,
+      marginTop: t.space[2],
       fontStyle: 'italic',
     },
-    processingHeader: {
-      marginTop: 12,
+    divider: {
+      marginTop: t.space[3],
+      marginBottom: t.space[3],
     },
   });
 

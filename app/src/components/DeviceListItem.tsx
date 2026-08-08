@@ -1,9 +1,12 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import { OmiDevice } from 'friend-lite-react-native';
-import { useTheme, ThemeColors } from '../theme';
+
+import { Badge, Button } from '@/components/ui';
+import { useTheme, type Theme } from '@/theme';
+import { detectDeviceType } from '@/utils/deviceType';
+
 import SignalStrength from './SignalStrength';
-import { detectDeviceType } from '../utils/deviceType';
 
 interface DeviceListItemProps {
   device: OmiDevice;
@@ -20,8 +23,8 @@ export const DeviceListItem: React.FC<DeviceListItemProps> = ({
   isConnecting,
   connectedDeviceId
 }) => {
-  const { colors } = useTheme();
-  const s = createStyles(colors);
+  const t = useTheme();
+  const s = createStyles(t);
   const isThisDeviceConnected = connectedDeviceId === device.id;
   const isAnotherDeviceConnected = connectedDeviceId !== null && connectedDeviceId !== device.id;
   const deviceType = detectDeviceType(device.name);
@@ -29,12 +32,12 @@ export const DeviceListItem: React.FC<DeviceListItemProps> = ({
   return (
     <View style={s.deviceItem}>
       <View style={s.deviceInfoContainer}>
-        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <View style={s.deviceNameRow}>
           <Text style={s.deviceName}>{device.name || 'Unknown Device'}</Text>
           {deviceType !== 'unknown' && (
-            <View style={[s.deviceTypeBadge, { backgroundColor: deviceType === 'neo' ? colors.warning : colors.primary }]}>
-              <Text style={s.deviceTypeBadgeText}>{deviceType === 'neo' ? 'Neo' : 'OMI'}</Text>
-            </View>
+            <Badge tone={deviceType === 'neo' ? 'warning' : 'accent'} style={s.deviceTypeBadge}>
+              {deviceType === 'neo' ? 'Neo' : 'OMI'}
+            </Badge>
           )}
           <SignalStrength rssi={device.rssi} />
         </View>
@@ -43,86 +46,61 @@ export const DeviceListItem: React.FC<DeviceListItemProps> = ({
       </View>
       {
         isThisDeviceConnected ? (
-          <TouchableOpacity
-            style={[s.button, s.smallButton, { backgroundColor: colors.danger }]}
+          <Button
+            variant="danger"
+            size="sm"
             onPress={onDisconnect}
             disabled={isConnecting}
           >
-            <Text style={s.buttonText}>{isConnecting ? 'Disconnecting...' : 'Disconnect'}</Text>
-          </TouchableOpacity>
+            {isConnecting ? 'Disconnecting...' : 'Disconnect'}
+          </Button>
         ) : (
-          <TouchableOpacity
-            style={[
-              s.button,
-              s.smallButton,
-              (isConnecting || isAnotherDeviceConnected) ? s.buttonDisabled : null
-            ]}
+          <Button
+            variant="primary"
+            size="sm"
             onPress={() => onConnect(device.id)}
             disabled={isConnecting || isAnotherDeviceConnected}
           >
-            <Text style={s.buttonText}>{isConnecting && connectedDeviceId === device.id ? 'Connecting...' : 'Connect'}</Text>
-          </TouchableOpacity>
+            {isConnecting && connectedDeviceId === device.id ? 'Connecting...' : 'Connect'}
+          </Button>
         )
       }
     </View>
   );
 };
 
-const createStyles = (colors: ThemeColors) => StyleSheet.create({
+const createStyles = (t: Theme) => StyleSheet.create({
   deviceItem: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 5,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.separator,
+    paddingVertical: t.space[3],
+    paddingHorizontal: t.space[1.5],
+    borderBottomWidth: t.borderWidth,
+    borderBottomColor: t.color.border.subtle,
   },
   deviceInfoContainer: {
     flex: 1,
-    marginRight: 10,
+    marginRight: t.space[3],
+  },
+  deviceNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   deviceName: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: colors.text,
+    fontFamily: t.font.sans,
+    ...t.type.base,
+    fontWeight: t.weight.medium,
+    color: t.color.text.primary,
   },
   deviceInfo: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    marginTop: 2,
+    fontFamily: t.font.sans,
+    ...t.type.xs,
+    color: t.color.text.secondary,
+    marginTop: t.space[0.5],
   },
   deviceTypeBadge: {
-    marginLeft: 6,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  deviceTypeBadgeText: {
-    color: 'white',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  button: {
-    backgroundColor: colors.primary,
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    alignItems: 'center',
-    elevation: 1,
-  },
-  smallButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-  },
-  buttonDisabled: {
-    backgroundColor: colors.disabled,
-    opacity: 0.7,
-  },
-  buttonText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: '600',
+    marginLeft: t.space[1.5],
   },
 });
 

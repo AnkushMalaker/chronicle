@@ -1,6 +1,8 @@
 import React from 'react';
-import { TouchableOpacity, Text, View, StyleSheet, ActivityIndicator } from 'react-native';
-import { useTheme, ThemeColors } from '../theme';
+import { View, StyleSheet } from 'react-native';
+
+import { Button, Caption, type ButtonVariant } from '@/components/ui';
+import { useTheme, type Theme } from '@/theme';
 
 interface PhoneAudioButtonProps {
   isRecording: boolean;
@@ -19,14 +21,16 @@ const PhoneAudioButton: React.FC<PhoneAudioButtonProps> = ({
   error,
   onPress,
 }) => {
-  const { colors } = useTheme();
-  const s = createStyles(colors);
+  const t = useTheme();
+  const s = createStyles(t);
 
-  const getButtonStyle = () => {
-    if (isDisabled && !isRecording) return [s.button, { backgroundColor: colors.disabled }];
-    if (isRecording) return [s.button, { backgroundColor: colors.danger }];
-    if (error) return [s.button, { backgroundColor: colors.warning }];
-    return [s.button, { backgroundColor: colors.primary }];
+  const getButtonVariant = (): ButtonVariant => {
+    // `secondary` is the neutral chip fill, which is the old `disabled` grey;
+    // the Button dims itself while `disabled` is set.
+    if (isDisabled && !isRecording) return 'secondary';
+    if (isRecording) return 'danger';
+    if (error) return 'warning';
+    return 'primary';
   };
 
   const getButtonText = () => {
@@ -38,20 +42,16 @@ const PhoneAudioButton: React.FC<PhoneAudioButtonProps> = ({
   return (
     <View style={s.container}>
       <View style={s.buttonWrapper}>
-        <TouchableOpacity
-          style={getButtonStyle()}
+        <Button
+          variant={getButtonVariant()}
+          size="lg"
+          fullWidth
+          loading={isInitializing}
+          disabled={isDisabled}
           onPress={onPress}
-          disabled={isDisabled || isInitializing}
-          activeOpacity={0.7}
         >
-          {isInitializing ? (
-            <ActivityIndicator size="small" color="#fff" />
-          ) : (
-            <View style={s.buttonContent}>
-              <Text style={s.buttonText}>{getButtonText()}</Text>
-            </View>
-          )}
-        </TouchableOpacity>
+          {isInitializing ? null : getButtonText()}
+        </Button>
       </View>
 
       {isRecording && (
@@ -59,91 +59,64 @@ const PhoneAudioButton: React.FC<PhoneAudioButtonProps> = ({
           <View style={s.audioLevelBackground}>
             <View style={[s.audioLevelBar, { width: `${Math.min(audioLevel * 100, 100)}%` }]} />
           </View>
-          <Text style={s.audioLevelText}>Audio Level</Text>
+          <Caption style={s.audioLevelText}>Audio Level</Caption>
         </View>
       )}
 
       {isRecording && (
-        <Text style={s.statusText}>Streaming audio to backend...</Text>
+        <Caption style={s.statusText}>Streaming audio to backend...</Caption>
       )}
 
       {error && !isRecording && (
-        <Text style={s.errorText}>{error}</Text>
+        <Caption style={s.errorText}>{error}</Caption>
       )}
 
       {isDisabled && !isRecording && (
-        <Text style={s.disabledText}>Disconnect Bluetooth device to use phone audio</Text>
+        <Caption style={s.disabledText}>Disconnect Bluetooth device to use phone audio</Caption>
       )}
     </View>
   );
 };
 
-const createStyles = (colors: ThemeColors) => StyleSheet.create({
+const createStyles = (t: Theme) => StyleSheet.create({
   container: {
-    marginVertical: 10,
-    paddingHorizontal: 20,
+    marginVertical: t.space[3],
   },
   buttonWrapper: {
     alignSelf: 'stretch',
   },
-  button: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    minHeight: 48,
-  },
-  buttonContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  buttonText: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '600',
-  },
   statusText: {
     textAlign: 'center',
-    marginTop: 8,
-    fontSize: 12,
-    color: colors.textTertiary,
+    marginTop: t.space[2],
   },
   errorText: {
     textAlign: 'center',
-    marginTop: 8,
-    fontSize: 12,
-    color: colors.danger,
+    marginTop: t.space[2],
+    color: t.color.status.danger.fg,
   },
   disabledText: {
     textAlign: 'center',
-    marginTop: 8,
-    fontSize: 12,
-    color: colors.textTertiary,
+    marginTop: t.space[2],
     fontStyle: 'italic',
   },
   audioLevelContainer: {
-    marginTop: 12,
+    marginTop: t.space[3],
     alignItems: 'center',
   },
   audioLevelBackground: {
     width: '100%',
-    height: 4,
-    backgroundColor: colors.separator,
-    borderRadius: 2,
+    height: t.space[1],
+    backgroundColor: t.color.border.subtle,
+    borderRadius: t.radius.sm,
     overflow: 'hidden',
   },
   audioLevelBar: {
     height: '100%',
-    backgroundColor: colors.success,
-    borderRadius: 2,
+    backgroundColor: t.color.status.success.base,
+    borderRadius: t.radius.sm,
   },
   audioLevelText: {
-    marginTop: 4,
-    fontSize: 10,
-    color: colors.textTertiary,
+    marginTop: t.space[1],
   },
 });
 

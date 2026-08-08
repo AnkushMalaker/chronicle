@@ -7,30 +7,21 @@
 // vision model can reconstruct.
 
 import { useCallback, useEffect, useState } from 'react';
-import {
-  ActivityIndicator,
-  Image,
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from 'react-native';
+import { Image, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useShareIntent } from 'expo-share-intent';
 
+import { Body, Button, ButtonRow, InlineAlert, Screen, TextField } from '@/components/ui';
 import { useSharedAppSettings } from '@/contexts/AppSettingsContext';
 import { uploadSharedScreenshot } from '@/services/screenshots';
-import { useTheme } from '@/theme';
+import { useTheme, type Theme } from '@/theme';
 
 type Phase = 'ready' | 'uploading' | 'done' | 'error';
 
 export default function ShareScreen() {
   const router = useRouter();
-  const { colors } = useTheme();
+  const t = useTheme();
+  const s = createStyles(t);
   const { webSocketUrl } = useSharedAppSettings();
   const { hasShareIntent, shareIntent, resetShareIntent } = useShareIntent();
 
@@ -60,9 +51,7 @@ export default function ShareScreen() {
       const result = await uploadSharedScreenshot(imageUri, webSocketUrl, { caption });
       setPhase('done');
       setMessage(
-        result.status === 'duplicate'
-          ? 'Already saved to Chronicle.'
-          : 'Saved to Chronicle.'
+        result.status === 'duplicate' ? 'Already saved to Chronicle.' : 'Saved to Chronicle.'
       );
       // Give the confirmation a beat to be read, then get out of the way.
       setTimeout(dismiss, 900);
@@ -77,119 +66,64 @@ export default function ShareScreen() {
   const busy = phase === 'uploading';
 
   return (
-    <KeyboardAvoidingView
-      style={[styles.flex, { backgroundColor: colors.background }]}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
-      <ScrollView contentContainerStyle={styles.content}>
-        {imageUri ? (
-          <Image
-            source={{ uri: imageUri }}
-            style={[styles.preview, { borderColor: colors.cardBorder }]}
-            resizeMode="contain"
-          />
-        ) : (
-          <Text style={[styles.muted, { color: colors.textSecondary }]}>
-            No image was shared.
-          </Text>
-        )}
+    <Screen keyboardAvoiding>
+      {imageUri ? (
+        <Image source={{ uri: imageUri }} style={s.preview} resizeMode="contain" />
+      ) : (
+        <Body style={s.empty}>No image was shared.</Body>
+      )}
 
-        <Text style={[styles.label, { color: colors.textSecondary }]}>
-          Note (optional)
-        </Text>
-        <TextInput
-          value={caption}
-          onChangeText={setCaption}
-          editable={!busy && phase !== 'done'}
-          placeholder="Why you saved this — helps you find it later"
-          placeholderTextColor={colors.textTertiary}
-          multiline
-          style={[
-            styles.input,
-            {
-              backgroundColor: colors.inputBackground,
-              borderColor: colors.inputBorder,
-              color: colors.text,
-            },
-          ]}
-        />
+      <TextField
+        label="Note"
+        hint="Optional — why you saved this. It is what you will search for later."
+        value={caption}
+        onChangeText={setCaption}
+        editable={!busy && phase !== 'done'}
+        placeholder="Game to try, ticket for Friday, fix this error…"
+        multiline
+        numberOfLines={3}
+      />
 
-        {message && (
-          <Text
-            style={[
-              styles.message,
-              { color: phase === 'error' ? colors.danger : colors.success },
-            ]}
+      {message && (
+        <InlineAlert tone={phase === 'error' ? 'danger' : 'success'}>{message}</InlineAlert>
+      )}
+
+      <ButtonRow>
+        <Button variant="secondary" onPress={dismiss} disabled={busy} style={s.action}>
+          {phase === 'done' ? 'Close' : 'Discard'}
+        </Button>
+        {phase !== 'done' && (
+          <Button
+            variant="primary"
+            onPress={send}
+            disabled={!imageUri}
+            loading={busy}
+            style={s.action}
           >
-            {message}
-          </Text>
+            {phase === 'error' ? 'Retry' : 'Save to Chronicle'}
+          </Button>
         )}
-
-        <View style={styles.actions}>
-          <TouchableOpacity
-            onPress={dismiss}
-            disabled={busy}
-            style={[styles.button, styles.secondary, { borderColor: colors.cardBorder }]}
-          >
-            <Text style={{ color: colors.textSecondary, fontWeight: '600' }}>
-              {phase === 'done' ? 'Close' : 'Discard'}
-            </Text>
-          </TouchableOpacity>
-
-          {phase !== 'done' && (
-            <TouchableOpacity
-              onPress={send}
-              disabled={busy || !imageUri}
-              style={[
-                styles.button,
-                {
-                  backgroundColor: imageUri ? colors.primary : colors.disabled,
-                },
-              ]}
-            >
-              {busy ? (
-                <ActivityIndicator color="#ffffff" />
-              ) : (
-                <Text style={styles.primaryText}>
-                  {phase === 'error' ? 'Retry' : 'Save to Chronicle'}
-                </Text>
-              )}
-            </TouchableOpacity>
-          )}
-        </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+      </ButtonRow>
+    </Screen>
   );
 }
 
-const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  content: { padding: 16, gap: 12 },
-  preview: {
-    width: '100%',
-    height: 320,
-    borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  label: { fontSize: 13, fontWeight: '600', marginTop: 4 },
-  input: {
-    minHeight: 72,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 10,
-    padding: 12,
-    fontSize: 15,
-    textAlignVertical: 'top',
-  },
-  message: { fontSize: 14, fontWeight: '500' },
-  muted: { fontSize: 15, textAlign: 'center', paddingVertical: 32 },
-  actions: { flexDirection: 'row', gap: 12, marginTop: 8 },
-  button: {
-    flex: 1,
-    paddingVertical: 14,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  secondary: { borderWidth: StyleSheet.hairlineWidth },
-  primaryText: { color: '#ffffff', fontWeight: '600', fontSize: 15 },
-});
+const createStyles = (t: Theme) =>
+  StyleSheet.create({
+    preview: {
+      width: '100%',
+      height: 320,
+      borderRadius: t.radius.lg,
+      borderWidth: t.borderWidth,
+      borderColor: t.color.border.subtle,
+      backgroundColor: t.color.surface.sunken,
+    },
+    empty: {
+      textAlign: 'center',
+      paddingVertical: t.space[8],
+      color: t.color.text.secondary,
+    },
+    action: {
+      flex: 1,
+    },
+  });

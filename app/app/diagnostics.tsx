@@ -1,98 +1,100 @@
 import React from 'react';
-import { View, Text, FlatList, TouchableOpacity, StyleSheet, SafeAreaView, Share, Platform, Alert } from 'react-native';
-import { useTheme, ThemeColors } from '@/theme';
+import { View, Text, FlatList, StyleSheet, SafeAreaView, Share, Platform, Alert } from 'react-native';
+import { useTheme, type Theme } from '@/theme';
+import { Badge, Button, Heading, Mono, type Tone } from '@/components/ui';
 import { useConnectionLog, ConnectionEvent, ConnectionEventType } from '@/contexts/ConnectionLogContext';
 import { getLogPath, readLog, clearLog } from '@/utils/logger';
 
-const EVENT_BADGE_COLORS: Record<ConnectionEventType, string> = {
-  scan_start: '#007AFF',
-  scan_stop: '#8E8E93',
-  scan_result: '#5856D6',
-  connect_start: '#FF9500',
-  connect_success: '#34C759',
-  connect_fail: '#FF3B30',
-  disconnect: '#FF3B30',
-  battery_read: '#34C759',
-  audio_start: '#007AFF',
-  audio_stop: '#8E8E93',
-  error: '#FF3B30',
-  health_ping: '#34C759',
-  reconnect_attempt: '#FF9500',
-  reconnect_backoff: '#FF9500',
-  bt_state_change: '#5856D6',
-  ws_connecting: '#FF9500',
-  ws_open: '#34C759',
-  ws_close: '#FF3B30',
-  ws_error: '#FF3B30',
-  ws_reconnect: '#FF9500',
-  ws_reauth: '#AF52DE',
-  net_change: '#5856D6',
+const EVENT_BADGE_TONES: Record<ConnectionEventType, Tone> = {
+  scan_start: 'info',
+  scan_stop: 'neutral',
+  scan_result: 'suggest',
+  connect_start: 'warning',
+  connect_success: 'success',
+  connect_fail: 'danger',
+  disconnect: 'danger',
+  battery_read: 'success',
+  audio_start: 'info',
+  audio_stop: 'neutral',
+  error: 'danger',
+  health_ping: 'success',
+  reconnect_attempt: 'warning',
+  reconnect_backoff: 'warning',
+  bt_state_change: 'suggest',
+  ws_connecting: 'warning',
+  ws_open: 'success',
+  ws_close: 'danger',
+  ws_error: 'danger',
+  ws_reconnect: 'warning',
+  ws_reauth: 'suggest',
+  net_change: 'suggest',
 };
 
 function formatTime(date: Date): string {
   return date.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-function EventItem({ event, colors }: { event: ConnectionEvent; colors: ThemeColors }) {
-  const badgeColor = EVENT_BADGE_COLORS[event.type] || colors.textTertiary;
+function EventItem({ event, t }: { event: ConnectionEvent; t: Theme }) {
+  const s = createItemStyles(t);
+  const badgeTone = EVENT_BADGE_TONES[event.type] ?? 'neutral';
 
   return (
-    <View style={[itemStyles.row, { borderBottomColor: colors.separator }]}>
-      <Text style={[itemStyles.time, { color: colors.textTertiary }]}>{formatTime(event.timestamp)}</Text>
-      <View style={[itemStyles.badge, { backgroundColor: badgeColor }]}>
-        <Text style={itemStyles.badgeText}>{event.type.replace(/_/g, ' ')}</Text>
-      </View>
-      <View style={itemStyles.details}>
-        {event.deviceName && <Text style={[itemStyles.device, { color: colors.text }]}>{event.deviceName}</Text>}
-        {event.details && <Text style={[itemStyles.detail, { color: colors.textSecondary }]} numberOfLines={2}>{event.details}</Text>}
-        {event.rssi != null && <Text style={[itemStyles.detail, { color: colors.textTertiary }]}>RSSI: {event.rssi} dBm</Text>}
+    <View style={s.row}>
+      <Mono style={s.time}>{formatTime(event.timestamp)}</Mono>
+      <Badge tone={badgeTone} mono style={s.badge}>{event.type.replace(/_/g, ' ')}</Badge>
+      <View style={s.details}>
+        {event.deviceName && <Text style={s.device}>{event.deviceName}</Text>}
+        {event.details && <Text style={s.detail} numberOfLines={2}>{event.details}</Text>}
+        {event.rssi != null && <Text style={s.detailMuted}>RSSI: {event.rssi} dBm</Text>}
       </View>
     </View>
   );
 }
 
-const itemStyles = StyleSheet.create({
+const createItemStyles = (t: Theme) => StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderBottomWidth: 1,
+    paddingVertical: t.space[2],
+    paddingHorizontal: t.space[3],
+    borderBottomWidth: t.borderWidth,
+    borderBottomColor: t.color.border.subtle,
   },
   time: {
-    fontSize: 11,
-    fontFamily: 'monospace',
+    fontFamily: t.font.mono,
     width: 65,
     marginTop: 3,
   },
   badge: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    marginRight: 8,
-    marginTop: 2,
-  },
-  badgeText: {
-    color: 'white',
-    fontSize: 10,
-    fontWeight: '600',
-    textTransform: 'uppercase',
+    marginRight: t.space[2],
+    marginTop: t.space[0.5],
   },
   details: {
     flex: 1,
   },
   device: {
-    fontSize: 13,
-    fontWeight: '500',
+    fontFamily: t.font.sans,
+    ...t.type.sm,
+    fontWeight: t.weight.medium,
+    color: t.color.text.primary,
   },
   detail: {
-    fontSize: 12,
+    fontFamily: t.font.sans,
+    ...t.type.xs,
+    color: t.color.text.secondary,
+    marginTop: 1,
+  },
+  detailMuted: {
+    fontFamily: t.font.sans,
+    ...t.type.xs,
+    color: t.color.text.muted,
     marginTop: 1,
   },
 });
 
 export default function DiagnosticsScreen() {
-  const { colors } = useTheme();
+  const t = useTheme();
+  const s = createScreenStyles(t);
   const { events, clearEvents } = useConnectionLog();
 
   const shareLogFile = async () => {
@@ -120,102 +122,87 @@ export default function DiagnosticsScreen() {
   };
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
-      <View style={[screenStyles.logBar, { borderBottomColor: colors.separator, backgroundColor: colors.card }]}>
-        <Text style={[screenStyles.logBarTitle, { color: colors.text }]}>Crash Log</Text>
-        <Text style={[screenStyles.logBarPath, { color: colors.textTertiary }]} numberOfLines={1}>{getLogPath()}</Text>
-        <View style={screenStyles.logBarRow}>
-          <TouchableOpacity onPress={shareLogFile} style={[screenStyles.logBtn, { backgroundColor: colors.inputBackground }]}>
-            <Text style={[screenStyles.logBtnText, { color: colors.text }]}>Share Log File</Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={wipeLogFile} style={[screenStyles.logBtn, { backgroundColor: colors.inputBackground }]}>
-            <Text style={[screenStyles.logBtnText, { color: colors.danger }]}>Clear File</Text>
-          </TouchableOpacity>
+    <SafeAreaView style={s.safeArea}>
+      <View style={s.logBar}>
+        <Text style={s.logBarTitle}>Crash Log</Text>
+        <Mono style={s.logBarPath} numberOfLines={1}>{getLogPath()}</Mono>
+        <View style={s.logBarRow}>
+          <Button variant="secondary" size="sm" style={s.logBtn} onPress={shareLogFile}>Share Log File</Button>
+          <Button variant="danger" size="sm" style={s.logBtn} onPress={wipeLogFile}>Clear File</Button>
         </View>
       </View>
-      <View style={[screenStyles.header, { borderBottomColor: colors.separator }]}>
-        <Text style={[screenStyles.title, { color: colors.text }]}>Connection Log ({events.length})</Text>
-        <TouchableOpacity onPress={clearEvents} style={[screenStyles.clearButton, { backgroundColor: colors.inputBackground }]}>
-          <Text style={[screenStyles.clearText, { color: colors.danger }]}>Clear</Text>
-        </TouchableOpacity>
+      <View style={s.header}>
+        <Heading>Connection Log ({events.length})</Heading>
+        <Button variant="danger" size="sm" onPress={clearEvents}>Clear</Button>
       </View>
 
       {events.length === 0 ? (
-        <View style={screenStyles.empty}>
-          <Text style={[screenStyles.emptyText, { color: colors.textTertiary }]}>No events recorded yet. Scan or connect a device to see events here.</Text>
+        <View style={s.empty}>
+          <Text style={s.emptyText}>No events recorded yet. Scan or connect a device to see events here.</Text>
         </View>
       ) : (
         <FlatList
           data={events}
-          renderItem={({ item }) => <EventItem event={item} colors={colors} />}
+          renderItem={({ item }) => <EventItem event={item} t={t} />}
           keyExtractor={(item) => item.id}
-          style={{ backgroundColor: colors.card }}
+          style={s.list}
         />
       )}
     </SafeAreaView>
   );
 }
 
-const screenStyles = StyleSheet.create({
+const createScreenStyles = (t: Theme) => StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: t.color.surface.page,
+  },
+  list: {
+    backgroundColor: t.color.surface.raised,
+  },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-  },
-  title: {
-    fontSize: 17,
-    fontWeight: '600',
-  },
-  clearButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-  },
-  clearText: {
-    fontSize: 14,
-    fontWeight: '500',
+    paddingHorizontal: t.space[4],
+    paddingVertical: t.space[3],
+    borderBottomWidth: t.borderWidth,
+    borderBottomColor: t.color.border.subtle,
   },
   empty: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 40,
+    padding: t.space[10],
   },
   emptyText: {
-    fontSize: 15,
+    fontFamily: t.font.sans,
+    ...t.type.base,
+    color: t.color.text.muted,
     textAlign: 'center',
   },
   logBar: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
+    paddingHorizontal: t.space[4],
+    paddingVertical: t.space[3],
+    borderBottomWidth: t.borderWidth,
+    borderBottomColor: t.color.border.subtle,
+    backgroundColor: t.color.surface.raised,
   },
   logBarTitle: {
-    fontSize: 15,
-    fontWeight: '600',
+    fontFamily: t.font.sans,
+    ...t.type.base,
+    fontWeight: t.weight.semibold,
+    color: t.color.text.primary,
   },
   logBarPath: {
-    fontSize: 10,
-    fontFamily: 'monospace',
-    marginTop: 2,
-    marginBottom: 8,
+    marginTop: t.space[0.5],
+    marginBottom: t.space[2],
   },
   logBarRow: {
     flexDirection: 'row',
-    gap: 8,
+    gap: t.space[2],
   },
   logBtn: {
     flex: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 6,
-    alignItems: 'center',
-  },
-  logBtnText: {
-    fontSize: 13,
-    fontWeight: '500',
   },
 });
