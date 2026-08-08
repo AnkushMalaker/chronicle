@@ -1485,6 +1485,7 @@ class PiMemoryAgent:
                 errors=events.errors,
                 usage=events.usage,
                 truncated=events.truncated,
+                verified=gateway.tools.verified,
             )
             set_safe_span_attributes(
                 span,

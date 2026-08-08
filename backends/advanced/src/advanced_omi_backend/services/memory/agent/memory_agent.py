@@ -213,6 +213,12 @@ def day_note_path(local_date: str) -> str:
     return f"Daily/{local_date}.md"
 
 
+# Executors whose agent crosses Chronicle's tool boundary and can therefore be expected
+# to have called verify_vault before finishing. Codex edits the vault natively with its
+# own filesystem tools, so it never can, and must not be judged as though it could.
+VERIFY_CAPABLE_BACKENDS = frozenset({"direct", "pi"})
+
+
 def required_notes(record: str, source_id: str) -> tuple[str, ...]:
     """Notes a write of this kind must produce, for ``verify_vault`` to check.
 
@@ -307,6 +313,13 @@ class MemoryAgentResult:
     stalled: bool = (
         False  # loop aborted after repeated no-progress error rounds (stuck retrying)
     )
+    # Whether the agent called verify_vault before finishing, as it is told to. This is
+    # what separates "I checked, and the day needs nothing" from stopping mid-thought:
+    # a final message of "Let me check the later parts of the day note for evening
+    # episodes" is not a conclusion, but it is a non-empty summary with no edits and
+    # would otherwise read as a deliberate no-op. Qwen3.6 and DeepSeek V4 Pro both do
+    # this — narrate the next tool call as prose instead of emitting it, ending the run.
+    verified: bool = False
 
 
 def _accumulate_response_usage(total: Dict[str, int], response: Any) -> None:
@@ -523,6 +536,7 @@ class MemoryAgent:
                         conversation_id=conversation_id,
                         rounds=round_idx + 1,
                         touched=sorted(self.tools.touched),
+                        verified=self.tools.verified,
                         summary=summary,
                         tool_calls=tool_calls,
                         removed=list(self.tools.removed),
@@ -541,6 +555,7 @@ class MemoryAgent:
                     conversation_id=conversation_id,
                     rounds=round_idx + 1,
                     touched=sorted(self.tools.touched),
+                    verified=self.tools.verified,
                     summary=summary,
                     tool_calls=tool_calls,
                     removed=list(self.tools.removed),
@@ -593,6 +608,7 @@ class MemoryAgent:
                         conversation_id=conversation_id,
                         rounds=round_idx + 1,
                         touched=sorted(self.tools.touched),
+                        verified=self.tools.verified,
                         summary="(stopped: stalled retrying a failing edit)",
                         tool_calls=tool_calls,
                         removed=list(self.tools.removed),
@@ -612,6 +628,7 @@ class MemoryAgent:
             conversation_id=conversation_id,
             rounds=MAX_TOOL_ROUNDS,
             touched=sorted(self.tools.touched),
+            verified=self.tools.verified,
             summary="(stopped at max rounds)",
             tool_calls=tool_calls,
             removed=list(self.tools.removed),

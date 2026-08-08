@@ -216,6 +216,7 @@ class VaultTools:
         self._trace_context = trace_context
         self._trace_attempt = current_memory_attempt()
         self.touched: set = set()  # vault-relative paths created/edited this run
+        self.verified = False  # whether the agent called verify_vault before finishing
         # Unlike ``touched``, this is monotonic: editing the same note twice must
         # still mark both tool observations as mutating.
         self._mutation_count = 0
@@ -249,6 +250,7 @@ class VaultTools:
         into a redundant write.
         """
 
+        self.verified = True
         return render_findings(
             verify_vault_changes(
                 self.root,

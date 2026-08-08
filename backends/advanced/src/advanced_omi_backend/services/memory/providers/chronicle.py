@@ -411,7 +411,17 @@ class MemoryService(MemoryServiceBase):
         unwritten, and the caller records it as failed so it can be retried.
         """
         # Lazy: ..agent imports llm_client, which imports this package's config back.
-        from ..agent.memory_agent import day_note_path, required_notes
+        from ..agent.memory_agent import (
+            VERIFY_CAPABLE_BACKENDS,
+            day_note_path,
+            required_notes,
+        )
+
+        verify_expected = (
+            self.config.write_agent_backend in VERIFY_CAPABLE_BACKENDS
+            and (self.config.write_recovery_backend or "direct")
+            in VERIFY_CAPABLE_BACKENDS
+        )
 
         if not day_digest or len(day_digest.strip()) < 10:
             memory_logger.info("Skipping empty day digest for %s", local_date)
@@ -454,6 +464,13 @@ class MemoryService(MemoryServiceBase):
                 and not agent_result.errors
                 and bool((agent_result.summary or "").strip())
                 and not agent_result.touched
+                # A non-empty summary is not a conclusion. Both Qwen3.6 and DeepSeek V4
+                # Pro end runs by narrating the next step as prose instead of emitting
+                # the call — "Let me check the later parts of the day note for evening
+                # episodes" — which reads as a clean finish with nothing to record. An
+                # agent that genuinely decided the day needs nothing called verify_vault
+                # first, as it is told to; one that stopped mid-thought did not.
+                and (agent_result.verified or not verify_expected)
             )
 
         result = None

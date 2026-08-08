@@ -43,7 +43,9 @@ Only one early detail was recorded before the agent stopped.
 @pytest.mark.asyncio
 async def test_incomplete_valid_note_is_replaced_by_lossless_source_fallback(tmp_path):
     source = "Speaker: retain this exact ending after the valid partial note stops."
-    service = MemoryService(SimpleNamespace(write_recovery_backend=None))
+    service = MemoryService(
+        SimpleNamespace(write_agent_backend="pi", write_recovery_backend=None)
+    )
 
     class IncompleteAgent:
         def __init__(self, root):
@@ -80,7 +82,9 @@ async def test_incomplete_valid_note_is_replaced_by_lossless_source_fallback(tmp
 
 @pytest.mark.asyncio
 async def test_provider_exception_diagnostics_never_persist_arbitrary_text(tmp_path):
-    service = MemoryService(SimpleNamespace(write_recovery_backend=None))
+    service = MemoryService(
+        SimpleNamespace(write_agent_backend="pi", write_recovery_backend=None)
+    )
 
     class FailingAgent:
         def __init__(self, _root):
@@ -112,7 +116,9 @@ async def test_provider_exception_diagnostics_never_persist_arbitrary_text(tmp_p
 
 @pytest.mark.asyncio
 async def test_provider_labels_primary_and_recovery_attempts(tmp_path, monkeypatch):
-    service = MemoryService(SimpleNamespace(write_recovery_backend="direct"))
+    service = MemoryService(
+        SimpleNamespace(write_agent_backend="pi", write_recovery_backend="direct")
+    )
     observed_attempts = []
 
     class PrimaryAgent:
@@ -220,7 +226,9 @@ async def test_day_write_fails_when_only_other_notes_were_touched(
     recorded the day. Two of four backfilled days reported success exactly that way.
     """
 
-    service = MemoryService(SimpleNamespace(write_recovery_backend=None))
+    service = MemoryService(
+        SimpleNamespace(write_agent_backend="pi", write_recovery_backend=None)
+    )
     local_date = "2026-08-06"
     root = tmp_path / "user-one"
     day_note = root / "Daily" / f"{local_date}.md"
@@ -270,7 +278,9 @@ async def test_day_write_treats_a_deliberate_no_op_as_done_without_recovery(
     skipped.
     """
 
-    service = MemoryService(SimpleNamespace(write_recovery_backend="direct"))
+    service = MemoryService(
+        SimpleNamespace(write_agent_backend="pi", write_recovery_backend="direct")
+    )
     local_date = "2026-08-06"
     root = tmp_path / "user-one"
     (root / "Daily").mkdir(parents=True, exist_ok=True)
@@ -287,6 +297,8 @@ async def test_day_write_treats_a_deliberate_no_op_as_done_without_recovery(
                 rounds=6,
                 touched=[],
                 summary="The day is already recorded; nothing new to add.",
+                # It checked before concluding, which is what makes this deliberate.
+                verified=True,
             )
 
     class Recovery:
@@ -310,3 +322,67 @@ async def test_day_write_treats_a_deliberate_no_op_as_done_without_recovery(
     assert success is True
     assert touched == []
     assert recovery_calls == []
+
+
+@pytest.mark.asyncio
+async def test_narrating_the_next_step_is_not_a_deliberate_no_op(tmp_path, monkeypatch):
+    """Stopping mid-thought must reach recovery, not pass as "nothing to record".
+
+    Qwen3.6 and DeepSeek V4 Pro both end runs by narrating the next tool call as prose
+    instead of emitting it — a known Qwen3.6 tool-calling defect, and observed on
+    DeepSeek here too. The result is a clean-looking finish: no error, no truncation,
+    no edits, and a perfectly well-formed summary that happens to be a sentence about
+    what the model was *about* to do. The one thing it never did was verify.
+    """
+
+    service = MemoryService(
+        SimpleNamespace(write_agent_backend="pi", write_recovery_backend="direct")
+    )
+    local_date = "2026-08-06"
+    root = tmp_path / "user-one"
+    (root / "Daily").mkdir(parents=True, exist_ok=True)
+    (root / "Daily" / f"{local_date}.md").write_text("# From an older run\n", "utf-8")
+    recovery_calls = []
+
+    class StopsMidThought:
+        def __init__(self, _root):
+            pass
+
+        async def run(self, *_args, **_kwargs):
+            return MemoryAgentResult(
+                conversation_id=local_date,
+                rounds=7,
+                touched=[],
+                summary=(
+                    "Let me check the later parts of the day note for evening episodes"
+                ),
+                verified=False,
+            )
+
+    class Recovery:
+        def __init__(self, _root):
+            recovery_calls.append(1)
+
+        async def run(self, *_args, **_kwargs):
+            return MemoryAgentResult(
+                conversation_id=local_date,
+                rounds=4,
+                touched=[f"Daily/{local_date}.md"],
+                summary="Recorded the day.",
+                verified=True,
+            )
+
+    monkeypatch.setattr(service, "_write_agent_class", lambda: StopsMidThought)
+    monkeypatch.setattr(service, "_recovery_agent_class", lambda: Recovery)
+    monkeypatch.setattr(service.vault, "user_root", lambda _uid: root)
+
+    success, touched = await service._add_day_memory_agent(
+        "A day digest long enough to clear the minimum-length guard.",
+        local_date,
+        "user-one",
+        source_date="2026-08-06T00:00:00+05:30",
+    )
+
+    assert recovery_calls == [1]
+    assert success is True
+    assert f"Daily/{local_date}.md" in touched
