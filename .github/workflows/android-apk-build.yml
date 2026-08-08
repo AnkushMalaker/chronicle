@@ -53,9 +53,20 @@ jobs:
       # took hours and routinely had to be cancelled.
       - name: Build Android APK
         run: |
-          set -euo pipefail
+          set -uo pipefail
           eas build --platform android --profile local --non-interactive --wait --json \
             > "$RUNNER_TEMP/build.json"
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            # A failed cloud build otherwise reports only "Build failed" here, with
+            # the actual Gradle error visible solely on expo.dev. Print it.
+            echo "::group::EAS build result"; cat "$RUNNER_TEMP/build.json" || true; echo "::endgroup::"
+            echo "::group::Last Android build on EAS"
+            eas build:list --platform android --limit 1 --non-interactive --json \
+              | jq '.[0] | {id, status, error, createdAt}'
+            echo "::endgroup::"
+            exit $rc
+          fi
           url=$(jq -r '.[0].artifacts.buildUrl // .[0].artifacts.applicationArchiveUrl' \
             "$RUNNER_TEMP/build.json")
           if [ -z "$url" ] || [ "$url" = "null" ]; then
