@@ -71,6 +71,9 @@ jobs:
         # non-interactive builds with "Failed to set up credentials".
         env:
           EXPO_ASC_API_KEY_PATH: ${{ github.workspace }}/app/asc-api-key.p8
+          # Without this EAS prompts "Apple Team ID:" and dies on unreadable stdin.
+          # It is the OU of the team's distribution certificate, not a secret.
+          EXPO_APPLE_TEAM_ID: '39Z45MQX8Z'
         run: eas build --platform ios --profile testflight --auto-submit --non-interactive
 
       - name: Submit existing build to TestFlight
