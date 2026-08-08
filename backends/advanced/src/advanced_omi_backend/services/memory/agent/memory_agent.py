@@ -773,6 +773,7 @@ async def _search_vault_impl(
     operation: str = "memory_search",
     max_rounds: int = MAX_SEARCH_ROUNDS,
     vault_summary: str = "",
+    user_id: str = "",
 ) -> VaultSearchResult:
     """Read-only retrieval agent: the model drives grep/glob/read to answer ``query``.
 
@@ -786,7 +787,7 @@ async def _search_vault_impl(
         or max_rounds <= 0
     ):
         raise ValueError("memory search max_rounds must be a positive integer")
-    tools = VaultTools(vault_root)
+    tools = VaultTools(vault_root, user_id=user_id)
     system_prompt = await _get_prompt(
         "memory.search_system", SEARCH_SYSTEM_PROMPT, vault_summary
     )
@@ -940,6 +941,7 @@ async def search_vault(
     operation: str = "memory_search",
     max_rounds: int = MAX_SEARCH_ROUNDS,
     vault_summary: str = "",
+    user_id: str = "",
 ) -> VaultSearchResult:
     """Trace Direct retrieval while native OpenAI and canonical tool spans nest below."""
 
@@ -969,6 +971,7 @@ async def search_vault(
             operation=operation,
             max_rounds=max_rounds,
             vault_summary=vault_summary,
+            user_id=user_id,
         )
         set_safe_span_attributes(
             span,

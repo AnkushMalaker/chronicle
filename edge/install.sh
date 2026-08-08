@@ -41,6 +41,7 @@ declare -A SERVICE_PATHS=(
     [tts]=extras/tts
     [llm-services]=extras/llm-services
     [havpe-relay]=extras/havpe-relay
+    [colpali-service]=extras/colpali-service
 )
 
 # ── Colours ───────────────────────────────────────────────────────────

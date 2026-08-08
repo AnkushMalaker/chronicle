@@ -79,23 +79,36 @@ def _audio_item(span: AudioEvidenceSpan) -> TimelineEvidenceItem:
 def _device_item(row: DeviceInputItem) -> TimelineEvidenceItem:
     if row.kind == "immich_memory":
         kind, role = "immich", "user_action"
+    elif row.kind == "screenshot":
+        # Someone chose to share this, so it is a user action rather than whatever
+        # happened to be on screen. Sharing it is already the decision to remember.
+        kind, role = "frame", "user_action"
     elif row.metadata.get("meeting_id"):
         kind, role = "meeting", "application_state"
     else:
         kind, role = "observation", "application_state"
     text_parts = [
         str(row.metadata.get(key) or "")
-        for key in ("app_name", "window_name", "text", "summary")
+        for key in (
+            "app_name",
+            "window_name",
+            "caption",
+            "description",
+            "text",
+            "summary",
+        )
     ]
     if row.samples:
         text_parts.extend(str(sample.get("text") or "") for sample in row.samples[-8:])
     excerpt = (
         " · ".join(part.strip() for part in text_parts if part.strip())[:6000] or None
     )
+    # ``description`` is already in the excerpt and ``ocr_text`` can run to thousands of
+    # characters, so neither belongs in the analysis payload a second time.
     metadata = {
         key: value
         for key, value in row.metadata.items()
-        if key not in {"text", "summary"}
+        if key not in {"text", "summary", "description", "ocr_text"}
     }
     return TimelineEvidenceItem(
         evidence_id=f"{kind}:{row.id}",

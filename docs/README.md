@@ -11,6 +11,7 @@ day-to-day operation, and use [AGENTS.md](../AGENTS.md) for development conventi
 - [Release process](releasing.md): candidate validation, TestFlight, publication, and verification
 - [Audio pipeline](audio-pipeline-architecture.md): session, transcription, and memory flow
 - [Multimodal memory](multimodal-memory.md): observations, event discovery, evidence retrieval, and durable memory
+- [Shared screenshots](shared-screenshots.md): sharing an image from a phone, describing it on arrival, and finding it again
 - [Initialization system](init-system.md): setup wizard and service orchestration
 - [Fleet updates](fleet-updates.md): how nodes learn about and apply code updates
 - [ScreenPipe capture nodes](screenpipe.md): local capture, Chronicle ingestion, desktop controls, and logs

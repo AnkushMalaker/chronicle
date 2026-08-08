@@ -1262,6 +1262,7 @@ class MemoryService(MemoryServiceBase):
                     query,
                     self.vault.user_root(user_id),
                     operation="memory_search",
+                    user_id=user_id,
                 )
             elif backend == "pi":
                 # Lazy: ..agent imports llm_client, which imports this package's config back.
@@ -1271,6 +1272,7 @@ class MemoryService(MemoryServiceBase):
                     query,
                     self.vault.user_root(user_id),
                     operation="memory_search",
+                    user_id=user_id,
                 )
             else:
                 raise ValueError(f"Unsupported memory search backend: {backend}")

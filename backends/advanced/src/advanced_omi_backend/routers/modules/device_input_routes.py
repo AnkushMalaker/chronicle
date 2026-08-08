@@ -1,5 +1,6 @@
 """Pairing, ingestion, bounded source jobs, and timeline APIs for capture devices."""
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -41,6 +42,11 @@ from advanced_omi_backend.services.device_context import (
     select_context_items,
 )
 from advanced_omi_backend.services.memory.vault_manager import ConvDocVaultManager
+from advanced_omi_backend.services.memory.vault_media import (
+    promote_image_bytes,
+    write_media_note,
+)
+from advanced_omi_backend.workers.screenshot_jobs import enqueue_screenshot_description
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +67,11 @@ _ALLOWED_AUDIO_TYPES = {
 _MAX_IMAGE_BYTES = 25 * 1024 * 1024
 # Frames an episode may stage for its picker; mirrors FRAMES_PER_EPISODE.
 _MAX_EPISODE_FRAMES = 6
+# Shared screenshots are stored inline in the item document, so this has to stay well
+# under the 16 MiB BSON limit that _MAX_IMAGE_BYTES above already exceeds. Phone
+# screenshots are 200 KB-2 MB, so this is a wide margin, not a tight budget.
+_MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
+_ALLOWED_SCREENSHOT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
 def _digest(value: str) -> str:
@@ -108,6 +119,47 @@ async def _device_source(authorization: str = Header(default="")) -> CaptureSour
     source = await CaptureSource.find_one(CaptureSource.token_hash == _digest(token))
     if source is None:
         raise HTTPException(status_code=401, detail="Invalid device token")
+    return source
+
+
+async def _mobile_source(user: User) -> CaptureSource:
+    """Get or create the synthetic capture source a user's phone shares through.
+
+    The phone already holds a JWT, so it never pairs: pairing would mint a second
+    long-lived credential on the same device for no gain. ``token_hash`` is therefore
+    deliberately unmatchable — ``_device_source`` only ever looks up a 64-char sha256
+    hex digest, and this is not one — while still satisfying the unique index.
+    """
+    user_id = _user_id(user)
+    source_id = f"mobile-{user_id}"
+    source = await CaptureSource.find_one(
+        CaptureSource.user_id == user_id,
+        CaptureSource.source_id == source_id,
+    )
+    if source is None:
+        source = CaptureSource(
+            user_id=user_id,
+            source_id=source_id,
+            name="Phone",
+            provider="mobile",
+            platform="mobile",
+            token_hash=f"unusable:{secrets.token_hex(32)}",
+            capabilities=["screenshot"],
+        )
+        try:
+            await source.insert()
+        except DuplicateKeyError:
+            source = await CaptureSource.find_one(
+                CaptureSource.user_id == user_id,
+                CaptureSource.source_id == source_id,
+            )
+            if source is None:
+                raise
+    # "Last seen" for a share target genuinely means "last share", so the ordinary
+    # heartbeat staleness rule in _effective_source_status applies without a special case.
+    source.status = "online"
+    source.last_seen_at = utcnow()
+    await source.save()
     return source
 
 
@@ -787,6 +839,96 @@ async def complete_thumbnail_job(
     return {"ok": True, "item_id": str(item.id)}
 
 
+@router.post("/screenshots", status_code=202)
+async def ingest_screenshot(
+    file: UploadFile = File(...),
+    captured_at: Optional[datetime] = Form(default=None),
+    caption: Optional[str] = Form(default=None),
+    origin_app: Optional[str] = Form(default=None),
+    user: User = Depends(current_active_user),
+):
+    """Accept one screenshot shared from the user's phone.
+
+    Push, not pull: every other image path in this router mints a job that a capture
+    node answers later from its own frame store. A phone holds the bytes once and can
+    never serve them again, so it uploads directly and this returns as soon as the
+    image is durable. Describing and indexing it happen afterwards.
+    """
+    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    if content_type not in _ALLOWED_SCREENSHOT_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail="Screenshots must be JPEG, PNG, or WebP; convert before uploading",
+        )
+    data = await file.read(_MAX_SCREENSHOT_BYTES + 1)
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty screenshot upload")
+    if len(data) > _MAX_SCREENSHOT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Screenshot exceeds {_MAX_SCREENSHOT_BYTES // (1024 * 1024)} MiB; "
+                "downscale and retry"
+            ),
+        )
+    if caption and len(caption) > 2000:
+        raise HTTPException(status_code=422, detail="Caption exceeds 2000 characters")
+
+    user_id = _user_id(user)
+    source = await _mobile_source(user)
+    digest = hashlib.sha256(data).hexdigest()
+
+    # The vault copy is written before the document so a durable, content-addressed
+    # original exists even if every downstream stage fails forever.
+    root = ConvDocVaultManager().user_root(user_id)
+    media_path, _ = await asyncio.to_thread(
+        promote_image_bytes, data, content_type, root
+    )
+
+    item = DeviceInputItem(
+        user_id=user_id,
+        source_id=source.source_id,
+        kind="screenshot",
+        source_item_id=digest,
+        captured_at=_as_utc(captured_at) if captured_at else utcnow(),
+        metadata={
+            "caption": (caption or "").strip() or None,
+            "origin_app": (origin_app or "").strip() or None,
+            "shared_at": _utc_iso(utcnow()),
+            "description_state": "pending",
+            "description_attempts": 0,
+            "embed_state": "pending",
+            "embed_attempts": 0,
+        },
+        media_data=data,
+        media_filename=file.filename or f"{digest[:12]}.{content_type.split('/')[-1]}",
+        media_content_type=content_type,
+        content_hash=digest,
+        promoted_path=media_path,
+    )
+    try:
+        await item.insert()
+    except DuplicateKeyError:
+        # The unique (user_id, source_id, kind, source_item_id) index makes a re-share
+        # or a client retry idempotent without any client-supplied dedupe token.
+        existing = await DeviceInputItem.find_one(
+            DeviceInputItem.user_id == user_id,
+            DeviceInputItem.source_id == source.source_id,
+            DeviceInputItem.kind == "screenshot",
+            DeviceInputItem.source_item_id == digest,
+        )
+        if existing is None:
+            raise
+        return {
+            "status": "duplicate",
+            "item_id": str(existing.id),
+            "content_hash": digest,
+        }
+
+    enqueue_screenshot_description(str(item.id))
+    return {"status": "accepted", "item_id": str(item.id), "content_hash": digest}
+
+
 @router.get("/sources")
 async def list_sources(user: User = Depends(current_active_user)):
     rows = (
@@ -961,6 +1103,30 @@ async def _immich_bytes(asset_id: str, endpoint: str) -> tuple[bytes, str]:
         return response.content, content_type
 
 
+@router.get("/media/{digest}/thumbnail")
+async def media_thumbnail(digest: str, user: User = Depends(current_active_user)):
+    """Serve a stored image by its content hash.
+
+    Vault notes are named ``Media/<digest>.md`` and the memory search cites those
+    paths, so a client holding a citation already knows the digest but not the item
+    id. Addressing by content lets a chat message render its own screenshots without
+    the search path having to carry an extra identifier through to the UI.
+    """
+    if not re.fullmatch(r"[0-9a-f]{64}", digest.lower()):
+        raise HTTPException(status_code=400, detail="Malformed content hash")
+    item = await DeviceInputItem.find_one(
+        DeviceInputItem.user_id == _user_id(user),
+        DeviceInputItem.content_hash == digest.lower(),
+    )
+    if item is None or not item.media_data:
+        raise HTTPException(status_code=404, detail="No stored image for that hash")
+    return Response(
+        content=item.media_data,
+        media_type=item.media_content_type or "image/jpeg",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
 @router.get("/items/{item_id}/thumbnail")
 async def context_thumbnail(item_id: str, user: User = Depends(current_active_user)):
     item = await _owned_item(item_id, user)
@@ -1038,39 +1204,25 @@ async def promote_context_item(item_id: str, user: User = Depends(current_active
             detail="Source-media retrieval is not available for this item",
         )
     data, content_type = await _immich_bytes(str(asset_id), "original")
-    digest = hashlib.sha256(data).hexdigest()
-    suffixes = {
-        "image/jpeg": ".jpg",
-        "image/png": ".png",
-        "image/webp": ".webp",
-        "image/heic": ".heic",
-    }
-    suffix = suffixes.get(content_type)
-    if suffix is None:
-        raise HTTPException(status_code=415, detail="Unsupported vault image type")
     root = ConvDocVaultManager().user_root(_user_id(user))
-    media_dir = root / "_media"
-    media_dir.mkdir(parents=True, exist_ok=True)
-    media_path = media_dir / f"{digest}{suffix}"
-    if not media_path.exists():
-        temporary = media_path.with_suffix(media_path.suffix + ".part")
-        temporary.write_bytes(data)
-        os.replace(temporary, media_path)
-    notes_dir = root / "Media"
-    notes_dir.mkdir(parents=True, exist_ok=True)
-    note_path = notes_dir / f"{digest}.md"
-    if not note_path.exists():
-        note_tmp = note_path.with_suffix(".md.part")
-        note_tmp.write_text(
-            f"---\nsource: immich\nasset_id: {asset_id}\ncaptured_at: {item.captured_at.isoformat()}\n---\n\n![[../_media/{media_path.name}]]\n",
-            encoding="utf-8",
+    try:
+        media_path, digest = await asyncio.to_thread(
+            promote_image_bytes, data, content_type, root
         )
-        os.replace(note_tmp, note_path)
-    item.promoted_path = str(media_path.relative_to(root))
+    except ValueError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+    note_path = await asyncio.to_thread(
+        write_media_note,
+        media_path,
+        digest,
+        root,
+        frontmatter={
+            "source": "immich",
+            "asset_id": asset_id,
+            "captured_at": item.captured_at.isoformat(),
+        },
+    )
+    item.promoted_path = media_path
     item.state = "promoted"
     await item.save()
-    return {
-        "status": "promoted",
-        "path": item.promoted_path,
-        "note": str(note_path.relative_to(root)),
-    }
+    return {"status": "promoted", "path": item.promoted_path, "note": note_path}

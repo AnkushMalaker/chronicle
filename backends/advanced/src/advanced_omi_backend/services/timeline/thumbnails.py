@@ -12,26 +12,18 @@ across the episode, a vision pass picks the one that depicts it, and the rest ar
 dropped.
 """
 
-import asyncio
 import json
 import logging
-import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from advanced_omi_backend.models.device_input import DeviceInputJob
 from advanced_omi_backend.models.timeline import TimelineDay, TimelineEpisode, utcnow
-from advanced_omi_backend.services.memory.agent.codex_agent import (
-    codex_executor_available,
-)
+from advanced_omi_backend.services.vision import codex_vision_settings, run_codex_vision
 
 from .executor import settings_dict
 
 logger = logging.getLogger(__name__)
-
-_CODEX_REASONING_EFFORTS = {"minimal", "none", "low", "medium", "high"}
-_CODEX_TIMEOUT_SECONDS = 600
 
 
 def thumbnail_codex_settings(settings: Any = None) -> dict[str, Any]:
@@ -39,21 +31,7 @@ def thumbnail_codex_settings(settings: Any = None) -> dict[str, Any]:
 
     if settings is None:
         settings = (settings_dict().get("thumbnails") or {}).get("codex") or {}
-    model = str(settings.get("model") or "").strip()
-    if not model:
-        raise ValueError(
-            "timeline.thumbnails.codex.model must be explicitly configured"
-        )
-    reasoning = str(settings.get("reasoning_effort") or "").strip().lower()
-    if reasoning and reasoning not in _CODEX_REASONING_EFFORTS:
-        allowed = ", ".join(sorted(_CODEX_REASONING_EFFORTS))
-        raise ValueError(
-            f"timeline.thumbnails.codex.reasoning_effort must be one of {allowed}"
-        )
-    timeout = int(settings.get("timeout_seconds", _CODEX_TIMEOUT_SECONDS))
-    if timeout <= 0:
-        raise ValueError("timeline.thumbnails.codex.timeout_seconds must be positive")
-    return {"model": model, "reasoning_effort": reasoning, "timeout_seconds": timeout}
+    return codex_vision_settings(settings, label="timeline.thumbnails.codex")
 
 
 # One request covers a whole episode, so this is a per-episode cost, not per-frame.
@@ -114,9 +92,6 @@ async def choose_episode_frame(episode: TimelineEpisode) -> dict[str, Any]:
     """Run the vision pass over an episode's fetched frames."""
 
     settings = thumbnail_codex_settings()
-    available, detail = codex_executor_available()
-    if not available:
-        raise RuntimeError(detail)
     context = {
         "title": episode.title,
         "summary": episode.summary,
@@ -126,55 +101,14 @@ async def choose_episode_frame(episode: TimelineEpisode) -> dict[str, Any]:
         "ended_at": _utc(episode.ended_at).isoformat(),
         "frame_ids": [frame["frame_id"] for frame in episode.frame_shortlist],
     }
-    with tempfile.TemporaryDirectory(prefix="chronicle-episode-frame-") as temp_dir:
-        workspace = Path(temp_dir)
-        schema_path = workspace / "choice-schema.json"
-        output_path = workspace / "choice.json"
-        schema_path.write_text(json.dumps(_CHOICE_SCHEMA), encoding="utf-8")
-        command = [
-            detail,
-            "exec",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "--color",
-            "never",
-            "--sandbox",
-            "read-only",
-            "--cd",
-            str(workspace),
-            "--output-schema",
-            str(schema_path),
-            "--output-last-message",
-            str(output_path),
-            "-m",
-            settings["model"],
-        ]
-        if settings["reasoning_effort"]:
-            command += [
-                "-c",
-                f'model_reasoning_effort="{settings["reasoning_effort"]}"',
-            ]
-        for frame in episode.frame_shortlist:
-            image_path = workspace / f"frame-{frame['frame_id']}.jpg"
-            image_path.write_bytes(frame["data"])
-            command += ["--image", str(image_path)]
-        command.append("-")
-        prompt = f"{_PROMPT}\n\nEpisode:\n{json.dumps(context, ensure_ascii=False)}"
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await asyncio.wait_for(
-            process.communicate(prompt.encode("utf-8")),
-            timeout=settings["timeout_seconds"],
-        )
-        if process.returncode != 0:
-            raise RuntimeError(
-                f"episode frame choice failed: {stderr.decode(errors='replace')[-2000:]}"
-            )
-        return json.loads(output_path.read_text(encoding="utf-8"))
+    # Frames are named by id because the prompt tells the model the images are
+    # `frame-<id>.jpg` and asks it to answer with one of those ids.
+    images = [
+        (f"frame-{frame['frame_id']}.jpg", frame["data"])
+        for frame in episode.frame_shortlist
+    ]
+    prompt = f"{_PROMPT}\n\nEpisode:\n{json.dumps(context, ensure_ascii=False)}"
+    return await run_codex_vision(prompt, images, _CHOICE_SCHEMA, settings)
 
 
 def apply_frame_choice(episode: TimelineEpisode, choice: dict[str, Any]) -> bool:

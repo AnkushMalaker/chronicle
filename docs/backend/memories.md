@@ -133,11 +133,16 @@ A ScreenPipe recording that the timeline agent judged **conversational** — a s
 ## Read path: the retrieval agent
 
 Search is served by the **read agent** (`_search_vault_grep`). Both the direct and Pi
-search backends are read-only and operate over the vault with three tools:
+search backends are read-only and operate over the vault with four tools:
 
 - `grep` — full-text ripgrep across the notes
 - `glob` — find notes by path/name pattern
 - `read_note` — read a specific note's contents
+- `search_images` — rank saved images by what they *look* like, returning `Media/`
+  note paths for `read_note`. Backed by the optional
+  [ColPali service](../shared-screenshots.md#the-visual-index); when that is
+  unreachable it returns a plain sentence saying so rather than raising, and the
+  images remain findable by grep over their descriptions.
 
 Given a query, the agent greps the vault, reads the relevant notes, and **synthesizes an answer**. The result returned to the caller is:
 

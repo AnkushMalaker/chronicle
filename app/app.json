@@ -2,7 +2,7 @@
   "expo": {
     "name": "chronicle",
     "slug": "friend-lite-app",
-    "version": "1.0.10",
+    "version": "1.0.11",
     "scheme": "chronicle",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -119,7 +119,18 @@
       "expo-image-picker",
       "./plugins/with-ats",
       "expo-asset",
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-share-intent",
+        {
+          "iosActivationRules": {
+            "NSExtensionActivationSupportsImageWithMaxCount": 1
+          },
+          "androidIntentFilters": [
+            "image/*"
+          ]
+        }
+      ]
     ],
     "owner": "cupbearer5517",
     "extra": {

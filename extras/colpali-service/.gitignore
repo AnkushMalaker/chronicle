@@ -1,0 +1,5 @@
+index/*
+!index/.gitkeep
+model_cache/*
+!model_cache/.gitkeep
+.env

@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { MessageCircle, Send, Plus, Trash2, Brain, Clock, User, Bot, BookOpen, Loader2, Wrench } from 'lucide-react'
-import { useQueryClient } from '@tanstack/react-query'
-import { chatApi } from '../services/api'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { chatApi, deviceInputApi } from '../services/api'
 import { useChatSessions, useChatMessages, useCreateChatSession, useDeleteChatSession, useExtractChatMemories } from '../hooks/useChat'
 import { IconButton, MetadataChip } from '../components/ui'
 
@@ -30,6 +30,63 @@ interface TurnStatus {
   note_count?: number
   found?: boolean
   failed?: boolean
+}
+
+// A cited vault note named Media/<sha256>.md is a stored image. The digest is the
+// image's content hash, so a citation is enough to render the picture — nothing extra
+// has to be threaded through the search path, and it still works on reload.
+const MEDIA_NOTE = /(?:^|\/)Media\/([0-9a-f]{64})\.md$/i
+
+// The endpoint is authenticated, so the image is fetched as a blob through the API
+// client and shown from an object URL. A bare <img src="/api/..."> sends no
+// Authorization header and 401s — same reason EpisodeThumbnail does it this way.
+function CitedImage({ digest }: { digest: string }) {
+  const thumbnail = useQuery({
+    queryKey: ['chat-cited-image', digest],
+    queryFn: async () => (await deviceInputApi.getMediaThumbnail(digest)).data,
+    staleTime: Infinity,
+    retry: false,
+  })
+  const url = useMemo(
+    () => (thumbnail.data ? URL.createObjectURL(thumbnail.data) : null),
+    [thumbnail.data]
+  )
+  useEffect(() => () => { if (url) URL.revokeObjectURL(url) }, [url])
+  // A pruned or unreadable image simply is not shown; no broken-image glyph.
+  if (!url) return null
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer"
+      title="Open the full screenshot"
+      className="block overflow-hidden rounded border border-gray-200 hover:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-700"
+    >
+      <img
+        src={url}
+        alt="Screenshot cited from your vault"
+        className="h-24 w-auto max-w-[12rem] object-cover"
+      />
+    </a>
+  )
+}
+
+function CitedImages({ memoriesUsed }: { memoriesUsed: string[] }) {
+  const digests = Array.from(
+    new Set(
+      (memoriesUsed || [])
+        .map((path) => path.match(MEDIA_NOTE)?.[1]?.toLowerCase())
+        .filter((digest): digest is string => Boolean(digest))
+    )
+  )
+  if (digests.length === 0) return null
+  return (
+    <div className="mt-3 flex flex-wrap gap-2">
+      {digests.map((digest) => (
+        <CitedImage key={digest} digest={digest} />
+      ))}
+    </div>
+  )
 }
 
 function describeStatus(status: TurnStatus): string {
@@ -484,7 +541,10 @@ export default function Chat() {
                         : 'bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border border-gray-200 dark:border-gray-700'
                     }`}
                   >
-                    <div className="whitespace-pre-wrap">{message.content}</div>
+                    {/* break-words because cited vault paths are single
+                        64-character tokens that otherwise overflow the bubble. */}
+                    <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                    <CitedImages memoriesUsed={message.memories_used} />
                     <div
                       className={`text-xs mt-2 flex items-center space-x-2 ${
                         message.role === 'user'

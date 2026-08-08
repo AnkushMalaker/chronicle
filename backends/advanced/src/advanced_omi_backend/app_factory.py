@@ -84,6 +84,12 @@ from advanced_omi_backend.services.plugin_service import (
     set_plugin_router,
 )
 from advanced_omi_backend.services.reaper import run_reaper
+from advanced_omi_backend.services.screenshots.describe import (
+    process_screenshot_descriptions,
+)
+from advanced_omi_backend.services.screenshots.embed import (
+    process_screenshot_embeddings,
+)
 from advanced_omi_backend.services.status_reconciler import (
     reconcile_conversation_statuses,
 )
@@ -320,6 +326,10 @@ async def lifespan(app: FastAPI):
             register_cron_job("screen_context_retention", purge_screen_context)
             register_cron_job("timeline_analysis", process_current_timeline_days)
             register_cron_job("episode_thumbnails", process_episode_thumbnails)
+            register_cron_job(
+                "screenshot_descriptions", process_screenshot_descriptions
+            )
+            register_cron_job("screenshot_embeddings", process_screenshot_embeddings)
             register_cron_job("episode_memory", process_episode_memory)
 
             scheduler = get_scheduler()

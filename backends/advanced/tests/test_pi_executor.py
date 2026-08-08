@@ -893,7 +893,7 @@ async def test_search_returns_only_notes_read_through_canonical_tools(
     assert result.usage["input_tokens"] == 35
     assert result.errors == []
     assert captured["command"][captured["command"].index("--tools") + 1] == (
-        "grep,glob,read_note"
+        "grep,glob,read_note,search_images"
     )
 
 
@@ -1188,7 +1188,11 @@ handlers.turn_start();
 await handlers.tool_call({{}}, context);
 handlers.turn_start();
 const blocked = await handlers.tool_call({{}}, context);
-if (tools.length !== 3) throw new Error(`expected 3 tools, got ${{tools.length}}`);
+// Derived, not hardcoded: the contract is that the extension registers exactly the
+// schemas it was handed, which is what stops a write tool leaking into search.
+if (tools.length !== {len(vault_tools.VAULT_SEARCH_TOOL_SCHEMAS)}) {{
+  throw new Error(`expected {len(vault_tools.VAULT_SEARCH_TOOL_SCHEMAS)} tools, got ${{tools.length}}`);
+}}
 if (tools.some((tool) => tool.executionMode !== "sequential")) {{
   throw new Error("all Chronicle tools must execute sequentially");
 }}

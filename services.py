@@ -269,6 +269,15 @@ SERVICES = {
             ("tts", "TTS_PORT", "8770", "/health"),
         ],
     },
+    "colpali-service": {
+        "path": "extras/colpali-service",
+        "compose_file": "docker-compose.yml",
+        "description": "Visual search over saved screenshots (ColPali)",
+        "ports": ["8790"],
+        "health_endpoints": [
+            ("colpali", "COLPALI_PORT", "8790", "/health"),
+        ],
+    },
 }
 
 
@@ -316,6 +325,7 @@ _DISCOVERY_NAMES = {
     "llm-services": "chronicle-llm",
     "wakeword-service": "chronicle-wakeword-service",
     "tts": "chronicle-tts",
+    "colpali-service": "chronicle-colpali",
 }
 
 
@@ -1978,6 +1988,8 @@ def _firewall_specs(service_names) -> dict[str, tuple[int, str]]:
             add(name, "api", env.get("WAKEWORD_PORT") or 8771)
         elif name == "tts":
             add(name, "api", env.get("TTS_PORT") or 8770)
+        elif name == "colpali-service":
+            add(name, "api", env.get("COLPALI_PORT") or 8790)
 
     if service_names:
         # The node agent runs on any start (WebUI control + Tailnet advertising).

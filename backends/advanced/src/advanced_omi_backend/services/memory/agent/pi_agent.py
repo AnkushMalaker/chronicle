@@ -412,12 +412,14 @@ class _VaultToolGateway:
         on_limit: Optional[Callable[[], None]] = None,
         required_notes: Sequence[str] = (),
         forbidden_folders: Sequence[str] = (),
+        user_id: str = "",
     ):
         self.tools = VaultTools(
             vault_root,
             trace_context=current_otel_context(),
             required_notes=required_notes,
             forbidden_folders=forbidden_folders,
+            user_id=user_id,
         )
         self.schemas = list(schemas)
         self.allowed_names = {
@@ -1186,6 +1188,7 @@ async def _invoke_pi(
     max_tool_calls: int = MAX_PI_WRITE_TOOL_CALLS,
     required_notes: Sequence[str] = (),
     forbidden_folders: Sequence[str] = (),
+    user_id: str = "",
 ) -> tuple[_PiEventResult, _VaultToolGateway]:
     """Run Pi and preserve gateway audit state for every post-start failure."""
     started_ns = time.time_ns()
@@ -1200,6 +1203,7 @@ async def _invoke_pi(
         on_limit=lambda: loop.call_soon_threadsafe(limit_signal.set),
         required_notes=required_notes,
         forbidden_folders=forbidden_folders,
+        user_id=user_id,
     )
     events: Optional[_PiEventResult] = None
     redaction_values = [
@@ -1536,6 +1540,7 @@ async def _search_vault_with_pi_impl(
     operation: str = "memory_search",
     max_rounds: int = MAX_SEARCH_ROUNDS,
     vault_summary: str = "",
+    user_id: str = "",
 ) -> VaultSearchResult:
     """Run Chronicle's read-only retrieval agent through Pi."""
     root = Path(vault_root)
@@ -1557,6 +1562,7 @@ async def _search_vault_with_pi_impl(
         config=config,
         max_tool_rounds=max_rounds,
         max_tool_calls=max_rounds * _PI_TOOL_CALLS_PER_SEARCH_ROUND,
+        user_id=user_id,
     )
     answer = PI_SEARCH_FAILURE_ANSWER if events.truncated else events.summary
     rounds = events.rounds
@@ -1639,6 +1645,7 @@ async def search_vault_with_pi(
     operation: str = "memory_search",
     max_rounds: int = MAX_SEARCH_ROUNDS,
     vault_summary: str = "",
+    user_id: str = "",
 ) -> VaultSearchResult:
     """Trace one complete Pi retrieval, including optional cap synthesis."""
 

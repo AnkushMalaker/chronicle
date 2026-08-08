@@ -125,6 +125,11 @@ SERVICES = {
             "cmd": setup_command("extras/tts/init.py"),
             "description": "Text-to-speech (TADA / Fish Speech / KittenTTS)",
         },
+        "colpali-service": {
+            "path": "extras/colpali-service",
+            "cmd": setup_command("extras/colpali-service/init.py"),
+            "description": "Visual search over saved screenshots (ColPali)",
+        },
     },
 }
 
@@ -142,6 +147,7 @@ HF_TOKEN_SERVICES = {
     "llm-services",
     "tts",
     "wakeword-service",
+    "colpali-service",
 }
 
 
@@ -204,6 +210,7 @@ def check_service_exists(service_name, service_config):
         "llm-services",
         "wakeword-service",
         "tts",
+        "colpali-service",
     ]:
         script_path = service_path / "init.py"
         if not script_path.exists():
@@ -1557,6 +1564,7 @@ JOINABLE_SERVICES = {
     "tts": "Text-to-speech — GPU",
     "llm-services": "Local LLM via llama.cpp — GPU",
     "wakeword-service": "Acoustic wake-word detection",
+    "colpali-service": "Visual search over saved screenshots — GPU",
 }
 
 

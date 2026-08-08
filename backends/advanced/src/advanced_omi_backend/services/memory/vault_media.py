@@ -3,6 +3,7 @@
 import hashlib
 import os
 from pathlib import Path
+from typing import Any, Mapping, Optional
 
 _SUFFIXES = {
     "image/jpeg": ".jpg",
@@ -48,3 +49,49 @@ def promote_image_bytes(data: bytes, content_type: str, root: Path) -> tuple[str
         temporary.write_bytes(data)
         os.replace(temporary, target)
     return target.relative_to(root).as_posix(), digest
+
+
+def _frontmatter_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_frontmatter_value(entry) for entry in value) + "]"
+    text = str(value).replace("\n", " ").strip()
+    return f'"{text}"' if any(char in text for char in ':#"[]{}') else text
+
+
+def write_media_note(
+    media_path: str,
+    digest: str,
+    root: Path,
+    *,
+    frontmatter: Mapping[str, Any],
+    body: Optional[str] = None,
+    overwrite: bool = False,
+) -> str:
+    """Write ``{root}/Media/{digest}.md`` embedding ``media_path``.
+
+    Returns the vault-relative note path. Notes live one folder deep, so the embed
+    is ``![[../_media/...]]`` — a bare ``_media/`` link does not resolve in Obsidian.
+
+    ``overwrite`` is for the description pass, which writes a placeholder-free note
+    only once it has prose; promotion leaves an existing note untouched.
+    """
+    notes_dir = root / "Media"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    note_path = notes_dir / f"{digest}.md"
+    if note_path.exists() and not overwrite:
+        return note_path.relative_to(root).as_posix()
+    lines = ["---"]
+    lines += [
+        f"{key}: {_frontmatter_value(value)}"
+        for key, value in frontmatter.items()
+        if value is not None
+    ]
+    lines += ["---", "", f"![[../{media_path}]]", ""]
+    if body:
+        lines += [body.strip(), ""]
+    temporary = note_path.with_suffix(".md.part")
+    temporary.write_text("\n".join(lines), encoding="utf-8")
+    os.replace(temporary, note_path)
+    return note_path.relative_to(root).as_posix()

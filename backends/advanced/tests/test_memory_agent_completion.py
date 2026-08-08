@@ -291,7 +291,7 @@ async def test_direct_search_caps_all_tool_calls_in_multi_call_turn(
     ]
 
     class FakeTools:
-        def __init__(self, _root):
+        def __init__(self, _root, **_kwargs):
             pass
 
         def dispatch(self, name, args):
@@ -362,7 +362,7 @@ async def test_final_search_rejects_unclean_or_tool_call_completion(
     ]
 
     class FakeTools:
-        def __init__(self, _root):
+        def __init__(self, _root, **_kwargs):
             pass
 
         def dispatch(self, _name, _args):

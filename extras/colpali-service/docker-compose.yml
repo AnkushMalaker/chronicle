@@ -1,0 +1,62 @@
+# ColPali visual retrieval service
+#
+# Finds saved screenshots by what they look like, for the queries that defeat both
+# a written description and OCR. Additive: Chronicle's screenshot search works
+# without this service running, so the node hosting it may be asleep.
+#
+# Usage:
+#   docker compose up colpali -d --build
+#   COLPALI_MODEL=vidore/colqwen2.5-v0.2 docker compose up colpali -d --build
+
+services:
+  colpali:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTORCH_CUDA_VERSION: ${PYTORCH_CUDA_VERSION:-cu126}
+    image: ${CHRONICLE_REGISTRY:-}chronicle-colpali:${CHRONICLE_TAG:-latest}
+    ports:
+      - "${COLPALI_PORT:-8790}:8790"
+    volumes:
+      - ./model_cache:/models
+      - ./index:/index
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HF_HOME=/models
+      - HF_TOKEN=${HF_TOKEN:-}
+      # colSmol-256M is ~0.5-1 GB and fits beside a desktop's own VRAM use.
+      # colqwen2.5-v0.2 scores better but wants ~7 GB; see README.
+      - COLPALI_MODEL=${COLPALI_MODEL:-vidore/colSmol-256M}
+      - COLPALI_DEVICE=${COLPALI_DEVICE:-}
+      - COLPALI_IDLE_UNLOAD_SECONDS=${COLPALI_IDLE_UNLOAD_SECONDS:-900}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8790/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    extra_hosts:
+      - host.docker.internal:host-gateway
+
+  # Advertise-only sidecar for a node that runs this service without the node agent.
+  edge-agent:
+    build:
+      context: ../../edge
+    network_mode: host
+    environment:
+      - ADVERTISE=chronicle-colpali:${COLPALI_PORT:-8790}
+    volumes:
+      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+    restart: unless-stopped
+    profiles: [edge]
+
+networks:
+  default: {}

@@ -27,6 +27,7 @@ CHRONICLE_SPEAKER = "chronicle-speaker"
 CHRONICLE_ASR = "chronicle-asr"
 CHRONICLE_LLM = "chronicle-llm"
 CHRONICLE_TTS = "chronicle-tts"
+CHRONICLE_COLPALI = "chronicle-colpali"
 CHRONICLE_RELAY = "chronicle-relay"
 
 _TAILSCALE_SOCKET = "/var/run/tailscale/tailscaled.sock"

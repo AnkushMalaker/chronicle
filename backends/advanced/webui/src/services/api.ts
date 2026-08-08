@@ -222,6 +222,12 @@ export const deviceInputApi = {
     api.get<Blob>(`/api/device-input/items/${itemId}/thumbnail`, {
       responseType: 'blob',
     }),
+  // Addressed by content hash so a cited Media/<digest>.md note can render its own
+  // image without the citation carrying an item id.
+  getMediaThumbnail: (digest: string) =>
+    api.get<Blob>(`/api/device-input/media/${digest}/thumbnail`, {
+      responseType: 'blob',
+    }),
   requestThumbnail: (itemId: string) =>
     api.post(`/api/device-input/items/${itemId}/request-thumbnail`),
   getConversationContext: (conversationId: string) =>

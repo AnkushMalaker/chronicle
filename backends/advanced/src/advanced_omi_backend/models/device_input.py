@@ -22,7 +22,7 @@ class CaptureSource(Document):
     user_id: str
     source_id: str
     name: str
-    provider: Literal["screenpipe", "immich"]
+    provider: Literal["screenpipe", "immich", "mobile"]
     platform: str
     token_hash: str
     capabilities: list[str] = Field(default_factory=list)
@@ -57,7 +57,14 @@ class PairingCode(Document):
 class DeviceInputItem(Document):
     user_id: str
     source_id: str
-    kind: Literal["audio", "activity", "observation", "screen_context", "immich_memory"]
+    kind: Literal[
+        "audio",
+        "activity",
+        "observation",
+        "screen_context",
+        "immich_memory",
+        "screenshot",
+    ]
     source_item_id: str
     captured_at: datetime
     ended_at: Optional[datetime] = None

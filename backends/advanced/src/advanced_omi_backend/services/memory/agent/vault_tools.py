@@ -198,7 +198,11 @@ class VaultTools:
         trace_context: Any = None,
         required_notes: Sequence[str] = (),
         forbidden_folders: Sequence[str] = (),
+        user_id: str = "",
     ):
+        # Whose vault this is. Only search_images needs it — the visual index is a
+        # separate service keyed by user, not a path under the vault root.
+        self.user_id = user_id
         # Notes this run must create or edit; verify_vault reports any that it has not.
         self.required_notes = tuple(required_notes)
         # Folders this run must not touch at all (a day write must not mint a
@@ -868,7 +872,57 @@ class VaultTools:
             return self.create_category(args["name"], args.get("properties"))
         if name == "verify_vault":
             return self.verify_vault()
+        if name == "search_images":
+            return self.search_images(args["query"], limit=args.get("limit", 5))
         raise VaultToolError(f"Unknown tool: {name}")
+
+    def search_images(self, query: str, limit: int = 5) -> str:
+        """Rank saved images by what they look like, returning their note paths.
+
+        Returning ``Media/<digest>.md`` paths rather than raw ids is what makes this
+        compose with everything downstream: the agent's natural next move is
+        ``read_note`` on one, which the search loop already records as evidence and
+        surfaces as a citation. Nothing else has to learn about images.
+
+        Blocking HTTP inside a synchronous dispatch, so the client's timeout is
+        deliberately tight; the visual index is a numpy dot product, and anything
+        slower means the node is unhealthy.
+        """
+        # Imported here to keep the memory package importable on a deployment with
+        # no visual search service and no discovery module present.
+        from advanced_omi_backend.services.colpali_client import search_images_sync
+
+        if not self.user_id:
+            return "Error: image search is not configured on this Chronicle instance."
+        limit = max(1, min(int(limit or 5), 20))
+        hits = search_images_sync(query, self.user_id, limit)
+        if hits is None:
+            # Degrade, never raise: the descriptions are still greppable, and the
+            # agent can recover within the same round.
+            return (
+                "Image search is temporarily unavailable. The images' descriptions "
+                "and text are still searchable with grep over `Media/*.md`."
+            )
+        if not hits:
+            return f"No saved images match {query!r}."
+        lines = [f"{len(hits)} saved image(s) matching {query!r}:", ""]
+        for position, hit in enumerate(hits, start=1):
+            metadata = hit.get("metadata") or {}
+            digest = metadata.get("content_hash") or ""
+            path = f"Media/{digest}.md" if digest else "(no vault note)"
+            captured = str(metadata.get("captured_at") or "")[:16].replace("T", " ")
+            summary = (
+                metadata.get("caption")
+                or metadata.get("description")
+                or metadata.get("app_or_site")
+                or ""
+            )
+            lines.append(f"{position}. {path}  ({captured}, score {hit['score']:.1f})")
+            if summary:
+                lines.append(f"   {str(summary)[:300]}")
+        lines.append("")
+        lines.append("Call read_note on a path for the full description and text.")
+        return "\n".join(lines)
 
 
 # --- OpenAI function-calling schemas ----------------------------------------
@@ -1111,10 +1165,39 @@ _VERIFY_TOOL = {
 }
 
 # Full write-agent toolset.
+_SEARCH_IMAGES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_images",
+        "description": (
+            "Find images the user saved, by what they LOOK like or contain. Use when "
+            "the user refers to a picture, screenshot, receipt, ticket, chart, error "
+            "message, or 'that thing I saved'. Returns vault note paths under "
+            "`Media/` — call read_note on one for the full description and text. "
+            "For facts recorded in prose, use grep instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What the image shows, in natural language.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum images to return (default 5, max 20).",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
 VAULT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     _GREP_TOOL,
     _GLOB_TOOL,
     _READ_TOOL,
+    _SEARCH_IMAGES_TOOL,
     _EDIT_TOOL,
     _EDIT_SECTION_TOOL,
     _WRITE_TOOL,
@@ -1123,5 +1206,11 @@ VAULT_TOOL_SCHEMAS: List[Dict[str, Any]] = [
     _VERIFY_TOOL,
 ]
 
-# Read-only subset for search.
-VAULT_SEARCH_TOOL_SCHEMAS: List[Dict[str, Any]] = [_GREP_TOOL, _GLOB_TOOL, _READ_TOOL]
+# Read-only subset for search. Anything added here must also appear above, or the
+# proper-subset assertion in pi_agent raises at import time and takes the app down.
+VAULT_SEARCH_TOOL_SCHEMAS: List[Dict[str, Any]] = [
+    _GREP_TOOL,
+    _GLOB_TOOL,
+    _READ_TOOL,
+    _SEARCH_IMAGES_TOOL,
+]
