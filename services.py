@@ -16,6 +16,7 @@ import sys
 import time
 from pathlib import Path
 
+import clients
 import requests
 import yaml
 from chronicle_setup import (
@@ -35,8 +36,6 @@ from dotenv import dotenv_values, set_key
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
-
-import clients
 
 console = Console()
 
