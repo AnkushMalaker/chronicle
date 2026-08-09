@@ -174,6 +174,44 @@ async def test_trimmed_audio_keeps_its_absolute_time(clean_db):
     )
 
 
+async def test_every_transcript_version_is_re_timed_not_just_the_active_one(clean_db):
+    """A version left on the old timeline is a delayed failure, not a dormant one.
+
+    Trimming moves the audio all versions describe. One left behind keeps timings that
+    outrun the audio, and it stays invisible until something activates it — a rebuild
+    resetting to the ASR layer, a manual version switch — at which point speaker
+    recognition fails on a segment that ends past the end of the recording.
+    """
+    conv = await _make_conversation_with_chunks(
+        180, segments=[(905.0, 930.0, "hello"), (950.0, 995.0, "goodbye")]
+    )
+    conv.add_transcript_version(
+        version_id="asr",
+        transcript="hello goodbye",
+        words=[],
+        segments=[
+            Conversation.SpeakerSegment(
+                speaker="Unknown Speaker", start=start, end=end, text=text
+            )
+            for start, end, text in [(905.0, 930.0, "hello"), (950.0, 995.0, "goodbye")]
+        ],
+        provider="test",
+        set_as_active=False,
+    )
+    await conv.save()
+
+    assert await trim_silence(conv.conversation_id, [(905.0, 995.0)]) is not None
+
+    refreshed = await Conversation.find_one(
+        Conversation.conversation_id == conv.conversation_id
+    )
+    inactive = next(v for v in refreshed.transcript_versions if v.version_id == "asr")
+    assert refreshed.active_transcript_version != "asr"
+    assert [round(s.start, 1) for s in inactive.segments] == [5.0, 50.0]
+    # Nothing describes audio that no longer exists.
+    assert max(s.end for s in inactive.segments) <= refreshed.audio_total_duration
+
+
 async def test_leading_silence_is_still_trimmed(clean_db):
     """Leading silence is now just the case where the only cut run is at the front."""
     # 1300s: 1200s of leading silence, then speech.

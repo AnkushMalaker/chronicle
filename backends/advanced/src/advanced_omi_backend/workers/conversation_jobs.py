@@ -221,16 +221,14 @@ async def trim_silence(
         + _renumber(kept)
     )
 
-    # 3) Re-time the transcript onto the trimmed timeline.
-    version = next(
-        (
-            v
-            for v in conversation.transcript_versions
-            if v.version_id == conversation.active_transcript_version
-        ),
-        None,
-    )
-    if version is not None:
+    # 3) Re-time every transcript version onto the trimmed timeline.
+    #
+    #    All of them, not just the active one: trimming moves the audio each version
+    #    describes, so a version left behind keeps timings that outrun the audio. That
+    #    stays invisible until something activates it — a rebuild resetting to the ASR
+    #    layer, a manual version switch — and then speaker recognition fails with
+    #    "end_time must be > start_time" on a segment past the end of the recording.
+    for version in conversation.transcript_versions or []:
         version.segments = remap_segments(version.segments or [], plan.regions)
         version.words = remap_words(version.words or [], plan.regions)
         version.transcript = build_transcript_text(version.segments)
