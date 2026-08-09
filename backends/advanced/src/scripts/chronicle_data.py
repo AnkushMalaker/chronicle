@@ -23,6 +23,7 @@ from advanced_omi_backend.services.data_archive import (
     verify_data_archive,
 )
 from advanced_omi_backend.services.memory.rebuild import (
+    TIMELINE_STAGES,
     MemoryRebuildError,
     RebuildStage,
     build_rebuild_plan,
@@ -139,18 +140,24 @@ async def _rebuild(database, args: argparse.Namespace):
                 f"[yellow]Speaker stage will skip {skipped_count} transcript-only "
                 "conversations with no stored audio.[/yellow]"
             )
-    if from_stage is RebuildStage.TIMELINE:
+    if from_stage in TIMELINE_STAGES:
         days = await build_timeline_days(database, plan.user_ids)
+        diarize = (
+            "re-diarizing every recording first"
+            if from_stage is RebuildStage.TIMELINE
+            else "reusing the speaker transcripts already on those recordings"
+        )
         console.print(
-            f"Timeline stage will re-analyse {len(days)} local day(s) with captured "
-            "audio and record each one; the per-conversation memory path does not run."
+            f"{from_stage.value.title()} stage will re-analyse {len(days)} local "
+            f"day(s) with captured audio and record each one, {diarize}; the "
+            "per-conversation memory path does not run."
         )
     if getattr(args, "dry_run", False):
         return None
     extra = (
         " Existing timeline runs, days, and episodes are deleted so analysis starts "
         "from evidence rather than from the boundaries being replaced."
-        if from_stage is RebuildStage.TIMELINE
+        if from_stage in TIMELINE_STAGES
         else ""
     )
     _require_confirmation(
