@@ -135,6 +135,7 @@ dev = [
     "pre-commit-uv>=4.1.4",
 ]
 test = [
+    "chronicle-setup",
     "pytest>=8.4.1",
     "pytest-asyncio>=1.0.0",
     "pytest-spec>=3.2.0",
@@ -146,3 +147,6 @@ test = [
     "pytest-html>=4.0.0",
     "aiosqlite>=0.20.0",  # For test plugin event storage
 ]
+
+[tool.uv.sources]
+chronicle-setup = { path = "../../extras/chronicle-setup", editable = true }
