@@ -228,6 +228,9 @@ services:
     volumes:
       - ./webui/src:/app/src
       - ./webui/public:/app/public
+      # Vite's entry document. Baked into the image otherwise, so edits to the
+      # page title/meta silently kept serving the built-in copy until a rebuild.
+      - ./webui/index.html:/app/index.html:ro
       - ./webui/tailwind.config.js:/app/tailwind.config.js:ro
       - ./webui/chronicle-espresso-preset.js:/app/chronicle-espresso-preset.js:ro
     depends_on:

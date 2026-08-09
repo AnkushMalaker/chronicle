@@ -502,7 +502,7 @@ plugins:
 ### Button Event Flow
 
 ```
-OMI Device (BLE button) → friend-lite-sdk (parse_button_event)
+OMI Device (BLE button) → chronicle-wearable-sdk (parse_button_event)
   → BLE Client (Wyoming protocol: {"type": "button-event", ...})
   → Backend (_handle_button_event) → dispatch_event to plugins
   → Plugin (on_button_event) → can close_conversation/call_plugin

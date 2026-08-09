@@ -15,8 +15,8 @@ import uuid
 from functools import partial
 from typing import Optional
 
+from chronicle_wearable_sdk.decoder import OmiOpusDecoder
 from fastapi import Query, WebSocket, WebSocketDisconnect
-from friend_lite.decoder import OmiOpusDecoder
 from starlette.websockets import WebSocketState
 
 from advanced_omi_backend.auth import websocket_auth

@@ -108,8 +108,8 @@ dependencies = [
 pendant = [
     { name = "bleak" },
     { name = "chronicle-wearable" },
+    { name = "chronicle-wearable-sdk" },
     { name = "easy-audio-interfaces" },
-    { name = "friend-lite-sdk" },
     { name = "pyyaml" },
     { name = "websockets" },
 ]
@@ -120,8 +120,8 @@ requires-dist = [
     { name = "chronicle-client", editable = "../chronicle-client" },
     { name = "chronicle-vault-sync", editable = "../vault-sync" },
     { name = "chronicle-wearable", marker = "extra == 'pendant'", editable = "../local-wearable-client" },
+    { name = "chronicle-wearable-sdk", marker = "extra == 'pendant'", editable = "../chronicle-wearable-sdk" },
     { name = "easy-audio-interfaces", marker = "extra == 'pendant'", specifier = ">=0.8" },
-    { name = "friend-lite-sdk", marker = "extra == 'pendant'", editable = "../friend-lite-sdk" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "minidisc-python", specifier = ">=0.1.0" },
     { name = "pyside6", specifier = ">=6.8.0" },
@@ -162,8 +162,8 @@ version = "0.1.0"
 source = { editable = "../local-wearable-client" }
 dependencies = [
     { name = "chronicle-client" },
+    { name = "chronicle-wearable-sdk" },
     { name = "easy-audio-interfaces" },
-    { name = "friend-lite-sdk" },
     { name = "httpx" },
     { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin'" },
     { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'" },
@@ -178,8 +178,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "chronicle-client", editable = "../chronicle-client" },
+    { name = "chronicle-wearable-sdk", editable = "../chronicle-wearable-sdk" },
     { name = "easy-audio-interfaces", specifier = ">=0.8" },
-    { name = "friend-lite-sdk", editable = "../friend-lite-sdk" },
     { name = "httpx" },
     { name = "pyobjc-framework-applicationservices", marker = "sys_platform == 'darwin'", specifier = ">=10.0" },
     { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'", specifier = ">=10.0" },
@@ -190,6 +190,31 @@ requires-dist = [
     { name = "rumps", marker = "sys_platform == 'darwin'" },
     { name = "websockets" },
 ]
+
+[[package]]
+name = "chronicle-wearable-sdk"
+version = "0.3.0"
+source = { editable = "../chronicle-wearable-sdk" }
+dependencies = [
+    { name = "bleak" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "opuslib" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "bleak", specifier = ">=0.22.3" },
+    { name = "deepgram-sdk", marker = "extra == 'deepgram'", specifier = ">=3.11.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.15.0" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "opuslib", specifier = ">=3.0.1" },
+    { name = "websockets", specifier = ">=14.0.0" },
+    { name = "wyoming", marker = "extra == 'wyoming'" },
+]
+provides-extras = ["deepgram", "wyoming", "dev"]
 
 [[package]]
 name = "dbus-fast"
@@ -277,31 +302,6 @@ dependencies = [
     { name = "termcolor" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/94/ed/3b9a10605163f48517931083aee8364d4d6d3bb1aa9b75eb0a4a5e9fbfc1/fire-0.5.0.tar.gz", hash = "sha256:a6b0d49e98c8963910021f92bba66f65ab440da2982b78eb1bbf95a0a34aacc6", size = 88282, upload-time = "2022-12-12T20:36:31.024Z" }
-
-[[package]]
-name = "friend-lite-sdk"
-version = "0.3.0"
-source = { editable = "../friend-lite-sdk" }
-dependencies = [
-    { name = "bleak" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "opuslib" },
-    { name = "websockets" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "bleak", specifier = ">=0.22.3" },
-    { name = "deepgram-sdk", marker = "extra == 'deepgram'", specifier = ">=3.11.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.15.0" },
-    { name = "numpy", specifier = ">=1.26" },
-    { name = "opuslib", specifier = ">=3.0.1" },
-    { name = "websockets", specifier = ">=14.0.0" },
-    { name = "wyoming", marker = "extra == 'wyoming'" },
-]
-provides-extras = ["deepgram", "wyoming", "dev"]
 
 [[package]]
 name = "h11"

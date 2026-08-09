@@ -218,7 +218,7 @@ OMI Device (BLE)
   → Button press on physical device
   → BLE characteristic notifies with 8-byte payload
   ↓
-friend-lite-sdk (extras/friend-lite-sdk/)
+chronicle-wearable-sdk (extras/chronicle-wearable-sdk/)
   → parse_button_event() converts payload → ButtonState IntEnum
   ↓
 BLE Client (extras/local-wearable-client/ or mobile app)

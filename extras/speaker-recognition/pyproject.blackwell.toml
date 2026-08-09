@@ -1,7 +1,7 @@
 [project]
 name = "speaker-recognition-service"
 version = "0.1.0"
-description = "Speaker recognition and diarization service for friend-lite"
+description = "Speaker recognition and diarization service for Chronicle"
 requires-python = ">=3.10"
 
 dependencies = [

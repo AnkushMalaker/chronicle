@@ -65,7 +65,7 @@ function captureEndpoint(): Plugin {
 export default defineConfig({
   plugins: [react(), captureEndpoint()],
   server: {
-    // 5180 to avoid clashing with the friend-lite webui dev server (5173).
+    // 5180 to avoid clashing with the Chronicle webui dev server (5173).
     port: 5180,
     strictPort: true,
   },

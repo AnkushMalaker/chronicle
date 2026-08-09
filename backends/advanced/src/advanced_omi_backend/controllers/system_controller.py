@@ -1432,9 +1432,6 @@ async def get_memory_provider():
     """Get current memory provider configuration."""
     try:
         current_provider = os.getenv("MEMORY_PROVIDER", "chronicle").lower()
-        # Map legacy provider names to current names
-        if current_provider in ("friend-lite", "friend_lite"):
-            current_provider = "chronicle"
 
         # Chronicle (agentic vault) is currently the only provider.
         available_providers = ["chronicle"]

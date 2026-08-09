@@ -18,7 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 pendant = [
     "chronicle-wearable",
-    "friend-lite-sdk",
+    "chronicle-wearable-sdk",
     "easy_audio_interfaces>=0.8",
     "websockets",
     "pyyaml",
@@ -32,7 +32,7 @@ chronicle-tray = "chronicle_tray.cli:main"
 chronicle-client = { path = "../chronicle-client", editable = true }
 chronicle-vault-sync = { path = "../vault-sync", editable = true }
 chronicle-wearable = { path = "../local-wearable-client", editable = true }
-friend-lite-sdk = { path = "../friend-lite-sdk", editable = true }
+chronicle-wearable-sdk = { path = "../chronicle-wearable-sdk", editable = true }
 
 [build-system]
 requires = ["hatchling"]

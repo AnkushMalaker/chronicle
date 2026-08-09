@@ -194,10 +194,6 @@ class ConfigManager:
         config = self._load_config_yml()
         provider = config.get("memory", {}).get("provider", "chronicle").lower()
 
-        # Map legacy names
-        if provider in ("friend-lite", "friend_lite"):
-            provider = "chronicle"
-
         return provider
 
     def set_memory_provider(self, provider: str) -> Dict[str, Any]:

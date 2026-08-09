@@ -61,7 +61,7 @@ jobs:
         run: eas init --force --non-interactive
 
       - name: Build Android APK
-        run: eas build --platform android --profile local --local --output ${{ github.workspace }}/friend-lite-android.apk --non-interactive
+        run: eas build --platform android --profile local --local --output ${{ github.workspace }}/chronicle-android.apk --non-interactive
 
       - name: Generate release tag
         id: tag
@@ -101,8 +101,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ${{ github.workspace }}/friend-lite-android.apk
-          asset_name: friend-lite-android.apk
+          asset_path: ${{ github.workspace }}/chronicle-android.apk
+          asset_name: chronicle-android.apk
           asset_content_type: application/vnd.android.package-archive
 
   build-ios:
@@ -141,7 +141,7 @@ jobs:
         run: eas init --force --non-interactive
 
       - name: Build iOS IPA
-        run: eas build --platform ios --profile local --local --non-interactive --output ${{ github.workspace }}/friend-lite-ios.ipa
+        run: eas build --platform ios --profile local --local --non-interactive --output ${{ github.workspace }}/chronicle-ios.ipa
 
       - name: Upload iOS IPA to Existing Release
         if: needs.build-android.result == 'success'
@@ -150,8 +150,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ needs.build-android.outputs.upload_url }}
-          asset_path: ${{ github.workspace }}/friend-lite-ios.ipa
-          asset_name: friend-lite-ios.ipa
+          asset_path: ${{ github.workspace }}/chronicle-ios.ipa
+          asset_name: chronicle-ios.ipa
           asset_content_type: application/octet-stream
 
       - name: Generate iOS release info
@@ -189,6 +189,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_ios_release.outputs.upload_url }}
-          asset_path: ${{ github.workspace }}/friend-lite-ios.ipa
-          asset_name: friend-lite-ios.ipa
+          asset_path: ${{ github.workspace }}/chronicle-ios.ipa
+          asset_name: chronicle-ios.ipa
           asset_content_type: application/octet-stream

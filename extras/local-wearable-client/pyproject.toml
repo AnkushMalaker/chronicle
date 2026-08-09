@@ -5,7 +5,7 @@ description = "Background service that auto-scans, connects, and streams audio f
 requires-python = ">= 3.10"
 dependencies = [
     "chronicle-client",
-    "friend-lite-sdk",
+    "chronicle-wearable-sdk",
     "easy_audio_interfaces>=0.8",
     "python-dotenv",
     "httpx",
@@ -23,7 +23,7 @@ chronicle-wearable = "chronicle_wearable.cli:main"
 
 [tool.uv.sources]
 chronicle-client = { path = "../chronicle-client", editable = true }
-friend-lite-sdk = { path = "../friend-lite-sdk", editable = true }
+chronicle-wearable-sdk = { path = "../chronicle-wearable-sdk", editable = true }
 
 [build-system]
 requires = ["hatchling"]

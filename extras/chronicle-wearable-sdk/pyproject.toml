@@ -1,5 +1,5 @@
 [project]
-name = "friend-lite-sdk"
+name = "chronicle-wearable-sdk"
 version = "0.3.0"
 description = "Python SDK for OMI/Neo1 BLE wearable devices — audio streaming, button events, and device control"
 readme = "README.md"
@@ -39,4 +39,4 @@ requires = ["setuptools >= 80.0.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["friend_lite*"]
+include = ["chronicle_wearable_sdk*"]

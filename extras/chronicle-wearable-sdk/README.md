@@ -1,26 +1,29 @@
-# friend-lite-sdk
+# chronicle-wearable-sdk
 
-Python SDK for OMI / Friend Lite BLE wearable devices — audio streaming, button events, device control, and transcription.
+Python SDK for OMI / Chronicle BLE wearable devices — audio streaming, button events, device control, and transcription.
 
 Derived from the [OMI Python SDK](https://github.com/BasedHardware/omi/tree/main/sdks/python) (MIT license, Based Hardware Contributors). See `NOTICE` for attribution.
 
 ## Installation
 
+The package lives in this repository and is consumed as a path dependency, so
+nothing is fetched from PyPI:
+
 ```bash
-pip install friend-lite-sdk
+uv add --editable extras/chronicle-wearable-sdk
 ```
 
 With optional transcription support:
 
 ```bash
-pip install "friend-lite-sdk[deepgram]"   # Deepgram cloud transcription
-pip install "friend-lite-sdk[wyoming]"    # Local ASR via Wyoming protocol
-pip install "friend-lite-sdk[deepgram,wyoming]"  # Both
+uv add --editable "extras/chronicle-wearable-sdk[deepgram]"   # Deepgram cloud transcription
+uv add --editable "extras/chronicle-wearable-sdk[wyoming]"    # Local ASR via Wyoming protocol
+uv add --editable "extras/chronicle-wearable-sdk[deepgram,wyoming]"  # Both
 ```
 
 ## Features
 
-- **BLE Audio Streaming** — Connect to OMI/Friend Lite devices and stream Opus-encoded audio
+- **BLE Audio Streaming** — Connect to OMI/Chronicle devices and stream Opus-encoded audio
 - **Button Events** — Subscribe to single tap, double tap, long press events
 - **Haptic Control** — Trigger haptic feedback patterns on supported devices
 - **WiFi Sync** — Configure and trigger WiFi-based audio sync
@@ -32,7 +35,7 @@ pip install "friend-lite-sdk[deepgram,wyoming]"  # Both
 
 ```python
 import asyncio
-from friend_lite import OmiConnection, ButtonState, parse_button_event
+from chronicle_wearable_sdk import OmiConnection, ButtonState, parse_button_event
 
 async def main():
     async with OmiConnection("AA:BB:CC:DD:EE:FF") as conn:
@@ -53,7 +56,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from friend_lite import print_devices
+from chronicle_wearable_sdk import print_devices
 
 asyncio.run(print_devices())
 ```

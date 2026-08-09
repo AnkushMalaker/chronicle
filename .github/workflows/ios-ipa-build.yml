@@ -82,5 +82,5 @@ jobs:
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: ${{ github.workspace }}/app-release.ipa
-          asset_name: friend-lite-ios.ipa
+          asset_name: chronicle-ios.ipa
           asset_content_type: application/octet-stream

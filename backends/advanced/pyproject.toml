@@ -10,7 +10,7 @@ dependencies = [
     "fastmcp>=0.5.0", # MCP server for conversation access
     "motor>=3.7.1",
     "ollama>=0.4.8",
-    "friend-lite-sdk",
+    "chronicle-wearable-sdk",
     "python-dotenv>=1.1.0",
     "uvicorn>=0.34.2",
     "wyoming>=1.6.1",
@@ -150,3 +150,6 @@ test = [
 
 [tool.uv.sources]
 chronicle-setup = { path = "../../extras/chronicle-setup", editable = true }
+# Sourced by git rather than a path dep: the Docker build context is this
+# directory, so ../../extras is outside it. Tracks dev until this lands on main.
+chronicle-wearable-sdk = { git = "https://github.com/SimpleOpenSoftware/chronicle", subdirectory = "extras/chronicle-wearable-sdk", branch = "dev" }
