@@ -275,7 +275,7 @@ async def purge_screen_context() -> dict[str, Any]:
     """
     settings = get_screen_context_settings()
     cutoff = utcnow() - timedelta(days=settings["retention_days"])
-    collection = DeviceInputItem.get_motor_collection()
+    collection = DeviceInputItem.get_pymongo_collection()
     sweepable = {"kind": "screen_context", "state": {"$ne": "promoted"}}
 
     referenced = await collection.distinct(

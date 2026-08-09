@@ -344,3 +344,29 @@ async def test_naive_mongo_delete_timestamps_compare_as_utc(monkeypatch):
     )
 
     assert await _expired_conversation_ids(["conv-1"], BASE) == ["conv-1"]
+
+
+class FakeDeleteResult:
+    deleted_count = 0
+
+
+class FakeDeviceInputCollection:
+    async def distinct(self, field, query):
+        return []
+
+    async def delete_many(self, query):
+        return FakeDeleteResult()
+
+
+async def test_purge_uses_current_beanie_collection_api(monkeypatch):
+    collection = FakeDeviceInputCollection()
+    monkeypatch.setattr(
+        device_context.DeviceInputItem,
+        "get_pymongo_collection",
+        lambda: collection,
+    )
+
+    summary = await device_context.purge_screen_context()
+
+    assert summary["referenced_conversations"] == 0
+    assert summary["removed_orphaned"] == 0
