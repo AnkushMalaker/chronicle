@@ -6,6 +6,8 @@ defaults:
   llm: openai-llm
   embedding: openai-embed
   stt: stt-deepgram
+  # Optional batch provider retried when the primary STT request fails.
+  fallback_stt: ''
   stt_stream: stt-deepgram-stream
   tts: tts-http
 
