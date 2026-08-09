@@ -719,6 +719,9 @@ llm_operations:
     max_tokens: 8000
   title_summary:
     temperature: 0.3
+    # Same overflow as detailed_summary below: the reasoning budget is spent before
+    # any title is emitted, and the job logs a warning and leaves the placeholder.
+    max_tokens: 8000
   detailed_summary:
     temperature: 0.3
     # Reasoning models spend completion tokens on reasoning before any output;
