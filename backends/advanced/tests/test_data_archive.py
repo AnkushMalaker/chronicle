@@ -387,3 +387,66 @@ async def test_import_keeps_first_duplicate_chunk_and_warns(tmp_path: Path):
     warning = result.duplicate_chunk_warnings[0]
     assert warning.kept_chunk_id == str(first_id)
     assert warning.skipped_chunk_id == str(duplicate_id)
+
+
+@pytest.mark.asyncio
+async def test_export_omits_audio_for_excluded_conversations(tmp_path: Path):
+    created_at = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    source = FakeDatabase(
+        {
+            "conversations": [
+                {
+                    "_id": ObjectId(),
+                    "conversation_id": "keep",
+                    "created_at": created_at,
+                },
+                {"_id": ObjectId(), "conversation_id": "dup", "created_at": created_at},
+            ],
+            "audio_chunks": [
+                {
+                    "_id": ObjectId(),
+                    "conversation_id": "keep",
+                    "chunk_index": 0,
+                    "audio_data": b"keep-audio",
+                    "created_at": created_at,
+                },
+                {
+                    "_id": ObjectId(),
+                    "conversation_id": "dup",
+                    "chunk_index": 0,
+                    "audio_data": b"already-backed-up",
+                    "created_at": created_at,
+                },
+            ],
+            "annotations": [{"_id": ObjectId(), "conversation_id": "dup"}],
+        }
+    )
+
+    archive_path = tmp_path / "deduped.chronicle"
+    summary = await create_data_archive(
+        source,
+        archive_path,
+        data_dir=tmp_path / "source",
+        exclude_audio_conversation_ids=["dup"],
+    )
+
+    assert summary.excluded_audio_chunks == 1
+    assert summary.excluded_audio_conversations == 1
+    manifest = verify_data_archive(archive_path)
+    assert manifest["collections"]["audio_chunks"]["documents"] == 1
+    assert manifest["excluded_audio_conversation_ids"] == ["dup"]
+
+    target = FakeDatabase({})
+    await import_data_archive(
+        target, archive_path, data_dir=tmp_path / "target", replace=True
+    )
+
+    chunks = list(target["audio_chunks"].documents.values())
+    assert [chunk["conversation_id"] for chunk in chunks] == ["keep"]
+    # The excluded conversation itself, and its annotations, are still archived.
+    conversations = [
+        document["conversation_id"]
+        for document in target["conversations"].documents.values()
+    ]
+    assert sorted(conversations) == ["dup", "keep"]
+    assert len(target["annotations"].documents) == 1

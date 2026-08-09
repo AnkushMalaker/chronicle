@@ -75,15 +75,29 @@ async def _connect_database():
     return database
 
 
+def _read_id_list(path: Path) -> list[str]:
+    ids = [line.strip() for line in path.read_text().splitlines()]
+    return [value for value in ids if value and not value.startswith("#")]
+
+
 async def _run_export(args: argparse.Namespace) -> None:
     database = await _connect_database()
     output = args.output or _default_archive_path()
+    excluded = _read_id_list(args.exclude_audio_for) if args.exclude_audio_for else []
     with console.status("Exporting Chronicle data..."):
         summary = await create_data_archive(
             database,
             output,
             data_dir=args.data_dir,
             overwrite=args.overwrite,
+            exclude_audio_conversation_ids=excluded,
+        )
+    excluded_note = ""
+    if summary.excluded_audio_conversations:
+        excluded_note = (
+            f"\n[yellow]Audio omitted:[/yellow] {summary.excluded_audio_chunks} chunks "
+            f"from {summary.excluded_audio_conversations} conversations already held by "
+            "an earlier backup; restore those alongside it."
         )
     console.print(
         Panel(
@@ -92,7 +106,8 @@ async def _run_export(args: argparse.Namespace) -> None:
             f"Collections: {summary.collections}\n"
             f"Documents: {summary.documents}\n"
             f"Filesystem files: {summary.files}\n"
-            f"Archive size: {_human_size(summary.bytes_written)}",
+            f"Archive size: {_human_size(summary.bytes_written)}"
+            f"{excluded_note}",
             border_style="green",
         )
     )
@@ -239,6 +254,15 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser = subparsers.add_parser("export", help="Create a full data archive")
     export_parser.add_argument("output", nargs="?", type=Path)
     export_parser.add_argument("--overwrite", action="store_true")
+    export_parser.add_argument(
+        "--exclude-audio-for",
+        type=Path,
+        help=(
+            "File of conversation ids (one per line) whose audio_chunks to omit "
+            "because an earlier backup already holds identical audio; produce it "
+            "with scripts/audio_backup_dedup.py scan --exclude-list"
+        ),
+    )
     _add_common_data_dir(export_parser)
     export_parser.set_defaults(handler=_run_export)
 

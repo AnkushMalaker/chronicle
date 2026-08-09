@@ -50,6 +50,8 @@ class ArchiveSummary:
     documents: int
     files: int
     bytes_written: int
+    excluded_audio_chunks: int = 0
+    excluded_audio_conversations: int = 0
 
 
 @dataclass(frozen=True)
@@ -137,8 +139,17 @@ async def create_data_archive(
     *,
     data_dir: Path,
     overwrite: bool = False,
+    exclude_audio_conversation_ids: Iterable[str] = (),
 ) -> ArchiveSummary:
-    """Export all Mongo collections and durable filesystem data to one archive."""
+    """Export all Mongo collections and durable filesystem data to one archive.
+
+    ``exclude_audio_conversation_ids`` omits those conversations' ``audio_chunks``
+    documents. Everything else about them — the conversation, its transcripts,
+    annotations, waveforms — is still archived, so only the bulky duplicate audio
+    is left out. The archive is then not self-contained for that audio, which the
+    manifest records so a restore can say where the audio has to come from.
+    """
+    excluded_audio = frozenset(exclude_audio_conversation_ids)
     output_path = output_path.expanduser().resolve()
     if output_path.suffix != ARCHIVE_SUFFIX:
         output_path = output_path.with_name(output_path.name + ARCHIVE_SUFFIX)
@@ -157,9 +168,11 @@ async def create_data_archive(
         "file_roots": list(FILE_ROOTS),
         "collections": {},
         "files": {},
+        "excluded_audio_conversation_ids": sorted(excluded_audio),
     }
     total_documents = 0
     total_files = 0
+    excluded_chunks = 0
 
     try:
         with zipfile.ZipFile(
@@ -189,7 +202,15 @@ async def create_data_archive(
                                 ("_id", 1),
                             ]
                         )
+                    skip_audio = excluded_audio and collection_name == "audio_chunks"
                     async for document in cursor:
+                        if (
+                            skip_audio
+                            and str(document.get("conversation_id", ""))
+                            in excluded_audio
+                        ):
+                            excluded_chunks += 1
+                            continue
                         writer.write(BSON.encode(document))
                         count += 1
                 manifest["collections"][collection_name] = {
@@ -234,6 +255,8 @@ async def create_data_archive(
         documents=total_documents,
         files=total_files,
         bytes_written=output_path.stat().st_size,
+        excluded_audio_chunks=excluded_chunks,
+        excluded_audio_conversations=len(excluded_audio),
     )
 
 
