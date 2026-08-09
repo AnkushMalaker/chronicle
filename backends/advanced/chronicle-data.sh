@@ -11,5 +11,11 @@ else
   compose_command=(docker compose)
 fi
 
-exec "${compose_command[@]}" run --rm --no-deps chronicle-backend \
+# Every subcommand here is a bulk scan, not request/response traffic: an export streams
+# every audio chunk through one cursor. The shared client's 20s socketTimeoutMS is right
+# for the API and fatal here -- one slow getMore aborts the whole backup -- and PyMongo
+# gives explicit kwargs precedence over URI options, so this is the only way to raise it.
+exec "${compose_command[@]}" run --rm --no-deps \
+  -e MONGODB_SOCKET_TIMEOUT_MS="${MONGODB_SOCKET_TIMEOUT_MS:-1800000}" \
+  chronicle-backend \
   uv run --offline --no-sync python3 src/scripts/chronicle_data.py "$@"
