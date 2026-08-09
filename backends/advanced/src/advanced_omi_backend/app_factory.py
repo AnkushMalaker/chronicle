@@ -43,6 +43,7 @@ from advanced_omi_backend.models.device_input import (
     DeviceInputJob,
     PairingCode,
 )
+from advanced_omi_backend.models.manual_memory import ManualMemory
 from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
 from advanced_omi_backend.models.system_event import SystemEvent
 from advanced_omi_backend.models.timeline import (
@@ -66,6 +67,12 @@ from advanced_omi_backend.services.audio_stream import AudioStreamProducer
 from advanced_omi_backend.services.device_audio_ingest import process_device_audio
 from advanced_omi_backend.services.device_context import purge_screen_context
 from advanced_omi_backend.services.immich_discovery import scan_immich_memories
+from advanced_omi_backend.services.manual_memories.image import (
+    process_manual_memory_images,
+)
+from advanced_omi_backend.services.manual_memories.visual_index import (
+    process_manual_memory_visual_index,
+)
 from advanced_omi_backend.services.memory import (
     get_memory_service,
     shutdown_memory_service,
@@ -84,12 +91,6 @@ from advanced_omi_backend.services.plugin_service import (
     set_plugin_router,
 )
 from advanced_omi_backend.services.reaper import run_reaper
-from advanced_omi_backend.services.screenshots.describe import (
-    process_screenshot_descriptions,
-)
-from advanced_omi_backend.services.screenshots.embed import (
-    process_screenshot_embeddings,
-)
 from advanced_omi_backend.services.status_reconciler import (
     reconcile_conversation_statuses,
 )
@@ -143,6 +144,7 @@ async def lifespan(app: FastAPI):
                 WaveformData,
                 Annotation,
                 MemoryAuditEntry,
+                ManualMemory,
                 SystemEvent,
                 CaptureSource,
                 PairingCode,
@@ -327,9 +329,11 @@ async def lifespan(app: FastAPI):
             register_cron_job("timeline_analysis", process_current_timeline_days)
             register_cron_job("episode_thumbnails", process_episode_thumbnails)
             register_cron_job(
-                "screenshot_descriptions", process_screenshot_descriptions
+                "manual_memory_image_enrichment", process_manual_memory_images
             )
-            register_cron_job("screenshot_embeddings", process_screenshot_embeddings)
+            register_cron_job(
+                "manual_memory_visual_index", process_manual_memory_visual_index
+            )
             register_cron_job("episode_memory", process_episode_memory)
 
             scheduler = get_scheduler()

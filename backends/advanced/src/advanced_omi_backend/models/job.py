@@ -53,6 +53,7 @@ async def _ensure_beanie_initialized():
                 DeviceInputJob,
                 PairingCode,
             )
+            from advanced_omi_backend.models.manual_memory import ManualMemory
             from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
             from advanced_omi_backend.models.timeline import (
                 AudioEvidenceSpan,
@@ -88,6 +89,7 @@ async def _ensure_beanie_initialized():
                     WaveformData,
                     Annotation,
                     MemoryAuditEntry,
+                    ManualMemory,
                     CaptureSource,
                     PairingCode,
                     DeviceInputItem,

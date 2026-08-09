@@ -46,7 +46,6 @@ from advanced_omi_backend.services.memory.vault_media import (
     promote_image_bytes,
     write_media_note,
 )
-from advanced_omi_backend.workers.screenshot_jobs import enqueue_screenshot_description
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +66,6 @@ _ALLOWED_AUDIO_TYPES = {
 _MAX_IMAGE_BYTES = 25 * 1024 * 1024
 # Frames an episode may stage for its picker; mirrors FRAMES_PER_EPISODE.
 _MAX_EPISODE_FRAMES = 6
-# Shared screenshots are stored inline in the item document, so this has to stay well
-# under the 16 MiB BSON limit that _MAX_IMAGE_BYTES above already exceeds. Phone
-# screenshots are 200 KB-2 MB, so this is a wide margin, not a tight budget.
-_MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
-_ALLOWED_SCREENSHOT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
 def _digest(value: str) -> str:
@@ -144,7 +138,7 @@ async def _mobile_source(user: User) -> CaptureSource:
             provider="mobile",
             platform="mobile",
             token_hash=f"unusable:{secrets.token_hex(32)}",
-            capabilities=["screenshot"],
+            capabilities=["manual_memory"],
         )
         try:
             await source.insert()
@@ -839,96 +833,6 @@ async def complete_thumbnail_job(
     return {"ok": True, "item_id": str(item.id)}
 
 
-@router.post("/screenshots", status_code=202)
-async def ingest_screenshot(
-    file: UploadFile = File(...),
-    captured_at: Optional[datetime] = Form(default=None),
-    caption: Optional[str] = Form(default=None),
-    origin_app: Optional[str] = Form(default=None),
-    user: User = Depends(current_active_user),
-):
-    """Accept one screenshot shared from the user's phone.
-
-    Push, not pull: every other image path in this router mints a job that a capture
-    node answers later from its own frame store. A phone holds the bytes once and can
-    never serve them again, so it uploads directly and this returns as soon as the
-    image is durable. Describing and indexing it happen afterwards.
-    """
-    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
-    if content_type not in _ALLOWED_SCREENSHOT_TYPES:
-        raise HTTPException(
-            status_code=415,
-            detail="Screenshots must be JPEG, PNG, or WebP; convert before uploading",
-        )
-    data = await file.read(_MAX_SCREENSHOT_BYTES + 1)
-    if not data:
-        raise HTTPException(status_code=400, detail="Empty screenshot upload")
-    if len(data) > _MAX_SCREENSHOT_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                f"Screenshot exceeds {_MAX_SCREENSHOT_BYTES // (1024 * 1024)} MiB; "
-                "downscale and retry"
-            ),
-        )
-    if caption and len(caption) > 2000:
-        raise HTTPException(status_code=422, detail="Caption exceeds 2000 characters")
-
-    user_id = _user_id(user)
-    source = await _mobile_source(user)
-    digest = hashlib.sha256(data).hexdigest()
-
-    # The vault copy is written before the document so a durable, content-addressed
-    # original exists even if every downstream stage fails forever.
-    root = ConvDocVaultManager().user_root(user_id)
-    media_path, _ = await asyncio.to_thread(
-        promote_image_bytes, data, content_type, root
-    )
-
-    item = DeviceInputItem(
-        user_id=user_id,
-        source_id=source.source_id,
-        kind="screenshot",
-        source_item_id=digest,
-        captured_at=_as_utc(captured_at) if captured_at else utcnow(),
-        metadata={
-            "caption": (caption or "").strip() or None,
-            "origin_app": (origin_app or "").strip() or None,
-            "shared_at": _utc_iso(utcnow()),
-            "description_state": "pending",
-            "description_attempts": 0,
-            "embed_state": "pending",
-            "embed_attempts": 0,
-        },
-        media_data=data,
-        media_filename=file.filename or f"{digest[:12]}.{content_type.split('/')[-1]}",
-        media_content_type=content_type,
-        content_hash=digest,
-        promoted_path=media_path,
-    )
-    try:
-        await item.insert()
-    except DuplicateKeyError:
-        # The unique (user_id, source_id, kind, source_item_id) index makes a re-share
-        # or a client retry idempotent without any client-supplied dedupe token.
-        existing = await DeviceInputItem.find_one(
-            DeviceInputItem.user_id == user_id,
-            DeviceInputItem.source_id == source.source_id,
-            DeviceInputItem.kind == "screenshot",
-            DeviceInputItem.source_item_id == digest,
-        )
-        if existing is None:
-            raise
-        return {
-            "status": "duplicate",
-            "item_id": str(existing.id),
-            "content_hash": digest,
-        }
-
-    enqueue_screenshot_description(str(item.id))
-    return {"status": "accepted", "item_id": str(item.id), "content_hash": digest}
-
-
 @router.get("/sources")
 async def list_sources(user: User = Depends(current_active_user)):
     rows = (
@@ -1101,30 +1005,6 @@ async def _immich_bytes(asset_id: str, endpoint: str) -> tuple[bytes, str]:
                 status_code=415, detail="Source did not return an image"
             )
         return response.content, content_type
-
-
-@router.get("/media/{digest}/thumbnail")
-async def media_thumbnail(digest: str, user: User = Depends(current_active_user)):
-    """Serve a stored image by its content hash.
-
-    Vault notes are named ``Media/<digest>.md`` and the memory search cites those
-    paths, so a client holding a citation already knows the digest but not the item
-    id. Addressing by content lets a chat message render its own screenshots without
-    the search path having to carry an extra identifier through to the UI.
-    """
-    if not re.fullmatch(r"[0-9a-f]{64}", digest.lower()):
-        raise HTTPException(status_code=400, detail="Malformed content hash")
-    item = await DeviceInputItem.find_one(
-        DeviceInputItem.user_id == _user_id(user),
-        DeviceInputItem.content_hash == digest.lower(),
-    )
-    if item is None or not item.media_data:
-        raise HTTPException(status_code=404, detail="No stored image for that hash")
-    return Response(
-        content=item.media_data,
-        media_type=item.media_content_type or "image/jpeg",
-        headers={"Cache-Control": "private, max-age=3600"},
-    )
 
 
 @router.get("/items/{item_id}/thumbnail")

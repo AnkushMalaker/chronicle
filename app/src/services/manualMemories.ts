@@ -1,4 +1,4 @@
-// Uploading a screenshot the user shared into Chronicle.
+// Creating a manual memory from an image deliberately shared with Chronicle.
 //
 // The share extension only hands the image to this app; the upload happens here so
 // it can reuse the JWT already in secure storage. That is why no keychain access
@@ -15,9 +15,8 @@ const MAX_WIDTH = 2048;
 const JPEG_QUALITY = 0.85;
 
 export interface ShareUploadResult {
-  status: 'accepted' | 'duplicate';
-  itemId: string;
-  contentHash: string;
+  status: 'created' | 'existing';
+  memoryId: string;
 }
 
 /**
@@ -36,10 +35,10 @@ async function toUploadableJpeg(uri: string): Promise<string> {
   return result.uri;
 }
 
-export async function uploadSharedScreenshot(
+export async function createManualMemory(
   uri: string,
   webSocketUrl: string,
-  options: { caption?: string; capturedAt?: Date } = {}
+  options: { note?: string; requestId: string }
 ): Promise<ShareUploadResult> {
   const baseUrl = deriveBaseUrl(webSocketUrl);
   if (!baseUrl) {
@@ -50,17 +49,17 @@ export async function uploadSharedScreenshot(
   const form = new FormData();
   // React Native's FormData takes this shape for a file part; do NOT set a
   // Content-Type header anywhere, or the multipart boundary is lost.
-  form.append('file', {
+  form.append('attachments', {
     uri: jpegUri,
-    name: 'screenshot.jpg',
+    name: 'shared-image.jpg',
     type: 'image/jpeg',
   } as unknown as Blob);
-  form.append('captured_at', (options.capturedAt ?? new Date()).toISOString());
-  if (options.caption?.trim()) {
-    form.append('caption', options.caption.trim());
+  form.append('request_id', options.requestId);
+  if (options.note?.trim()) {
+    form.append('note', options.note.trim());
   }
 
-  const response = await fetchAuthed(`${baseUrl}/api/device-input/screenshots`, {
+  const response = await fetchAuthed(`${baseUrl}/api/manual-memories`, {
     method: 'POST',
     body: form,
   });
@@ -73,15 +72,14 @@ export async function uploadSharedScreenshot(
     } catch {
       // Non-JSON error body; the status line is all we can report.
     }
-    logError('Screenshots', `upload failed: ${detail}`);
+    logError('ManualMemory', `save failed: ${detail}`);
     throw new Error(detail);
   }
 
   const body = await response.json();
-  logInfo('Screenshots', `upload ${body.status} (${body.item_id})`);
+  logInfo('ManualMemory', `save ${body.status} (${body.memory_id})`);
   return {
     status: body.status,
-    itemId: body.item_id,
-    contentHash: body.content_hash,
+    memoryId: body.memory_id,
   };
 }

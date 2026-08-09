@@ -27,7 +27,7 @@ function ThemedStack() {
       <Stack.Screen name="index" options={{ title: 'Chronicle', headerShown: false }} />
       <Stack.Screen name="diagnostics" options={{ title: 'Diagnostics', presentation: 'card' }} />
       <Stack.Screen name="settings" options={{ title: 'Settings', presentation: 'card' }} />
-      <Stack.Screen name="share" options={{ title: 'Add to Chronicle', presentation: 'modal' }} />
+      <Stack.Screen name="share" options={{ title: 'Save a memory', presentation: 'modal' }} />
       <Stack.Screen name="theme-preview" options={{ title: 'Design System', presentation: 'card' }} />
     </Stack>
   );

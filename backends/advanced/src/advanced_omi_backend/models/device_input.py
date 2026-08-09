@@ -63,7 +63,6 @@ class DeviceInputItem(Document):
         "observation",
         "screen_context",
         "immich_memory",
-        "screenshot",
     ]
     source_item_id: str
     captured_at: datetime

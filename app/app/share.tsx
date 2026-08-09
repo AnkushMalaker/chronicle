@@ -1,4 +1,4 @@
-// Confirm screen for a screenshot shared into Chronicle from the share sheet.
+// Confirm screen for an image shared as a manual memory.
 //
 // The share extension hands the image over and opens the app here rather than
 // uploading itself. That keeps the JWT in this app's secure storage (no shared
@@ -6,14 +6,14 @@
 // single most useful signal for finding the image again, and the one thing no
 // vision model can reconstruct.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Image, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useShareIntentContext } from 'expo-share-intent';
 
 import { Body, Button, ButtonRow, InlineAlert, Screen, TextField } from '@/components/ui';
 import { useSharedAppSettings } from '@/contexts/AppSettingsContext';
-import { uploadSharedScreenshot } from '@/services/screenshots';
+import { createManualMemory } from '@/services/manualMemories';
 import { useTheme, type Theme } from '@/theme';
 
 type Phase = 'ready' | 'uploading' | 'done' | 'error';
@@ -30,6 +30,7 @@ export default function ShareScreen() {
   const [caption, setCaption] = useState('');
   const [phase, setPhase] = useState<Phase>('ready');
   const [message, setMessage] = useState<string | null>(null);
+  const requestId = useRef(`${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
   const imageUri = shareIntent?.files?.[0]?.path ?? null;
 
@@ -53,10 +54,13 @@ export default function ShareScreen() {
     setPhase('uploading');
     setMessage(null);
     try {
-      const result = await uploadSharedScreenshot(imageUri, webSocketUrl, { caption });
+      const result = await createManualMemory(imageUri, webSocketUrl, {
+        note: caption,
+        requestId: requestId.current,
+      });
       setPhase('done');
       setMessage(
-        result.status === 'duplicate' ? 'Already saved to Chronicle.' : 'Saved to Chronicle.'
+        result.status === 'existing' ? 'Already saved as a memory.' : 'Memory saved.'
       );
       // Give the confirmation a beat to be read, then get out of the way.
       setTimeout(dismiss, 900);
@@ -80,7 +84,7 @@ export default function ShareScreen() {
 
       <TextField
         label="Note"
-        hint="Optional — why you saved this. It is what you will search for later."
+        hint="Optional — why this matters. Your note stays primary when you search later."
         value={caption}
         onChangeText={setCaption}
         editable={!busy && phase !== 'done'}
@@ -105,7 +109,7 @@ export default function ShareScreen() {
             loading={busy}
             style={s.action}
           >
-            {phase === 'error' ? 'Retry' : 'Save to Chronicle'}
+            {phase === 'error' ? 'Retry' : 'Save memory'}
           </Button>
         )}
       </ButtonRow>

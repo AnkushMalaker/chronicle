@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { MessageCircle, Send, Plus, Trash2, Brain, Clock, User, Bot, BookOpen, Loader2, Wrench } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { chatApi, deviceInputApi } from '../services/api'
+import { chatApi, manualMemoriesApi } from '../services/api'
 import { useChatSessions, useChatMessages, useCreateChatSession, useDeleteChatSession, useExtractChatMemories } from '../hooks/useChat'
 import { IconButton, MetadataChip } from '../components/ui'
 
@@ -32,18 +32,21 @@ interface TurnStatus {
   failed?: boolean
 }
 
-// A cited vault note named Media/<sha256>.md is a stored image. The digest is the
-// image's content hash, so a citation is enough to render the picture — nothing extra
-// has to be threaded through the search path, and it still works on reload.
-const MEDIA_NOTE = /(?:^|\/)Media\/([0-9a-f]{64})\.md$/i
+const MANUAL_MEMORY_NOTE = /(?:^|\/)Manual Memories\/([0-9a-f-]{36})\.md$/i
 
 // The endpoint is authenticated, so the image is fetched as a blob through the API
 // client and shown from an object URL. A bare <img src="/api/..."> sends no
 // Authorization header and 401s — same reason EpisodeThumbnail does it this way.
-function CitedImage({ digest }: { digest: string }) {
+function CitedImage({ memoryId }: { memoryId: string }) {
+  const memory = useQuery({
+    queryKey: ['manual-memory', memoryId],
+    queryFn: async () => (await manualMemoriesApi.get(memoryId)).data,
+  })
+  const attachment = memory.data?.attachments[0]
   const thumbnail = useQuery({
-    queryKey: ['chat-cited-image', digest],
-    queryFn: async () => (await deviceInputApi.getMediaThumbnail(digest)).data,
+    queryKey: ['chat-cited-manual-memory', memoryId, attachment?.attachment_id],
+    queryFn: async () => (await manualMemoriesApi.getThumbnail(memoryId, attachment!.attachment_id)).data,
+    enabled: Boolean(attachment),
     staleTime: Infinity,
     retry: false,
   })
@@ -59,12 +62,12 @@ function CitedImage({ digest }: { digest: string }) {
       href={url}
       target="_blank"
       rel="noreferrer"
-      title="Open the full screenshot"
+      title="Open the saved image"
       className="block overflow-hidden rounded border border-gray-200 hover:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-gray-700"
     >
       <img
         src={url}
-        alt="Screenshot cited from your vault"
+        alt="Image from a cited manual memory"
         className="h-24 w-auto max-w-[12rem] object-cover"
       />
     </a>
@@ -72,18 +75,18 @@ function CitedImage({ digest }: { digest: string }) {
 }
 
 function CitedImages({ memoriesUsed }: { memoriesUsed: string[] }) {
-  const digests = Array.from(
+  const memoryIds = Array.from(
     new Set(
       (memoriesUsed || [])
-        .map((path) => path.match(MEDIA_NOTE)?.[1]?.toLowerCase())
-        .filter((digest): digest is string => Boolean(digest))
+        .map((path) => path.match(MANUAL_MEMORY_NOTE)?.[1]?.toLowerCase())
+        .filter((memoryId): memoryId is string => Boolean(memoryId))
     )
   )
-  if (digests.length === 0) return null
+  if (memoryIds.length === 0) return null
   return (
     <div className="mt-3 flex flex-wrap gap-2">
-      {digests.map((digest) => (
-        <CitedImage key={digest} digest={digest} />
+      {memoryIds.map((memoryId) => (
+        <CitedImage key={memoryId} memoryId={memoryId} />
       ))}
     </div>
   )

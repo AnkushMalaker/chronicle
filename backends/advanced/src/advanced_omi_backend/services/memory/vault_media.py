@@ -95,3 +95,33 @@ def write_media_note(
     temporary.write_text("\n".join(lines), encoding="utf-8")
     os.replace(temporary, note_path)
     return note_path.relative_to(root).as_posix()
+
+
+def write_manual_memory_note(
+    memory_id: str,
+    root: Path,
+    *,
+    frontmatter: Mapping[str, Any],
+    media_paths: list[str],
+    body: Optional[str] = None,
+) -> str:
+    """Atomically write one semantic note for a deliberate manual memory."""
+
+    notes_dir = root / "Manual Memories"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    note_path = notes_dir / f"{memory_id}.md"
+    lines = ["---"]
+    lines += [
+        f"{key}: {_frontmatter_value(value)}"
+        for key, value in frontmatter.items()
+        if value is not None
+    ]
+    lines += ["---", ""]
+    lines += [f"![[../{path}]]" for path in media_paths]
+    lines.append("")
+    lines.append((body or "Manual memory.").strip())
+    lines.append("")
+    temporary = note_path.with_suffix(".md.part")
+    temporary.write_text("\n".join(lines), encoding="utf-8")
+    os.replace(temporary, note_path)
+    return note_path.relative_to(root).as_posix()

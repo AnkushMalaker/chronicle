@@ -878,9 +878,9 @@ watchdog:
     socket_mount_fresh: true
     tls_cert: true
 
-screenshots:
+manual_memories:
   agents:
-    describe:
+    analyze_image:
       backend: codex        # codex | pi (pi is a declared slot, not yet implemented)
   backends:
     codex:
@@ -935,12 +935,12 @@ cron_jobs:
     description: "Give timeline episodes a representative frame from their own interval"
     enabled: true
     schedule: "*/10 * * * *"
-  screenshot_descriptions:
-    description: "Describe shared screenshots the on-arrival job did not complete"
+  manual_memory_image_enrichment:
+    description: "Describe and extract text from saved images not completed on arrival"
     enabled: true
     schedule: "*/5 * * * *"
-  screenshot_embeddings:
-    description: "Index shared screenshots for visual search when the GPU node is up"
+  manual_memory_visual_index:
+    description: "Index manual-memory images for visual search when the GPU node is up"
     enabled: true
     schedule: "*/10 * * * *"
   screen_context_retention:

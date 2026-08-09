@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CalendarDays, Combine, Copy, Link2, Monitor, PencilRuler, RefreshCw } from 'lucide-react'
+import { Bookmark, CalendarDays, Combine, Copy, Image, Link2, Monitor, PencilRuler, RefreshCw } from 'lucide-react'
 import EpisodeCard from '../components/timeline/EpisodeCard'
 import EpisodeLabelBar from '../components/timeline/EpisodeLabelBar'
-import { TimelineEpisodeUpdate, deviceInputApi, timelineApi } from '../services/api'
+import { ManualMemory, TimelineEpisodeUpdate, deviceInputApi, manualMemoriesApi, timelineApi } from '../services/api'
 import { timeAgo } from '../utils/timeAgo'
 import { Button, Card, IconButton } from '../components/ui'
 
@@ -31,6 +31,75 @@ type Interval = { started_at: string; ended_at: string; reason: string }
 
 function clockTime(value: string) {
   return new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
+function ManualMemoryPreview({ memory }: { memory: ManualMemory }) {
+  const attachment = memory.attachments[0]
+  const thumbnail = useQuery({
+    queryKey: ['manual-memory-thumbnail', memory.memory_id, attachment?.attachment_id],
+    queryFn: async () => (await manualMemoriesApi.getThumbnail(memory.memory_id, attachment.attachment_id)).data,
+    enabled: Boolean(attachment),
+    staleTime: Infinity,
+  })
+  const url = useMemo(
+    () => thumbnail.data ? URL.createObjectURL(thumbnail.data) : null,
+    [thumbnail.data],
+  )
+
+  useEffect(() => () => {
+    if (url) URL.revokeObjectURL(url)
+  }, [url])
+
+  if (thumbnail.isLoading) {
+    return <div className="aspect-[4/3] animate-pulse bg-gray-100 dark:bg-gray-800" />
+  }
+  if (!url) {
+    return (
+      <div className="flex aspect-[4/3] items-center justify-center bg-gray-100 text-gray-400 dark:bg-gray-800">
+        <Image className="h-7 w-7" aria-hidden="true" />
+      </div>
+    )
+  }
+  return <img src={url} alt="" className="aspect-[4/3] w-full bg-gray-100 object-contain dark:bg-gray-800" />
+}
+
+function ManualMemories({ items }: { items: ManualMemory[] }) {
+  return (
+    <div className="mb-5 rounded-lg border border-gray-200 p-4 dark:border-gray-700">
+      <div className="mb-3">
+        <h3 className="font-medium text-gray-900 dark:text-gray-100">Manual memories</h3>
+        <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+          Everything you explicitly saved, newest first. These do not depend on timeline analysis.
+        </p>
+      </div>
+      {items.length ? (
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {items.map(item => {
+            const description = item.attachments.find(attachment => attachment.description)?.description || ''
+            const origin = item.source.application || ''
+            return (
+              <article key={item.memory_id} className="overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900">
+                <ManualMemoryPreview memory={item} />
+                <div className="p-3">
+                  <p className="line-clamp-2 text-sm text-gray-800 dark:text-gray-200">
+                    {item.note || description || 'Manual memory.'}
+                  </p>
+                  <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                    {new Date(item.shared_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
+                    {origin ? ` · ${origin}` : ''}
+                  </p>
+                </div>
+              </article>
+            )
+          })}
+        </div>
+      ) : (
+        <div className="rounded-md border border-dashed border-gray-300 p-5 text-sm text-gray-500 dark:border-gray-600 dark:text-gray-400">
+          No manual memories saved yet.
+        </div>
+      )}
+    </div>
+  )
 }
 
 function IntervalList({ title, note, intervals, tone }: {
@@ -71,6 +140,7 @@ export default function Timeline() {
     return `${value.year}-${value.month}-${value.day}`
   })
   const [showRaw, setShowRaw] = useState(false)
+  const [showManualMemories, setShowManualMemories] = useState(false)
   // Labeling is opt-in: these controls mutate the day, and the day is normally read.
   const [labeling, setLabeling] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -89,6 +159,11 @@ export default function Timeline() {
     queryKey: ['raw-device-timeline', day],
     queryFn: async () => (await deviceInputApi.getTimeline(start, end)).data.items,
     enabled: showRaw,
+  })
+  const manualMemories = useQuery({
+    queryKey: ['manual-memories'],
+    queryFn: async () => (await manualMemoriesApi.list()).data.items,
+    enabled: showManualMemories,
   })
   const sources = useQuery({
     queryKey: ['device-input-sources'],
@@ -202,6 +277,14 @@ export default function Timeline() {
             {timeline.data?.coverage?.window_count != null && <span className="text-xs text-gray-500">{timeline.data.coverage.window_count} evidence windows</span>}
           </div>
           <div className="flex gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setShowManualMemories(value => !value)}
+              icon={<Bookmark className="h-4 w-4" />}
+            >
+              {showManualMemories ? 'Hide manual memories' : 'Manual memories'}
+            </Button>
             <Button variant="secondary" size="sm" onClick={() => setShowRaw(value => !value)}>{showRaw ? 'Hide raw capture' : 'Raw capture'}</Button>
             <Button
               variant={labeling ? 'primary' : 'secondary'}
@@ -216,6 +299,12 @@ export default function Timeline() {
             </Button>
           </div>
         </div>
+
+        {showManualMemories && (
+          manualMemories.isLoading
+            ? <div className="mb-5 rounded-lg border border-gray-200 p-4 text-sm text-gray-500 dark:border-gray-700 dark:text-gray-400">Loading manual memories…</div>
+            : <ManualMemories items={manualMemories.data || []} />
+        )}
 
         {progressMessage && <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">{progressMessage}</div>}
         {status?.state === 'failed' && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">Analysis failed. {status.error}</div>}

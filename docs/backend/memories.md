@@ -138,9 +138,9 @@ search backends are read-only and operate over the vault with four tools:
 - `grep` — full-text ripgrep across the notes
 - `glob` — find notes by path/name pattern
 - `read_note` — read a specific note's contents
-- `search_images` — rank saved images by what they *look* like, returning `Media/`
+- `search_images` — rank saved images by what they *look* like, returning `Manual Memories/`
   note paths for `read_note`. Backed by the optional
-  [ColPali service](../shared-screenshots.md#the-visual-index); when that is
+  [ColPali service](../manual-memories.md#enrichment-and-recovery); when that is
   unreachable it returns a plain sentence saying so rather than raising, and the
   images remain findable by grep over their descriptions.
 

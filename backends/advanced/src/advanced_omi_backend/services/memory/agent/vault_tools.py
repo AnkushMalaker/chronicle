@@ -879,7 +879,7 @@ class VaultTools:
     def search_images(self, query: str, limit: int = 5) -> str:
         """Rank saved images by what they look like, returning their note paths.
 
-        Returning ``Media/<digest>.md`` paths rather than raw ids is what makes this
+        Returning manual-memory vault paths rather than raw ids is what makes this
         compose with everything downstream: the agent's natural next move is
         ``read_note`` on one, which the search loop already records as evidence and
         surfaces as a citation. Nothing else has to learn about images.
@@ -901,18 +901,17 @@ class VaultTools:
             # agent can recover within the same round.
             return (
                 "Image search is temporarily unavailable. The images' descriptions "
-                "and text are still searchable with grep over `Media/*.md`."
+                "and text are still searchable with grep over `Manual Memories/*.md`."
             )
         if not hits:
             return f"No saved images match {query!r}."
         lines = [f"{len(hits)} saved image(s) matching {query!r}:", ""]
         for position, hit in enumerate(hits, start=1):
             metadata = hit.get("metadata") or {}
-            digest = metadata.get("content_hash") or ""
-            path = f"Media/{digest}.md" if digest else "(no vault note)"
-            captured = str(metadata.get("captured_at") or "")[:16].replace("T", " ")
+            path = metadata.get("vault_path") or "(no vault note)"
+            captured = str(metadata.get("shared_at") or "")[:16].replace("T", " ")
             summary = (
-                metadata.get("caption")
+                metadata.get("note")
                 or metadata.get("description")
                 or metadata.get("app_or_site")
                 or ""
@@ -1173,7 +1172,7 @@ _SEARCH_IMAGES_TOOL = {
             "Find images the user saved, by what they LOOK like or contain. Use when "
             "the user refers to a picture, screenshot, receipt, ticket, chart, error "
             "message, or 'that thing I saved'. Returns vault note paths under "
-            "`Media/` — call read_note on one for the full description and text. "
+            "`Manual Memories/` — call read_note on one for the full description and text. "
             "For facts recorded in prose, use grep instead."
         ),
         "parameters": {
