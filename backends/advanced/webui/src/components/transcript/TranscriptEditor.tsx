@@ -623,11 +623,11 @@ export default function TranscriptEditor({
   return (
     <div className="space-y-3">
       {showAudio && (
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3">
           <div className="inline-flex rounded-lg bg-gray-100 dark:bg-gray-700 p-1" aria-label="Annotation mode">
             <button
               onClick={() => setAnnotationMode('transcript')}
-              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium ${annotationMode === 'transcript' ? 'bg-white dark:bg-gray-800 shadow text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-300'}`}
+              className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium sm:px-3 ${annotationMode === 'transcript' ? 'bg-white dark:bg-gray-800 shadow text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-300'}`}
             >
               <AlignLeft className="h-3.5 w-3.5" /> Transcript
             </button>
@@ -637,7 +637,7 @@ export default function TranscriptEditor({
                 setEditingSegment(null)
                 setInsertOpen(null)
               }}
-              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium ${annotationMode === 'speakers' ? 'bg-white dark:bg-gray-800 shadow text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-300'}`}
+              className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium sm:px-3 ${annotationMode === 'speakers' ? 'bg-white dark:bg-gray-800 shadow text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-300'}`}
             >
               <Users className="h-3.5 w-3.5" /> Edit speakers & timing
             </button>
@@ -1100,7 +1100,7 @@ export default function TranscriptEditor({
               return (
                 <div key={idx} ref={anchor}>
                   <div
-                    className={`group flex items-center gap-2 py-1.5 px-3 rounded ${
+                    className={`group flex items-start gap-2 py-1.5 px-3 rounded ${
                       isEvent ? 'bg-amber-50 dark:bg-amber-900/25 border-l-2 border-amber-500' : 'bg-green-50 dark:bg-green-900/25 border-l-2 border-green-500'
                     } ${dimmed ? 'opacity-40' : ''}`}
                     onMouseEnter={isEvent ? () => setHoverMarker({ start: segment.start, end: segment.end }) : undefined}
@@ -1111,7 +1111,7 @@ export default function TranscriptEditor({
                         {player.playingSegmentId === `${conversationId}-${idx}` ? <Pause className="h-3 w-3 text-yellow-600" /> : <Play className="h-3 w-3 text-yellow-600" />}
                       </button>
                     )}
-                    <span className="text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase mr-2">{isEvent ? 'event' : 'note'}</span>
+                    <span className="flex-shrink-0 text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase mr-2">{isEvent ? 'event' : 'note'}</span>
                     <span className="text-sm text-gray-800 dark:text-gray-200 italic">{displayText}</span>
                   </div>
                   <InsertDivider afterIndex={idx} />
@@ -1122,7 +1122,7 @@ export default function TranscriptEditor({
             return (
               <div key={idx} ref={anchor}>
                 <div
-                  className={`group flex items-start gap-2 py-1 rounded hover:bg-gray-50 dark:hover:bg-gray-700/50 ${
+                  className={`group flex flex-wrap items-start gap-x-2 gap-y-0.5 py-1 rounded hover:bg-gray-50 dark:hover:bg-gray-700/50 sm:flex-nowrap sm:gap-2 ${
                     delA ? 'bg-red-50 dark:bg-red-900/10 opacity-60' : (!preview && textA) ? 'bg-yellow-50 dark:bg-yellow-900/10' : ''
                   } ${dimmed ? 'opacity-40' : ''}`}
                   onMouseEnter={() => setHoverMarker({ start: segment.start, end: segment.end })}
@@ -1134,7 +1134,10 @@ export default function TranscriptEditor({
                     </button>
                   )}
 
-                  <div className="flex-shrink-0 w-28 inline-flex items-start gap-1">
+                  {/* Narrow screens: speaker + timestamp share the first line and the
+                      text takes a full-width line below (a fixed speaker column
+                      leaves ~180px of text on a phone, wrapping one word per line). */}
+                  <div className="flex-shrink-0 inline-flex items-start gap-1 sm:w-28">
                     {preview ? (
                       <span className={`text-sm font-medium ${speakerColor}`}>{displaySpeaker}</span>
                     ) : (
@@ -1164,7 +1167,7 @@ export default function TranscriptEditor({
                     )}
                   </div>
 
-                  <div className="flex-1 min-w-0">
+                  <div className="order-last w-full min-w-0 sm:order-none sm:w-auto sm:flex-1">
                     {isEditing && !preview ? (
                       <div className="space-y-1">
                         <textarea
@@ -1238,7 +1241,7 @@ export default function TranscriptEditor({
                     </>
                   )}
 
-                  <span className="flex-shrink-0 text-xs text-gray-400 mt-0.5 tabular-nums">
+                  <span className="ml-auto flex-shrink-0 text-xs text-gray-400 mt-0.5 tabular-nums sm:ml-0">
                     {timingA ? formatDuration(timingA.new_start) : formatDuration(segment.start)}
                   </span>
                 </div>

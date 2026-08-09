@@ -135,8 +135,11 @@ export default function Layout() {
                   : <PanelLeftOpen className="h-5 w-5" />}
               </IconButton>
               <Music className="h-8 w-8 text-blue-600 flex-shrink-0" />
-              <h1 className="text-base sm:text-xl font-semibold text-gray-900 dark:text-gray-100 whitespace-nowrap truncate">
-                Chronicle Dashboard
+              <h1 className="text-base sm:text-xl font-semibold text-gray-900 dark:text-gray-100 whitespace-nowrap">
+                {/* The full title does not fit beside the status/action icons on a
+                    phone, and truncating it reads as "Chronicle Dashb…". */}
+                <span className="sm:hidden">Chronicle</span>
+                <span className="hidden sm:inline">Chronicle Dashboard</span>
               </h1>
             </div>
             <div className="flex items-center space-x-2 sm:space-x-4 flex-shrink-0">

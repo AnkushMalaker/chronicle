@@ -29,13 +29,13 @@ export default function ConversationContextLens({ conversationId }: { conversati
   const items = query.data || []
 
   return (
-    <Card raised padded={false} className="p-6">
-      <div className="flex items-center justify-between gap-3 mb-4">
+    <Card raised padded={false} className="p-4 sm:p-6">
+      <div className="flex flex-col gap-2 mb-4 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
         <div>
           <h2 className="font-medium text-gray-900 dark:text-gray-100">Conversation Lens</h2>
           <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Screen and photo context from the same time window.</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-shrink-0 gap-2">
           {items.length > 0 && (
             <IconButton onClick={() => clear.mutate()} disabled={clear.isPending} label="Clear non-vault context">
               <Trash2 className="w-4 h-4" />

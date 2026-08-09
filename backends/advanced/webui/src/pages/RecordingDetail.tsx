@@ -429,12 +429,12 @@ export default function RecordingDetail() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto p-6 space-y-6">
+    <div className="max-w-7xl mx-auto p-4 sm:p-6 space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <button
           onClick={() => navigate(backTo)}
-          className="flex items-center gap-2 text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100 transition-colors"
+          className="flex min-w-0 items-center gap-2 whitespace-nowrap text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100 transition-colors"
         >
           <ArrowLeft className="w-5 h-5" />
           {backLabel}
@@ -580,7 +580,7 @@ export default function RecordingDetail() {
         {/* Left Column - Main Content */}
         <div className="lg:col-span-3 space-y-6">
           {/* Title */}
-          <div id="transcript" className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6 scroll-mt-6">
+          <div id="transcript" className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 sm:p-6 scroll-mt-6">
             {editingTitle ? (
               <div className="space-y-2">
                 <div className="flex items-center space-x-2">
@@ -654,8 +654,8 @@ export default function RecordingDetail() {
 
           {/* Audio + transcript — one shared editor. The waveform doubles as the
               timing editor (auto-zooms when you edit a segment). */}
-          <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
-            <div className="flex items-center justify-between mb-4">
+          <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 sm:p-6">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
               <h2 className="font-medium text-gray-900 dark:text-gray-100">
                 Transcript
                 {isLive && (
