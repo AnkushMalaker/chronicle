@@ -26,6 +26,7 @@ from advanced_omi_backend.services.memory.rebuild import (
     MemoryRebuildError,
     RebuildStage,
     build_rebuild_plan,
+    build_timeline_days,
     execute_memory_rebuild,
 )
 
@@ -138,12 +139,24 @@ async def _rebuild(database, args: argparse.Namespace):
                 f"[yellow]Speaker stage will skip {skipped_count} transcript-only "
                 "conversations with no stored audio.[/yellow]"
             )
+    if from_stage is RebuildStage.TIMELINE:
+        days = await build_timeline_days(database, plan.user_ids)
+        console.print(
+            f"Timeline stage will re-analyse {len(days)} local day(s) with captured "
+            "audio and record each one; the per-conversation memory path does not run."
+        )
     if getattr(args, "dry_run", False):
         return None
+    extra = (
+        " Existing timeline runs, days, and episodes are deleted so analysis starts "
+        "from evidence rather than from the boundaries being replaced."
+        if from_stage is RebuildStage.TIMELINE
+        else ""
+    )
     _require_confirmation(
         "This deletes the selected users' current Markdown memory vaults and memory "
         "audit history, then recreates them from active transcripts. Syncthing "
-        "pairing markers are retained.",
+        f"pairing markers are retained.{extra}",
         args.force,
     )
     backup_dir = None if args.no_vault_backup else args.data_dir / "backups"
@@ -163,6 +176,8 @@ async def _rebuild(database, args: argparse.Namespace):
             f"Speaker skipped (no audio): "
             f"{len(result.skipped_speaker_conversations)}\n"
             f"Memory jobs: {len(result.memory_jobs)}\n"
+            f"Timeline day jobs: {len(result.timeline_jobs)}\n"
+            f"Deleted timeline documents: {result.deleted_timeline_documents}\n"
             f"Users: {len(result.user_ids)}\n"
             f"Deleted vault files: {result.deleted_vault_files}\n"
             f"Deleted audit entries: {result.deleted_audit_entries}\n"

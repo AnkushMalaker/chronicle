@@ -7,11 +7,13 @@ import tarfile
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Optional
+from zoneinfo import ZoneInfo
 
+from beanie import PydanticObjectId
 from rq.exceptions import NoSuchJobError
 from rq.job import Dependency, Job
 
@@ -22,13 +24,18 @@ from advanced_omi_backend.controllers.queue_controller import (
     post_conv_enqueue_kwargs,
     transcription_queue,
 )
+from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services.data_archive import clear_vault_contents
 from advanced_omi_backend.services.memory.audit import MemoryCause, UpdateStrategy
+from advanced_omi_backend.services.timeline.timezone import canonical_timezone
 from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
 from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
 
 VAULT_ROOTS = ("conversation_docs", "memory_md")
 MEMORY_REBUILD_JOB_TIMEOUT = 7200
+# One day = a segmentation agent run over the day's evidence plus a vault write agent
+# run; both are slow, and a dense day escalates the segmentation effort.
+TIMELINE_REBUILD_JOB_TIMEOUT = 10800
 
 import logging
 
@@ -40,10 +47,21 @@ class MemoryRebuildError(RuntimeError):
 
 
 class RebuildStage(str, Enum):
-    """Earliest derived-data stage to rerun during reconstruction."""
+    """Earliest derived-data stage to rerun during reconstruction.
+
+    ``TIMELINE`` is the earliest because episode bounds decide what a memory is *about*.
+    Replaying memory alone reproduces the old container boundaries — the very thing a
+    re-bound exists to replace — so a rebuild that changed audio bounds must start here.
+    """
 
     MEMORY = "memory"
     SPEAKERS = "speakers"
+    TIMELINE = "timeline"
+
+
+# Stages that re-run diarization, and so must read the ASR layer rather than whatever
+# speaker layer is sitting on top of it.
+_DIARIZING_STAGES = frozenset({RebuildStage.SPEAKERS, RebuildStage.TIMELINE})
 
 
 @dataclass(frozen=True)
@@ -76,6 +94,13 @@ class RebuildPlan:
 
 
 @dataclass(frozen=True)
+class RebuildDay:
+    user_id: str
+    local_date: date
+    timezone: str
+
+
+@dataclass(frozen=True)
 class RebuildResult:
     run_id: str
     jobs: tuple[str, ...]
@@ -87,6 +112,9 @@ class RebuildResult:
     deleted_vault_files: int
     deleted_audit_entries: int
     vault_backup: Optional[Path]
+    timeline_jobs: tuple[str, ...] = ()
+    timeline_days: tuple[RebuildDay, ...] = ()
+    deleted_timeline_documents: int = 0
 
 
 def _normalise_user_ids(user_ids: Optional[Iterable[str]]) -> tuple[str, ...]:
@@ -163,14 +191,14 @@ async def build_rebuild_plan(
                 created_at=document.get("created_at"),
                 transcript_version_id=(
                     _speaker_source_version(document)
-                    if from_stage is RebuildStage.SPEAKERS
+                    if from_stage in _DIARIZING_STAGES
                     else document["active_transcript_version"]
                 ),
                 memory_excluded=document.get("memory_excluded", False) is True,
                 active_transcript_version_id=document["active_transcript_version"],
             )
         )
-    if from_stage is RebuildStage.SPEAKERS and conversations_list:
+    if from_stage in _DIARIZING_STAGES and conversations_list:
         conversation_ids = [item.conversation_id for item in conversations_list]
         audio_conversation_ids = set(
             await database["audio_chunks"].distinct(
@@ -190,6 +218,158 @@ async def build_rebuild_plan(
     if requested_users:
         selected_users = requested_users
     return RebuildPlan(conversations=conversations, user_ids=selected_users)
+
+
+async def build_timeline_days(
+    database: Any, user_ids: tuple[str, ...]
+) -> tuple[RebuildDay, ...]:
+    """Every local day these users captured audio on, oldest first.
+
+    Days are derived from each chunk's ``captured_at`` rather than the owning
+    conversation's ``created_at``: a re-bound or uploaded recording is filed on the day
+    it was *recorded*, and those differ by up to several days here. A recording that
+    straddles local midnight belongs to both days, so the span is expanded, not rounded.
+    """
+
+    if not user_ids:
+        return ()
+    zones: dict[str, str] = {}
+    for user in await User.find(
+        {"_id": {"$in": [PydanticObjectId(u) for u in user_ids]}}
+    ).to_list():
+        zones[str(user.id)] = canonical_timezone(user.timezone or "UTC")
+
+    owners: dict[str, str] = {}
+    cursor = database["conversations"].find(
+        {
+            "deleted": {"$ne": True},
+            "data_purpose": {"$ne": "annotation"},
+            "user_id": {"$in": list(user_ids)},
+        },
+        projection={"conversation_id": 1, "user_id": 1},
+    )
+    async for document in cursor:
+        owners[document["conversation_id"]] = str(document["user_id"])
+    if not owners:
+        return ()
+
+    rows = (
+        await database["audio_chunks"]
+        .aggregate(
+            [
+                {
+                    "$match": {
+                        "conversation_id": {"$in": list(owners)},
+                        "deleted": {"$ne": True},
+                        "captured_at": {"$ne": None},
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": "$conversation_id",
+                        "first": {"$min": "$captured_at"},
+                        "last": {"$max": "$captured_at"},
+                    }
+                },
+            ],
+            allowDiskUse=True,
+        )
+        .to_list(length=None)
+    )
+
+    days: set[tuple[str, date, str]] = set()
+    for row in rows:
+        user_id = owners.get(row["_id"])
+        if not user_id:
+            continue
+        zone_name = zones.get(user_id, "UTC")
+        zone = ZoneInfo(zone_name)
+        first = _epoch_to_local_date(row["first"], zone)
+        last = _epoch_to_local_date(row["last"], zone)
+        current = first
+        while current <= last:
+            days.add((user_id, current, zone_name))
+            current += timedelta(days=1)
+    return tuple(
+        RebuildDay(user_id=user_id, local_date=local_date, timezone=zone_name)
+        for user_id, local_date, zone_name in sorted(days)
+    )
+
+
+def _epoch_to_local_date(value: Any, zone: ZoneInfo) -> date:
+    """``captured_at`` is milliseconds since the epoch, UTC."""
+
+    return (
+        datetime.fromtimestamp(float(value) / 1000, tz=timezone.utc)
+        .astimezone(zone)
+        .date()
+    )
+
+
+async def _clear_timeline_state(database: Any, user_ids: tuple[str, ...]) -> int:
+    """Drop the derived timeline so analysis starts from evidence, not prior episodes.
+
+    Runs, days, and episodes are all regenerable. Deleting them is what makes the
+    rebuild honest: a surviving day carries ``memory_state: written``, which is exactly
+    the latch that would skip it, and a surviving episode is offered back to the agent
+    as prior art so it would reproduce the boundaries being replaced.
+    """
+
+    deleted = 0
+    query = {"user_id": {"$in": list(user_ids)}}
+    for name in ("timeline_episodes", "timeline_days", "timeline_analysis_runs"):
+        result = await database[name].delete_many(query)
+        deleted += int(result.deleted_count)
+    return deleted
+
+
+def _enqueue_timeline_rebuild(
+    day: RebuildDay, *, run_id: str, sequence: int, depends_on: Optional[str]
+) -> Job:
+    """Analysis and the day write, chained one day at a time.
+
+    Serial by construction: the write agent takes the per-user vault lock, so parallel
+    days would queue on it anyway while holding worker slots.
+    """
+
+    # Imported here to break the circular import: the job module reaches back into
+    # this package through the timeline memory service.
+    from advanced_omi_backend.workers.timeline_jobs import rebuild_timeline_day_job
+
+    dependency = Dependency(jobs=depends_on, allow_failure=True) if depends_on else None
+    return memory_queue.enqueue(
+        rebuild_timeline_day_job,
+        day.user_id,
+        day.local_date.isoformat(),
+        day.timezone,
+        job_timeout=TIMELINE_REBUILD_JOB_TIMEOUT,
+        result_ttl=JOB_RESULT_TTL,
+        job_id=f"timeline_rebuild_{run_id}_{sequence}_{day.local_date.isoformat()}",
+        description=f"Rebuild timeline for {day.local_date.isoformat()}",
+        depends_on=dependency,
+        meta={"local_date": day.local_date.isoformat(), "trigger": "timeline_rebuild"},
+    )
+
+
+async def _reset_active_versions_to_asr(
+    database: Any, conversations: Iterable[RebuildConversation]
+) -> None:
+    """Point every conversation back at its ASR transcript before re-diarizing.
+
+    Downstream work is allowed to continue after a failed speaker job. Resetting the
+    pointer first guarantees that continuation reads the clean ASR source, never the
+    previously generated (and potentially polluted) speaker version.
+    """
+
+    for item in conversations:
+        if (
+            item.active_transcript_version_id
+            and item.active_transcript_version_id != item.transcript_version_id
+        ):
+            await database["conversations"].update_one(
+                {"conversation_id": item.conversation_id},
+                {"$set": {"active_transcript_version": item.transcript_version_id}},
+            )
 
 
 def _active_rebuild_jobs(conversation_ids: set[str]) -> list[str]:
@@ -313,19 +493,73 @@ async def execute_memory_rebuild(
     )
     deleted_audit_entries = int(audit_result.deleted_count)
 
-    if from_stage is RebuildStage.SPEAKERS:
-        # Memory is allowed to continue after a failed speaker job. Resetting the
-        # pointer first guarantees that continuation reads the clean ASR source,
-        # never the previously generated (and potentially polluted) speaker version.
+    if from_stage is RebuildStage.TIMELINE:
+        deleted_timeline = await _clear_timeline_state(database, plan.user_ids)
+        days = await build_timeline_days(database, plan.user_ids)
+        if not days:
+            raise MemoryRebuildError(
+                "No captured audio found for these users, so there are no days to "
+                "rebuild a timeline from"
+            )
+        run_id = uuid.uuid4().hex[:12]
+        # Speakers first, and the days wait for them: an episode's transcript is the
+        # speaker-labelled one, so segmenting a day whose recordings are still raw ASR
+        # decides its bounds -- and writes its memory -- from text with no speakers in it.
+        await _reset_active_versions_to_asr(database, plan.conversations)
+        speaker_jobs: list[str] = []
+        skipped_speaker_conversations: list[str] = []
+        timeline_jobs: list[str] = []
+        by_user: dict[str, list[RebuildConversation]] = defaultdict(list)
         for item in plan.conversations:
-            if (
-                item.active_transcript_version_id
-                and item.active_transcript_version_id != item.transcript_version_id
-            ):
-                await database["conversations"].update_one(
-                    {"conversation_id": item.conversation_id},
-                    {"$set": {"active_transcript_version": item.transcript_version_id}},
+            by_user[item.user_id].append(item)
+        by_user_days: dict[str, list[RebuildDay]] = defaultdict(list)
+        for day in days:
+            by_user_days[day.user_id].append(day)
+
+        # Chained per user: two users may rebuild in parallel, but one user's days must
+        # not, because each day's write takes that user's vault lock.
+        for user_id in plan.user_ids:
+            dependency = None
+            for sequence, item in enumerate(by_user[user_id], start=1):
+                if not item.has_audio:
+                    logger.warning(
+                        "Speaker rebuild skipped conversation %s: no stored audio",
+                        item.conversation_id,
+                    )
+                    skipped_speaker_conversations.append(item.conversation_id)
+                    continue
+                job = _enqueue_speaker_rebuild(
+                    item, run_id=run_id, sequence=sequence, depends_on=dependency
                 )
+                speaker_jobs.append(job.id)
+                dependency = job.id
+            for sequence, day in enumerate(by_user_days[user_id], start=1):
+                job = _enqueue_timeline_rebuild(
+                    day, run_id=run_id, sequence=sequence, depends_on=dependency
+                )
+                timeline_jobs.append(job.id)
+                dependency = job.id
+        return RebuildResult(
+            run_id=run_id,
+            jobs=tuple((*speaker_jobs, *timeline_jobs)),
+            speaker_jobs=tuple(speaker_jobs),
+            skipped_speaker_conversations=tuple(skipped_speaker_conversations),
+            # Deliberately empty: the day pass is the whole vault write for this stage.
+            # Running the per-conversation path alongside it would record the same
+            # audio twice, under the container boundaries the rebuild is replacing.
+            memory_jobs=(),
+            from_stage=from_stage,
+            user_ids=plan.user_ids,
+            deleted_vault_files=deleted_files,
+            deleted_audit_entries=deleted_audit_entries,
+            vault_backup=vault_backup,
+            timeline_jobs=tuple(timeline_jobs),
+            timeline_days=days,
+            deleted_timeline_documents=deleted_timeline,
+        )
+
+    if from_stage is RebuildStage.SPEAKERS:
+        await _reset_active_versions_to_asr(database, plan.conversations)
 
     run_id = uuid.uuid4().hex[:12]
     by_user: dict[str, list[RebuildConversation]] = defaultdict(list)
