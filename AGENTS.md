@@ -611,6 +611,8 @@ tailscale ip -4
 ### Testing Strategy
 - **Makefile-Based**: All test operations through simple `make` commands (`make test`, `make start`, `make stop`)
 - **One suite, N service profiles**: tests are never selected by whether an API key is present. `tests/profiles.yml` declares which backing services are real for a run; stubs replay recorded real responses from `tests/cassettes/`, so the same assertions hold with or without credentials. Do not add a tag or a skip to work around a missing key — record a cassette (`make record-cassettes`) or fix the stub.
+- **Exercise Production Entry Points**: When adding or changing a cron job, worker job, background task, event handler, or lifecycle hook, add a test that invokes the real registered entry-point function with its external dependencies faked. Testing only extracted helpers is insufficient: the entry-point test must execute dependency lookup and orchestration far enough to catch stale APIs, broken wiring, and initialization errors.
+- **Background Failures Need a Direct Signal**: A healthy process does not prove its background jobs are healthy. For changes to scheduled or asynchronous work, run the entry point directly in tests and verify the relevant job status, metrics, or fresh logs after deployment/restart.
 - **Log Preservation**: Container logs always saved before cleanup (never lose debugging info)
 - **End-to-End Integration**: Robot Framework validates complete audio processing pipeline
 - **Environment Flexibility**: Tests work with both local .env files and CI environment variables
