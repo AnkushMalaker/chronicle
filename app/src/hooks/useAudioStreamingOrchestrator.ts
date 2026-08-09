@@ -13,7 +13,7 @@ interface OrchestratorParams {
     isStreaming: boolean;
     startStreaming: (url: string) => Promise<void>;
     stopStreaming: () => void;
-    sendAudio: (audioBytes: Uint8Array) => void;
+    sendAudio: (audioBytes: Uint8Array, durable?: boolean) => void;
     getWebSocketReadyState: () => number | undefined;
   };
   phoneAudioRecorder: {
@@ -108,12 +108,15 @@ export const useAudioStreamingOrchestrator = ({
 
     try {
       const finalUrl = buildWebSocketUrl(settings.webSocketUrl);
-      await audioStreamer.startStreaming(finalUrl);
       await originalStartAudioListener(async (audioBytes) => {
-        const wsReady = audioStreamer.getWebSocketReadyState();
-        if (wsReady === WebSocket.OPEN && audioBytes.length > 0) {
+        if (audioBytes.length > 0) {
           await audioStreamer.sendAudio(audioBytes);
         }
+      });
+      // BLE capture is independent of network availability. The durable spool above
+      // keeps receiving while this connection attempt fails or reconnects.
+      audioStreamer.startStreaming(finalUrl).catch((error) => {
+        console.warn('[AudioOrchestrator] Initial WebSocket connection failed; buffering locally:', error);
       });
     } catch (error) {
       Alert.alert('Error', 'Could not start audio listening or streaming.');
@@ -140,7 +143,7 @@ export const useAudioStreamingOrchestrator = ({
       await phoneAudioRecorder.startRecording(async (pcmBuffer) => {
         const wsReady = audioStreamer.getWebSocketReadyState();
         if (wsReady === WebSocket.OPEN && pcmBuffer.length > 0) {
-          await audioStreamer.sendAudio(pcmBuffer);
+          await audioStreamer.sendAudio(pcmBuffer, false);
         }
       }, { deviceId, captureProfile: phoneCaptureProfile });
       setIsPhoneAudioMode(true);

@@ -820,6 +820,7 @@ async def _publish_audio_to_stream(
     sample_rate: int,
     channels: int,
     sample_width: int,
+    captured_at: float | None = None,
 ) -> None:
     """
     Publish audio chunk to Redis Stream with chunk tracking.
@@ -850,6 +851,7 @@ async def _publish_audio_to_stream(
         sample_rate=sample_rate,
         channels=channels,
         sample_width=sample_width,
+        captured_at=captured_at,
     )
 
 
@@ -861,7 +863,8 @@ async def _handle_omi_audio_chunk(
     user_id: str,
     client_id: str,
     packet_count: int,
-) -> None:
+    captured_at: float | None = None,
+) -> bool:
     """
     Handle OMI audio chunk: decode Opus to PCM, then publish to stream.
 
@@ -899,13 +902,16 @@ async def _handle_omi_audio_chunk(
             OMI_SAMPLE_RATE,
             OMI_CHANNELS,
             OMI_SAMPLE_WIDTH,
+            captured_at,
         )
+        return True
     else:
         # Log decode failures for first 5 packets
         if packet_count <= 5:
             application_logger.warning(
                 f"❌ Failed to decode OMI packet #{packet_count}: {len(opus_payload)} bytes"
             )
+        return False
 
 
 async def _handle_streaming_mode_audio(
@@ -1627,6 +1633,25 @@ async def handle_omi_websocket(
                 )
 
             elif header["type"] == "audio-chunk" and payload:
+                chunk_data = header.get("data", {})
+                durable_session_id = chunk_data.get("durable_session_id")
+                durable_sequence = chunk_data.get("durable_sequence")
+                receipt_key = None
+                if durable_session_id is not None and durable_sequence is not None:
+                    receipt_key = (
+                        f"mobile-audio-receipt:{user.user_id}:{client_id}:"
+                        f"{durable_session_id}"
+                    )
+                    prior = await audio_stream_producer.redis_client.get(receipt_key)
+                    if prior is not None and int(prior) >= int(durable_sequence):
+                        await ws.send_json(
+                            {
+                                "type": "audio-ack",
+                                "session_id": durable_session_id,
+                                "sequence": int(durable_sequence),
+                            }
+                        )
+                        continue
                 packet_count += 1
                 total_bytes += len(payload)
 
@@ -1635,7 +1660,7 @@ async def handle_omi_websocket(
                         f"🎵 Received OMI audio chunk #{packet_count}: {len(payload)} bytes"
                     )
 
-                await _handle_omi_audio_chunk(
+                decoded = await _handle_omi_audio_chunk(
                     client_state,
                     audio_stream_producer,
                     payload,
@@ -1643,7 +1668,31 @@ async def handle_omi_websocket(
                     user.user_id,
                     client_id,
                     packet_count,
+                    (
+                        float(chunk_data["captured_at_ms"]) / 1000.0
+                        if chunk_data.get("captured_at_ms") is not None
+                        else None
+                    ),
                 )
+
+                if receipt_key is not None and decoded:
+                    # ACK only after the decoded bytes cross the Redis WAL boundary.
+                    await audio_stream_producer.flush_session_buffer(
+                        client_state.stream_session_id,
+                        sample_rate=OMI_SAMPLE_RATE,
+                        channels=OMI_CHANNELS,
+                        sample_width=OMI_SAMPLE_WIDTH,
+                    )
+                    await audio_stream_producer.redis_client.set(
+                        receipt_key, int(durable_sequence), ex=7 * 24 * 60 * 60
+                    )
+                    await ws.send_json(
+                        {
+                            "type": "audio-ack",
+                            "session_id": durable_session_id,
+                            "sequence": int(durable_sequence),
+                        }
+                    )
 
                 if packet_count % 1000 == 0:
                     application_logger.info(

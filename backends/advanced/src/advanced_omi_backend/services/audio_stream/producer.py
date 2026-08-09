@@ -31,6 +31,7 @@ class SessionBuffer:
     stream_name: str
     buffer: bytes = b""
     chunk_count: int = 0
+    captured_at: float | None = None
 
 
 class AudioStreamProducer:
@@ -310,6 +311,7 @@ class AudioStreamProducer:
         sample_rate: int = 16000,
         channels: int = 1,
         sample_width: int = 2,
+        captured_at: float | None = None,
     ) -> list[str]:
         """
         Add audio data to session buffer and publish fixed-size chunks.
@@ -341,6 +343,8 @@ class AudioStreamProducer:
             )
 
         # Add incoming audio to buffer
+        if not session_buffer.buffer:
+            session_buffer.captured_at = captured_at
         session_buffer.buffer += audio_data
 
         # Calculate target chunk size (0.25 seconds of audio)
@@ -369,6 +373,7 @@ class AudioStreamProducer:
                 b"user_id": user_id.encode(),
                 b"client_id": client_id.encode(),
                 b"timestamp": str(time.time()).encode(),
+                b"captured_at": str(session_buffer.captured_at or time.time()).encode(),
                 b"sample_rate": str(sample_rate).encode(),
                 b"channels": str(channels).encode(),
                 b"sample_width": str(sample_width).encode(),
@@ -381,6 +386,12 @@ class AudioStreamProducer:
             )
 
             session_buffer.buffer = session_buffer.buffer[target_chunk_size:]
+            session_buffer.captured_at = (
+                (session_buffer.captured_at or time.time())
+                + (len(chunk_audio) / bytes_per_second)
+                if session_buffer.buffer
+                else None
+            )
             session_buffer.chunk_count = next_chunk_count
             message_ids.append(
                 message_id.decode() if isinstance(message_id, bytes) else message_id
@@ -449,6 +460,7 @@ class AudioStreamProducer:
                 b"user_id": session_buffer.user_id.encode(),
                 b"client_id": session_buffer.client_id.encode(),
                 b"timestamp": str(time.time()).encode(),
+                b"captured_at": str(session_buffer.captured_at or time.time()).encode(),
                 b"sample_rate": str(sample_rate).encode(),
                 b"channels": str(channels).encode(),
                 b"sample_width": str(sample_width).encode(),
@@ -459,6 +471,7 @@ class AudioStreamProducer:
                 session_id, stream_name, chunk_data
             )
             session_buffer.buffer = b""
+            session_buffer.captured_at = None
             session_buffer.chunk_count = next_chunk_count
 
             # Update session tracking

@@ -5,6 +5,7 @@ import notifee, { AndroidImportance } from '@notifee/react-native';
 import NetInfo from '@react-native-community/netinfo';
 import { refreshToken } from '../services/auth';
 import { playDownlinkAudio } from '../utils/audioPlayback';
+import { durableAudioSpool, SpoolPacket } from '../services/durableAudioSpool';
 import { useConnectionLog, ConnectionEventType, ConnectionEvent } from '../contexts/ConnectionLogContext';
 
 interface UseAudioStreamerOptions {
@@ -21,7 +22,7 @@ interface UseAudioStreamer {
   startStreaming: (url: string) => Promise<void>;
   getWebSocketReadyState: () => number | undefined;
   stopStreaming: () => void;
-  sendAudio: (audioBytes: Uint8Array) => void;
+  sendAudio: (audioBytes: Uint8Array, durable?: boolean) => void;
 }
 
 // Wyoming Protocol Types
@@ -110,6 +111,10 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatRef = useRef<NodeJS.Timeout | null>(null);
   const currentUrlRef = useRef<string>('');
+  const outboundChainRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingPacketsRef = useRef<Map<string, SpoolPacket>>(new Map());
+  const drainingSpoolRef = useRef<boolean>(false);
+  const deferredLivePacketsRef = useRef<SpoolPacket[]>([]);
 
   // backoff: 3s, 6s, 12s, ... capped at 30s; up to 10 attempts before showing an error notification
   const reconnectAttemptsRef = useRef<number>(0);
@@ -216,9 +221,41 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     }
   }, [setStateSafe]);
 
+  const sendDurablePacket = useCallback((packet: SpoolPacket) => {
+    pendingPacketsRef.current.set(`${packet.sessionId}:${packet.sequence}`, packet);
+    outboundChainRef.current = outboundChainRef.current.then(async () => {
+      if (websocketRef.current?.readyState !== WebSocket.OPEN) return;
+      await sendWyomingEvent(
+        {
+          type: 'audio-chunk',
+          data: {
+            ...AUDIO_FORMAT,
+            durable_session_id: packet.sessionId,
+            durable_sequence: packet.sequence,
+            captured_at_ms: packet.capturedAtMs,
+          },
+        },
+        packet.payload
+      );
+    });
+  }, [sendWyomingEvent]);
+
+  const drainDurableSpool = useCallback(async () => {
+    drainingSpoolRef.current = true;
+    try {
+      const packets = await durableAudioSpool.pendingPackets();
+      packets.forEach(sendDurablePacket);
+    } finally {
+      deferredLivePacketsRef.current.forEach(sendDurablePacket);
+      deferredLivePacketsRef.current = [];
+      drainingSpoolRef.current = false;
+    }
+  }, [sendDurablePacket]);
+
   // Stop (CHANGED): use explicit close code & reason; clear heartbeat; stop FGS
   const stopStreaming = useCallback(async () => {
     manuallyStoppedRef.current = true;
+    durableAudioSpool.close();
 
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -307,6 +344,14 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     manuallyStoppedRef.current = false;
     authFailedRef.current = false;
 
+    // Keep BLE capture and the durable spool alive even when there is no network.
+    // Starting this after the reachability gate would let Android suspend the JS
+    // runtime during exactly the outage we are trying to survive.
+    await startForegroundServiceNotification(
+      'Chronicle - Recording',
+      'Saving audio securely until the backend is reachable'
+    );
+
     // Network gate
     const netState = await NetInfo.fetch();
     if (!netState.isConnected || !netState.isInternetReachable) {
@@ -315,9 +360,6 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
       logEvent('ws_error', 'Connect aborted: no internet connection');
       return Promise.reject(new Error(errorMsg));
     }
-
-    // Ensure Foreground Service is up so the JS VM isn’t killed when backgrounded
-    await startForegroundServiceNotification('Chronicle - Streaming', 'Keeping WebSocket connection alive');
 
     console.log(`[AudioStreamer] Initializing WebSocket: ${trimmed}`);
     if (websocketRef.current) await stopStreaming(); // close any existing
@@ -365,6 +407,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
             const audioStartEvent: WyomingEvent = { type: 'audio-start', data: AUDIO_FORMAT };
             console.log('[AudioStreamer] Sending audio-start event');
             await sendWyomingEvent(audioStartEvent);
+            await drainDurableSpool();
             console.log('[AudioStreamer] ✅ audio-start sent successfully');
           } catch (e) {
             console.error('[AudioStreamer] audio-start failed:', e);
@@ -380,6 +423,17 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
             // Heartbeat reply — proves the socket is alive end-to-end.
             if (msg.type === 'pong') {
               lastPongRef.current = Date.now();
+              return;
+            }
+            if (msg.type === 'audio-ack') {
+              const key = `${msg.session_id}:${msg.sequence}`;
+              const packet = pendingPacketsRef.current.get(key);
+              if (packet) {
+                pendingPacketsRef.current.delete(key);
+                durableAudioSpool.acknowledge(packet).catch((e) =>
+                  console.error('[AudioStreamer] Failed to retire acknowledged audio:', e)
+                );
+              }
               return;
             }
             if (msg.type === 'error' && (msg.error === 'token_expired' || msg.error === 'authentication_failed' || msg.error === 'user_not_found')) {
@@ -467,9 +521,18 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
         reject(new Error(msg));
       }
     });
-  }, [attemptReconnect, attemptReLogin, notifyInfo, sendWyomingEvent, setStateSafe, stopStreaming, logEvent]);
+  }, [attemptReconnect, attemptReLogin, drainDurableSpool, notifyInfo, sendWyomingEvent, setStateSafe, stopStreaming, logEvent]);
 
-  const sendAudio = useCallback(async (audioBytes: Uint8Array) => {
+  const sendAudio = useCallback(async (audioBytes: Uint8Array, durable = true) => {
+    if (durable && audioBytes.length > 0) {
+      const packet = durableAudioSpool.append(audioBytes);
+      if (drainingSpoolRef.current) {
+        deferredLivePacketsRef.current.push(packet);
+      } else {
+        sendDurablePacket(packet);
+      }
+      return;
+    }
     if (websocketRef.current && websocketRef.current.readyState === WebSocket.OPEN && audioBytes.length > 0) {
       try {
         console.log(`[AudioStreamer] 📤 Sending audio chunk: ${audioBytes.length} bytes`);
@@ -487,7 +550,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
         } bytes=${audioBytes.length} actualReady=${websocketRef.current?.readyState}`
       );
     }
-  }, [sendWyomingEvent, setStateSafe]);
+  }, [sendDurablePacket, sendWyomingEvent, setStateSafe]);
 
   const getWebSocketReadyState = useCallback(() => websocketRef.current?.readyState, []);
 
