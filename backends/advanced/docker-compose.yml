@@ -52,7 +52,7 @@ services:
       - AUTH_SECRET_KEY=${AUTH_SECRET_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - HA_TOKEN=${HA_TOKEN}
-      - CORS_ORIGINS=http://localhost:5173,http://localhost:8000,http://192.168.1.153:5173,http://192.168.1.153:8000,https://localhost:5173,https://localhost:8000,https://100.105.225.45,https://localhost
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:8000,http://192.168.1.153:5173,http://192.168.1.153:8000,https://localhost:5173,https://localhost:8000,https://100.105.225.45,https://localhost,app://obsidian.md
       - REDIS_URL=redis://redis:6379/0
       - MONGODB_URI=mongodb://mongo:27017
       # Service endpoints — what each is for: compose-stack.md#chronicle-backend
