@@ -8,7 +8,12 @@
 # so they're baked into the wakeword-service image (and served to all clients).
 !extras/wakeword-service/tones/*.wav
 **/*.env
+# Suffixed variants too. "**/*.env" only matches names ENDING in .env, so hand-made
+# backups (.env.pre-<date>, .env.bak-<date>) were untracked-but-not-ignored and a
+# blanket `git add` would have published live keys to this public repo.
+**/.env.*
 !**/.env.template
+!**/.env.test.template
 **/memory_config.yaml
 !**/memory_config.yaml.template
 tests/setup/.env.test
