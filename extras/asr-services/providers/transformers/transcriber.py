@@ -44,6 +44,7 @@ class TransformersTranscriber:
             "DEVICE", "cuda" if torch.cuda.is_available() else "cpu"
         )
         self.torch_dtype_str = os.getenv("TORCH_DTYPE", "float16")
+        self.mixed_code = os.getenv("MIXED_CODE", "false").lower() == "true"
 
         # Determine torch dtype
         dtype_map = {
@@ -145,7 +146,23 @@ class TransformersTranscriber:
 
         # Pipeline options
         generate_kwargs = {}
-        if language:
+        if self.mixed_code:
+            if not language:
+                raise ValueError("MIXED_CODE=true requires LANGUAGE=hi or LANGUAGE=en")
+            ids = self.processor.tokenizer.convert_tokens_to_ids
+            mixed_code_ids = self.processor.tokenizer(
+                "<|mixedcode|>", add_special_tokens=False
+            ).input_ids
+            prompt = [
+                ids("<|startoftranscript|>"),
+                ids(f"<|{language}|>"),
+                *mixed_code_ids,
+                ids("<|transcribe|>"),
+            ]
+            generate_kwargs["decoder_input_ids"] = torch.tensor(
+                [prompt], device=self.device
+            )
+        elif language:
             generate_kwargs["language"] = language
 
         # Determine timestamp mode

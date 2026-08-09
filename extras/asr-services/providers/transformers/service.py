@@ -37,6 +37,7 @@ class TransformersService(BaseASRService):
         USE_FLASH_ATTENTION: Enable Flash Attention 2 (default: false)
         DEVICE: Device to use (default: cuda)
         LANGUAGE: Force language code (default: None for auto-detect)
+        MIXED_CODE: Use the model-specific Hinglish mixed-code decoder prompt
     """
 
     def __init__(self, model_id: Optional[str] = None):

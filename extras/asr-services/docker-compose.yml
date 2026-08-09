@@ -141,6 +141,7 @@ services:
       - DEVICE_INDEX=${DEVICE_INDEX:-0}
       - VAD_FILTER=${VAD_FILTER:-true}
       - LANGUAGE=${LANGUAGE:-}
+      - MIXED_CODE=${MIXED_CODE:-false}
       - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
       - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
       - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
@@ -458,6 +459,9 @@ services:
       - CHRONICLE_INGEST_URL=${CHRONICLE_INGEST_URL:-}
       - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
       - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     restart: unless-stopped
 
   # ============================================================================
