@@ -1,6 +1,33 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { systemApi } from '../services/api'
 
+interface HealthService {
+  healthy: boolean
+  status?: string
+}
+
+export interface SystemHealthSummary {
+  services: Record<string, HealthService>
+  overall_healthy: boolean
+  status: 'healthy' | 'degraded' | 'critical'
+}
+
+/** Lightweight fleet heartbeat for persistent navigation chrome. */
+export function useSystemHealthSummary(isAdmin: boolean) {
+  return useQuery<SystemHealthSummary>({
+    queryKey: ['system', 'healthSummary'],
+    queryFn: async () => {
+      const response = await systemApi.getHealth()
+      return response.data
+    },
+    enabled: isAdmin,
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: true,
+    retry: 1,
+  })
+}
+
 export function useSystemData(isAdmin: boolean) {
   return useQuery({
     queryKey: ['system', 'data'],

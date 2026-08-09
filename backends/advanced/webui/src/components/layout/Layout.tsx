@@ -5,6 +5,7 @@ import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useSSE, SSEStatus } from '../../hooks/useSSE'
 import { useSystemEventsSummary } from '../../hooks/useSystemEvents'
+import { useSystemHealthSummary } from '../../hooks/useSystem'
 import GlobalRecordingIndicator from './GlobalRecordingIndicator'
 import UserLoopModal from '../UserLoopModal'
 import { IconButton } from '../ui'
@@ -36,6 +37,20 @@ export default function Layout() {
   // the SSE 'system.error' invalidation in useSSE).
   const { data: sysSummary } = useSystemEventsSummary(24, isAdmin)
   const unackedErrors = sysSummary?.unacked ?? 0
+
+  // Keep service outages visible from every page. The health endpoint includes
+  // optional configured services (wake-word, speaker recognition, etc.), not
+  // just the critical dependencies that decide whether the backend can serve.
+  const { data: healthSummary, isError: healthRequestFailed } = useSystemHealthSummary(isAdmin)
+  const unhealthyServices = Object.entries(healthSummary?.services ?? {})
+    .filter(([, service]) => !service.healthy)
+    .map(([name]) => name.replace(/_/g, ' '))
+  const systemIssueCount = healthRequestFailed
+    ? 1
+    : unhealthyServices.length
+  const systemIssueTitle = healthRequestFailed
+    ? 'System health check unavailable'
+    : `${unhealthyServices.join(', ')} ${unhealthyServices.length === 1 ? 'is' : 'are'} unavailable`
 
   const navigationItems = [
     { path: '/live-record', label: 'Live Record', icon: Radio },
@@ -74,6 +89,16 @@ export default function Layout() {
       >
         <Icon className="h-5 w-5" />
         <span>{label}</span>
+        {path === '/system' && systemIssueCount > 0 && (
+          <span
+            className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center gap-1 rounded-full bg-red-600 px-1.5 py-0.5 text-xs font-semibold text-white"
+            title={systemIssueTitle}
+            aria-label={`${systemIssueCount} system ${systemIssueCount === 1 ? 'issue' : 'issues'}: ${systemIssueTitle}`}
+          >
+            <AlertTriangle className="h-3 w-3" aria-hidden="true" />
+            {systemIssueCount > 99 ? '99+' : systemIssueCount}
+          </span>
+        )}
         {path === '/system-errors' && unackedErrors > 0 && (
           <span className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-red-600 px-1.5 py-0.5 text-xs font-semibold text-white" title="Unacknowledged events">
             {unackedErrors > 99 ? '99+' : unackedErrors}

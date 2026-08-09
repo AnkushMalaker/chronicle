@@ -8,6 +8,7 @@ the displayed name and ports cannot drift from what is actually configured.
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import services
 
@@ -101,3 +102,58 @@ def test_a_shared_port_is_not_listed_twice(monkeypatch, tmp_path):
     )
 
     assert services.service_display_ports("asr-services") == ["8772"]
+
+
+def test_llm_health_uses_each_endpoints_configured_bind_host(monkeypatch, tmp_path):
+    """A Tailnet-only chat bind must not be probed through localhost."""
+    monkeypatch.setattr(services, "__file__", str(tmp_path / "services.py"))
+    llm_dir = tmp_path / "extras" / "llm-services"
+    llm_dir.mkdir(parents=True)
+    (llm_dir / ".env").write_text(
+        "LLM_PORT=8083\n"
+        "EMBED_PORT=8082\n"
+        "LLM_BIND_HOST=100.83.66.30\n"
+        "EMBED_BIND_HOST=127.0.0.1\n"
+    )
+    requested = []
+
+    def get(url, timeout):
+        requested.append((url, timeout))
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(services.requests, "get", get)
+
+    assert services.check_service_health("llm-services") == ("healthy", "")
+    assert requested == [
+        ("http://100.83.66.30:8083/health", 2),
+        ("http://127.0.0.1:8082/health", 2),
+    ]
+
+
+def test_llm_health_dials_loopback_for_wildcard_binds(monkeypatch, tmp_path):
+    monkeypatch.setattr(services, "__file__", str(tmp_path / "services.py"))
+    llm_dir = tmp_path / "extras" / "llm-services"
+    llm_dir.mkdir(parents=True)
+    (llm_dir / ".env").write_text("LLM_BIND_HOST=0.0.0.0\nEMBED_BIND_HOST=::\n")
+    requested = []
+
+    def get(url, timeout):
+        requested.append(url)
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(services.requests, "get", get)
+
+    assert services.check_service_health("llm-services") == ("healthy", "")
+    assert requested == [
+        "http://127.0.0.1:8083/health",
+        "http://127.0.0.1:8082/health",
+    ]
+
+
+def test_display_ports_resolve_endpoint_port_overrides(monkeypatch, tmp_path):
+    monkeypatch.setattr(services, "__file__", str(tmp_path / "services.py"))
+    llm_dir = tmp_path / "extras" / "llm-services"
+    llm_dir.mkdir(parents=True)
+    (llm_dir / ".env").write_text("LLM_PORT=18083\nEMBED_PORT=18082\n")
+
+    assert services.service_display_ports("llm-services") == ["18083", "18082"]

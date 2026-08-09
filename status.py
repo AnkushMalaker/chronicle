@@ -9,6 +9,7 @@ import json
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 from rich.console import Console
@@ -18,18 +19,14 @@ from rich.table import Table
 from services import (
     SERVICES,
     check_service_enabled,
+    check_service_health,
     compose_ps_json,
     container_engine,
     service_display_label,
+    service_health_endpoint_urls,
 )
 
 console = Console()
-
-# Health check endpoints
-HEALTH_ENDPOINTS = {
-    "backend": "http://localhost:8000/health",
-    "speaker-recognition": "http://localhost:8085/health",
-}
 
 
 def get_restart_counts(container_names: List[str]) -> Dict[str, int]:
@@ -143,11 +140,26 @@ def get_service_health(service_name: str) -> Dict[str, Any]:
     # Get container status
     container_info = get_container_status(service_name)
 
-    # Check HTTP health endpoint if available
+    # Resolve the same endpoint set used by services.py and the node agent. This
+    # keeps the CLI from maintaining its own hard-coded host/port table.
+    endpoint_urls = service_health_endpoint_urls(service_name)
     health_check = None
-    if service_name in HEALTH_ENDPOINTS:
-        url = HEALTH_ENDPOINTS[service_name]
-        health_check = check_http_health(url)
+    if endpoint_urls:
+        health_status, detail = check_service_health(service_name)
+        health_check = {
+            "healthy": health_status == "healthy",
+            "status": health_status,
+            "error": detail or health_status,
+            "data": None,
+        }
+
+        # The detailed view includes Chronicle's dependency breakdown from
+        # /health; the lifecycle endpoint for backend readiness is /readiness.
+        if service_name == "backend":
+            parsed = urlsplit(endpoint_urls[0][1])
+            backend_health_url = urlunsplit(parsed._replace(path="/health"))
+            detailed = check_http_health(backend_health_url)
+            health_check["data"] = detailed.get("data")
 
     return {
         "configured": True,
@@ -164,7 +176,12 @@ def get_backend_worker_health() -> Optional[Dict[str, Any]]:
     This catches internal worker crash loops that Docker restart counts miss.
     """
     try:
-        response = requests.get("http://localhost:8000/health", timeout=5)
+        endpoint_urls = service_health_endpoint_urls("backend")
+        if not endpoint_urls:
+            return None
+        parsed = urlsplit(endpoint_urls[0][1])
+        backend_health_url = urlunsplit(parsed._replace(path="/health"))
+        response = requests.get(backend_health_url, timeout=5)
         if response.status_code == 200:
             data = response.json()
             redis_info = data.get("services", {}).get("redis", {})

@@ -16,7 +16,6 @@ import sys
 import time
 from pathlib import Path
 
-import clients
 import requests
 import yaml
 from chronicle_setup import (
@@ -36,6 +35,8 @@ from dotenv import dotenv_values, set_key
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
+
+import clients
 
 console = Console()
 
@@ -194,7 +195,12 @@ SERVICES = {
             "https_marker": "langfuse-web:3000",
         },
         "health_endpoints": [
-            ("langfuse", None, "3002", "/api/public/health"),
+            {
+                "label": "langfuse",
+                "port_env": None,
+                "default_port": "3002",
+                "path": "/api/public/health",
+            },
         ],
     },
     "backend": {
@@ -210,7 +216,12 @@ SERVICES = {
             "https_marker": "webui-dev:5173",
         },
         "health_endpoints": [
-            ("backend", "BACKEND_PUBLIC_PORT", "8000", "/readiness"),
+            {
+                "label": "backend",
+                "port_env": "BACKEND_PUBLIC_PORT",
+                "default_port": "8000",
+                "path": "/readiness",
+            },
         ],
     },
     "speaker-recognition": {
@@ -226,7 +237,12 @@ SERVICES = {
             "https_marker": "web-ui:",
         },
         "health_endpoints": [
-            ("speaker", "SPEAKER_SERVICE_PORT", "8085", "/health"),
+            {
+                "label": "speaker",
+                "port_env": "SPEAKER_SERVICE_PORT",
+                "default_port": "8085",
+                "path": "/health",
+            },
         ],
     },
     "asr-services": {
@@ -238,7 +254,12 @@ SERVICES = {
         "description": "Offline speech-to-text (ASR)",
         "ports": ["8767"],
         "health_endpoints": [
-            ("asr", "ASR_PORT", "8767", "/health"),
+            {
+                "label": "asr",
+                "port_env": "ASR_PORT",
+                "default_port": "8767",
+                "path": "/health",
+            },
         ],
     },
     "llm-services": {
@@ -247,8 +268,20 @@ SERVICES = {
         "description": "Local LLM via llama.cpp (chat + embeddings)",
         "ports": ["8083", "8082"],
         "health_endpoints": [
-            ("chat", "LLM_PORT", "8083", "/health"),
-            ("embeddings", "EMBED_PORT", "8082", "/health"),
+            {
+                "label": "chat",
+                "port_env": "LLM_PORT",
+                "default_port": "8083",
+                "bind_host_env": "LLM_BIND_HOST",
+                "path": "/health",
+            },
+            {
+                "label": "embeddings",
+                "port_env": "EMBED_PORT",
+                "default_port": "8082",
+                "bind_host_env": "EMBED_BIND_HOST",
+                "path": "/health",
+            },
         ],
     },
     "wakeword-service": {
@@ -257,7 +290,12 @@ SERVICES = {
         "description": "Hermes Acoustic Wake-Word Detection",
         "ports": ["8771"],
         "health_endpoints": [
-            ("wakeword", "WAKEWORD_PORT", "8771", "/health"),
+            {
+                "label": "wakeword",
+                "port_env": "WAKEWORD_PORT",
+                "default_port": "8771",
+                "path": "/health",
+            },
         ],
     },
     "tts": {
@@ -266,7 +304,12 @@ SERVICES = {
         "description": "Text-to-Speech (TADA / Fish Speech / KittenTTS / Kokoro)",
         "ports": ["8770"],
         "health_endpoints": [
-            ("tts", "TTS_PORT", "8770", "/health"),
+            {
+                "label": "tts",
+                "port_env": "TTS_PORT",
+                "default_port": "8770",
+                "path": "/health",
+            },
         ],
     },
     "colpali-service": {
@@ -275,7 +318,12 @@ SERVICES = {
         "description": "Visual search over saved screenshots (ColPali)",
         "ports": ["8790"],
         "health_endpoints": [
-            ("colpali", "COLPALI_PORT", "8790", "/health"),
+            {
+                "label": "colpali",
+                "port_env": "COLPALI_PORT",
+                "default_port": "8790",
+                "path": "/health",
+            },
         ],
     },
 }
@@ -523,10 +571,21 @@ def service_display_ports(
     cloud-only selection yields an empty list rather than a phantom port.
     """
     service = SERVICES[service_name]
-    if service_name != "asr-services":
-        return service["ports"]
     if env_values is None:
         env_values = service_env_values(service_name)
+
+    if service_name != "asr-services":
+        # Replace every endpoint's static display default with its configured
+        # host-published port. Extra UI/HTTPS ports remain unchanged.
+        replacements = {
+            str(endpoint["default_port"]): str(
+                env_values.get(endpoint["port_env"], endpoint["default_port"])
+                if endpoint.get("port_env")
+                else endpoint["default_port"]
+            ).strip("'\"")
+            for endpoint in service.get("health_endpoints", [])
+        }
+        return [replacements.get(str(port), str(port)) for port in service["ports"]]
 
     ports: list[str] = []
     batch = (env_values.get("ASR_PROVIDER") or "").strip("'\"")
@@ -553,7 +612,9 @@ def _get_advertised_services() -> list[tuple[str, int, str]]:
         endpoints = service.get("health_endpoints", [])
         if not endpoints:
             continue
-        _label, port_env, default_port, _path = endpoints[0]
+        endpoint = endpoints[0]
+        port_env = endpoint.get("port_env")
+        default_port = endpoint["default_port"]
         env_values = service_env_values(svc_name)
         if port_env:
             if svc_name == "asr-services" and port_env == "ASR_PORT":
@@ -681,20 +742,10 @@ def check_service_health(service_name):
     if not endpoints:
         return ("stopped", "no endpoints defined")
 
-    env_path = Path(service["path"]) / ".env"
-    env_values = dotenv_values(env_path) if env_path.exists() else {}
-
     results = []  # list of (label, ok: bool)
     any_unhealthy = False
 
-    for label, port_env, default_port, path in endpoints:
-        if service_name == "asr-services" and port_env == "ASR_PORT":
-            port = _asr_health_port(env_values, default_port)
-        elif port_env:
-            port = env_values.get(port_env, default_port)
-        else:
-            port = default_port
-        url = f"http://localhost:{port}{path}"
+    for label, url in service_health_endpoint_urls(service_name):
         try:
             resp = requests.get(url, timeout=2)
             if resp.status_code < 400:
@@ -716,6 +767,46 @@ def check_service_health(service_name):
         return ("stopped", "")
     down_labels = ", ".join(r[0] for r in down)
     return ("partial", f"{down_labels} down")
+
+
+def service_health_endpoint_urls(service_name: str) -> list[tuple[str, str]]:
+    """Resolve node-local health URLs from the service registry and its `.env`.
+
+    The node agent runs beside the compose project. Endpoint port and bind-host
+    overrides therefore belong to that node and must be resolved there, before
+    health is reported to a central Chronicle deployment.
+    """
+    service = SERVICES[service_name]
+    env_values = service_env_values(service_name)
+    urls: list[tuple[str, str]] = []
+
+    for endpoint in service.get("health_endpoints", []):
+        port_env = endpoint.get("port_env")
+        default_port = endpoint["default_port"]
+        if service_name == "asr-services" and port_env == "ASR_PORT":
+            port = _asr_health_port(env_values, default_port)
+        elif port_env:
+            port = env_values.get(port_env, default_port)
+        else:
+            port = default_port
+
+        bind_host_env = endpoint.get("bind_host_env")
+        host = (
+            str(env_values.get(bind_host_env, "127.0.0.1")).strip("'\"")
+            if bind_host_env
+            else "127.0.0.1"
+        )
+        # Wildcard addresses are valid bind targets, not dial targets. The node
+        # agent is local to the compose project, so loop back for those binds.
+        if host in {"", "0.0.0.0", "::", "[::]"}:
+            host = "127.0.0.1"
+        elif ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+
+        port = str(port).strip("'\"")
+        urls.append((endpoint["label"], f"http://{host}:{port}{endpoint['path']}"))
+
+    return urls
 
 
 # Profile-gated services in the backend compose. `https` (caddy) is auto-enabled

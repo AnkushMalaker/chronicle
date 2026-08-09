@@ -649,12 +649,21 @@ class LLMServicesSetup:
         self.console.print("2. Services will be available at:")
         llm_port = self.config.get("LLM_PORT", "8081")
         embed_port = self.config.get("EMBED_PORT", "8082")
-        self.console.print(f"   Chat:      [cyan]http://localhost:{llm_port}[/cyan]")
-        self.console.print(f"   Embedding: [cyan]http://localhost:{embed_port}[/cyan]")
+        llm_host = self.config.get("LLM_BIND_HOST", "127.0.0.1")
+        embed_host = self.config.get("EMBED_BIND_HOST", "127.0.0.1")
+
+        def dial_host(bind_host: str) -> str:
+            # Wildcard addresses describe where to listen, not where curl dials.
+            return "127.0.0.1" if bind_host in {"0.0.0.0", "::", "[::]"} else bind_host
+
+        llm_url = f"http://{dial_host(llm_host)}:{llm_port}"
+        embed_url = f"http://{dial_host(embed_host)}:{embed_port}"
+        self.console.print(f"   Chat:      [cyan]{llm_url}[/cyan]")
+        self.console.print(f"   Embedding: [cyan]{embed_url}[/cyan]")
         self.console.print()
         self.console.print("3. Test health:")
-        self.console.print(f"   [cyan]curl http://localhost:{llm_port}/health[/cyan]")
-        self.console.print(f"   [cyan]curl http://localhost:{embed_port}/health[/cyan]")
+        self.console.print(f"   [cyan]curl {llm_url}/health[/cyan]")
+        self.console.print(f"   [cyan]curl {embed_url}/health[/cyan]")
 
     def run(self):
         """Run the complete setup process."""
