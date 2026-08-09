@@ -31,6 +31,7 @@ from advanced_omi_backend.services.memory.audit import (
 )
 from advanced_omi_backend.workers.memory_jobs import build_memory_transcript
 
+from .episode_notes import write_episode_notes
 from .executor import settings_dict
 from .timezone import canonical_timezone
 
@@ -337,6 +338,26 @@ async def _settled_days(user: User, timezone_name: str) -> list[TimelineDay]:
     )
 
 
+def _write_episode_notes(
+    memory_service: Any,
+    day: TimelineDay,
+    episodes: list[TimelineEpisode],
+    transcripts: dict[str, str],
+) -> list[str]:
+    """Record each decided bound, tolerating a provider that has no vault."""
+
+    vault = getattr(memory_service, "vault", None)
+    if vault is None:
+        return []
+    return write_episode_notes(
+        vault.user_root(day.user_id),
+        episodes,
+        day.timezone,
+        transcripts,
+        day_note_name=day.local_date.isoformat(),
+    )
+
+
 async def _write_day(day: TimelineDay) -> str:
     """Write one claimed day. Returns ``written``, ``skipped``, or ``failed``."""
 
@@ -366,6 +387,10 @@ async def _write_day(day: TimelineDay) -> str:
         )
 
     memory_service = get_memory_service()
+    # Written before the agent runs, and kept even if it fails: the record of what
+    # happened in a decided bound must not depend on a model completing. It is also the
+    # only place a long transcript survives whole, since the digest above trims them.
+    episode_notes = _write_episode_notes(memory_service, day, episodes, transcripts)
     with memory_provenance(MemoryCause.DAY_EPISODES.value, UpdateStrategy.FULL.value):
         success, touched = await memory_service.add_day_memory(
             digest,
@@ -377,31 +402,115 @@ async def _write_day(day: TimelineDay) -> str:
         )
     if not success:
         return "failed"
+
+    async def record_paths(paths: list[str]) -> None:
+        await TimelineEpisode.get_pymongo_collection().update_many(
+            {"episode_id": {"$in": [episode.episode_id for episode in episodes]}},
+            {"$set": {"memory_state": "written", "vault_paths": paths}},
+        )
+
     if not touched:
         # The agent completed and chose to record nothing. Terminal, not a failure:
         # retrying only re-reaches the same judgement, and the day's legacy note
         # already carries the content it declined to duplicate.
         logger.info(
-            "🗓️ Day %s for user %s needed no vault change (%d episode(s))",
+            "🗓️ Day %s for user %s needed no vault change (%d episode(s), "
+            "%d episode note(s))",
             day.local_date,
             day.user_id,
             len(episodes),
+            len(episode_notes),
         )
+        await record_paths(episode_notes)
         return "no_changes"
 
-    written_ids = [episode.episode_id for episode in episodes]
-    await TimelineEpisode.get_pymongo_collection().update_many(
-        {"episode_id": {"$in": written_ids}},
-        {"$set": {"memory_state": "written", "vault_paths": touched}},
-    )
+    paths = list(dict.fromkeys([*episode_notes, *touched]))
+    await record_paths(paths)
     logger.info(
-        "🗓️ Recorded day %s for user %s: %d episode(s), %d note(s) touched",
+        "🗓️ Recorded day %s for user %s: %d episode(s), %d note(s) touched "
+        "(%d episode record note(s))",
         day.local_date,
         day.user_id,
         len(episodes),
-        len(touched),
+        len(paths),
+        len(episode_notes),
     )
     return "written"
+
+
+async def write_day_memory(day: TimelineDay) -> str:
+    """Claim one day and record it, settling ``memory_state`` however it ends.
+
+    The claim is what makes this safe to call directly — a rebuild replaying a range of
+    days and the cron scanning settled days can both reach the same day, and only one of
+    them may spend an agent run on it. Returns the outcome, or ``"busy"`` when another
+    holder has it.
+    """
+
+    max_attempts = _setting("max_attempts", _DEFAULT_MAX_ATTEMPTS)
+    claim_timeout = _setting("claim_timeout_minutes", _DEFAULT_CLAIM_TIMEOUT_MINUTES)
+    collection = TimelineDay.get_pymongo_collection()
+    claimed = await collection.find_one_and_update(
+        _claim_query(day, claim_timeout, max_attempts),
+        {
+            "$set": {
+                "memory_state": "claimed",
+                "memory_claimed_at": utcnow(),
+                "memory_run_id": day.active_run_id,
+            },
+            "$inc": {"memory_attempts": 1},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if claimed is None:
+        return "busy"
+
+    attempts = claimed.get("memory_attempts", 1)
+    try:
+        outcome = await _write_day(day)
+        error = None
+    except Exception as exc:  # noqa: BLE001 - a bad day must not stop the rest
+        outcome = "failed"
+        error = f"{type(exc).__name__}: {exc}"[:2000]
+        logger.error(
+            "🗓️ Recording day %s for user %s failed",
+            day.local_date,
+            day.user_id,
+            exc_info=True,
+        )
+
+    if outcome == "failed":
+        # Release for retry until the attempt budget is spent, then settle into
+        # `skipped` with the diagnostic rather than retrying forever.
+        exhausted = attempts >= max_attempts
+        await collection.update_one(
+            {"_id": claimed["_id"]},
+            {
+                "$set": {
+                    "memory_state": "skipped" if exhausted else "",
+                    "memory_error": error or "day memory write failed",
+                }
+            },
+        )
+        if exhausted:
+            logger.error(
+                "🗓️ Day %s for user %s exhausted %d attempts — not retrying",
+                day.local_date,
+                day.user_id,
+                max_attempts,
+            )
+    else:
+        await collection.update_one(
+            {"_id": claimed["_id"]},
+            {
+                "$set": {
+                    "memory_state": outcome,
+                    "memory_written_at": utcnow(),
+                    "memory_error": None,
+                }
+            },
+        )
+    return outcome
 
 
 async def process_episode_memory() -> dict[str, int]:
@@ -415,9 +524,6 @@ async def process_episode_memory() -> dict[str, int]:
         "failed": 0,
     }
     max_days = _setting("max_days_per_run", _DEFAULT_MAX_DAYS_PER_RUN)
-    max_attempts = _setting("max_attempts", _DEFAULT_MAX_ATTEMPTS)
-    claim_timeout = _setting("claim_timeout_minutes", _DEFAULT_CLAIM_TIMEOUT_MINUTES)
-    collection = TimelineDay.get_pymongo_collection()
 
     users = await User.find({"timezone": {"$nin": [None, ""]}}).to_list()
     processed = 0
@@ -429,64 +535,9 @@ async def process_episode_memory() -> dict[str, int]:
             if processed >= max_days:
                 break
             totals["considered"] += 1
-            claimed = await collection.find_one_and_update(
-                _claim_query(day, claim_timeout, max_attempts),
-                {
-                    "$set": {
-                        "memory_state": "claimed",
-                        "memory_claimed_at": utcnow(),
-                        "memory_run_id": day.active_run_id,
-                    },
-                    "$inc": {"memory_attempts": 1},
-                },
-                return_document=ReturnDocument.AFTER,
-            )
-            if claimed is None:
+            outcome = await write_day_memory(day)
+            if outcome == "busy":
                 continue  # another worker holds it
             processed += 1
-            attempts = claimed.get("memory_attempts", 1)
-            try:
-                outcome = await _write_day(day)
-                error = None
-            except Exception as exc:  # noqa: BLE001 - a bad day must not stop the rest
-                outcome = "failed"
-                error = f"{type(exc).__name__}: {exc}"[:2000]
-                logger.error(
-                    "🗓️ Recording day %s for user %s failed",
-                    day.local_date,
-                    day.user_id,
-                    exc_info=True,
-                )
-            if outcome == "failed":
-                # Release for retry until the attempt budget is spent, then settle into
-                # `skipped` with the diagnostic rather than retrying forever.
-                exhausted = attempts >= max_attempts
-                await collection.update_one(
-                    {"_id": claimed["_id"]},
-                    {
-                        "$set": {
-                            "memory_state": "skipped" if exhausted else "",
-                            "memory_error": error or "day memory write failed",
-                        }
-                    },
-                )
-                if exhausted:
-                    logger.error(
-                        "🗓️ Day %s for user %s exhausted %d attempts — not retrying",
-                        day.local_date,
-                        day.user_id,
-                        max_attempts,
-                    )
-            else:
-                await collection.update_one(
-                    {"_id": claimed["_id"]},
-                    {
-                        "$set": {
-                            "memory_state": outcome,
-                            "memory_written_at": utcnow(),
-                            "memory_error": None,
-                        }
-                    },
-                )
             totals[outcome] += 1
     return totals
