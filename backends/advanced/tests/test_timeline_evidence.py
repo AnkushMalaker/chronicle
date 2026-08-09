@@ -1,12 +1,16 @@
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
+from advanced_omi_backend.services.timeline import evidence
 from advanced_omi_backend.services.timeline.contracts import TimelineEvidenceItem
 from advanced_omi_backend.services.timeline.evidence import (
     _audio_item,
     _clip_evidence_to_range,
     _coalesce_application_evidence,
     _device_items,
+    _transcript_item,
     day_bounds,
 )
 
@@ -285,3 +289,78 @@ def test_evidence_is_clipped_to_the_requested_local_day():
     assert len(clipped) == 1
     assert clipped[0].started_at == day_start
     assert clipped[0].ended_at == day_start + timedelta(hours=2)
+
+
+def test_transcript_bounds_come_from_capture_time_not_record_creation():
+    """A re-bound child's ``created_at`` is the operation time, so it must not
+    decide which day the recording is filed under."""
+    captured = datetime(2026, 8, 6, 9, 0, tzinfo=timezone.utc)
+    conversation = SimpleNamespace(
+        conversation_id="conv-1",
+        transcript="we talked about the release",
+        created_at=datetime(2026, 8, 12, 3, 0, tzinfo=timezone.utc),
+        audio_total_duration=120.0,
+        external_source_id="",
+        external_source_type=None,
+        active_transcript=None,
+    )
+
+    item = _transcript_item(conversation, (captured, captured + timedelta(minutes=2)))
+
+    assert item is not None
+    assert item.started_at == captured
+    assert item.ended_at == captured + timedelta(minutes=2)
+    # No screenpipe source id, so no direction can be parsed and the speech is
+    # not assumed to be media playback.
+    assert item.role == "uncertain"
+    assert item.metadata["conversation_id"] == "conv-1"
+
+
+class _FakeAggregateCollection:
+    def __init__(self, rows):
+        self.rows = rows
+        self.pipeline = None
+
+    def aggregate(self, pipeline):
+        self.pipeline = pipeline
+        rows = self.rows
+
+        class _Cursor:
+            async def to_list(self, length=None):
+                return list(rows)
+
+        return _Cursor()
+
+
+@pytest.mark.asyncio
+async def test_audio_bounds_are_taken_from_captured_at_across_every_source(monkeypatch):
+    day_start = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    day_end = day_start + timedelta(days=1)
+    collection = _FakeAggregateCollection(
+        [
+            {
+                "_id": "screen-capture",
+                "started_at": day_start + timedelta(hours=1),
+                "ended_at": day_start + timedelta(hours=1, seconds=10),
+            },
+            {
+                "_id": "phone-recording",
+                "started_at": day_start + timedelta(hours=5),
+                "ended_at": day_start + timedelta(hours=5, seconds=10),
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        evidence.AudioChunkDocument,
+        "get_pymongo_collection",
+        classmethod(lambda cls: collection),
+    )
+
+    bounds = await evidence._conversation_audio_bounds(day_start, day_end)
+
+    assert set(bounds) == {"screen-capture", "phone-recording"}
+    assert bounds["phone-recording"][0] == day_start + timedelta(hours=5)
+    # Selection is on capture time only; nothing keys on external_source_type,
+    # so a wearable and a screen recorder are treated identically.
+    match_stage = collection.pipeline[0]["$match"]
+    assert set(match_stage) == {"captured_at", "deleted"}

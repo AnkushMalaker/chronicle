@@ -77,7 +77,9 @@ class AudioChunkDocument(Document):
         description="Opus-encoded size in bytes (after compression)", gt=0
     )
 
-    # Time boundaries
+    # Time boundaries, relative to whichever conversation currently owns the chunk.
+    # These are a VIEW, not identity: split, merge and silence trimming all renumber
+    # and re-base them. Use ``captured_at`` for anything that must survive that.
     start_time: float = Field(
         description="Start time in seconds from conversation start", ge=0.0
     )
@@ -86,6 +88,16 @@ class AudioChunkDocument(Document):
     )
     duration: float = Field(
         description="Chunk duration in seconds (typically 10.0)", gt=0.0
+    )
+
+    # Absolute wall-clock start of this chunk's audio. Immutable once written: no
+    # reassignment may rewrite it. This is the chunk's own identity in time, which is
+    # what makes a conversation a *claim over an interval* rather than a container.
+    # Without it a chunk's time is defined by its parent, so re-bounding a recording
+    # means rewriting every chunk and trimmed audio loses all provenance.
+    captured_at: Optional[datetime] = Field(
+        default=None,
+        description="Absolute UTC time this chunk's audio was captured (immutable)",
     )
 
     # Audio format
@@ -156,6 +168,9 @@ class AudioChunkDocument(Document):
             "created_at",
             # Soft delete filtering
             "deleted",
+            # "what audio exists for this stretch of wall-clock time", independent of
+            # which conversation currently claims it.
+            "captured_at",
             # At-least-once delivery without duplicate Mongo audio. The partial
             # filter keeps imported/pre-WAL chunks with missing or null IDs out.
             IndexModel(

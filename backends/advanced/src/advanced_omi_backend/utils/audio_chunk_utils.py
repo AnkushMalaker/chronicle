@@ -15,6 +15,7 @@ import io
 import logging
 import time
 import wave
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -809,6 +810,7 @@ async def convert_audio_to_chunks(
     channels: int = 1,
     sample_width: int = 2,
     chunk_duration: float = 10.0,
+    captured_at: Optional[datetime] = None,
 ) -> int:
     """
     Convert raw PCM audio directly to MongoDB chunks without disk intermediary.
@@ -823,6 +825,9 @@ async def convert_audio_to_chunks(
         channels: Number of channels (default: 1 = mono)
         sample_width: Bytes per sample (default: 2 = 16-bit)
         chunk_duration: Duration of each chunk in seconds (default: 10.0)
+        captured_at: Absolute UTC time the first sample was captured. Each chunk
+            records its own ``captured_at`` from this, which is what survives the
+            renumbering done by split, merge and silence trimming.
 
     Returns:
         Number of chunks created
@@ -887,6 +892,11 @@ async def convert_audio_to_chunks(
             start_time=chunk_start_time,
             end_time=chunk_end_time,
             duration=chunk_duration_actual,
+            captured_at=(
+                captured_at + timedelta(seconds=chunk_start_time)
+                if captured_at is not None
+                else None
+            ),
             sample_rate=sample_rate,
             channels=channels,
         )
@@ -967,6 +977,7 @@ async def convert_wav_to_chunks(
     conversation_id: str,
     wav_file_path: Path,
     chunk_duration: float = 10.0,
+    captured_at: Optional[datetime] = None,
 ) -> int:
     """
     Convert an existing WAV file to MongoDB audio chunks.
@@ -1061,6 +1072,11 @@ async def convert_wav_to_chunks(
             start_time=chunk_start_time,
             end_time=chunk_end_time,
             duration=chunk_duration_actual,
+            captured_at=(
+                captured_at + timedelta(seconds=chunk_start_time)
+                if captured_at is not None
+                else None
+            ),
             sample_rate=sample_rate,
             channels=channels,
         )

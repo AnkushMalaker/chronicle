@@ -10,6 +10,7 @@ Also includes audio cropping operations that work with the Conversation model.
 import logging
 import os
 import uuid
+from datetime import datetime
 
 from fastapi import UploadFile
 from fastapi.responses import JSONResponse
@@ -55,6 +56,9 @@ async def upload_and_process_audio_files(
     data_purpose: str | None = None,
     memory_excluded: bool | None = None,
     memory_exclusion_reason: str | None = None,
+    # Wall-clock time of the first sample. Continuous capture knows this (the source
+    # chunks are timestamped); a plain file upload does not, and passes None.
+    captured_at: datetime | None = None,
     # Continuous capture wants speaker identification (so the timeline agent learns who
     # spoke) but not per-session memory extraction or an LLM-generated title. The
     # terminal event-dispatch job always runs — it owns end_reason/completed_at/status,
@@ -202,6 +206,7 @@ async def upload_and_process_audio_files(
                         sample_rate=sample_rate,
                         channels=channels,
                         sample_width=sample_width,
+                        captured_at=captured_at,
                     )
                     audio_logger.info(
                         f"📦 Converted uploaded file to {num_chunks} MongoDB chunks "

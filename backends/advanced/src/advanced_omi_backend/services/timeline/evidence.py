@@ -6,8 +6,10 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import DeviceInputItem
+from advanced_omi_backend.models.manual_memory import ManualMemory
 from advanced_omi_backend.models.timeline import AudioEvidenceSpan
 
 from .contracts import (
@@ -79,10 +81,6 @@ def _audio_item(span: AudioEvidenceSpan) -> TimelineEvidenceItem:
 def _device_item(row: DeviceInputItem) -> TimelineEvidenceItem:
     if row.kind == "immich_memory":
         kind, role = "immich", "user_action"
-    elif row.kind == "screenshot":
-        # Someone chose to share this, so it is a user action rather than whatever
-        # happened to be on screen. Sharing it is already the decision to remember.
-        kind, role = "frame", "user_action"
     elif row.metadata.get("meeting_id"):
         kind, role = "meeting", "application_state"
     else:
@@ -136,6 +134,30 @@ def _device_item(row: DeviceInputItem) -> TimelineEvidenceItem:
             "image_content_type": row.media_content_type if row.media_data else None,
         },
         image_filename=f"{kind}-{row.id}" if row.media_data else None,
+    )
+
+
+def _manual_memory_item(memory: ManualMemory) -> TimelineEvidenceItem:
+    descriptions = [item.description for item in memory.attachments if item.description]
+    excerpt = memory.note or (descriptions[0] if descriptions else "Manual memory.")
+    return TimelineEvidenceItem(
+        evidence_id=f"manual_memory:{memory.memory_id}",
+        kind="frame",
+        source_id="manual",
+        source_item_id=memory.memory_id,
+        started_at=utc(memory.shared_at),
+        role="user_action",
+        excerpt=excerpt[:6000],
+        content_hash=(
+            memory.attachments[0].content_hash if memory.attachments else None
+        ),
+        metadata={
+            "source_kind": "manual_memory",
+            "memory_id": memory.memory_id,
+            "memory_at": memory.memory_at,
+            "source_application": memory.source.get("application"),
+            "attachment_count": len(memory.attachments),
+        },
     )
 
 
@@ -373,12 +395,62 @@ def _clip_evidence_to_range(
     return clipped
 
 
-def _transcript_item(conversation: Conversation) -> TimelineEvidenceItem | None:
+async def _conversation_audio_bounds(
+    day_start: datetime, range_end: datetime
+) -> dict[str, tuple[datetime, datetime]]:
+    """Absolute audio bounds per conversation with audio inside the day.
+
+    Selection is by audio time rather than by source: continuous screen capture,
+    a wearable, and a phone recording are all streamed audio and must reach the
+    agent the same way. A conversation whose chunks carry no ``captured_at`` is
+    absent from the result and therefore not placed on any day -- an upload's
+    ``created_at`` is when the file arrived, which would file it on the wrong one.
+
+    Chunks carry no user id, so the result spans users; the caller's conversation
+    query is what scopes it.
+    """
+    pipeline = [
+        {
+            "$match": {
+                "captured_at": {"$gte": day_start, "$lt": range_end},
+                "deleted": {"$ne": True},
+            }
+        },
+        {
+            "$group": {
+                "_id": "$conversation_id",
+                "started_at": {"$min": "$captured_at"},
+                "ended_at": {
+                    "$max": {
+                        "$add": [
+                            "$captured_at",
+                            {"$multiply": [{"$ifNull": ["$duration", 10.0]}, 1000]},
+                        ]
+                    }
+                },
+            }
+        },
+    ]
+    collection = AudioChunkDocument.get_pymongo_collection()
+    rows = await collection.aggregate(pipeline).to_list(length=None)
+    bounds: dict[str, tuple[datetime, datetime]] = {}
+    for row in rows:
+        conversation_id = str(row["_id"] or "")
+        if conversation_id and row["started_at"] is not None:
+            bounds[conversation_id] = (utc(row["started_at"]), utc(row["ended_at"]))
+    return bounds
+
+
+def _transcript_item(
+    conversation: Conversation, bounds: tuple[datetime, datetime]
+) -> TimelineEvidenceItem | None:
     transcript = (conversation.transcript or "").strip()
     if not transcript:
         return None
-    started_at = utc(conversation.created_at)
-    ended_at = started_at + timedelta(seconds=conversation.audio_total_duration or 0)
+    # Bounds come from the chunks' immutable ``captured_at``, never from
+    # ``created_at``: for a re-bound child that is the operation time, and this
+    # deployment holds recordings whose two differ by six days.
+    started_at, ended_at = bounds
     source_parts = (conversation.external_source_id or "").split(":")
     direction = source_parts[2] if len(source_parts) >= 3 else "unknown"
     role = "media_content" if direction == "output" else "uncertain"
@@ -491,14 +563,22 @@ async def assemble_day_evidence(
         DeviceInputItem.captured_at < range_end,
         {"$or": [{"ended_at": None}, {"ended_at": {"$gte": day_start}}]},
     ).to_list()
+    manual_memories = await ManualMemory.find(
+        ManualMemory.user_id == user_id,
+        ManualMemory.shared_at >= day_start,
+        ManualMemory.shared_at < range_end,
+    ).to_list()
+    audio_bounds = await _conversation_audio_bounds(day_start, range_end)
     conversations = await Conversation.find(
         Conversation.user_id == user_id,
-        Conversation.external_source_type == "screenpipe",
-        Conversation.created_at < range_end,
+        {"conversation_id": {"$in": sorted(audio_bounds)}},
         # A deleted recording is not evidence. Without this an episode can cite —
         # and a promoted recording can point at — audio the user can no longer play,
         # which is what a duplicate sweep leaves behind.
         {"deleted": {"$ne": True}},
+        # Mining/audit clips are dataset material, not something that happened to
+        # the user on this day. They are also the one corpus with no capture time.
+        {"data_purpose": {"$ne": "annotation"}},
     ).to_list()
 
     device_evidence: list[TimelineEvidenceItem] = []
@@ -517,8 +597,11 @@ async def assemble_day_evidence(
 
     evidence = [_audio_item(span) for span in spans]
     evidence.extend(_coalesce_application_evidence(device_evidence))
+    evidence.extend(_manual_memory_item(memory) for memory in manual_memories)
     for conversation in conversations:
-        item = _transcript_item(conversation)
+        item = _transcript_item(
+            conversation, audio_bounds[conversation.conversation_id]
+        )
         if item and _overlaps(item.started_at, item.ended_at, day_start, range_end):
             evidence.append(item)
 

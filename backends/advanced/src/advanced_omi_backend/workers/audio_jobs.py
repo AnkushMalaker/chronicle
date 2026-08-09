@@ -6,6 +6,7 @@ This module contains jobs related to audio file processing and cropping.
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from bson import Binary
@@ -45,6 +46,31 @@ class AudioPersistenceInvariantError(AudioPersistenceError):
 
 def _message_id_text(message_id: bytes | str) -> str:
     return message_id.decode() if isinstance(message_id, bytes) else str(message_id)
+
+
+def _captured_at(message_id: str) -> datetime | None:
+    """Absolute capture time from a Redis stream ID.
+
+    A stream ID is ``<milliseconds>-<sequence>``, stamped by Redis when the producer
+    appended the audio. That is already the wall-clock time of the sound, so the
+    streaming path needs no new plumbing to anchor its chunks — it just has to stop
+    throwing the timestamp away.
+    """
+    milliseconds = message_id.split("-", 1)[0]
+    if not milliseconds.isdigit():
+        return None
+    return datetime.fromtimestamp(int(milliseconds) / 1000.0, tz=timezone.utc)
+
+
+def _captured_at_from_fields(fields: dict, message_id: str) -> datetime | None:
+    raw = fields.get(b"captured_at")
+    if raw is not None:
+        try:
+            value = raw.decode() if isinstance(raw, bytes) else str(raw)
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (TypeError, ValueError, OverflowError):
+            logger.warning("Invalid captured_at on Redis audio message %s", message_id)
+    return _captured_at(message_id)
 
 
 @async_job(redis=True, beanie=True)
@@ -92,6 +118,7 @@ async def audio_streaming_persistence_job(
     pcm_buffer = bytearray()
     pcm_message_ids: list[bytes | str] = []
     pcm_conversation_id: str | None = None
+    pcm_captured_at: datetime | None = None
     total_pcm_bytes = 0
     total_compressed_bytes = 0
     total_mongo_chunks_written = 0
@@ -126,7 +153,7 @@ async def audio_streaming_persistence_job(
 
     async def commit_and_ack_buffer() -> None:
         """Commit the local PCM buffer, then ACK exactly its source messages."""
-        nonlocal pcm_buffer, pcm_message_ids, pcm_conversation_id
+        nonlocal pcm_buffer, pcm_message_ids, pcm_conversation_id, pcm_captured_at
         nonlocal total_pcm_bytes, total_compressed_bytes, total_mongo_chunks_written
 
         if not pcm_buffer:
@@ -170,6 +197,7 @@ async def audio_streaming_persistence_job(
                 start_time=chunk_start_time,
                 end_time=end_time,
                 duration=duration,
+                captured_at=pcm_captured_at or _captured_at(source_ids[0]),
                 sample_rate=sample_rate,
                 channels=channels,
                 source_stream=audio_stream_name,
@@ -227,10 +255,11 @@ async def audio_streaming_persistence_job(
         pcm_buffer = bytearray()
         pcm_message_ids = []
         pcm_conversation_id = None
+        pcm_captured_at = None
 
     async def process_messages(messages) -> bytes | str | None:
         """Move delivered entries to Mongo or leave them pending on any error."""
-        nonlocal end_signal_received, pcm_conversation_id
+        nonlocal end_signal_received, pcm_conversation_id, pcm_captured_at
         last_message_id = None
         for _stream_name, stream_messages in messages:
             for message_id, fields in stream_messages:
@@ -265,6 +294,9 @@ async def audio_streaming_persistence_job(
                         await commit_and_ack_buffer()
                     if pcm_conversation_id is None:
                         pcm_conversation_id = conversation_id
+                        pcm_captured_at = _captured_at_from_fields(
+                            fields, _message_id_text(message_id)
+                        )
                         seen_conversations.add(conversation_id)
                     pcm_buffer.extend(audio_data)
                     pcm_message_ids.append(message_id)
