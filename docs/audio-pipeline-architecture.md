@@ -260,7 +260,140 @@ Polls `TranscriptionResultsAggregator` at 1s intervals. Speech criteria: word co
 ```
 Indexes: `user_id`, `client_id`, `conversation_id` (unique)
 
-**`audio_chunks` collection**: Raw audio session data (`audio_uuid`, `user_id`, `client_id`). Always created; conversations only created when speech detected.
+**`audio_chunks` collection**: ~10-second Opus audio documents grouped operationally by
+`conversation_id`. Capture/processing paths may create hidden provisional conversation
+containers before a user-visible conversation exists.
+
+Each document is ~10 seconds of Opus. Its `chunk_index`/`start_time`/`end_time` are
+relative to whichever conversation currently owns it, and split, merge and silence
+trimming all renumber them — they are a view, not identity.
+
+`captured_at` is the identity: the absolute wall-clock start of that audio, written
+once and never rewritten. It is what makes a conversation a **claim over an interval**
+rather than a container, so audio can be re-bounded by moving a pointer instead of
+rewriting every chunk, and trimmed audio keeps its provenance with no separate record.
+The streaming path derives it from the Redis stream ID (already a millisecond
+timestamp); uploads take it from the caller, which is how continuous capture anchors a
+mixed window to the moment it was recorded.
+
+Timeline episodes persist this semantic relationship in `audio_ranges`: each range
+freezes stable Mongo chunk IDs plus exact absolute UTC bounds. Those references remain
+valid when split, merge, or trim moves a chunk to a different operational conversation.
+`related_conversation_ids` remains evidence and lineage context; it is not playback or
+temporal truth. Chunks still carry a required `conversation_id` so existing processing,
+reconstruction, and administration can group them, but changing that grouping no
+longer changes what audio an episode claims.
+
+#### Trimmed-silence lifecycle
+
+Finalization runs VAD-driven silence trimming when enabled. With the defaults, it keeps
+5 seconds around speech, moves only silent runs of at least 120 seconds, and does
+nothing unless at least 60 seconds would be saved. Whole chunks are reassigned—never
+re-encoded—to a new soft-deleted conversation titled `Trimmed silence`, with
+`deletion_reason: silence_trim` and `derived_from` lineage. The surviving conversation
+and its active transcript are packed onto a contiguous relative timeline; every chunk
+on both sides keeps its original `captured_at`.
+
+The remnant is recoverable soft-deleted data, not a permanent archive. Chronicle's
+normal deleted-conversation purge also deletes its chunks once `retention_days` has
+elapsed. Retention defaults to 30 days, but `backend.cleanup.auto_cleanup_enabled` is
+false by default. An administrator may preview or trigger the purge through
+`POST /api/admin/cleanup` (`dry_run=true` is the safe preview). Enabling automatic
+cleanup explicitly opts into hard deletion after the configured window.
+
+Audio written before the field existed is anchored by
+`scripts/backfill_chunk_capture_time.py` (dry run by default). It resolves an anchor per
+conversation — evidence span, then `derived_from` lineage for split/trim children whose
+own `created_at` is the operation time, then `created_at` — and offsets each chunk by its
+`start_time`. It deliberately **skips** audio recorded elsewhere and uploaded later
+(`data_purpose: annotation`, the `-upload` device, `annotation_dataset`), because there
+`created_at` is when the file arrived. A null anchor means "unknown" and can be fixed
+later; a plausible-but-wrong one silently corrupts every future stitch, so the script
+also withdraws anchors a previous run should not have written.
+
+Once anchored, a recording's old bounds stop being load-bearing, so audio already stored
+under the blind 30-minute cap can be re-bounded to what the current pipeline would have
+produced. `scripts/reset_recording_bounds.py` (dry run by default) reassembles capture
+windows from `captured_at`, then per window **merges** the pieces the cap severed,
+**splits** at speech-derived seams, and **trims** the silence — three existing operations,
+no re-encode, everything soft-deleted with lineage rather than destroyed. It reads the
+speech profile from the chunks' stored VAD scores, so it decodes no audio. `--scope
+fenced` touches only `capture_evidence`, which is excluded from memory; `screenpipe`
+adds the promoted stretches, which are the recordings a user actually sees; `all` also
+re-bounds live device capture, whose memories must then be rebuilt. A window is held
+back rather than half-applied when a recording the scope may not touch sits inside it.
+
+Measured over this deployment's ScreenPipe corpus: 231 recordings across 87 windows
+became 165 recordings, and 93.6 h of stored audio became 52.4 h.
+
+**Unanalyzed audio must be held back, not read as silent.** Audio nobody has run VAD
+over produces no speech intervals, which is indistinguishable from silence unless the
+caller checks — and reading it as silence is the worst available error, because the cut
+planner then sees a uniformly quiet window and places its cut at exactly the target,
+reinstating the blind 30-minute cut the tool exists to remove. That happened here to 18
+windows / 17.5 h before the check existed, and it hid itself twice over: those windows
+also reported as "carrying no speech at all", and the "no cut landed in speech" check
+passed vacuously on them.
+
+The measurement that missed it is worth remembering. In a Mongo *aggregation*, a
+missing field does not compare equal to null, so `{$ne: ["$vad.scores", null]}` counts
+chunks with no `vad` field at all as analyzed. Use an explicit size check instead:
+
+```js
+{$gt: [{$size: {$ifNull: ["$vad.scores", []]}}, 0]}
+```
+
+### An annotation keyed to a container does not survive the container
+
+Everything Chronicle learns about a stretch of audio — that it is conversational, what
+was said in it, who said it — is attached to a `Conversation`. But a conversation is a
+*container*, and three routine operations replace the container while leaving the audio
+exactly where it was: dedup of an ingest retry, merge/split when re-bounding, and the
+silence trim. Each one is a small data loss at a different layer, and they are the same
+bug three times:
+
+| Annotation | What replacing the container does |
+|---|---|
+| an episode's `related_conversation_ids` | the citation points at a soft-deleted id, so promotion unhides nothing — 126 of 638 episodes here, including six generations of one real meeting |
+| the `conversational` promotion itself | it is a flag on a whole recording, so carrying it across new bounds spreads it to every child that overlaps, and the next pass spreads it again — 17 → 23 recordings, 442 → 493 minutes over two passes, and "promoted" also means memory-eligible |
+| `transcript_versions` | versions are keyed to the conversation, so a re-bound child starts from a fresh slice and the earlier versions stay behind on the dead parent |
+
+Read-time resolution fixes the citation case without rewriting stored evidence:
+`services/timeline/recording_refs.py` resolves a cited id to whatever is live now, by
+`derived_into` lineage and — for dedup, which records no lineage because the surviving
+copy never knew about the twin — by live audio covering the same span on the same
+capture stream. It is deliberately stream-matched: the other node, or the other
+direction of the same call, is different audio.
+
+**Promotion carry-forward is disabled** (`Window.promoted` in
+`scripts/reset_recording_bounds.py` is a documented no-op). A re-bound leaves every
+child fenced, and visibility is re-derived afterwards from the episodes with
+`scripts/repromote_conversational_episodes.py`, where it is computed from the agent's
+bounds instead of inherited from whatever container last held it. Computed can shrink;
+inherited can only grow.
+
+None of this is the real fix. A conversation id is operational lineage, not temporal
+identity — `captured_at` is the identity, so a durable annotation should be anchored to
+an absolute time range over chunks. See [multimodal-memory.md](multimodal-memory.md):
+an episode is the claim that a conversation spans a range of audio documents, and a
+user-visible recording is best materialized from that claim rather than guessed at by a
+silence heuristic underneath it.
+
+### An operation that moves audio must preserve the audio's identity
+
+`create_conversation` defaults every distinguishing field off, so each one has to be
+inherited explicitly by split and merge or it is silently dropped — and the damage only
+shows up somewhere else, long after the operation looked successful:
+
+| Dropped | What breaks |
+|---|---|
+| `data_purpose`, `memory_excluded` | continuous capture becomes memory-eligible and ambient room audio walks into the vault |
+| `external_source_type`, `external_source_id` | the recording vanishes from the timeline, which selects audio evidence by source type, and loses the capture direction that decides its media/speech role |
+| `created_at` (split children) | a child stamped with the moment the split ran is filed on today, not the day it was recorded |
+
+All three are covered by `tests/test_split_merge_fencing.py`. They matter far more at
+the scale of a re-set than for a one-off admin split: the tool above performs hundreds
+of merges and splits, so a laundered field becomes a corpus-wide fault.
 
 ### Disk Storage
 

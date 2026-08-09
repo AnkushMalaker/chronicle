@@ -57,6 +57,28 @@ class TimelineAssertion(BaseModel):
     evidence_ids: list[str] = Field(min_length=1)
 
 
+class TimelineAudioRange(BaseModel):
+    """Immutable audio-document references supporting one episode interval.
+
+    Chunk ids and absolute bounds remain valid when an operational conversation is
+    split, merged, or silence-trimmed. ``conversation_ids`` is lineage/debug context;
+    consumers must not use it as the range's identity.
+    """
+
+    range_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    chunk_ids: list[str] = Field(min_length=1)
+    started_at: datetime
+    ended_at: datetime
+    source_stream: Optional[str] = None
+    conversation_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "TimelineAudioRange":
+        if self.ended_at <= self.started_at:
+            raise ValueError("timeline audio range must have positive duration")
+        return self
+
+
 class AudioEvidenceSpan(Document):
     """Compact profile for one assembled ScreenPipe compute span.
 
@@ -217,6 +239,9 @@ class TimelineEpisode(Document):
     source_ids: list[str] = Field(default_factory=list)
     related_episode_ids: list[str] = Field(default_factory=list)
     related_conversation_ids: list[str] = Field(default_factory=list)
+    # Authoritative playable audio. Unlike related_conversation_ids, these references
+    # survive container replacement because Mongo chunk ids and captured_at are stable.
+    audio_ranges: list[TimelineAudioRange] = Field(default_factory=list)
     parent_episode_id: Optional[str] = None
     representative_image: Optional[bytes] = None
     representative_image_type: Optional[str] = None

@@ -43,6 +43,7 @@ from .executor import (
     validate_agent_result,
 )
 from .prompt import PROMPT_VERSION
+from .recording_refs import build_audio_ranges, resolve_live_recordings
 from .timezone import canonical_timezone
 from .workspace import write_workspace
 
@@ -421,6 +422,13 @@ async def _promote_conversational_recordings(
     if not cited:
         return []
 
+    # A cited id names a container, and dedup, merge and trim all replace the container
+    # while leaving the audio alone. Promoting only what is still live by that exact id
+    # silently drops the meeting instead — see services/timeline/recording_refs.py.
+    cited = await resolve_live_recordings(cited)
+    if not cited:
+        return []
+
     collection = Conversation.get_pymongo_collection()
     query = {
         "conversation_id": {"$in": sorted(cited)},
@@ -478,44 +486,49 @@ async def _publish(
             _evidence_ref(evidence[evidence_id]) for evidence_id in episode.evidence_ids
         ]
         representative = episode.representative_evidence_id
-        documents.append(
-            TimelineEpisode(
-                episode_id=episode_ids[index],
-                run_id=run.run_id,
-                user_id=run.user_id,
-                local_date=run.local_date,
-                timezone=run.timezone,
-                started_at=episode.started_at,
-                ended_at=episode.ended_at,
-                kind=episode.kind,
-                title=episode.title,
-                summary=episode.summary,
-                conversational=episode.conversational,
-                salience=episode.salience,
-                confidence=episode.confidence,
-                activity_mode=episode.activity_mode,
-                entities=episode.entities,
-                attributes={item.key: item.value for item in episode.attributes},
-                assertions=[
-                    TimelineAssertion(**assertion.model_dump())
-                    for assertion in episode.assertions
-                ],
-                evidence_refs=refs,
-                source_ids=sorted({ref.source_id for ref in refs if ref.source_id}),
-                related_conversation_ids=episode.related_conversation_ids,
-                parent_episode_id=(
-                    episode_ids[episode.parent_episode_index]
-                    if episode.parent_episode_index is not None
-                    else None
-                ),
-                representative_image=images.get(representative or ""),
-                representative_image_type=(
-                    evidence[representative].metadata.get("image_content_type")
-                    if representative and representative in images
-                    else None
-                ),
-            )
+        document = TimelineEpisode(
+            episode_id=episode_ids[index],
+            run_id=run.run_id,
+            user_id=run.user_id,
+            local_date=run.local_date,
+            timezone=run.timezone,
+            started_at=episode.started_at,
+            ended_at=episode.ended_at,
+            kind=episode.kind,
+            title=episode.title,
+            summary=episode.summary,
+            conversational=episode.conversational,
+            salience=episode.salience,
+            confidence=episode.confidence,
+            activity_mode=episode.activity_mode,
+            entities=episode.entities,
+            attributes={item.key: item.value for item in episode.attributes},
+            assertions=[
+                TimelineAssertion(**assertion.model_dump())
+                for assertion in episode.assertions
+            ],
+            evidence_refs=refs,
+            source_ids=sorted({ref.source_id for ref in refs if ref.source_id}),
+            related_conversation_ids=episode.related_conversation_ids,
+            parent_episode_id=(
+                episode_ids[episode.parent_episode_index]
+                if episode.parent_episode_index is not None
+                else None
+            ),
+            representative_image=images.get(representative or ""),
+            representative_image_type=(
+                evidence[representative].metadata.get("image_content_type")
+                if representative and representative in images
+                else None
+            ),
         )
+        document.audio_ranges = await build_audio_ranges(
+            started_at=document.started_at,
+            ended_at=document.ended_at,
+            evidence_refs=document.evidence_refs,
+            related_conversation_ids=document.related_conversation_ids,
+        )
+        documents.append(document)
     carried = _carry_forward(run, pinned or [], manifest)
     await _guard_empty_generation(run, manifest, len(documents) + len(carried))
     if documents or carried:

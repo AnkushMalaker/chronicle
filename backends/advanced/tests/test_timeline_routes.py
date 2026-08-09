@@ -67,6 +67,7 @@ def test_episode_payload_marks_episode_and_evidence_datetimes_as_utc():
         ],
         related_episode_ids=[],
         related_conversation_ids=[],
+        audio_ranges=[],
         parent_episode_id=None,
         representative_image=None,
     )
@@ -131,6 +132,7 @@ def test_episode_payload_exposes_durable_identity_and_confirmation():
         ],
         related_episode_ids=[],
         related_conversation_ids=[],
+        audio_ranges=[],
         parent_episode_id=None,
         representative_image=None,
     )

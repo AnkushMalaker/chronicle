@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
   AudioLines,
@@ -18,7 +18,6 @@ import {
 import {
   TimelineEpisode,
   TimelineEvidenceRef,
-  conversationsApi,
   speakerApi,
   timelineApi,
 } from '../services/api'
@@ -126,59 +125,19 @@ function Section({
  */
 function EpisodePlayback({
   episode,
-  conversationIds,
 }: {
   episode: TimelineEpisode
-  conversationIds: string[]
 }) {
   const player = useGaplessPlayer()
-  const results = useQueries({
-    queries: conversationIds.map(id => ({
-      queryKey: ['conversation', id],
-      queryFn: () => conversationsApi.getById(id).then(r => r.data.conversation),
-    })),
-  })
-
-  const loading = results.some(r => r.isLoading)
-
-  const { ranges, skipped } = useMemo(() => {
-    const episodeStart = Date.parse(episode.started_at) / 1000
-    const episodeEnd = Date.parse(episode.ended_at) / 1000
-    const usable: Array<{ range: Range; at: number }> = []
-    let missing = 0
-
-    results.forEach((result, index) => {
-      const conversation = result.data as
-        | { created_at?: string | number; audio_total_duration?: number; audio_chunks_count?: number }
-        | undefined
-      const base = epochSeconds(conversation?.created_at)
-      const duration = conversation?.audio_total_duration
-      if (base == null || !duration || !conversation?.audio_chunks_count) {
-        if (result.isSuccess) missing += 1
-        return
-      }
-      // Clip the recording to the slice that lies inside the episode.
-      const start = Math.max(0, episodeStart - base)
-      const end = Math.min(duration, episodeEnd - base)
-      if (!(end > start)) {
-        missing += 1
-        return
-      }
-      usable.push({ range: { cid: conversationIds[index], start, end }, at: base + start })
-    })
-
-    // Wall-clock order, so the program plays the event forwards regardless of the
-    // order the agent happened to cite its evidence in.
-    usable.sort((a, b) => a.at - b.at)
-    return { ranges: usable.map(item => item.range), skipped: missing }
-  }, [results, episode.started_at, episode.ended_at, conversationIds])
+  const ranges: Range[] = (episode.audio_playback_ranges ?? []).map(item => ({
+    cid: item.conversation_id,
+    start: item.start,
+    end: item.end,
+  }))
 
   const isThisEpisode = player.activeConversationId === episode.episode_id
   const active = isThisEpisode && (player.isPlaying || player.isPaused)
 
-  if (loading) {
-    return <Card className="text-sm text-gray-500 dark:text-gray-400">Loading audio…</Card>
-  }
   if (ranges.length === 0) {
     return null
   }
@@ -209,12 +168,6 @@ function EpisodePlayback({
         {ranges.length === 1 ? '1 recording' : `${ranges.length} recordings`}
         {player.buffering && isThisEpisode && ' · buffering…'}
       </span>
-      {skipped > 0 && (
-        <span className="text-xs text-amber-600 dark:text-amber-400">
-          {skipped} cited {skipped === 1 ? 'recording has' : 'recordings have'} no playable
-          audio and {skipped === 1 ? 'is' : 'are'} not included.
-        </span>
-      )}
     </Card>
   )
 }
@@ -381,14 +334,6 @@ export default function EpisodeDetail() {
     return Array.from(new Set(ids))
   }, [episode?.evidence])
 
-  // Playback covers the episode's whole span, so it uses every recording that
-  // overlaps it rather than only the ones cited as evidence — a long call is often
-  // cited through the single recording carrying its most quotable stretch.
-  const playbackRecordingIds = useMemo(() => {
-    const spanned = episode?.audio_recording_ids ?? []
-    return spanned.length ? spanned : citedRecordingIds
-  }, [episode?.audio_recording_ids, citedRecordingIds])
-
   if (episodeQuery.isLoading) {
     return <div className="text-sm text-gray-500 dark:text-gray-400">Loading episode…</div>
   }
@@ -549,7 +494,7 @@ export default function EpisodeDetail() {
           hint="Play the event straight through, or correct one recording at a time."
         >
           <div className="space-y-4">
-            <EpisodePlayback episode={episode} conversationIds={playbackRecordingIds} />
+            <EpisodePlayback episode={episode} />
             {citedRecordingIds.map(conversationId => (
               <EpisodeRecording
                 key={conversationId}

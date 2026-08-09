@@ -184,7 +184,7 @@ export const conversationsApi = {
 export interface DeviceInputSource {
   source_id: string
   name: string
-  provider: 'screenpipe' | 'immich'
+  provider: 'screenpipe' | 'immich' | 'mobile'
   platform: string
   status: 'pairing' | 'online' | 'offline' | 'error'
   health: Record<string, unknown>
@@ -222,12 +222,6 @@ export const deviceInputApi = {
     api.get<Blob>(`/api/device-input/items/${itemId}/thumbnail`, {
       responseType: 'blob',
     }),
-  // Addressed by content hash so a cited Media/<digest>.md note can render its own
-  // image without the citation carrying an item id.
-  getMediaThumbnail: (digest: string) =>
-    api.get<Blob>(`/api/device-input/media/${digest}/thumbnail`, {
-      responseType: 'blob',
-    }),
   requestThumbnail: (itemId: string) =>
     api.post(`/api/device-input/items/${itemId}/request-thumbnail`),
   getConversationContext: (conversationId: string) =>
@@ -238,6 +232,37 @@ export const deviceInputApi = {
     api.delete(`/api/device-input/conversations/${conversationId}/context`),
   promoteItem: (itemId: string) =>
     api.post(`/api/device-input/items/${itemId}/promote`),
+}
+
+export interface ManualMemoryAttachment {
+  attachment_id: string
+  media_type: 'image'
+  content_type: string
+  original_filename: string
+  content_hash: string
+  byte_size: number
+  description: string | null
+  extracted_text: string | null
+  enrichments: Record<string, { state: 'pending' | 'processing' | 'complete' | 'failed' }>
+}
+
+export interface ManualMemory {
+  memory_id: string
+  note: string | null
+  source: { kind: string; application?: string | null }
+  shared_at: string
+  memory_at: string | null
+  vault_path: string
+  attachments: ManualMemoryAttachment[]
+}
+
+export const manualMemoriesApi = {
+  list: () => api.get<{ items: ManualMemory[]; next_before: string | null }>('/api/manual-memories'),
+  get: (memoryId: string) => api.get<ManualMemory>(`/api/manual-memories/${memoryId}`),
+  getThumbnail: (memoryId: string, attachmentId: string) =>
+    api.get<Blob>(`/api/manual-memories/${memoryId}/attachments/${attachmentId}/thumbnail`, {
+      responseType: 'blob',
+    }),
 }
 
 export interface TimelineEvidenceRef {
@@ -276,10 +301,29 @@ export interface TimelineEpisode {
   evidence: TimelineEvidenceRef[]
   related_episode_ids: string[]
   related_conversation_ids: string[]
+  /** Authoritative audio claim; stable across conversation split/merge/trim. */
+  audio_ranges: Array<{
+    range_id: string
+    chunk_ids: string[]
+    started_at: string
+    ended_at: string
+    source_stream: string | null
+    /** Operational lineage/debug context only; not the range identity. */
+    conversation_ids: string[]
+  }>
   // Every live recording overlapping the episode, in wall-clock order. Wider than
   // the cited set, which is only the evidence the agent reasoned over. Detail
   // endpoint only.
   audio_recording_ids?: string[]
+  /** Current playback coordinates resolved from authoritative audio_ranges. */
+  audio_playback_ranges?: Array<{
+    range_id: string
+    conversation_id: string
+    start: number
+    end: number
+    started_at: string
+    ended_at: string
+  }>
   parent_episode_id: string | null
   has_thumbnail: boolean
 }

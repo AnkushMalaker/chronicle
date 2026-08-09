@@ -4,11 +4,12 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Literal, Optional
 
+from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from advanced_omi_backend.auth import current_active_user
-from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.timeline import (
     TimelineAnalysisRun,
     TimelineDay,
@@ -23,10 +24,6 @@ from advanced_omi_backend.services.timeline.discovery import (
 from advanced_omi_backend.services.timeline.timezone import canonical_timezone
 
 router = APIRouter(prefix="/timeline", tags=["timeline"])
-
-# Longest single recording the capture pipeline produces (2h meeting cap, plus slack),
-# so a scan for recordings overlapping an episode needs no earlier lower bound.
-_MAX_RECORDING_SPAN = timedelta(hours=3)
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -97,6 +94,7 @@ def _episode_payload(episode: TimelineEpisode) -> dict:
         ],
         "related_episode_ids": episode.related_episode_ids,
         "related_conversation_ids": episode.related_conversation_ids,
+        "audio_ranges": [item.model_dump(mode="json") for item in episode.audio_ranges],
         "parent_episode_id": episode.parent_episode_id,
         "has_thumbnail": bool(episode.representative_image),
     }
@@ -196,66 +194,62 @@ async def _episode_audio_recordings(episode: TimelineEpisode) -> list[str]:
     recording that carried its most quotable stretch. Playing the episode needs
     whatever audio covers the span, so this is derived from the interval instead.
     """
-    started, ended = _utc(episode.started_at), _utc(episode.ended_at)
-    if started is None or ended is None:
+    # Compatibility/display metadata only. Playback truth is ``audio_ranges``; map
+    # their current owners for the existing recording-detail links.
+    chunk_ids = [
+        chunk_id for item in episode.audio_ranges for chunk_id in item.chunk_ids
+    ]
+    if not chunk_ids:
         return []
-    # Bounded and projected: an unbounded scan pulls the user's whole history, and
-    # each document carries its transcript versions. A recording cannot reach into
-    # the episode from further back than the longest session the pipeline produces.
-    candidates = (
-        await Conversation.get_pymongo_collection()
-        .find(
-            {
-                "user_id": episode.user_id,
-                "created_at": {
-                    "$gte": started - _MAX_RECORDING_SPAN,
-                    "$lt": ended,
-                },
-                "deleted": {"$ne": True},
-            },
-            {
-                "conversation_id": 1,
-                "created_at": 1,
-                "audio_total_duration": 1,
-                "audio_chunks_count": 1,
-            },
-        )
-        .to_list(length=None)
+    owners = await AudioChunkDocument.get_pymongo_collection().distinct(
+        "conversation_id", {"_id": {"$in": [ObjectId(item) for item in chunk_ids]}}
     )
-    overlapping: list[tuple[datetime, datetime, str]] = []
-    for row in candidates:
-        duration = row.get("audio_total_duration") or 0
-        base = _utc(row.get("created_at"))
-        if duration <= 0 or not row.get("audio_chunks_count") or base is None:
-            continue
-        end = base + timedelta(seconds=duration)
-        if end > started:
-            overlapping.append((base, end, row["conversation_id"]))
-    overlapping.sort()
+    return sorted(str(item) for item in owners)
 
-    # Greedy interval cover. Concurrent capture means several recordings overlap the
-    # same minutes — both directions of one device, and every device in the room — so
-    # returning all of them would replay the same audio once per stream. Take the
-    # fewest that still reach the end of the episode.
-    chosen: list[str] = []
-    cursor = started
-    while cursor < ended:
-        best: tuple[datetime, str] | None = None
-        for start, end, conversation_id in overlapping:
-            if start > cursor:
-                break
-            if end > cursor and (best is None or end > best[0]):
-                best = (end, conversation_id)
-        if best is None:
-            # Gap in coverage: jump to the next recording that starts after it.
-            later = [item for item in overlapping if item[0] > cursor]
-            if not later:
-                break
-            cursor = later[0][0]
-            continue
-        chosen.append(best[1])
-        cursor = best[0]
-    return chosen
+
+async def _episode_playback_ranges(episode: TimelineEpisode) -> list[dict]:
+    """Resolve immutable episode ranges onto chunks' current playback coordinates."""
+    playback: list[dict] = []
+    for audio_range in episode.audio_ranges:
+        chunks = await AudioChunkDocument.find(
+            {"_id": {"$in": [ObjectId(item) for item in audio_range.chunk_ids]}}
+        ).to_list()
+        chunks.sort(key=lambda item: _at(item.captured_at))
+        current: dict | None = None
+        for chunk in chunks:
+            if chunk.captured_at is None:
+                continue
+            captured = _at(chunk.captured_at)
+            absolute_start = max(_at(audio_range.started_at), captured)
+            absolute_end = min(
+                _at(audio_range.ended_at),
+                captured + timedelta(seconds=chunk.duration),
+            )
+            if absolute_end <= absolute_start:
+                continue
+            relative_start = (
+                chunk.start_time + (absolute_start - captured).total_seconds()
+            )
+            relative_end = chunk.start_time + (absolute_end - captured).total_seconds()
+            if (
+                current is not None
+                and current["conversation_id"] == chunk.conversation_id
+                and abs(current["end"] - relative_start) <= 0.25
+            ):
+                current["end"] = relative_end
+                current["ended_at"] = absolute_end
+            else:
+                current = {
+                    "range_id": audio_range.range_id,
+                    "conversation_id": chunk.conversation_id,
+                    "start": relative_start,
+                    "end": relative_end,
+                    "started_at": absolute_start,
+                    "ended_at": absolute_end,
+                }
+                playback.append(current)
+    playback.sort(key=lambda item: item["started_at"])
+    return playback
 
 
 @router.get("/episodes/{episode_id}")
@@ -265,6 +259,7 @@ async def get_timeline_episode(
     episode = await _owned_episode(episode_id, user)
     payload = _episode_payload(episode)
     payload["audio_recording_ids"] = await _episode_audio_recordings(episode)
+    payload["audio_playback_ranges"] = await _episode_playback_ranges(episode)
     return payload
 
 
