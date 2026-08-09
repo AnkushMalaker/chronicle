@@ -90,14 +90,44 @@ state for all users, and queues active transcripts from the selected stage:
   --replace --rebuild-from memory --force
 
 ./chronicle-data.sh import /app/data/backups/before-upgrade.chronicle \
-  --replace --rebuild-from speakers --force
+  --replace --rebuild-from days --force
 ```
 
-The `speakers` mode runs speaker recognition first and creates new active transcript
-versions before starting memory reconstruction. It processes every non-deleted
-conversation with an active transcript; `memory_excluded=true` conversations receive
-speaker processing but remain excluded from memory. The `memory` mode starts directly
-from the imported active transcripts.
+### Choosing a stage
+
+The stages are ordered by how far back they replay. Pick the earliest thing that
+actually changed — each step back costs a full pass over the corpus.
+
+| Stage | Replays | Use when |
+|---|---|---|
+| `memory` | per-conversation vault writes from the imported active transcripts | only the memory prompt or vault format changed |
+| `speakers` | diarization + identification, then memory | enrollment or the speaker model changed |
+| `days` | episode boundaries + the day vault write, over the **existing** speaker layer | the segmentation agent, day prompt, or episode-note format changed |
+| `timeline` | diarization **and** boundaries **and** the day write | audio bounds changed — a re-bound, silence trim, merge or split |
+
+`days` and `timeline` are the two that re-decide boundaries. Both delete existing
+`timeline_analysis_runs`, `timeline_days`, and `timeline_episodes` first: a surviving
+`TimelineDay` carries the write-once `memory_state` latch that would skip it, and a
+surviving episode is offered back to the agent as prior art, so it reproduces the
+boundaries the run exists to replace. Both enqueue **no** per-conversation memory jobs
+— the day pass is the whole vault write, and running both would record the same audio
+twice under the boundaries being replaced.
+
+The difference is diarization, and it is the expensive half. `timeline` resets every
+conversation to its ASR layer and fans out one speaker job per recording; on a corpus
+of a few hundred recordings that is hours of GPU before the day chain can even start.
+`days` keeps the speaker layer that is already active, which is the transcript the day
+pass wants to read anyway — resetting to ASR would make it segment text with no
+speakers in it. So reach for `timeline` only when the audio itself moved.
+
+Within a boundary stage, speaker jobs fan out (they write only their own
+conversation's transcript, so nothing orders them) while days run serially, because
+each day's write takes that user's vault lock.
+
+The `speakers` mode processes every non-deleted conversation with an active
+transcript; `memory_excluded=true` conversations receive speaker processing but remain
+excluded from memory. The `memory` mode starts directly from the imported active
+transcripts.
 
 Transcript-only conversations that have no stored audio chunks are reported and
 skipped by the speaker stage. They still participate in memory reconstruction from
@@ -124,6 +154,7 @@ The same clean rebuild can run without importing an archive:
 ./chronicle-data.sh rebuild-memory --dry-run
 ./chronicle-data.sh rebuild-memory --force
 ./chronicle-data.sh rebuild-memory --rebuild-from speakers --force
+./chronicle-data.sh rebuild-memory --rebuild-from days --force
 ./chronicle-data.sh rebuild-memory --user-id 507f1f77bcf86cd799439011 --force
 ```
 
