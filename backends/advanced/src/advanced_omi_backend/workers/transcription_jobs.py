@@ -713,6 +713,31 @@ async def process_transcription_result(
     await conversation.save()
     await _settle_audio_evidence_span(conversation, len(words), "transcribed")
 
+    # Trim the conversation's silence now that its transcript is attached and active.
+    # This is where continuous capture lands: a 30-minute ScreenPipe recording is
+    # mostly silence, and it must be trimmed BEFORE the post-conversation chain so
+    # speaker recognition reads the same timeline the audio now has. The trim re-times
+    # the active version in place, so re-read it for the result below.
+    # Lazy import: circular dependency — conversation_jobs imports transcription_jobs.
+    from advanced_omi_backend.workers.conversation_jobs import maybe_trim_silence
+
+    if await maybe_trim_silence(conversation_id) is not None:
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == conversation_id
+        )
+        trimmed = next(
+            (
+                v
+                for v in (conversation.transcript_versions if conversation else [])
+                if v.version_id == version_id
+            ),
+            None,
+        )
+        if trimmed is not None:
+            speaker_segments = trimmed.segments or []
+            words = [word.model_dump() for word in (trimmed.words or [])]
+            transcript_text = trimmed.transcript or ""
+
     logger.info(
         f"✅ Transcript processing completed for {conversation_id} in {processing_time:.2f}s"
     )
@@ -1096,17 +1121,15 @@ async def transcription_fallback_check_job(
             "reason": processing_result.get("reason"),
         }
 
-    # Trim leading silence before post-processing. This is the batch-fallback
-    # finalization path (no streaming speech was detected mid-session, so
-    # open_conversation_job's Phase 6b never ran); the same trim must happen here so an
-    # always_persist conversation that recorded a long pause before speech still gets
-    # the silence split off. Best-effort — never blocks the chain.
+    # Trim silence before post-processing. This is the batch-fallback finalization
+    # path (no streaming speech was detected mid-session, so open_conversation_job's
+    # Phase 6b never ran); the same trim must happen here so an always_persist
+    # conversation that recorded a long pause before speech still gets the silence
+    # split off. Best-effort — never blocks the chain.
     # Lazy import: circular dependency — conversation_jobs imports transcription_jobs.
-    from advanced_omi_backend.workers.conversation_jobs import (
-        maybe_trim_leading_silence,
-    )
+    from advanced_omi_backend.workers.conversation_jobs import maybe_trim_silence
 
-    await maybe_trim_leading_silence(conv_id)
+    await maybe_trim_silence(conv_id)
 
     # Enqueue post-conversation jobs
     post_jobs = start_post_conversation_jobs(

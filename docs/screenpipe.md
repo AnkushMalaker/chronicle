@@ -229,10 +229,11 @@ degrade to a text memory, never to no memory.
 
 ## Meeting detection and audio session bounds
 
-Without a meeting signal, the backend can only sessionize forwarded audio by blind
-time rules (60 s gap, 30-minute hard split), so a 45-minute call became two arbitrary
-conversations. The collector now supplies real meeting intervals from two sources,
-recorder first:
+A meeting signal is the strongest evidence of where a conversation begins and ends,
+because it comes from the machine rather than from inference. Without one the backend
+falls back to the speech profile (see "Where a recording begins and ends" below), which
+is good but not authoritative. The collector supplies real meeting intervals from two
+sources, recorder first:
 
 1. **The recorder's own meetings table (macOS / Windows — preferred).** ScreenPipe's
    meeting watcher (CoreAudio process taps / WASAPI sessions) persists meetings —
@@ -262,9 +263,39 @@ so they land on the timeline and join overlapping conversations through the exis
 correlation. Each forwarded audio chunk overlapping a meeting interval — state
 persists in `~/.local/state/chronicle-screenpipe/meetings.json` — carries a
 `meeting_id`, and the backend's session grouping (`device_audio_ingest.py`) splits
-on meeting boundaries, tolerates 5-minute silences inside one meeting, and replaces
-the 30-minute split with a 2-hour safety cap. Disable per node at pairing time with
-`--no-meeting-detection`.
+on meeting boundaries and tolerates 5-minute silences inside one meeting. A window
+carrying a meeting id is never cut by the speech-derived rule below: its bounds came
+from a real signal. Disable per node at pairing time with `--no-meeting-detection`.
+
+## Where a recording begins and ends
+
+ScreenPipe records continuously, so the 60-second gap rule almost never fires — the
+recorder does not stop just because nothing is happening. For a long time the only
+other splitter was a hard 30-minute cap, which cut wherever the clock landed.
+
+Measured over this deployment's corpus of 237 ScreenPipe recordings: 95.9 hours of
+stored audio carrying 24.9 hours of speech, 176 recordings sitting exactly at the cap,
+and **94 of those with speech running to within 15 seconds of the cut**. More than half
+of all capped recordings were severed mid-conversation, with the remainder filed as a
+separate recording that began 30 minutes later.
+
+Two independent changes fix the two halves of that, and they compose:
+
+- **The window is bounded for compute; the boundary is chosen from speech.**
+  `group_audio_sessions` now accumulates up to a 2-hour window, which is mixed and
+  profiled once. `plan_session_cuts` then reads the 10-second speech series and cuts at
+  the middle of the longest quiet run near a 30-minute target, widening its search to
+  the safety cap before settling. Replayed over the corpus' rebuilt capture windows, a
+  fixed 30:00 cut severed speech on **148 of 334 cuts (44%)**; choosing the quietest
+  point severs **34 of 308 (11%)**, and none of the remainder are forced by the safety
+  cap — they are windows with no long quiet run anywhere in two hours.
+- **Silence inside a recording is trimmed, not stored inline.** See
+  [memories.md](backend/memories.md) for the vault side; the audio side is
+  `utils/audio_trim.py`, invoked after transcription by `maybe_trim_silence`.
+
+Neither change deletes audio. Trimmed stretches move to a soft-deleted remnant
+conversation, and every chunk keeps an immutable `captured_at`, so a remnant needs no
+"trimmed from here" record — the audio itself says when it happened.
 
 ## Screen context and the `chronicle` fork branch
 

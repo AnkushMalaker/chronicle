@@ -11,14 +11,15 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from omegaconf import OmegaConf
+from pymongo import UpdateOne
 from rq import get_current_job
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
-from advanced_omi_backend.config import get_live_segmentation
+from advanced_omi_backend.config import get_live_segmentation, silence_trim_settings
 from advanced_omi_backend.config_loader import get_backend_config
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
@@ -59,7 +60,16 @@ from advanced_omi_backend.services.sse_publisher import (
     publish_sse_event,
     publish_sse_event_throttled,
 )
-from advanced_omi_backend.utils.audio_chunk_utils import wait_for_audio_chunks
+from advanced_omi_backend.utils.audio_chunk_utils import (
+    invalidate_conversation_audio_caches,
+    wait_for_audio_chunks,
+)
+from advanced_omi_backend.utils.audio_trim import (
+    TrimPlan,
+    plan_silence_trim,
+    remap_segments,
+    remap_words,
+)
 from advanced_omi_backend.utils.conversation_utils import (
     analyze_speech,
     extract_speakers_from_segments,
@@ -71,149 +81,176 @@ from advanced_omi_backend.utils.conversation_utils import (
     update_job_progress_metadata,
 )
 from advanced_omi_backend.utils.job_utils import check_job_alive, update_job_meta
+from advanced_omi_backend.utils.transcript_slicing import build_transcript_text
 from advanced_omi_backend.utils.vad_analysis import analyze_conversation_audio
 
 logger = logging.getLogger(__name__)
 
 
-def leading_silence_trim_index(
-    chunks: list[dict],
-    speech_start_time: float,
-    min_trim_seconds: float,
-) -> int | None:
-    """Chunk index where a conversation's real content begins, or None to skip trimming.
+def _renumber(chunks: list[dict]) -> list[UpdateOne]:
+    """Pack ``chunks`` (in order) onto a contiguous timeline starting at zero.
 
-    With always_persist on, the session placeholder records audio from session start,
-    so a long pause before the user speaks lands as leading silence. At finalize we
-    split that silence off into a soft-deleted remnant. This returns the chunk_index of
-    the first chunk that should belong to the trimmed (visible) conversation — the chunk
-    containing ``speech_start_time``.
-
-    Returns None when there is nothing worth trimming: when the leading silence is
-    shorter than ``min_trim_seconds`` (don't churn over a few seconds of pre-roll) or
-    when speech already starts in the first chunk.
-
-    Args:
-        chunks: chunk timeline, dicts with ``chunk_index``/``start_time``/``end_time``,
-            sorted by chunk_index.
-        speech_start_time: time (conversation timeline, seconds) of the first speech.
-        min_trim_seconds: only trim when ``speech_start_time`` is at least this large.
+    ``captured_at`` is deliberately absent from the ``$set``: it is the chunk's own
+    identity in time and must survive every renumbering, which is what lets trimmed
+    audio keep its provenance without a separate record of where it came from.
     """
-    if speech_start_time < min_trim_seconds:
-        return None
-    for chunk in chunks:
-        if chunk["start_time"] <= speech_start_time < chunk["end_time"]:
-            boundary = int(chunk["chunk_index"])
-            return boundary if boundary > 0 else None
-    return None
+    operations = []
+    cursor = 0.0
+    for position, chunk in enumerate(chunks):
+        duration = float(chunk["end_time"]) - float(chunk["start_time"])
+        operations.append(
+            UpdateOne(
+                {"_id": chunk["_id"]},
+                {
+                    "$set": {
+                        "chunk_index": position,
+                        "start_time": round(cursor, 3),
+                        "end_time": round(cursor + duration, 3),
+                    }
+                },
+            )
+        )
+        cursor += duration
+    return operations
 
 
-async def trim_leading_silence(
+async def trim_silence(
     conversation_id: str,
-    speech_start_time: float,
+    speech_regions: Sequence[tuple[float, float]],
     *,
-    min_trim_seconds: float = 30.0,
-) -> bool:
-    """Split leading silence off a conversation into a soft-deleted remnant.
+    pad_seconds: float = 5.0,
+    min_run_seconds: float = 120.0,
+    min_saving_seconds: float = 60.0,
+    reason: str = "silence_trim",
+) -> TrimPlan | None:
+    """Move a conversation's silent stretches onto a soft-deleted remnant.
 
-    With always_persist on, the session placeholder records audio from session start,
-    so a long pause before speech becomes leading silence on the conversation. This
-    moves the pre-speech chunks onto a NEW soft-deleted remnant (the audio is kept in
-    Mongo, just hidden) and re-bases the remaining chunks in place so the visible
-    conversation begins at the first speech. The conversation_id is unchanged, so the
-    post-conversation chain keyed to it is unaffected.
+    Leading silence is the special case where the only cut run is at the front; the
+    same operation handles interior silence, which is where continuous capture puts
+    nearly all of it. The visible conversation keeps only the audio around speech and
+    is renumbered to be contiguous, so playback and reconstruction (which read chunks
+    ordered by ``chunk_index``) need no knowledge that a trim happened.
 
-    Returns True if a trim happened, False if there was nothing worth trimming.
+    The active transcript is re-timed through the same map, so segment and word
+    timestamps still address the audio they name.
 
-    Mirrors the crash-safe ordering of data_audit's split (create remnant first, move
-    chunks, mutate the conversation last) and reuses the same chunk-reassignment shape.
+    Returns the applied plan, or None when nothing was worth trimming.
+
+    Crash-safe ordering matches data_audit's split: create the remnant first, move
+    chunks, mutate the conversation last. A crash mid-way leaves audio reachable from
+    one conversation or the other, never from neither.
     """
-    chunks = [
-        {
-            "chunk_index": c.chunk_index,
-            "start_time": c.start_time,
-            "end_time": c.end_time,
-            "duration": c.duration,
-        }
-        for c in await AudioChunkDocument.find(
+    documents = (
+        await AudioChunkDocument.find(
             AudioChunkDocument.conversation_id == conversation_id,
             AudioChunkDocument.deleted == False,  # noqa: E712 — Beanie needs ==
         )
         .sort("+chunk_index")
         .to_list()
+    )
+    if not documents:
+        return None
+    chunks = [
+        {
+            "_id": c.id,
+            "chunk_index": c.chunk_index,
+            "start_time": c.start_time,
+            "end_time": c.end_time,
+            "duration": c.duration,
+        }
+        for c in documents
     ]
-    if not chunks:
-        return False
 
-    boundary = leading_silence_trim_index(chunks, speech_start_time, min_trim_seconds)
-    if boundary is None:
-        return False
-
-    chunk_by_index = {int(c["chunk_index"]): c for c in chunks}
-    t0 = float(chunk_by_index[boundary]["start_time"])
-    now = datetime.now(timezone.utc)
+    plan = plan_silence_trim(
+        chunks,
+        speech_regions,
+        pad_seconds=pad_seconds,
+        min_run_seconds=min_run_seconds,
+        min_saving_seconds=min_saving_seconds,
+    )
+    if not plan.trims:
+        return None
 
     conversation = await Conversation.find_one(
         Conversation.conversation_id == conversation_id
     )
     if conversation is None or conversation.deleted:
-        return False
+        return None
 
-    # 1) Soft-deleted remnant that will hold the leading-silence chunks.
+    by_index = {int(c["chunk_index"]): c for c in chunks}
+    kept = [by_index[i] for i in plan.keep]
+    dropped = [by_index[i] for i in plan.drop]
+    now = datetime.now(timezone.utc)
+
+    # 1) Remnant holding the silence. It is soft-deleted, so it stays out of every
+    #    user-facing list while the audio remains addressable and restorable.
     remnant = create_conversation(
         user_id=conversation.user_id,
         client_id=conversation.client_id,
-        title="Leading silence",
+        title="Trimmed silence",
     )
     remnant.deleted = True
-    remnant.deletion_reason = "leading_silence"
+    remnant.deletion_reason = reason
     remnant.deleted_at = now
     remnant.derived_from = Conversation.DerivedFrom(
-        operation="leading_silence_trim",
+        operation=reason,
         source_conversation_ids=[conversation_id],
-        time_range=[0.0, t0],
+        time_range=[
+            float(dropped[0]["start_time"]),
+            float(dropped[-1]["end_time"]),
+        ],
         performed_at=now,
         performed_by="system",
     )
-    remnant.audio_chunks_count = boundary
-    remnant.audio_total_duration = round(
-        float(chunk_by_index[boundary - 1]["end_time"]), 2
-    )
+    remnant.audio_chunks_count = len(dropped)
+    remnant.audio_total_duration = round(plan.dropped_seconds, 2)
     await remnant.insert()
 
     collection = AudioChunkDocument.get_pymongo_collection()
-    # 2) Move the leading-silence chunks (0..boundary-1) onto the remnant, re-indexed
-    #    from 0 (their times already start at 0, so no time shift needed).
-    await collection.update_many(
-        {"conversation_id": conversation_id, "chunk_index": {"$lt": boundary}},
-        {"$set": {"conversation_id": remnant.conversation_id}},
-    )
-    # 3) Re-base the surviving chunks in place: chunk_index -= boundary, times -= t0.
-    await collection.update_many(
-        {"conversation_id": conversation_id, "chunk_index": {"$gte": boundary}},
+    # 2) Hand the silence to the remnant and pack both sides onto their own contiguous
+    #    timelines. Per-chunk updates because each lands at a different position.
+    await collection.bulk_write(
         [
-            {
-                "$set": {
-                    "chunk_index": {"$subtract": ["$chunk_index", boundary]},
-                    "start_time": {"$subtract": ["$start_time", t0]},
-                    "end_time": {"$subtract": ["$end_time", t0]},
-                }
-            }
-        ],
+            UpdateOne(
+                {"_id": chunk["_id"]},
+                {"$set": {"conversation_id": remnant.conversation_id}},
+            )
+            for chunk in dropped
+        ]
+        + _renumber(dropped)
+        + _renumber(kept)
     )
 
-    # 4) Mutate the conversation last (visible content now starts at the first speech).
-    surviving = len(chunks) - boundary
-    conversation.audio_chunks_count = surviving
-    conversation.audio_total_duration = round(float(chunks[-1]["end_time"]) - t0, 2)
+    # 3) Re-time the transcript onto the trimmed timeline.
+    version = next(
+        (
+            v
+            for v in conversation.transcript_versions
+            if v.version_id == conversation.active_transcript_version
+        ),
+        None,
+    )
+    if version is not None:
+        version.segments = remap_segments(version.segments or [], plan.regions)
+        version.words = remap_words(version.words or [], plan.regions)
+        version.transcript = build_transcript_text(version.segments)
+
+    # 4) Mutate the conversation last.
+    conversation.audio_chunks_count = len(kept)
+    conversation.audio_total_duration = round(plan.kept_seconds, 2)
+    # Both caches are keyed to the pre-trim audio and would now describe a timeline
+    # that no longer exists.
+    conversation.vad_analysis = None
     await conversation.save()
+    await invalidate_conversation_audio_caches(conversation_id)
 
     logger.info(
-        f"✂️ Trimmed {boundary} leading-silence chunks ({t0:.0f}s) off conversation "
-        f"{conversation_id[:12]} → soft-deleted remnant {remnant.conversation_id[:12]} "
-        f"(audio kept in Mongo)"
+        f"✂️ Trimmed {len(dropped)} silent chunks ({plan.dropped_seconds:.0f}s of "
+        f"{plan.dropped_seconds + plan.kept_seconds:.0f}s) off conversation "
+        f"{conversation_id[:12]} → soft-deleted remnant "
+        f"{remnant.conversation_id[:12]} (audio kept in Mongo)"
     )
-    return True
+    return plan
 
 
 async def _wait_for_chunk_count_stable(
@@ -245,63 +282,66 @@ async def _wait_for_chunk_count_stable(
         await asyncio.sleep(0.5)
 
 
-async def maybe_trim_leading_silence(
-    conversation_id: str, *, min_trim_seconds: float = 30.0
-) -> bool:
-    """Trim leading silence off a finalized conversation, best-effort.
+async def maybe_trim_silence(conversation_id: str) -> TrimPlan | None:
+    """Trim a finalized conversation's silence, best-effort.
 
-    With always_persist on, the session placeholder records audio from session start,
-    so a long pause before the user speaks lands as leading silence on the conversation.
-    This locates where speech actually begins, waits for the audio-chunk count to settle,
-    and splits the silence off onto a soft-deleted remnant (audio kept in Mongo) so the
-    visible conversation begins at the first speech.
+    Two populations need this and they need the same thing. An ``always_persist``
+    placeholder records from session start, so a pause before the user speaks lands as
+    leading silence. Continuous capture records regardless of whether anything is
+    happening, so its silence is mostly interior — on this deployment's ScreenPipe
+    corpus, three quarters of all stored audio.
 
-    Speech start is derived from VAD over the audio itself (``analyze_conversation_audio``)
-    rather than from transcript word timings: the streaming transcript times words
-    relative to the speech onset (word[0].start == 0.0), so it cannot locate where speech
-    sits in the session timeline — only the batch path produces absolute times. VAD is the
-    one signal that is correct for both finalization paths, and it populates the per-chunk
-    ``vad`` field as a side benefit.
+    Speech regions come from VAD over the audio (``analyze_conversation_audio``) rather
+    than from transcript word timings: the streaming transcript times words relative to
+    the speech onset (word[0].start == 0.0), so it cannot locate where speech sits in
+    the session timeline — only the batch path produces absolute times. VAD is correct
+    for both finalization paths, and it populates the per-chunk ``vad`` field as a side
+    benefit.
 
-    This is the single entry point shared by BOTH finalization paths — the streaming
-    ``open_conversation_job`` and the batch ``transcription_fallback_check_job`` — since
-    a conversation can be finalized by either (whichever detects the transcript). It
-    never raises: trimming is a cosmetic optimization and must not block finalize.
-
-    Returns True if a trim happened, False otherwise.
+    Never raises: trimming is an optimization and must not block finalize.
     """
     try:
         conversation = await Conversation.find_one(
             Conversation.conversation_id == conversation_id
         )
-        if conversation is None or not getattr(conversation, "always_persist", False):
-            # Only always_persist placeholders accumulate leading silence; a
-            # speech-driven conversation begins at the speech by construction.
-            return False
+        if conversation is None or conversation.deleted:
+            return None
 
-        # Cheap guard: a conversation shorter than the trim threshold cannot have
-        # min_trim_seconds of leading silence — skip the VAD decode entirely.
+        settings = silence_trim_settings()
+        if not settings.get("enabled", True):
+            return None
+        min_run = float(settings.get("min_run_seconds", 120.0))
+
+        # A conversation shorter than one cuttable run cannot have one — skip the
+        # VAD decode entirely.
         total_duration = float(
             getattr(conversation, "audio_total_duration", 0.0) or 0.0
         )
-        if total_duration < min_trim_seconds:
-            return False
+        if total_duration < min_run:
+            return None
 
         await _wait_for_chunk_count_stable(conversation_id)
 
-        # VAD over the audio gives absolute speech regions in the session timeline.
         analysis = await analyze_conversation_audio(conversation_id)
-        regions = analysis.get("speech_regions") or []
+        regions = [
+            (float(start), float(end))
+            for start, end in (analysis.get("speech_regions") or [])
+        ]
         if not regions:
-            return False
-        speech_start = float(regions[0][0])
+            # No speech at all. Trimming would empty the conversation; whether it
+            # should exist is the speech gate's decision, not this one's.
+            return None
 
-        return await trim_leading_silence(
-            conversation_id, speech_start, min_trim_seconds=min_trim_seconds
+        return await trim_silence(
+            conversation_id,
+            regions,
+            pad_seconds=float(settings.get("pad_seconds", 5.0)),
+            min_run_seconds=min_run,
+            min_saving_seconds=float(settings.get("min_saving_seconds", 60.0)),
         )
     except Exception as e:  # noqa: BLE001 — trimming must never block finalize
-        logger.warning(f"Leading-silence trim skipped for {conversation_id[:12]}: {e}")
-        return False
+        logger.warning(f"Silence trim skipped for {conversation_id[:12]}: {e}")
+        return None
 
 
 def should_discard_unbacked_conversation(has_meaningful_transcript: bool) -> bool:
@@ -1838,9 +1878,9 @@ async def open_conversation_job(
             aggregator=aggregator,
         )
 
-        # Phase 6b: Trim leading silence off the (always_persist) conversation. Shared
-        # with the batch-fallback finalization path — see maybe_trim_leading_silence.
-        await maybe_trim_leading_silence(conversation_id)
+        # Phase 6b: Trim the conversation's silence. Shared with the batch-fallback
+        # finalization path — see maybe_trim_silence.
+        await maybe_trim_silence(conversation_id)
 
         # Phase 7: Enqueue post-processing pipeline
         await _enqueue_post_processing(

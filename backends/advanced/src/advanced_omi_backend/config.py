@@ -108,6 +108,28 @@ def save_diarization_settings(settings: dict) -> bool:
 # ============================================================================
 
 
+def silence_trim_settings() -> dict:
+    """Silence-trim thresholds, from ``backend.audio_filtering.silence_trim``.
+
+    ``min_run_seconds`` is deliberately far longer than any conversational pause: the
+    trim is meant to find stretches where nothing was happening, not to compress the
+    rhythm of a conversation. Lowering it towards a few seconds would make playback
+    skip. Runs in the workers container, which reloads config only on restart.
+    """
+    cfg = get_backend_config("audio_filtering")
+    settings = OmegaConf.to_container(cfg, resolve=True) if cfg else {}
+    trim = settings.get("silence_trim") if isinstance(settings, dict) else None
+    defaults = {
+        "enabled": True,
+        "pad_seconds": 5.0,
+        "min_run_seconds": 120.0,
+        "min_saving_seconds": 60.0,
+    }
+    if isinstance(trim, dict):
+        defaults.update(trim)
+    return defaults
+
+
 def require_speech_for_transcription() -> bool:
     """Audio-filtering gate: skip transcription when local VAD finds no speech.
 

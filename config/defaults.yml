@@ -813,6 +813,21 @@ backend:
   audio_filtering:
     require_speech: true
 
+    # Silence trim — after a conversation is transcribed, stretches with no speech
+    # are moved onto a soft-deleted remnant and the survivors are packed onto a
+    # contiguous timeline (the transcript is re-timed with them). The audio is kept,
+    # and each chunk's immutable captured_at records when it really happened.
+    silence_trim:
+      enabled: true
+      # Context kept on each side of speech.
+      pad_seconds: 5.0
+      # Shortest silent run worth cutting. Far longer than any conversational pause
+      # on purpose: this finds stretches where nothing was happening, and lowering
+      # it towards a few seconds makes playback skip.
+      min_run_seconds: 120.0
+      # Leave a conversation alone below this total saving.
+      min_saving_seconds: 60.0
+
   # Screen context pulled from a capture node for one completed conversation.
   # This is raw per-frame OCR, not the collector's already-reduced observation
   # stream, so it is filtered on arrival and expired by the
