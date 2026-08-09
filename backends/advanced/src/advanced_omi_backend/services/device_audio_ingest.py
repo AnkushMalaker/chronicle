@@ -5,6 +5,7 @@ import hashlib
 import logging
 import tempfile
 import wave
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -33,10 +34,16 @@ _SESSION_GAP = timedelta(seconds=60)
 _CLOSE_DELAY = timedelta(seconds=90)
 # Ingest attempts allowed for one session start before its chunks are dropped.
 _MAX_INGEST_ATTEMPTS = 5
-_MAX_SESSION = timedelta(minutes=30)
+# How much contiguous capture is mixed and profiled at once. This bounds *compute*,
+# not conversations: where one recording ends is decided afterwards, from the speech
+# profile (see plan_session_cuts). ScreenPipe records continuously, so the 60s gap
+# rule almost never fires and this window is what actually terminates a session.
+_MAX_WINDOW = timedelta(hours=2)
+# Preferred recording length. A cut is placed near this, but only where the audio is
+# quiet — never mid-sentence.
+_TARGET_SESSION = timedelta(minutes=30)
 # Chunks the collector tagged with the same meeting interval belong to one
-# conversation: tolerate longer silences and only split at a safety cap
-# instead of the blind 30-minute rule.
+# conversation: tolerate longer silences, and never cut inside the meeting.
 _MEETING_SESSION_GAP = timedelta(minutes=5)
 _MAX_MEETING_SESSION = timedelta(hours=2)
 
@@ -70,7 +77,7 @@ def group_audio_sessions(items: list[DeviceInputItem]) -> list[list[DeviceInputI
             item
         ) == _meeting_id(previous)
         gap_limit = _MEETING_SESSION_GAP if same_meeting else _SESSION_GAP
-        max_session = _MAX_MEETING_SESSION if same_meeting else _MAX_SESSION
+        max_session = _MAX_MEETING_SESSION if same_meeting else _MAX_WINDOW
         if (
             _meeting_id(item) != _meeting_id(previous)
             or captured_at - previous_end > gap_limit
@@ -80,6 +87,104 @@ def group_audio_sessions(items: list[DeviceInputItem]) -> list[list[DeviceInputI
         else:
             sessions[-1].append(item)
     return sessions
+
+
+def plan_session_cuts(
+    speech_fraction: list[float | None],
+    bucket_seconds: float,
+    *,
+    target_seconds: float = _TARGET_SESSION.total_seconds(),
+    max_seconds: float = _MAX_WINDOW.total_seconds(),
+    min_quiet_seconds: float = 30.0,
+) -> list[float]:
+    """Where a capture window should be cut into recordings, in seconds from its start.
+
+    The old rule cut at exactly 30 minutes regardless of what was being said. Measured
+    over this deployment's ScreenPipe corpus, 176 of 237 recordings hit that cap and 94
+    of them had speech running to within 15 seconds of the cut — more than half were
+    severed mid-conversation, with the rest of the conversation filed as a separate
+    recording.
+
+    So the target is only honoured where the audio agrees. A cut needs a quiet run of
+    at least ``min_quiet_seconds`` reasonably near the target; failing that the window
+    stays whole, because a dense 63-minute call IS one recording and splitting it is
+    the bug being fixed. The only unconditional cut is the safety cap, and even there
+    the quietest available point within the cap is preferred.
+
+    Args:
+        speech_fraction: per-bucket speech share; None where the VAD had no verdict.
+        bucket_seconds: seconds of audio per bucket.
+        target_seconds: preferred recording length.
+        max_seconds: hard cap; a cut happens here even with nowhere good to put it.
+        min_quiet_seconds: shortest silence that may carry a cut.
+    """
+    if bucket_seconds <= 0 or not speech_fraction:
+        return []
+    total = len(speech_fraction) * bucket_seconds
+    quiet = [not fraction for fraction in speech_fraction]
+    min_buckets = max(1, int(min_quiet_seconds / bucket_seconds))
+
+    def quiet_cut(low: float, high: float) -> float | None:
+        return _longest_quiet_run(
+            quiet,
+            bucket_seconds,
+            int(low // bucket_seconds),
+            int(high // bucket_seconds),
+            min_buckets,
+        )
+
+    cuts: list[float] = []
+    window_start = 0.0
+    # Half a target's overshoot is tolerated rather than cut: a 40-minute recording is
+    # better than a 30 and a 10.
+    while total - window_start > target_seconds * 1.5:
+        remaining = total - window_start
+        forced = remaining > max_seconds
+        # Never leave a stub: the search starts half a target in, and stops half a
+        # target short of the end so the tail is a recording rather than a fragment.
+        low = window_start + target_seconds * 0.5
+        cut = quiet_cut(low, min(window_start + target_seconds * 1.5, total - low))
+        if cut is None and forced:
+            # Past the safety cap something has to give — take the quietest point
+            # anywhere inside the cap before resorting to the cap itself.
+            cut = quiet_cut(low, window_start + max_seconds)
+        if cut is None:
+            if not forced:
+                # No good seam and no obligation to cut: one longer recording is the
+                # honest answer.
+                break
+            cut = window_start + max_seconds
+        if cut <= window_start:
+            break
+        cuts.append(round(cut, 3))
+        window_start = cut
+    return cuts
+
+
+def _longest_quiet_run(
+    quiet: list[bool],
+    bucket_seconds: float,
+    first: int,
+    last: int,
+    min_buckets: int = 1,
+) -> float | None:
+    """Midpoint of the longest quiet run of at least ``min_buckets`` in [first, last)."""
+    best_length = 0
+    best_middle: float | None = None
+    index = max(0, first)
+    last = min(last, len(quiet))
+    while index < last:
+        if not quiet[index]:
+            index += 1
+            continue
+        run_start = index
+        while index < last and quiet[index]:
+            index += 1
+        length = index - run_start
+        if length >= min_buckets and length > best_length:
+            best_length = length
+            best_middle = (run_start + index) / 2 * bucket_seconds
+    return best_middle
 
 
 def audio_stream_key(item: DeviceInputItem) -> tuple[str, str, str]:
@@ -141,6 +246,59 @@ async def _mix_session(
         raise RuntimeError(
             f"ffmpeg audio assembly failed: {stderr.decode(errors='replace')[-1000:]}"
         )
+
+
+@dataclass
+class _Segment:
+    """One recording carved out of a capture window."""
+
+    items: list[DeviceInputItem]
+    path: Path
+    started_at: datetime
+    ended_at: datetime
+    profile: AudioEvidenceProfile
+
+
+def _write_wav(
+    path: Path, pcm: bytes, sample_rate: int, channels: int, sample_width: int
+) -> None:
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(channels)
+        handle.setsampwidth(sample_width)
+        handle.setframerate(sample_rate)
+        handle.writeframes(pcm)
+
+
+def split_window(
+    session: list[DeviceInputItem],
+    window_start: datetime,
+    cuts: list[float],
+) -> list[tuple[list[DeviceInputItem], float, float]]:
+    """Assign each source item to exactly one segment of the cut window.
+
+    An item is placed by its midpoint, so a cut falling inside a 30-second source file
+    does not duplicate it into both neighbours — which would double-count the audio and
+    collide on the evidence span's (first item, last item) uniqueness key.
+
+    Segments with no items are dropped: a cut can only ever land in quiet audio, but a
+    window that begins or ends with a gap could still produce an empty edge.
+    """
+    bounds = [0.0, *cuts]
+    ends = [*cuts, float("inf")]
+    buckets: list[list[DeviceInputItem]] = [[] for _ in bounds]
+    for item in session:
+        start = (_as_utc(item.captured_at) - window_start).total_seconds()
+        end = (
+            _as_utc(item.ended_at or item.captured_at) - window_start
+        ).total_seconds()
+        middle = (start + max(start, end)) / 2
+        for index, (low, high) in enumerate(zip(bounds, ends)):
+            if low <= middle < high:
+                buckets[index].append(item)
+                break
+    return [
+        (items, low, high) for items, low, high in zip(buckets, bounds, ends) if items
+    ]
 
 
 def _profile_wav(path: Path) -> AudioEvidenceProfile:
@@ -250,9 +408,18 @@ async def _save_evidence_span(
     profile: AudioEvidenceProfile,
     state: str,
     conversation_id: str | None = None,
+    bounds: tuple[datetime, datetime] | None = None,
 ) -> AudioEvidenceSpan:
-    started_at = min(_as_utc(item.captured_at) for item in session)
-    ended_at = max(_as_utc(item.ended_at or item.captured_at) for item in session)
+    # A segment's bounds are the cut, not its items: a cut lands inside a source file,
+    # and the span must describe the audio that was actually ingested.
+    started_at = (
+        bounds[0] if bounds else min(_as_utc(item.captured_at) for item in session)
+    )
+    ended_at = (
+        bounds[1]
+        if bounds
+        else max(_as_utc(item.ended_at or item.captured_at) for item in session)
+    )
     source_item_ids = [item.source_item_id for item in session]
     covered, missing, coverage = _coverage_profile(
         session, started_at, ended_at, profile.bucket_seconds
@@ -314,6 +481,148 @@ async def _save_evidence_span(
     )
     await span.insert()
     return span
+
+
+def _carve_window(
+    session: list[DeviceInputItem],
+    path: Path,
+    profile: AudioEvidenceProfile,
+) -> list[_Segment]:
+    """Cut one mixed capture window into the recordings it should have been.
+
+    The mix and the VAD both already ran over the whole window, so the cut costs one
+    PCM slice per segment and a re-profile of each — no second ffmpeg pass. A window
+    the collector tagged as a meeting is never cut: its bounds came from a real signal
+    and beat anything inferred from silence.
+    """
+    window_start = min(_as_utc(item.captured_at) for item in session)
+    window_end = max(_as_utc(item.ended_at or item.captured_at) for item in session)
+    whole = [_Segment(session, path, window_start, window_end, profile)]
+
+    if _meeting_id(session[0]) is not None:
+        return whole
+    cuts = plan_session_cuts(profile.speech_fraction, profile.bucket_seconds)
+    if not cuts:
+        return whole
+
+    try:
+        with wave.open(str(path), "rb") as handle:
+            sample_rate = handle.getframerate()
+            channels = handle.getnchannels()
+            sample_width = handle.getsampwidth()
+            pcm = handle.readframes(handle.getnframes())
+    except Exception:
+        logger.exception("Cutting window %s failed to decode; ingesting whole", path)
+        return whole
+
+    frame_bytes = sample_width * channels
+    bytes_per_second = sample_rate * frame_bytes
+    segments: list[_Segment] = []
+    for index, (items, low, high) in enumerate(
+        split_window(session, window_start, cuts)
+    ):
+        start_byte = int(low * sample_rate) * frame_bytes
+        end_byte = (
+            len(pcm) if high == float("inf") else int(high * sample_rate) * frame_bytes
+        )
+        piece = pcm[start_byte : min(end_byte, len(pcm))]
+        if not piece:
+            continue
+        segment_path = path.with_name(f"{path.stem}-part{index}.wav")
+        _write_wav(segment_path, piece, sample_rate, channels, sample_width)
+        segments.append(
+            _Segment(
+                items=items,
+                path=segment_path,
+                started_at=window_start + timedelta(seconds=low),
+                ended_at=window_start
+                + timedelta(seconds=low + len(piece) / bytes_per_second),
+                profile=profile_pcm_audio(piece, sample_rate, channels, sample_width),
+            )
+        )
+    return segments or whole
+
+
+async def _ingest_segment(
+    user: User,
+    source_id: str,
+    direction: str,
+    segment: _Segment,
+) -> str | None:
+    """Turn one carved segment into a conversation. Returns its id, or None on failure."""
+    with segment.path.open("rb") as handle:
+        result = await upload_and_process_audio_files(
+            user,
+            [UploadFile(file=handle, filename=segment.path.name)],
+            device_name=f"{source_id}-{direction}",
+            source="screenpipe",
+            # ``_mix_session`` delays each source chunk to its offset from the window
+            # start, and a segment is a slice of that, so its audio starts exactly here.
+            captured_at=segment.started_at,
+            external_source_id=(
+                f"screenpipe:{source_id}:{direction}:"
+                f"{segment.items[0].source_item_id}-{segment.items[-1].source_item_id}"
+            ),
+            external_source_type="screenpipe",
+            data_purpose="capture_evidence",
+            memory_excluded=True,
+            memory_exclusion_reason="continuous_screenpipe_capture",
+            # Speaker recognition DOES run: without it the timeline agent only ever
+            # sees "Speaker 0", so it cannot name who was present and falls back to
+            # "a friend". Memory extraction and LLM title/summary stay off — this is
+            # evidence, not a conversation.
+            skip_memory_extraction=True,
+            skip_title_summary=True,
+        )
+    if (
+        not isinstance(result, dict)
+        or not result.get("files")
+        or result["files"][0].get("status") != "started"
+    ):
+        await _save_evidence_span(
+            segment.items,
+            direction,
+            segment.profile,
+            state="failed",
+            bounds=(segment.started_at, segment.ended_at),
+        )
+        return None
+
+    conversation_id = result["files"][0]["conversation_id"]
+    await _save_evidence_span(
+        segment.items,
+        direction,
+        segment.profile,
+        state="transcribed" if segment.profile.scored else "unscored",
+        conversation_id=conversation_id,
+        bounds=(segment.started_at, segment.ended_at),
+    )
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
+    if conversation is not None:
+        conversation.created_at = segment.started_at
+        await conversation.save()
+
+    observations = await DeviceInputItem.find(
+        DeviceInputItem.user_id == str(user.id),
+        DeviceInputItem.source_id == source_id,
+        DeviceInputItem.kind == "observation",
+        DeviceInputItem.captured_at <= segment.ended_at,
+        {
+            "$or": [
+                {"ended_at": None},
+                {"ended_at": {"$gte": segment.started_at}},
+            ]
+        },
+    ).to_list()
+    for observation in observations:
+        if conversation_id not in observation.related_conversation_ids:
+            observation.related_conversation_ids.append(conversation_id)
+            observation.related_conversation_ids.sort()
+            observation.curation = "pending"
+            await observation.save()
+    return conversation_id
 
 
 async def process_device_audio() -> dict[str, Any]:
@@ -384,93 +693,58 @@ async def process_device_audio() -> dict[str, Any]:
                             await item.delete()
                         rejected_no_speech += 1
                         continue
-                    with output.open("rb") as handle:
-                        result = await upload_and_process_audio_files(
-                            user,
-                            [UploadFile(file=handle, filename=output.name)],
-                            device_name=f"{source_id}-{direction}",
-                            source="screenpipe",
-                            external_source_id=(
-                                f"screenpipe:{source_id}:{direction}:"
-                                f"{session[0].source_item_id}-{session[-1].source_item_id}"
-                            ),
-                            external_source_type="screenpipe",
-                            data_purpose="capture_evidence",
-                            memory_excluded=True,
-                            memory_exclusion_reason="continuous_screenpipe_capture",
-                            # Speaker recognition DOES run: without it the timeline agent
-                            # only ever sees "Speaker 0", so it cannot name who was present
-                            # and falls back to "a friend". Memory extraction and LLM
-                            # title/summary stay off — this is evidence, not a conversation.
-                            skip_memory_extraction=True,
-                            skip_title_summary=True,
-                        )
-                if (
-                    not isinstance(result, dict)
-                    or not result.get("files")
-                    or result["files"][0].get("status") != "started"
-                ):
-                    await _save_evidence_span(
-                        session, direction, profile, state="failed"
-                    )
-                    # A failed upload leaves the chunks staged so the next tick can retry.
-                    # The retried session has grown by then, so it mixes to a new range and
-                    # re-uploads from scratch: every pass leaks a Conversation holding a
-                    # full copy of the audio, and nothing ever converges. Bound the retries
-                    # per session *start*, which is the identity that survives the growth.
-                    attempts = await _session_ingest_attempts(session, direction)
-                    if attempts >= _MAX_INGEST_ATTEMPTS:
-                        logger.error(
-                            "🛑 ScreenPipe session %s-%s (start=%s) failed to ingest %d "
-                            "times — dropping %d staged chunks so it stops retrying",
+                    segments = _carve_window(session, output, profile)
+                    if len(segments) > 1:
+                        logger.info(
+                            "✂️ Capture window %s-%s (%.0f min) cut into %d recordings "
+                            "at quiet points instead of at a fixed %.0f-minute mark",
                             source_id,
                             direction,
-                            session[0].source_item_id,
-                            attempts,
-                            len(session),
+                            (
+                                session_end - _as_utc(session[0].captured_at)
+                            ).total_seconds()
+                            / 60,
+                            len(segments),
+                            _TARGET_SESSION.total_seconds() / 60,
                         )
-                        await _save_evidence_span(
-                            session, direction, profile, state="abandoned"
+                    for segment in segments:
+                        ingested = await _ingest_segment(
+                            user, source_id, direction, segment
                         )
-                        for item in session:
+                        if ingested is None:
+                            # A failed upload leaves the chunks staged so the next tick
+                            # can retry. The retried window has grown by then, so it
+                            # mixes to a new range and re-uploads from scratch: every
+                            # pass leaks a Conversation holding a full copy of the
+                            # audio, and nothing ever converges. Bound the retries per
+                            # window *start*, the identity that survives the growth.
+                            attempts = await _session_ingest_attempts(
+                                segment.items, direction
+                            )
+                            if attempts >= _MAX_INGEST_ATTEMPTS:
+                                logger.error(
+                                    "🛑 ScreenPipe window %s-%s (start=%s) failed to "
+                                    "ingest %d times — dropping %d staged chunks so it "
+                                    "stops retrying",
+                                    source_id,
+                                    direction,
+                                    segment.items[0].source_item_id,
+                                    attempts,
+                                    len(segment.items),
+                                )
+                                await _save_evidence_span(
+                                    segment.items,
+                                    direction,
+                                    segment.profile,
+                                    state="abandoned",
+                                    bounds=(segment.started_at, segment.ended_at),
+                                )
+                                for item in segment.items:
+                                    await item.delete()
+                            continue
+                        for item in segment.items:
                             await item.delete()
-                    continue
-                conversation_id = result["files"][0]["conversation_id"]
-                await _save_evidence_span(
-                    session,
-                    direction,
-                    profile,
-                    state="transcribed" if profile.scored else "unscored",
-                    conversation_id=conversation_id,
-                )
-                session_start = min(_as_utc(item.captured_at) for item in session)
-                conversation = await Conversation.find_one(
-                    Conversation.conversation_id == conversation_id
-                )
-                if conversation is not None:
-                    conversation.created_at = session_start
-                    await conversation.save()
-                observations = await DeviceInputItem.find(
-                    DeviceInputItem.user_id == user_id,
-                    DeviceInputItem.source_id == source_id,
-                    DeviceInputItem.kind == "observation",
-                    DeviceInputItem.captured_at <= session_end,
-                    {
-                        "$or": [
-                            {"ended_at": None},
-                            {"ended_at": {"$gte": session_start}},
-                        ]
-                    },
-                ).to_list()
-                for observation in observations:
-                    if conversation_id not in observation.related_conversation_ids:
-                        observation.related_conversation_ids.append(conversation_id)
-                        observation.related_conversation_ids.sort()
-                        observation.curation = "pending"
-                        await observation.save()
-                for item in session:
-                    await item.delete()
-                processed += 1
+                        processed += 1
             except Exception:
                 # One unlucky session used to abort the whole run, leaving every
                 # later session's chunks staged behind it indefinitely.

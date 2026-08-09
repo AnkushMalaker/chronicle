@@ -65,11 +65,29 @@ def test_audio_session_closes_after_meaningful_gap():
     ]
 
 
-def test_continuous_capture_is_bounded_into_processing_windows():
+def test_a_processing_window_no_longer_decides_where_a_recording_ends():
+    """Grouping bounds compute; the boundary is chosen later from the speech profile.
+
+    This used to cut at exactly 30 minutes, which severed conversations that were
+    still going. A 32-minute run of continuous capture is now one window, and where
+    it becomes one or two recordings is ``plan_session_cuts``' decision.
+    """
     start = datetime(2026, 7, 22, tzinfo=timezone.utc)
     rows = [item(str(index), start + timedelta(minutes=index)) for index in range(32)]
+
     sessions = group_audio_sessions(rows)
-    assert [len(session) for session in sessions] == [30, 2]
+
+    assert [len(session) for session in sessions] == [32]
+
+
+def test_a_processing_window_is_still_bounded_for_compute():
+    """Mixing and profiling have to be bounded even when capture never stops."""
+    start = datetime(2026, 7, 22, tzinfo=timezone.utc)
+    rows = [item(str(index), start + timedelta(minutes=index)) for index in range(150)]
+
+    sessions = group_audio_sessions(rows)
+
+    assert [len(session) for session in sessions] == [120, 30]
 
 
 def test_meeting_chunks_are_not_split_by_the_thirty_minute_window():
