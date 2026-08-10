@@ -19,6 +19,7 @@ from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
 from advanced_omi_backend.services.audio_stream.windowed_batch_consumer import (
     WindowedBatchConsumer,
 )
+from advanced_omi_backend.services.observability.loop_monitor import start_loop_monitor
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -78,7 +79,9 @@ async def main():
         logger.info("💾 Publishing results to transcription:results:{session_id}")
 
         # This blocks until the consumer is stopped.
-        # heartbeat_name lets the workers healthcheck detect a wedged loop.
+        # heartbeat_name lets the workers healthcheck detect a wedged loop; the
+        # loop monitor measures the sub-second stalls long before that threshold.
+        start_loop_monitor("windowed-batch")
         await consumer.start_consuming(heartbeat_name="windowed-batch")
 
     except KeyboardInterrupt:

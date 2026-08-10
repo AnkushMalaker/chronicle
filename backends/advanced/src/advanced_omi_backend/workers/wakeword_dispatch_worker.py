@@ -26,6 +26,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from advanced_omi_backend.client_manager import initialize_redis_for_client_manager
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
+from advanced_omi_backend.services.observability.loop_monitor import start_loop_monitor
 from advanced_omi_backend.services.plugin_service import (
     init_plugin_router,
     initialize_plugins,
@@ -112,6 +113,7 @@ async def main():
 
     try:
         logger.info("🔔 Listening for wake-word detections on wakeword:detections")
+        start_loop_monitor("wakeword-dispatch")
         await dispatcher.run()
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received, shutting down...")

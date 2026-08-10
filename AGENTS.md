@@ -44,6 +44,58 @@ Do not assume a remote deployment's checkout is clean or matches `origin` — ch
 inspect the live application. Remote deployment, restarts, or other mutations still
 require the user's request to change or deploy the running system.
 
+### Investigating a slow or unresponsive backend
+
+When *everything* is slow at once — the dashboard hangs, health checks time out, a
+WebSocket stops draining — suspect a blocked event loop before suspecting the
+network or a dependency. FastAPI runs `async def` handlers on one loop, so a single
+synchronous call (a blocking client, a large serialization) stops every other task
+in that process while the container keeps reporting healthy.
+
+Do not measure this by hand. Every Chronicle loop — the backend and each stream
+worker — monitors its own scheduling delay:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8000/api/system/event-loop | python3 -m json.tool
+```
+
+A healthy loop's `lag_p50_ms` is a fraction of a millisecond. Sustained double
+digits mean it is saturated. A stall past one second is recorded in **System
+Events** under the `performance` category, carrying the stack that was executing —
+sampled repeatedly during the stall, so the reported frame is evidence rather than a
+guess. Repeat stalls from one cause collapse into a single incident.
+
+Set `ASYNCIO_DEBUG=true` (with `ASYNCIO_SLOW_CALLBACK_SECONDS`) to have asyncio name
+the exact offending callback instead of a stack. It is worth it while diagnosing and
+costs real throughput, so turn it off afterwards. `py-spy dump --pid 1` inside the
+container remains the deepest tool when the above is not enough. Implementation:
+`services/observability/loop_monitor.py`.
+
+### Investigating unexplained service restarts
+
+Before treating an unexpected restart as a crash, check the admin **System Events**
+page and filter to the `service` category. Start, stop, restart, and provider-switch
+operations routed through `edge/service_manager.py` write a `running` entry followed by
+a `done` or `failed` entry to the MongoDB `system_events` ledger. Each entry includes
+the node, service, action, operation ID, timestamps, result, phase, and captured command
+output. These records have the system-event ledger's rolling 30-day retention.
+
+Use the operation ID to correlate a ledger entry with the node-agent logs. On a
+systemd-managed node, inspect:
+
+```bash
+journalctl --user -u chronicle-service-manager
+journalctl --user -u chronicle-stack
+```
+
+For an unmanaged node agent, inspect `edge/service-manager.log`. Container logs remain
+the next source for why a service exited. Direct commands such as
+`services.py restart`, `./restart.sh`, or raw Compose/Podman commands do **not** create
+service-operation ledger entries, so absence from the ledger does not prove a restart
+was automatic. Also check the relevant shell history or host journal when direct
+execution is plausible.
+
 ## Initial Setup & Configuration
 
 Chronicle includes an **interactive setup wizard** for easy configuration. The wizard guides you through:

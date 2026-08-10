@@ -85,6 +85,7 @@ from advanced_omi_backend.services.memory.syncthing_audit import (
 )
 from advanced_omi_backend.services.observability import run_event_ingest_drain
 from advanced_omi_backend.services.observability.health_poller import run_health_poller
+from advanced_omi_backend.services.observability.loop_monitor import start_loop_monitor
 from advanced_omi_backend.services.person_photos import sync_person_photos
 from advanced_omi_backend.services.plugin_service import (
     cleanup_plugin_router,
@@ -419,10 +420,14 @@ async def lifespan(app: FastAPI):
             run_event_ingest_drain()
         )
         app.state.health_poller_task = asyncio.create_task(run_health_poller(app))
+        # Measures this loop's own scheduling delay. A blocked loop fails nothing
+        # that a container probe can see — it just makes everything slow at once.
+        app.state.loop_monitor_task = start_loop_monitor("backend")
     except Exception as e:
         application_logger.warning(f"Observability tasks not started: {e}")
         app.state.system_event_drain_task = None
         app.state.health_poller_task = None
+        app.state.loop_monitor_task = None
 
     # One-shot startup reconcile: recompute processing_status from facts once, so any
     # drift left before this version (or by a failure callback that itself died) is
@@ -493,6 +498,7 @@ async def lifespan(app: FastAPI):
         for _attr, _label in (
             ("system_event_drain_task", "System-event drain"),
             ("health_poller_task", "Health poller"),
+            ("loop_monitor_task", "Event-loop monitor"),
         ):
             try:
                 _task = getattr(app.state, _attr, None)

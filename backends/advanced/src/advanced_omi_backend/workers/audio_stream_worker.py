@@ -16,6 +16,7 @@ import sys
 
 from advanced_omi_backend.client_manager import initialize_redis_for_client_manager
 from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
+from advanced_omi_backend.services.observability.loop_monitor import start_loop_monitor
 from advanced_omi_backend.services.plugin_service import (
     init_plugin_router,
     initialize_plugins,
@@ -136,7 +137,10 @@ async def main():
 
         # The streaming consumer is the only task here; the wake-word dispatcher
         # runs as its own worker (wakeword_dispatch_worker).
-        # heartbeat_name lets the workers healthcheck detect a wedged loop.
+        # heartbeat_name lets the workers healthcheck detect a wedged loop; the
+        # loop monitor measures the sub-second stalls long before that threshold,
+        # which here mean audio is not being drained from Redis.
+        start_loop_monitor("streaming-stt")
         await consumer.start_consuming(heartbeat_name="streaming-stt")
 
     except KeyboardInterrupt:

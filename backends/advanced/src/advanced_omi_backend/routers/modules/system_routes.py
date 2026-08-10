@@ -19,9 +19,14 @@ from advanced_omi_backend.controllers import (
     system_controller,
 )
 from advanced_omi_backend.models.user import User
+from advanced_omi_backend.redis_factory import create_async_redis
 from advanced_omi_backend.services import plugin_assistant
 from advanced_omi_backend.services.audio_stream.reclaim import (
     reclaim_settled_audio_streams,
+)
+from advanced_omi_backend.services.observability.loop_monitor import (
+    SNAPSHOT_KEY_PREFIX,
+    get_monitor,
 )
 from advanced_omi_backend.services.plugin_service import get_plugin_router
 from advanced_omi_backend.services.status_reconciler import (
@@ -678,6 +683,42 @@ async def reclaim_audio_streams(
     while diagnosing. Admin only.
     """
     return await reclaim_settled_audio_streams(max_streams=max_streams)
+
+
+@router.get("/system/event-loop")
+async def event_loop_health(current_user: User = Depends(current_superuser)):
+    """Scheduling delay for every Chronicle event loop, and recent stalls.
+
+    A blocked loop is invisible to container probes — the process is up and the
+    port is open — while everything on it waits at once. Each process measures its
+    own delay and publishes a snapshot; this collects them.
+
+    ``lag_p50_ms`` on a healthy loop is a fraction of a millisecond. Sustained
+    double digits mean it is saturated; ``recent_stalls`` carries the stack that
+    was executing, sampled repeatedly during the stall. Admin only.
+    """
+    redis_client = create_async_redis()
+    processes = []
+    try:
+        for key in await redis_client.keys(f"{SNAPSHOT_KEY_PREFIX}*"):
+            raw = await redis_client.get(key)
+            if raw:
+                processes.append(json.loads(raw))
+    finally:
+        await redis_client.aclose()
+
+    # This process publishes on the same timer as the rest, so prefer its live
+    # stats over its own (up to 15s stale) snapshot.
+    monitor = get_monitor()
+    if monitor is not None:
+        processes = [p for p in processes if p.get("process") != monitor.process]
+        processes.append(monitor.stats())
+
+    processes.sort(key=lambda p: p.get("process", ""))
+    return {
+        "processes": processes,
+        "stalls_total": sum(p.get("stalls", 0) for p in processes),
+    }
 
 
 # External Service Management Endpoints (proxied to host service-manager agent)
