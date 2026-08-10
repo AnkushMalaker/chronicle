@@ -1,7 +1,15 @@
 services:
   llama-cpp-llm:
-    # A30/Qwen memory profile was validated against b10290 (commit c8e03ce).
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda-b10290
+    # Muse Glimmer support merged after the currently published CUDA image. Build
+    # the exact upstream merge reproducibly until an equivalent image is tagged.
+    image: localhost/chronicle-llama-cpp:muse-glimmer-62bf73d
+    build:
+      context: https://github.com/ggml-org/llama.cpp.git#62bf73d25c53b8161f8a22894d4f90c4aebbd7d0
+      dockerfile: .devops/cuda.Dockerfile
+      target: server
+      args:
+        APP_VERSION: muse-glimmer-62bf73d
+        APP_REVISION: 62bf73d25c53b8161f8a22894d4f90c4aebbd7d0
     ports:
       # Loopback is the safe default. Same-host Chronicle containers reach this
       # service directly as llama-cpp-llm:8080 on chronicle-network.
@@ -16,6 +24,7 @@ services:
       # passes --model ONLY when LLM_HF_REPO is empty; otherwise llama.cpp downloads
       # + caches the GGUF from HuggingFace via LLAMA_ARG_HF_REPO.
       LLAMA_ARG_HF_REPO: ${LLM_HF_REPO:-}
+      LLAMA_ARG_HF_FILE: ${LLM_HF_FILE:-}
       LLM_MODEL_PATH: /models/${LLM_MODEL_FILE:-model.gguf}
       LLAMA_CACHE: /cache
       HF_TOKEN: ${HF_TOKEN:-}
@@ -30,14 +39,20 @@ services:
       LLAMA_ARG_CACHE_TYPE_K: ${LLAMA_ARG_CACHE_TYPE_K:-f16}
       LLAMA_ARG_CACHE_TYPE_V: ${LLAMA_ARG_CACHE_TYPE_V:-f16}
       LLAMA_ARG_MMPROJ_AUTO: ${LLAMA_ARG_MMPROJ_AUTO:-true}
+      LLAMA_ARG_REASONING: ${LLAMA_ARG_REASONING:-auto}
       # `--reasoning-budget`: -1 is llama.cpp's unrestricted default. Bound it for a
       # thinking model so a runaway trace cannot eat the context the caller needs.
       LLAMA_ARG_THINK_BUDGET: ${LLAMA_ARG_THINK_BUDGET:--1}
+      LLAMA_ARG_SPEC_TYPE: ${LLAMA_ARG_SPEC_TYPE:-none}
+      LLAMA_ARG_SPEC_DRAFT_MODEL: ${LLAMA_ARG_SPEC_DRAFT_MODEL:-}
+      LLAMA_ARG_SPEC_DRAFT_N_MAX: ${LLAMA_ARG_SPEC_DRAFT_N_MAX:-3}
+      LLAMA_ARG_FIT: ${LLAMA_ARG_FIT:-on}
+      LLAMA_DRAFT_MODEL_URL: ${LLAMA_DRAFT_MODEL_URL:-}
       LLAMA_ARG_HOST: "0.0.0.0"
     entrypoint:
       - /bin/sh
       - -c
-      - 'if [ -n "$$LLAMA_ARG_HF_REPO" ]; then exec /app/llama-server; else exec /app/llama-server --model "$$LLM_MODEL_PATH"; fi'
+      - 'if [ -n "$$LLAMA_DRAFT_MODEL_URL" ] && [ ! -s "$$LLAMA_ARG_SPEC_DRAFT_MODEL" ]; then curl --fail --location --retry 5 --output "$$LLAMA_ARG_SPEC_DRAFT_MODEL.part" "$$LLAMA_DRAFT_MODEL_URL" && mv "$$LLAMA_ARG_SPEC_DRAFT_MODEL.part" "$$LLAMA_ARG_SPEC_DRAFT_MODEL"; fi; if [ -n "$$LLAMA_ARG_HF_REPO" ]; then exec /app/llama-server; else exec /app/llama-server --model "$$LLM_MODEL_PATH"; fi'
     deploy:
       resources:
         reservations:

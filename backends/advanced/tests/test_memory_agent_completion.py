@@ -51,6 +51,11 @@ class _Operation:
     def to_api_params(self):
         return {"model": self.model_name}
 
+    def prepare_messages(self, messages):
+        # The real implementation applies the model's system-prompt prefix; this
+        # test has no prefix configured and is about fallback, not prompt shaping.
+        return messages
+
 
 @pytest.mark.asyncio
 async def test_tool_chat_uses_configured_fallback_on_context_overflow(monkeypatch):

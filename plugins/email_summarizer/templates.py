@@ -8,6 +8,8 @@ import html
 from datetime import datetime
 from typing import Optional
 
+from advanced_omi_backend.utils.user_time import format_user_datetime
+
 
 def format_duration(seconds: float) -> str:
     """
@@ -37,6 +39,7 @@ def format_html_email(
     conversation_id: str,
     duration: float,
     created_at: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
 ) -> str:
     """
     Format HTML email template.
@@ -52,7 +55,11 @@ def format_html_email(
         HTML email body
     """
     formatted_duration = format_duration(duration)
-    date_str = created_at.strftime("%B %d, %Y at %I:%M %p") if created_at else "N/A"
+    date_str = (
+        format_user_datetime(created_at, timezone_name, "%B %d, %Y at %I:%M %p %Z")
+        if created_at
+        else "N/A"
+    )
 
     # Escape HTML to prevent XSS attacks
     summary_escaped = html.escape(summary, quote=True)
@@ -211,6 +218,7 @@ def format_text_email(
     conversation_id: str,
     duration: float,
     created_at: Optional[datetime] = None,
+    timezone_name: Optional[str] = None,
 ) -> str:
     """
     Format plain text email template.
@@ -226,7 +234,11 @@ def format_text_email(
         Plain text email body
     """
     formatted_duration = format_duration(duration)
-    date_str = created_at.strftime("%B %d, %Y at %I:%M %p") if created_at else "N/A"
+    date_str = (
+        format_user_datetime(created_at, timezone_name, "%B %d, %Y at %I:%M %p %Z")
+        if created_at
+        else "N/A"
+    )
 
     return f"""
 🎙️ CONVERSATION SUMMARY

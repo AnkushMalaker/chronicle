@@ -97,7 +97,22 @@ export default function ApiKeysPanel({
       {error && <Alert tone="danger" className="mb-3">{error}</Alert>}
 
       {loading ? (
-        <div className="text-sm text-gray-500 dark:text-gray-400">Loading…</div>
+        <div className="space-y-2" role="status" aria-label="Loading API keys" aria-busy="true">
+          {[0, 1].map(index => (
+            <div
+              key={index}
+              className="flex animate-pulse items-center justify-between gap-3 rounded-md bg-gray-50 p-3 dark:bg-gray-700"
+            >
+              <div className="min-w-0 flex-1 space-y-2">
+                <div className="h-3.5 w-32 rounded bg-gray-200 dark:bg-gray-600" />
+                <div className="h-2.5 w-24 rounded bg-gray-200/80 dark:bg-gray-600/80" />
+                <div className="h-2.5 w-full max-w-sm rounded bg-gray-200/60 dark:bg-gray-600/60" />
+              </div>
+              <div className="h-8 w-8 flex-shrink-0 rounded-md bg-gray-200 dark:bg-gray-600" />
+            </div>
+          ))}
+          <span className="sr-only">Loading API keys.</span>
+        </div>
       ) : keys.length === 0 ? (
         <div className="text-sm text-gray-500 dark:text-gray-400 p-3 bg-gray-50 dark:bg-gray-700 rounded-md">
           {emptyHint}

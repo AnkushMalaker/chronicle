@@ -149,9 +149,9 @@ def test_select_llm_provider_defaults_to_ollama_for_local_llm():
     assert result == "ollama"
 
 
-def test_select_llm_provider_treats_qwen_as_managed_llamacpp():
-    """Qwen's concrete registry alias remains llama.cpp on wizard reruns."""
-    config = {"defaults": {"llm": "qwen36-llm"}}
+def test_select_llm_provider_treats_muse_as_managed_llamacpp():
+    """Muse's concrete registry alias remains llama.cpp on wizard reruns."""
+    config = {"defaults": {"llm": "muse-glimmer-llm"}}
     result = _select_llm_with_eof(config)
     assert result == "llamacpp"
 

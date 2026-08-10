@@ -276,7 +276,7 @@ export default function Timeline() {
             {timeline.isFetching && <RefreshCw className="h-4 w-4 animate-spin text-gray-400" />}
             {timeline.data?.coverage?.window_count != null && <span className="text-xs text-gray-500">{timeline.data.coverage.window_count} evidence windows</span>}
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap justify-end gap-2">
             <Button
               variant="secondary"
               size="sm"

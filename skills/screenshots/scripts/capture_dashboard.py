@@ -8,7 +8,6 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 
@@ -89,11 +88,6 @@ def main() -> None:
 
         for name, route in args.route:
             page.goto(f"{base_url}{route}", wait_until="domcontentloaded")
-            try:
-                page.wait_for_load_state("networkidle", timeout=10_000)
-            except PlaywrightTimeoutError:
-                # Dashboards with persistent SSE/HMR connections may never become idle.
-                pass
             page.wait_for_timeout(1_000)
             body = " ".join(page.locator("body").inner_text().split())
             if "/login" in page.url and route != "/login":

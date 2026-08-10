@@ -49,8 +49,8 @@ export default function Layout() {
     ? 1
     : unhealthyServices.length
   const systemIssueTitle = healthRequestFailed
-    ? 'System health check unavailable'
-    : `${unhealthyServices.join(', ')} ${unhealthyServices.length === 1 ? 'is' : 'are'} unavailable`
+    ? 'Health check unavailable'
+    : unhealthyServices.join(', ')
 
   const navigationItems = [
     { path: '/live-record', label: 'Live Record', icon: Radio },
@@ -91,12 +91,17 @@ export default function Layout() {
         <span>{label}</span>
         {path === '/system' && systemIssueCount > 0 && (
           <span
-            className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center gap-1 rounded-full bg-red-600 px-1.5 py-0.5 text-xs font-semibold text-white"
-            title={systemIssueTitle}
+            className="group relative ml-auto inline-flex min-w-[1.25rem] items-center justify-center gap-1 rounded-full bg-red-600 px-1.5 py-0.5 text-xs font-semibold text-white"
             aria-label={`${systemIssueCount} system ${systemIssueCount === 1 ? 'issue' : 'issues'}: ${systemIssueTitle}`}
           >
             <AlertTriangle className="h-3 w-3" aria-hidden="true" />
             {systemIssueCount > 99 ? '99+' : systemIssueCount}
+            <span
+              role="tooltip"
+              className="pointer-events-none absolute right-0 top-full z-20 mt-1.5 hidden max-w-52 whitespace-normal rounded bg-gray-950 px-2 py-1 text-left text-[11px] font-normal leading-tight text-white shadow-sm group-hover:block"
+            >
+              {systemIssueTitle}
+            </span>
           </span>
         )}
         {path === '/system-errors' && unackedErrors > 0 && (

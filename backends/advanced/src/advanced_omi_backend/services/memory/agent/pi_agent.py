@@ -164,6 +164,8 @@ class _PiRuntimeConfig:
     timeout_seconds: int
     reasoning: bool
     temperature: float
+    input_modalities: List[str] = field(default_factory=lambda: ["text"])
+    system_prompt_prefix: str = ""
     compat: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -341,6 +343,11 @@ def _resolve_pi_config(
         raise PiExecutorError(f"model {model_def.name!r} has no resolvable base URL")
 
     model_params = model_def.model_params or {}
+    prefix = model_def.system_prompt_prefix
+    capabilities = {
+        str(item).strip().lower() for item in (model_def.capabilities or [])
+    }
+    input_modalities = ["text", "image"] if "vision" in capabilities else ["text"]
     context_default = getattr(model_def, "context_window", None)
     if context_default is None:
         context_default = model_params.get("context_window")
@@ -380,6 +387,8 @@ def _resolve_pi_config(
         ),
         reasoning=bool(model_def.thinking),
         temperature=resolved.temperature,
+        input_modalities=input_modalities,
+        system_prompt_prefix=prefix.strip(),
         compat=_pi_model_compat(model_def, resolved, settings),
     )
 
@@ -824,7 +833,7 @@ def _models_payload(config: _PiRuntimeConfig) -> Dict[str, Any]:
                         "id": config.model,
                         "name": config.model,
                         "reasoning": config.reasoning,
-                        "input": ["text"],
+                        "input": config.input_modalities,
                         "contextWindow": config.context_window,
                         "maxTokens": config.max_tokens,
                         "cost": {
@@ -1236,7 +1245,12 @@ async def _invoke_pi(
             )
             models_path.chmod(0o600)
             system_prompt_path = temp_dir / "system-prompt.md"
-            system_prompt_path.write_text(system_prompt, encoding="utf-8")
+            effective_system_prompt = system_prompt
+            if config.system_prompt_prefix:
+                effective_system_prompt = (
+                    f"{config.system_prompt_prefix}\n\n{system_prompt}"
+                )
+            system_prompt_path.write_text(effective_system_prompt, encoding="utf-8")
             system_prompt_path.chmod(0o600)
 
             command = [

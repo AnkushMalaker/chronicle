@@ -2,7 +2,11 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from advanced_omi_backend.services.timeline.codex_executor import _parse_usage
+from advanced_omi_backend.services.timeline.codex_executor import (
+    CodexTimelineExecutor,
+    _parse_usage,
+    _workspace_fingerprint,
+)
 from advanced_omi_backend.services.timeline.contracts import (
     AgentAssertion,
     AgentAttribute,
@@ -75,6 +79,43 @@ def _result(evidence_id: str = "observation:one") -> TimelineAgentResult:
             )
         ],
     )
+
+
+def test_workspace_fingerprint_tracks_inputs_but_ignores_generated_outputs(tmp_path):
+    (tmp_path / "evidence.json").write_text("first", encoding="utf-8")
+    (tmp_path / "timeline-result.json").write_text("generated", encoding="utf-8")
+
+    first = _workspace_fingerprint(tmp_path)
+    (tmp_path / "evidence.json").write_text("second", encoding="utf-8")
+    second = _workspace_fingerprint(tmp_path)
+
+    assert [entry["path"] for entry in first] == ["evidence.json"]
+    assert first != second
+
+
+@pytest.mark.asyncio
+async def test_cached_timeline_result_bypasses_quota_and_provider(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cached_result = _result().model_dump(mode="json")
+
+    monkeypatch.setattr(
+        "advanced_omi_backend.services.timeline.codex_executor.load_reusable_result",
+        lambda operation, request: cached_result,
+    )
+    executor = CodexTimelineExecutor({})
+    monkeypatch.setattr(
+        executor,
+        "_check_quota",
+        lambda: pytest.fail("cache hit must happen before quota or provider checks"),
+    )
+
+    result = await executor.analyze(workspace, _manifest(), [])
+
+    assert result.episodes[0].title == "Watched Terminator"
+    assert result.usage["cache_hits"] == 1
 
 
 def test_valid_overlapping_episode_result_is_accepted():

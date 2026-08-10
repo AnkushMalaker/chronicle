@@ -49,6 +49,9 @@ class MemoryConfig:
     write_agent_backend: str = "direct"
     write_recovery_backend: Optional[str] = "direct"
     search_agent_backend: str = "direct"
+    # A read-only second agent reads what a write added and reports what the vault
+    # already knew or the source never said. Costs one extra agent run per write.
+    review_writes: bool = True
 
 
 def load_config_yml() -> Dict[str, Any]:
@@ -117,13 +120,6 @@ def build_memory_config_from_env() -> MemoryConfig:
             )
         memory_provider = (mem_settings.get("provider") or "chronicle").lower()
 
-        # Map legacy provider names to current names
-        if memory_provider in ("friend-lite", "friend_lite"):
-            memory_logger.info(
-                f"🔧 Mapping legacy provider '{memory_provider}' to 'chronicle'"
-            )
-            memory_provider = "chronicle"
-
         if memory_provider not in [p.value for p in MemoryProvider]:
             raise ValueError(f"Unsupported memory provider: {memory_provider}")
 
@@ -187,6 +183,7 @@ def build_memory_config_from_env() -> MemoryConfig:
             str(raw_recovery).lower() if raw_recovery not in (None, "") else None
         )
         search_agent_backend = str(search_cfg.get("backend") or "direct").lower()
+        review_writes = bool(write_cfg.get("review", True))
 
         write_backends = {"direct", "codex", "pi"}
         search_backends = {"direct", "pi"}
@@ -220,6 +217,7 @@ def build_memory_config_from_env() -> MemoryConfig:
             write_agent_backend=write_agent_backend,
             write_recovery_backend=write_recovery_backend,
             search_agent_backend=search_agent_backend,
+            review_writes=review_writes,
         )
 
     except ImportError:

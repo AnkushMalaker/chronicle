@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Sparkles, Archive as ArchiveIcon, AlertTriangle, Mic, Radio, Target, ArrowRight } from 'lucide-react'
+import { Sparkles, Archive as ArchiveIcon, AlertTriangle, AudioLines, Mic, Radio, Target, ArrowRight } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { dataAuditApi, AuditConversation } from '../services/api'
 import { useJobPolling } from '../hooks/useJobPolling'
@@ -18,6 +18,7 @@ import SplitConversationModal from '../components/dataAudit/SplitConversationMod
 import MergePreviewModal from '../components/dataAudit/MergePreviewModal'
 import ExportModal from '../components/dataAudit/ExportModal'
 import GuidedEnrollment from '../components/dataAudit/GuidedEnrollment'
+import SpeakerLabelReview from '../components/dataAudit/SpeakerLabelReview'
 import EnrollmentCandidates from '../components/finetuning/EnrollmentCandidates'
 import { Alert, Button, Label, Modal, Select, Tabs } from '../components/ui'
 
@@ -26,7 +27,7 @@ import { Alert, Button, Label, Modal, Select, Tabs } from '../components/ui'
 // background/role. Each flow reuses its existing panel(s). The Wake-Word Lab is
 // the one hub tile that leaves the page — it's a full sub-view at /wakeword-lab
 // rather than an inline flow, so it links out instead of switching curationView.
-type CurationView = 'conversations' | 'enroll' | 'background'
+type CurationView = 'conversations' | 'speaker-review' | 'enroll' | 'background'
 
 const HUB_TILE_CLASS =
   'text-left rounded-xl border p-4 transition-colors border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 hover:border-blue-300'
@@ -397,9 +398,10 @@ export default function DataAudit() {
       </div>
 
       {/* Task hub — pick a curation flow */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
         {([
           { key: 'conversations', icon: Sparkles, title: 'Audit conversations', metric: total ? `${total}` : '', blurb: 'Find speech-free or mis-attributed audio; split, merge, archive.' },
+          { key: 'speaker-review', icon: AudioLines, title: 'Review speaker labels', metric: '', blurb: 'Verify actual identity claims five at a time across the corpus.' },
           { key: 'enroll', icon: Mic, title: 'Enroll speakers', metric: triagePending.pending_count ? `${triagePending.pending_count}` : '', blurb: 'Review the relabel queue and strengthen voiceprints — deliberate, gated.' },
           { key: 'background', icon: Radio, title: 'Background & role', metric: '', blurb: 'Content vs real people vs noise. Feeds background suppression.' },
         ] as { key: CurationView; icon: any; title: string; metric: string; blurb: string }[]).map((t) => {
@@ -451,6 +453,22 @@ export default function DataAudit() {
           <EnrollmentCandidates />
           <GuidedEnrollment />
           <DriftPanel />
+        </div>
+      )}
+
+      {curationView === 'speaker-review' && (
+        <div className="space-y-4">
+          <SpeakerLabelReview onPendingChanged={refreshTriagePending} />
+          {triagePending.pending_count > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-5 py-4 dark:border-gray-700 dark:bg-gray-800">
+              <p className="text-sm text-gray-600 dark:text-gray-300">
+                {triagePending.pending_count} correction(s) pending across {triagePending.conversation_count} conversation(s).
+              </p>
+              <Button variant="primary" onClick={applyTriage} disabled={applyingTriage}>
+                {applyingTriage ? 'Applying corrections…' : 'Apply pending corrections'}
+              </Button>
+            </div>
+          )}
         </div>
       )}
 

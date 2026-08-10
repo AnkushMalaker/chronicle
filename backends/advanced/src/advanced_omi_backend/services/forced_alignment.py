@@ -58,19 +58,31 @@ async def synthesize_words_via_alignment(
     if not segments or total_duration <= 0:
         return []
 
-    url = _align_url()
-    if not url:
-        logger.warning(
-            "🔤 No /align URL resolvable from batch STT model; skipping alignment"
-        )
-        return []
-
     try:
         wav_bytes = await reconstruct_audio_segment(
             conversation_id, 0.0, total_duration
         )
     except Exception as e:
         logger.warning(f"🔤 Could not fetch audio for alignment: {e}")
+        return []
+
+    return await align_audio_words(wav_bytes, segments, timeout=timeout)
+
+
+async def align_audio_words(
+    wav_bytes: bytes,
+    segments: List[Dict],
+    timeout: float = 600.0,
+) -> List[Dict]:
+    """Forced-align known segment text against an in-memory WAV."""
+    if not wav_bytes or not segments:
+        return []
+
+    url = _align_url()
+    if not url:
+        logger.warning(
+            "🔤 No /align URL resolvable from batch STT model; skipping alignment"
+        )
         return []
 
     seg_payload = [

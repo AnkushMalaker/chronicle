@@ -161,6 +161,14 @@ export default function Chat() {
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const shouldFocusInputRef = useRef(false)
+
+  useEffect(() => {
+    if (shouldFocusInputRef.current && currentSession) {
+      inputRef.current?.focus()
+      shouldFocusInputRef.current = false
+    }
+  }, [currentSession])
 
   // Auto-scroll to bottom (only when actively sending messages)
   const scrollToBottom = () => {
@@ -190,9 +198,11 @@ export default function Chat() {
   const createNewSession = async () => {
     try {
       const newSession = await createSession.mutateAsync(undefined)
+      shouldFocusInputRef.current = true
       setCurrentSessionId(newSession.session_id)
       setLocalMessages([])
       setMemoryContext(null)
+      setShowSessions(false)
     } catch (err: any) {
       console.error('Failed to create session:', err)
       setError('Failed to create new chat session')
@@ -376,7 +386,7 @@ export default function Chat() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-12rem)] bg-gray-50 dark:bg-gray-900 relative">
+    <div className="relative flex min-w-0 h-[calc(100vh-12rem)] bg-gray-50 dark:bg-gray-900">
       {/* Backdrop for the mobile sessions slide-over */}
       {showSessions && (
         <div
@@ -455,13 +465,13 @@ export default function Chat() {
       </div>
 
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         {currentSession ? (
           <>
             {/* Chat Header */}
             <div className="p-4 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 min-w-0">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex min-w-0 flex-1 items-center gap-2">
                   {/* Open sessions list on mobile */}
                   <IconButton
                     label="Show chat sessions"
@@ -474,7 +484,7 @@ export default function Chat() {
                     {currentSession.title}
                   </h2>
                 </div>
-                <div className="flex items-center space-x-2">
+                <div className="flex flex-wrap items-center justify-end gap-2">
                   {/* Remember from Chat Button */}
                   <button
                     onClick={extractMemoriesFromChat}
@@ -520,16 +530,16 @@ export default function Chat() {
             )}
 
             {/* Messages Area */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div className="min-w-0 flex-1 space-y-4 overflow-x-hidden overflow-y-auto p-4">
               {messages.map((message) => (
                 <div
                   key={message.message_id}
-                  className={`flex items-start space-x-3 ${
+                  className={`flex min-w-0 items-start space-x-3 ${
                     message.role === 'user' ? 'flex-row-reverse space-x-reverse' : ''
                   }`}
                 >
                   <div
-                    className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
                       message.role === 'user'
                         ? 'bg-blue-600 text-white'
                         : 'bg-gray-300 dark:bg-gray-600 text-gray-700 dark:text-gray-300'
@@ -538,7 +548,7 @@ export default function Chat() {
                     {message.role === 'user' ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
                   </div>
                   <div
-                    className={`max-w-2xl p-3 rounded-lg ${
+                    className={`min-w-0 max-w-[calc(100%-2.75rem)] rounded-lg p-3 ${
                       message.role === 'user'
                         ? 'bg-blue-600 text-white'
                         : 'bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border border-gray-200 dark:border-gray-700'
@@ -546,7 +556,7 @@ export default function Chat() {
                   >
                     {/* break-words because cited vault paths are single
                         64-character tokens that otherwise overflow the bubble. */}
-                    <div className="whitespace-pre-wrap break-words">{message.content}</div>
+                    <div className="whitespace-pre-wrap [overflow-wrap:anywhere]">{message.content}</div>
                     <CitedImages memoriesUsed={message.memories_used} />
                     <div
                       className={`text-xs mt-2 flex items-center space-x-2 ${
@@ -572,13 +582,13 @@ export default function Chat() {
                   Shown from the moment the request is sent, because the first
                   token can be minutes away on a local model. */}
               {(isSending || streamingMessage) && (
-                <div className="flex items-start space-x-3">
-                  <div className="w-8 h-8 rounded-full bg-gray-300 dark:bg-gray-600 text-gray-700 dark:text-gray-300 flex items-center justify-center">
+                <div className="flex min-w-0 items-start space-x-3">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gray-300 text-gray-700 dark:bg-gray-600 dark:text-gray-300">
                     <Bot className="h-4 w-4" />
                   </div>
-                  <div className="max-w-2xl p-3 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border border-gray-200 dark:border-gray-700">
+                  <div className="min-w-0 max-w-[calc(100%-2.75rem)] rounded-lg border border-gray-200 bg-white p-3 text-gray-900 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100">
                     {streamingMessage && (
-                      <div className="whitespace-pre-wrap">{streamingMessage}</div>
+                      <div className="whitespace-pre-wrap [overflow-wrap:anywhere]">{streamingMessage}</div>
                     )}
                     <div
                       className={`flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 ${streamingMessage ? 'mt-2' : ''}`}
@@ -624,8 +634,8 @@ export default function Chat() {
                 </div>
               )}
 
-              <div className="flex items-end space-x-3">
-                <div className="flex-1">
+              <div className="flex min-w-0 items-end space-x-3">
+                <div className="min-w-0 flex-1">
                   <textarea
                     ref={inputRef}
                     value={inputMessage}
@@ -648,7 +658,7 @@ export default function Chat() {
                 </button>
               </div>
 
-              <div className="mt-2 flex items-center justify-between">
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center space-x-4">
                   <MetadataChip
                     className="space-x-1.5"
@@ -659,7 +669,7 @@ export default function Chat() {
                   </MetadataChip>
                 </div>
 
-                <div className="flex items-center space-x-2">
+                <div className="ml-auto flex items-center space-x-2">
                   <Brain className="h-4 w-4 text-gray-500 dark:text-gray-400" />
                   <input
                     type="range"

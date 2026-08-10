@@ -1,6 +1,6 @@
 ---
 name: screenshots
-description: Captures consistent screenshots of every Chronicle web or Expo screen with Playwright, including authenticated routes and dynamic pages. Use when documenting UI, reviewing visual regressions, or asked to screenshot all pages.
+description: Captures consistent Chronicle web or Expo screenshots with Playwright, including authenticated and dynamic routes, full-project light/dark desktop/phone reviews, safe interaction passes, browser-console diagnostics, responsive overflow checks, and resumable dated reports. Use when documenting UI, reviewing visual regressions, auditing every page, or asked to screenshot all screens.
 ---
 
 # Screenshot skill
@@ -16,7 +16,7 @@ PY
 
 ## Playwright with uv
 
-Use `uv run --with playwright` for Python browser automation. If Chromium is not already available, install it ephemerally with `uvx --from playwright playwright install chromium`; do not add Playwright to `package.json` or a Python project environment. Use the exact dashboard host allowed by Chronicle CORS—normally `http://localhost:5173`, not `127.0.0.1`.
+Use `uv run --with playwright` for Python browser automation. If Chromium is not already available, install it ephemerally with `uvx --from playwright playwright install chromium`; do not add Playwright to `package.json` or a Python project environment. Read `CLAUDE.local.md` and prefer the deployment's stable same-origin Caddy/HTTPS endpoint. Use direct Vite at `http://localhost:5173`, never `127.0.0.1`, only when no proxy is available.
 
 Use a 1440×1000 viewport, a fixed device scale factor, `full_page=True`, and wait for `domcontentloaded` plus any page-specific loading indicator (Vite's HMR socket means `networkidle` never fires against the dev server). Save images to `artifacts/screenshots/` unless the task requests a committed asset. For a LAN deployment with a self-signed development certificate, pass `--ignore-https-errors`; never use it for an untrusted public host.
 
@@ -34,12 +34,57 @@ Never put a token, password, or authenticated screenshot with personal data in a
 ## Dashboard workflow
 
 1. Start the dashboard and backend using the repository’s normal commands. Confirm the actual URL and port.
-2. Read `backends/advanced/webui/src/App.tsx` and build the route inventory from its `<Route>` entries. At present the inventory includes `/login`, `/`, `/live-record`, `/chat`, `/recordings`, `/recordings/:id`, `/timeline`, `/timeline/:episodeId`, `/memory-ledger`, `/users`, `/system`, `/system-errors`, `/settings`, `/upload`, `/queue`, `/plugins`, `/finetuning`, `/network`, `/data-audit`, `/speaker-enrollment`, and `/wakeword-lab`. `/conversations` and `/conversations/:id` still resolve, but only as redirects to their `/recordings` equivalents.
+2. Read `backends/advanced/webui/src/App.tsx` and build the route inventory from its current `<Route>` entries. Exclude wildcard fallbacks and redirect-only aliases; do not copy a static inventory into the capture script.
 3. Use a real recording ID for `/recordings/:id` and a real episode ID for `/timeline/:episodeId`; discover them through the UI or an authenticated API request. Never invent an ID and call that page complete.
-4. Vite's HMR socket keeps the page from ever reaching `networkidle`. Wait on `domcontentloaded` plus the page's own content, not on network quiet.
+4. Vite's HMR socket keeps the page from ever reaching `networkidle`. Wait on `domcontentloaded` plus the page's own content, not on network quiet. Never reject a page merely because its text contains “Loading”; detect blank/error pages and record unresolved loading indicators as review findings.
 5. Capture `/login` unauthenticated. Log in through the UI, then capture every protected route with the same viewport, theme, and browser state.
 6. Wait for the page heading/content and loading indicators to settle. Use `full_page=True`, and save predictable names such as `01-login.png`, `02-recordings.png`, and `03-recording-detail-<id>.png`.
-7. Record failures separately. A redirect to login, error boundary, blank page, missing fixture, or unresolved loading state is a failed capture—not a screenshot of the requested page.
+7. Record failures separately. A redirect to login, error boundary, blank page, or missing fixture is a failed capture—not a screenshot of the requested page. Preserve substantially rendered pages with unresolved subsections as review issues.
+
+## Full-project review
+
+For “all pages/screens” requests, use the reusable project-review script. It inventories `App.tsx`, discovers real dynamic IDs, captures desktop 1440×1000 and phone 390×844 in both themes, performs allowlisted non-destructive phone interactions, records isolated browser diagnostics, detects horizontal overflow, and writes an incremental manifest plus report into a dated directory.
+
+```bash
+uv run --with playwright python \
+  skills/screenshots/scripts/screenshot_project_review.py \
+  --base-url https://localhost \
+  --backend-url http://localhost:8000 \
+  --ignore-https-errors
+```
+
+Before a long or delegated run:
+
+1. Perform read-only health checks; do not restart or rebuild services for a screenshot audit.
+2. Capture and visually inspect the user's named priority pages manually as a smoke test.
+3. Preview the dynamic route inventory with `--dry-run`.
+4. Start the matrix only after the smoke captures render correctly.
+5. When delegating, keep the smoke test and final validation with the primary agent. Monitor for five minutes by checking agent status, the active Playwright process, newly written files, and manifest progress. Do not wait blindly.
+
+The review is resumable by default. Existing successful files referenced by the manifest are validated and skipped; use `--no-resume` for an intentional clean recapture. Derive filenames before capture; never fall back to shared `retry-*.png` names.
+
+After fixing a subset of pages, replace only those route results while retaining the rest of the dated review. Repeat `--only-route` for each `App.tsx` route template and pair it with `--no-resume`:
+
+```bash
+uv run --with playwright python \
+  skills/screenshots/scripts/screenshot_project_review.py \
+  --base-url https://localhost \
+  --backend-url http://localhost:8000 \
+  --only-route /system \
+  --only-route /system-errors \
+  --no-resume \
+  --ignore-https-errors
+```
+
+Treat a substantially rendered page with a stuck subsection as `review-issue`, preserve its screenshot, and record its loading indicators. Reserve `failed` for a missing or blank page, login redirect, error boundary, missing real fixture, navigation failure, or missing output.
+
+For phone captures, compare `document.documentElement.scrollWidth` with the 390px viewport. When content overflows, retain the full-page screenshot as evidence and add a clipped 390×844 screenshot for realistic phone review.
+
+Only perform explicitly allowlisted, reversible interactions such as opening tabs, disclosures, summaries, and transcripts. Never submit forms or trigger save, upload, record, delete, enqueue, train, restart, provider-switch, or similar actions.
+
+If the app becomes unavailable, follow `AGENTS.md` under “Investigating unexplained service restarts”: check System Events filtered to `service`, correlate operation IDs and logs, and avoid labeling the event a crash without evidence.
+
+Each result must record console warnings/errors, page errors, failed requests, navigation-aborted requests, viewport and PNG dimensions, theme, route, action, and review flags. Redact credentials and tokens. Keep diagnostics isolated per page/context.
 
 Use the generic framework for any set of public or authenticated routes:
 
@@ -74,5 +119,10 @@ The file-based screens are `app/app/index.tsx`, `app/app/diagnostics.tsx`, and `
 - Dynamic routes use valid fixture data.
 - Authenticated and unauthenticated states are intentional.
 - Screenshots use the same viewport, scale, and theme.
+- Full-project reviews cover the route × theme × viewport matrix and safe interaction states.
+- Every manifest file exists, totals agree, and no stale or generic retry images remain.
+- Phone results report horizontal overflow and include a clipped viewport capture when needed.
+- Console, page-error, and request-failure diagnostics are isolated per result.
+- Representative desktop, dark, phone, dynamic-detail, and interaction captures are visually inspected.
 - No secrets, tokens, or personal data appear in committed images.
 - Output artifacts are stored outside source directories and are ignored unless explicitly requested for commit.

@@ -32,12 +32,11 @@ export function useSystemData(isAdmin: boolean) {
   return useQuery({
     queryKey: ['system', 'data'],
     queryFn: async () => {
-      const [health, readiness, metrics, diagnostics, processor, clients] = await Promise.allSettled([
+      const [health, readiness, metrics, diagnostics, clients] = await Promise.allSettled([
         systemApi.getHealth(),
         systemApi.getReadiness(),
         systemApi.getMetrics().catch(() => ({ data: null })),
         systemApi.getConfigDiagnostics().catch(() => ({ data: null })),
-        systemApi.getProcessorStatus().catch(() => ({ data: null })),
         systemApi.getActiveClients().catch(() => ({ data: [] })),
       ])
 
@@ -46,7 +45,6 @@ export function useSystemData(isAdmin: boolean) {
         readinessData: readiness.status === 'fulfilled' ? readiness.value.data : null,
         metricsData: metrics.status === 'fulfilled' ? metrics.value.data : null,
         configDiagnostics: diagnostics.status === 'fulfilled' ? diagnostics.value.data : null,
-        processorStatus: processor.status === 'fulfilled' ? processor.value.data : null,
         activeClients: clients.status === 'fulfilled' ? clients.value.data || [] : [],
       }
     },

@@ -130,6 +130,63 @@ Unlike the conversation path there is no deterministic source-preserving fallbac
 
 A ScreenPipe recording that the timeline agent judged **conversational** — a standup, a 1:1 — is separately promoted back into the Recordings list and search. See [Semantic timeline episodes](timeline-episodes.md#a-conversational-episode-promotes-the-recordings-it-cites).
 
+### Checking the write: structure, then a reviewer
+
+A completed write is checked twice before the run is accepted, because the two things
+that go wrong are not the same kind of thing.
+
+**Structure** is decided by a function. `vault_verify.verify_vault_changes` diffs the
+vault against a pre-run snapshot and reports illegal paths, a note missing its canonical
+sections or aggregation embed, a newly duplicated `## Section`, a case-only collision, a
+day write that minted a `Conversations/` note, and a run that never wrote the record note
+it was asked for. Each `Finding` carries a fix instruction addressed to a model. The same
+function is offered to the agent as the `verify_vault` tool so it can self-correct
+in-run, and re-run server-side so correctness does not depend on it choosing to.
+
+**Redundancy cannot be.** Structural verification passes on a perfectly well-formed
+bullet that re-records something the vault already holds — which is exactly how a
+DeepSeek V4 Pro day write finished with *Vault verification passed* after restating the
+phone stand, the chai, and the air-fryer fries that `People/ankush.md` and
+`People/anushpa.md` already carried. Deciding that means reading the surrounding notes
+and judging whether two differently worded sentences carry the same fact, so a second
+agent does it (`agent/review_agent.py`):
+
+- **read-only** — `grep`/`glob`/`read_note` and a `report_findings` tool, so a review
+  cannot mutate the vault it judges;
+- **fresh context** — it sees the source and the lines actually added, never the
+  writer's reasoning, so it cannot inherit the writer's conviction that the work was
+  done;
+- **narrow** — only `redundant` (a note of the same kind already records this) and
+  `unsupported` (the source does not say this). Off-vocabulary verdicts are dropped;
+  `Daily`, `People`, and `Topics` overlap on purpose and that overlap is not redundancy;
+- **never judging what it cannot see** — the source is bounded at the day digest's own
+  budget, and if it still had to be cut, `unsupported` is withdrawn for that run. A
+  reviewer shown part of a source cannot tell "the source never said this" from "the
+  source said it in the part you were not given", and left to judge anyway it picks the
+  former in confident detail: cutting a 39,563-char digest at 24,000 hid a gaming
+  session, and a true bullet about it was flagged as invented;
+- **advisory** — its findings are the same `Finding` type and flow into the same bounded
+  repair pass. A reviewer that fails, stalls, or returns nothing parseable yields no
+  findings, because a broken reviewer must never block a good write.
+
+It ends with a **forced verdict**: when the round or tool-call budget runs out, the
+search tools are withdrawn and the model is asked to report from what it has already
+read. Measured on the live vault, that step is what makes the reviewer usable at all —
+the first runs exhausted six rounds with the right answer already written in their own
+prose ("no mention of Tokyo … this is unsupported") and returned nothing, because they
+never got a round in which to report. With nothing left to call but the verdict, there
+is no next search to narrate.
+
+Measured on the live vault with `scripts/probe_write_review.py`, which injects bullets
+whose verdict is known into a copy of the real notes: **28/32** over two days and eight
+trials on Qwen 3.6 27B. Genuinely-new bullets were left alone 8/8 and invented ones
+caught 8/8. All four misses are the same borderline bullet, where the reviewer finds the
+overlap and then rules it a *new detail about an already-recorded event* — the exception
+its own instructions grant — rather than a duplicate.
+
+Disable per deployment with `memory.agents.write.review: false`; it costs one extra
+agent run per write that changed anything (~38s against a ~190s day write here).
+
 ## Read path: the retrieval agent
 
 Search is served by the **read agent** (`_search_vault_grep`). Both the direct and Pi
@@ -217,6 +274,7 @@ memory:
     write:
       backend: pi
       recovery_backend: direct
+      review: true            # read-only review agent over what the write added
     search:
       backend: pi
   backends:
@@ -229,26 +287,26 @@ memory:
       max_used_percent: 80
       limit_id: ""
     pi:
-      model: qwen36-llm       # Chronicle model-registry entry, not upstream model ID
+      model: muse-glimmer-llm  # Chronicle model-registry entry, not upstream model ID
       timeout_seconds: 900
-      context_window: 65536
+      context_window: 131072
       max_tokens: 4096        # capped generally; leaves most context for prompts/tools
-      thinking: off
+      thinking: high
 
 llm_operations:
   memory_write:
-    reasoning_effort: none      # Qwen thinking off; lowest supported OpenAI effort
+    reasoning_effort: high
     max_tokens: 8000
   memory_search:
-    reasoning_effort: none
+    reasoning_effort: high
     max_tokens: 8000
 ```
 
 The Pi model may be any OpenAI-compatible LLM entry in the effective registry formed by
 `config/defaults.yml` plus name-based overrides from `config/config.yml`. The wizard
-rejects missing entries, embeddings, and non-OpenAI API families. For the local Qwen
-service, setup selects `qwen36-llm`, records llama.cpp's exact upstream Hugging Face
-identity, and records the context actually selected for that service. API credentials,
+rejects missing entries, embeddings, and non-OpenAI API families. For the local Muse
+Glimmer service, setup selects `muse-glimmer-llm`, records llama.cpp's exact upstream
+Hugging Face identity, and records the context actually selected for that service. API credentials,
 when a selected registry model needs them, continue to come from the model definition's
 environment-variable reference.
 No vector store, embedding model, or graph database is part of memory storage or

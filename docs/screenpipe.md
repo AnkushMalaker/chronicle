@@ -57,6 +57,14 @@ are rejected with that detail while another owner is active. On macOS the status
 warns when the desktop app's readable settings have meeting detection disabled; the
 third-party preference is never rewritten automatically.
 
+On Wayland, accepting or declining the desktop portal does not change the recorder
+process state: its API can remain healthy without a selected screen. ScreenPipe owns the
+portal session and exposes its lifecycle as `/health.vision_capture` (`idle`, `starting`,
+`running`, `failed`, or `disabled`) with the portal's failure detail. Chronicle only
+renders that contract: a failed requested capture adds an amber attention badge, changes
+the Capture menu to `Video capture — no screen selected`, and explains recovery in the
+tooltip. Intentionally disabling video never raises the warning.
+
 **Chronicle does not install ScreenPipe.** `init.py` resolves the recorder with
 `shutil.which("screenpipe")` and exits with instructions if it is absent; it only
 writes the unit around whatever is already on `PATH`. So the recording binary is

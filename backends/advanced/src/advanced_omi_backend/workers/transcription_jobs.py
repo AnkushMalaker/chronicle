@@ -53,8 +53,15 @@ from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStore,
     SpeakerCheckStatus,
 )
+from advanced_omi_backend.services.forced_alignment import align_audio_words
+from advanced_omi_backend.services.observability import record_event_sync
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
 from advanced_omi_backend.services.sse_publisher import publish_sse_event_throttled
+from advanced_omi_backend.services.transcript_integrity import (
+    TranscriptTimingError,
+    load_transcript_audio_ranges,
+    validate_and_normalize_transcript_timing,
+)
 from advanced_omi_backend.services.transcription import (
     get_transcription_provider,
     is_transcription_available,
@@ -206,6 +213,39 @@ BATCH_CHUNK_SECONDS = 3600  # Never send more than 1h to ASR at once
 # results is expected, not a fault. If the last audio chunk arrived more than this many
 # seconds ago the inflow is considered idle and the watchdog stays its hand.
 AUDIO_INFLOW_IDLE_SECONDS = 30
+
+
+def _needs_forced_alignment(words: list[dict]) -> bool:
+    """Return whether provider 'words' are really timestamped multi-word phrases."""
+    return not words or any(
+        len(str(word.get("word", "")).split()) > 1 for word in words
+    )
+
+
+async def _align_result_words(result: dict, wav_data: bytes) -> dict:
+    """Replace absent/phrase-level word timing with acoustic forced alignment."""
+    words = result.get("words", [])
+    if not _needs_forced_alignment(words):
+        return result
+
+    # Whisper long-form output may expose its timestamped decoding windows through
+    # the words field when the fine-tuned model has no alignment-head metadata.
+    # Those windows are much better alignment boundaries than one full-file segment.
+    phrase_windows = [
+        {
+            "text": word.get("word", ""),
+            "start": word.get("start", 0.0),
+            "end": word.get("end", word.get("start", 0.0)),
+        }
+        for word in words
+        if str(word.get("word", "")).strip()
+        and word.get("end", word.get("start", 0.0)) > word.get("start", 0.0)
+    ]
+    alignment_segments = phrase_windows or result.get("segments", [])
+    aligned_words = await align_audio_words(wav_data, alignment_segments)
+    if aligned_words:
+        result["words"] = aligned_words
+    return result
 
 
 def _build_wav(
@@ -362,6 +402,7 @@ async def transcribe_audio_range(
         except Exception as e:
             raise RuntimeError(f"Transcription failed ({type(e).__name__}): {e}")
 
+        result = await _align_result_words(result, wav_data)
         if condense_map:
             result = remap_condensed_result(result, condense_map)
         return {
@@ -419,6 +460,7 @@ async def transcribe_audio_range(
         except Exception as e:
             raise RuntimeError(f"Transcription failed ({type(e).__name__}): {e}")
 
+        result = await _align_result_words(result, chunk_wav)
         # Offset timestamps by chunk start time
         for seg in result.get("segments", []):
             seg["start"] = seg.get("start", 0.0) + chunk_start
@@ -480,6 +522,49 @@ async def process_transcription_result(
         client_id = (
             conversation.client_id if hasattr(conversation, "client_id") else None
         )
+
+    # The provider response has already crossed the content-hash cache boundary in
+    # RegistryBatchTranscriptionProvider.transcribe(). Validate a copy before any
+    # plugin sees it or it becomes active: cache the paid result, never cache corruption
+    # into the conversation timeline.
+    try:
+        audio_ranges = await load_transcript_audio_ranges(conversation_id)
+        segments, words = validate_and_normalize_transcript_timing(
+            segments,
+            words,
+            audio_duration=conversation.audio_total_duration or 0.0,
+            audio_ranges=audio_ranges,
+        )
+    except TranscriptTimingError as error:
+        reason = f"{error.code}: {error}"
+        conversation.transcript_integrity_error = reason
+        await conversation.save()
+        details = {
+            **error.details,
+            "provider": provider_name,
+            "trigger": trigger,
+            "version_id": version_id,
+        }
+        record_event_sync(
+            severity="error",
+            category="data_integrity",
+            source="transcription_ingest",
+            title="Transcript timing rejected",
+            detail=reason,
+            user_id=user_id,
+            client_id=client_id,
+            conversation_id=conversation_id,
+            metadata=details,
+            incident_key=f"transcript-integrity:{conversation_id}",
+        )
+        logger.warning(
+            "Rejected %s transcript for %s before activation: %s",
+            provider_name,
+            conversation_id,
+            reason,
+        )
+        raise
+    conversation.transcript_integrity_error = None
 
     # Guard: a batch / re-transcription that comes back without usable structure
     # (no words AND no segments) must NOT replace a good existing transcript.

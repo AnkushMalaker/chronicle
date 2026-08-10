@@ -88,27 +88,28 @@ models:
       max_tokens: 2000
     model_output: json
 
-  - name: qwen36-llm
-    description: Local LLM via llama.cpp (Qwen3.6-27B Q4_K_M)
+  - name: muse-glimmer-llm
+    description: Local multimodal agent LLM via llama.cpp (Muse Glimmer 30B K-Quant-17GB)
     model_type: llm
     model_provider: llamacpp
     api_family: openai
-    thinking: true  # Qwen3-class thinking model — controls thinking via chat template
-    model_name: qwen3.6-27b
-    # Validated on a 24GB A30 with Q8_0 KV cache: the full 64K context keeps
-    # audited memory prompts (observed near 15K tokens) comfortably in-window.
-    context_window: 65536
+    thinking: true
+    capabilities: [vision]
+    model_name: meta-models/Muse-Glimmer-30B-GGUF:muse-glimmer-30B-kquant-17gb.gguf
+    system_prompt_prefix: "Reasoning strength: high"
+    context_window: 131072
     # Served by the same llama.cpp container as llamacpp-llm above, which hosts one
-    # model at a time — selecting this one means LLM_HF_REPO points at the Qwen GGUF.
-    # Dense 27B: ~16.8GB of weights must stay resident, so it wants a 24GB GPU with
-    # nothing else on it (a 12GB card cannot hold it at all).
+    # model at a time. The 17GB target plus its 1.4GB perception encoder and 1.6GB
+    # DFlash drafter are the official 24GB-GPU profile.
     model_url: ${oc.env:LLM_BASE_URL,''}
     discovery_service: chronicle-llm
     discovery_path: /v1
     discovery_default: http://llama-cpp-llm:8080/v1
     api_key: ${oc.env:LLAMA_API_KEY,no-key}
     model_params:
-      temperature: 0.2
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 64
       max_tokens: 2000
     model_output: json
 
@@ -617,13 +618,13 @@ memory:
     pi:
       # Chronicle model-registry entry. The adapter resolves its provider, upstream
       # model id, base URL, and API key, then writes an isolated Pi models.json.
-      model: qwen36-llm
+      model: muse-glimmer-llm
       timeout_seconds: 900
-      context_window: 65536
+      context_window: 131072
       # Keep most of the window for Pi's system prompt, tool schemas, transcript,
-      # and multi-round tool results. The local Qwen setup serves this 64K profile.
+      # and multi-round tool results. The local Muse setup serves the full 131K profile.
       max_tokens: 4096
-      thinking: off
+      thinking: high
   extraction:
     enabled: true
     prompt: |
@@ -710,12 +711,12 @@ llm_operations:
   # by default: the validated Qwen profile ran with thinking disabled, while `none`
   # normalizes safely to the lowest supported effort for OpenAI reasoning models.
   memory_write:
-    reasoning_effort: none
+    reasoning_effort: high
     max_tokens: 8000
   # Vault retrieval agent. This is separate so reads can use a cheaper/faster model
   # or a different agent backend without changing ingestion.
   memory_search:
-    reasoning_effort: none
+    reasoning_effort: high
     max_tokens: 8000
   title_summary:
     temperature: 0.3

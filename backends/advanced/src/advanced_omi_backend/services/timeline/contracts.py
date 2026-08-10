@@ -1,6 +1,6 @@
 """Executor-independent contracts for semantic timeline analysis."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Optional, Protocol
 
@@ -85,8 +85,23 @@ class AgentEpisode(BaseModel):
 
     @model_validator(mode="after")
     def positive_duration(self) -> "AgentEpisode":
-        if self.ended_at <= self.started_at:
-            raise ValueError("episode must have positive duration")
+        """Give an instantaneous episode the smallest real duration instead of rejecting it.
+
+        Some things the agent identifies genuinely happen at a point in time — a photo
+        review, a button press, a `user_action` — and it reports them with
+        ``ended_at == started_at``. Raising here failed the *whole* ``TimelineAgentResult``,
+        so one instant out of twelve episodes cost an entire day its memory after a full
+        agent run, and the failure was deterministic: a retry re-derived the same episode
+        and failed identically. Measured on 2026-07-28 and 2026-07-29 during the
+        full-corpus rebuild.
+
+        An inverted range is still a real error — that is the agent contradicting itself,
+        not describing an instant — so it is left to raise.
+        """
+        if self.ended_at == self.started_at:
+            self.ended_at = self.started_at + timedelta(seconds=1)
+        elif self.ended_at < self.started_at:
+            raise ValueError("episode ends before it starts")
         return self
 
 

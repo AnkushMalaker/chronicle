@@ -48,9 +48,27 @@ def _tray_icon() -> QIcon:
     return icon if not icon.isNull() else _fallback_icon()
 
 
+def _warning_icon(base: QIcon) -> QIcon:
+    """Add a legible amber attention badge without replacing Chronicle's glyph."""
+    pixmap = base.pixmap(64, 64)
+    painter = QPainter(pixmap)
+    painter.setPen(QColor("#2b2118"))
+    painter.setBrush(QColor("#e5a53a"))
+    painter.drawEllipse(38, 38, 25, 25)
+    font = painter.font()
+    font.setBold(True)
+    font.setPixelSize(19)
+    painter.setFont(font)
+    painter.drawText(38, 38, 25, 25, 0x84, "!")
+    painter.end()
+    return QIcon(pixmap)
+
+
 class ChronicleTray(QSystemTrayIcon):
     def __init__(self, sections) -> None:
-        super().__init__(_tray_icon())
+        self.normal_icon = _tray_icon()
+        self.warning_icon = _warning_icon(self.normal_icon)
+        super().__init__(self.normal_icon)
         self.sections = sections
         self.active = []
 
@@ -98,6 +116,11 @@ class ChronicleTray(QSystemTrayIcon):
             line = section.tooltip()
             if line:
                 lines.append(line)
+        self.setIcon(
+            self.warning_icon
+            if any(section.warning() for section in self.active)
+            else self.normal_icon
+        )
         self.setToolTip("\n".join(lines))
 
     def view_logs(self) -> None:

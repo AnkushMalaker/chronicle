@@ -88,6 +88,16 @@ def _stats() -> str:
         return f"Stats unavailable: {error}"
 
 
+def _screen_capture_warning(recorder_status: dict, screen_enabled: bool) -> bool:
+    capture = recorder_status.get("vision_capture")
+    return bool(
+        screen_enabled
+        and isinstance(capture, dict)
+        and capture.get("requested") is True
+        and capture.get("state") == "failed"
+    )
+
+
 class ScreenPipeSection(Section):
     title = "ScreenPipe"
 
@@ -109,6 +119,8 @@ class ScreenPipeSection(Section):
         self._update_lock = threading.Lock()
         self._update_state = {"busy": False, "message": ""}
         self._engine_detail = "checking"
+        self._screen_warning = False
+        self._screen_warning_detail = ""
 
     def available(self) -> tuple[bool, str]:
         if shutil.which("screenpipe") or SCREENPIPE_DB.exists():
@@ -288,6 +300,33 @@ class ScreenPipeSection(Section):
                 action.setEnabled(False)
             self.settings_action.setEnabled(False)
 
+    def _refresh_screen_health(self, recorder_status: dict) -> None:
+        try:
+            _audio_mode, screen_enabled = _capture_settings()
+            self._screen_warning = _screen_capture_warning(
+                recorder_status, screen_enabled
+            )
+            capture = recorder_status.get("vision_capture") or {}
+            self._screen_warning_detail = str(capture.get("detail") or "")
+        except (
+            OSError,
+            KeyError,
+            RuntimeError,
+            StopIteration,
+            ValueError,
+            sqlite3.Error,
+        ):
+            logger.exception("Could not determine screen capture health")
+            self._screen_warning = False
+            self._screen_warning_detail = ""
+
+        if self.video_capture is not None:
+            self.video_capture.setText(
+                "⚠ Video capture — no screen selected"
+                if self._screen_warning
+                else "Video capture"
+            )
+
     def _update_recorder(self) -> None:
         self._run_update_step(self._update_worker)
 
@@ -391,6 +430,7 @@ class ScreenPipeSection(Section):
             actions["restart"].setEnabled(active)
         self.stats_item.setText(_stats())
         self._refresh_capture_settings()
+        self._refresh_screen_health(recorder_status)
         if external_owner:
             for action in (self.audio_capture, self.video_capture):
                 action.setEnabled(False)
@@ -398,7 +438,13 @@ class ScreenPipeSection(Section):
         self._refresh_update_actions()
 
     def tooltip(self) -> str:
+        if self._screen_warning:
+            detail = self._screen_warning_detail or "no screen was selected"
+            return f"Screen capture unavailable — {detail} · Collector: {self._collector_state()}"
         return f"Recorder: {self._engine_detail} · Collector: {self._collector_state()}"
+
+    def warning(self) -> bool:
+        return self._screen_warning
 
     def shutdown(self) -> None:
         if self.pause_timer is not None:

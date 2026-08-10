@@ -98,6 +98,34 @@ def test_unscored_buckets_count_as_quiet_rather_than_blocking_a_cut():
     assert 1200 <= cuts[0] <= 2400
 
 
+def test_a_window_nothing_was_measured_in_is_left_whole():
+    """An unscored window is uniformly *unknown*, which is not the same as silent.
+
+    Reading it as silent makes the longest quiet run the whole window, so the cut
+    lands on the blind target this function exists to remove — and the failure hides,
+    because such a window also reports as carrying no speech at all. Measured during
+    the corpus re-bound: 18 windows, 17.5 hours, every cut at exactly 30:00.
+    """
+    assert plan_session_cuts([None] * 1080, BUCKET) == []
+
+
+def test_measured_silence_is_preferred_over_an_unmeasured_stretch():
+    """Cut where the audio is known to be quiet, not merely where nothing is known."""
+    # Real silence at 1500-1800s; an unscored stretch at 2100-2400s.
+    timeline = (
+        buckets(25, speech=True)
+        + [0.0] * 30
+        + buckets(5, speech=True)
+        + [None] * 30
+        + buckets(25, speech=True)
+    )
+
+    cuts = plan_session_cuts(timeline, BUCKET)
+
+    assert len(cuts) == 1
+    assert 1500 <= cuts[0] <= 1800
+
+
 def test_a_long_window_is_cut_more_than_once():
     cuts = plan_session_cuts(buckets(120), BUCKET)
 

@@ -104,7 +104,24 @@ export default function AutomationSettings({ isAdmin }: { isAdmin: boolean }) {
       )}
 
       {isLoading ? (
-        <p className="text-sm text-gray-500">Loading…</p>
+        <div
+          className="divide-y divide-gray-100 dark:divide-gray-700"
+          role="status"
+          aria-label="Loading automation schedules"
+          aria-busy="true"
+        >
+          {[0, 1, 2].map(index => (
+            <div key={index} className="flex animate-pulse items-center justify-between gap-4 py-3">
+              <div className="min-w-0 flex-1 space-y-2">
+                <div className="h-3.5 w-44 rounded bg-gray-200 dark:bg-gray-700" />
+                <div className="h-2.5 w-full max-w-md rounded bg-gray-100 dark:bg-gray-700/70" />
+                <div className="h-2.5 w-28 rounded bg-gray-100 dark:bg-gray-700/70" />
+              </div>
+              <div className="h-7 w-16 flex-shrink-0 rounded-md bg-gray-200 dark:bg-gray-700" />
+            </div>
+          ))}
+          <span className="sr-only">Loading automation schedules.</span>
+        </div>
       ) : (
         <div className="divide-y divide-gray-100 dark:divide-gray-700">
           {jobs.map((job: any) => {

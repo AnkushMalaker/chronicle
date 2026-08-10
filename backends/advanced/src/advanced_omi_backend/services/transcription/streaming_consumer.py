@@ -30,6 +30,7 @@ from advanced_omi_backend.plugins.router import PluginRouter
 from advanced_omi_backend.services.audio_stream.durability import (
     AUDIO_PERSISTENCE_GROUP,
     delete_stream_if_durable,
+    session_append_closed,
 )
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
@@ -1167,10 +1168,9 @@ class StreamingTranscriptionConsumer:
         age/TTL fallback: inability to prove durability means retaining the stream.
         """
         session_id = stream_name.removeprefix("audio:stream:")
-        status = await SessionStore(self.redis_client).get_status(session_id)
-        if status not in (SessionStatus.FINALIZING, SessionStatus.FINISHED):
+        if not await session_append_closed(self.redis_client, session_id):
             logger.debug(
-                f"Retaining stream {stream_name}: session status {status} is not terminal"
+                f"Retaining stream {stream_name}: session may still append to it"
             )
             return
 

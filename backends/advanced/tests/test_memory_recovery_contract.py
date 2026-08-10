@@ -44,7 +44,11 @@ Only one early detail was recorded before the agent stopped.
 async def test_incomplete_valid_note_is_replaced_by_lossless_source_fallback(tmp_path):
     source = "Speaker: retain this exact ending after the valid partial note stops."
     service = MemoryService(
-        SimpleNamespace(write_agent_backend="pi", write_recovery_backend=None)
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend=None,
+            review_writes=False,
+        )
     )
 
     class IncompleteAgent:
@@ -83,7 +87,11 @@ async def test_incomplete_valid_note_is_replaced_by_lossless_source_fallback(tmp
 @pytest.mark.asyncio
 async def test_provider_exception_diagnostics_never_persist_arbitrary_text(tmp_path):
     service = MemoryService(
-        SimpleNamespace(write_agent_backend="pi", write_recovery_backend=None)
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend=None,
+            review_writes=False,
+        )
     )
 
     class FailingAgent:
@@ -117,7 +125,11 @@ async def test_provider_exception_diagnostics_never_persist_arbitrary_text(tmp_p
 @pytest.mark.asyncio
 async def test_provider_labels_primary_and_recovery_attempts(tmp_path, monkeypatch):
     service = MemoryService(
-        SimpleNamespace(write_agent_backend="pi", write_recovery_backend="direct")
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend="direct",
+            review_writes=False,
+        )
     )
     observed_attempts = []
 
@@ -184,7 +196,11 @@ async def test_day_write_fails_when_no_backend_completes(tmp_path, monkeypatch):
     """
 
     service = MemoryService(
-        SimpleNamespace(write_agent_backend="pi", write_recovery_backend="direct")
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend="direct",
+            review_writes=False,
+        )
     )
     local_date = "2026-08-05"
     day_note = tmp_path / "user-one" / "Daily" / f"{local_date}.md"
@@ -227,7 +243,11 @@ async def test_day_write_fails_when_only_other_notes_were_touched(
     """
 
     service = MemoryService(
-        SimpleNamespace(write_agent_backend="pi", write_recovery_backend=None)
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend=None,
+            review_writes=False,
+        )
     )
     local_date = "2026-08-06"
     root = tmp_path / "user-one"
@@ -279,7 +299,11 @@ async def test_day_write_treats_a_deliberate_no_op_as_done_without_recovery(
     """
 
     service = MemoryService(
-        SimpleNamespace(write_agent_backend="pi", write_recovery_backend="direct")
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend="direct",
+            review_writes=False,
+        )
     )
     local_date = "2026-08-06"
     root = tmp_path / "user-one"
@@ -336,7 +360,11 @@ async def test_narrating_the_next_step_is_not_a_deliberate_no_op(tmp_path, monke
     """
 
     service = MemoryService(
-        SimpleNamespace(write_agent_backend="pi", write_recovery_backend="direct")
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend="direct",
+            review_writes=False,
+        )
     )
     local_date = "2026-08-06"
     root = tmp_path / "user-one"
@@ -386,3 +414,85 @@ async def test_narrating_the_next_step_is_not_a_deliberate_no_op(tmp_path, monke
     assert recovery_calls == [1]
     assert success is True
     assert f"Daily/{local_date}.md" in touched
+
+
+@pytest.mark.asyncio
+async def test_a_reviewer_finding_sends_the_write_back_for_repair(
+    tmp_path, monkeypatch
+):
+    """A well-formed duplicate passes structural verification and must still be caught.
+
+    This is the DeepSeek failure end to end: the day note is written, every rule in
+    vault_verify is satisfied, and the run would be accepted — until a second agent
+    reads what was added and says the vault already had it.
+    """
+
+    service = MemoryService(
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend=None,
+            review_writes=True,
+        )
+    )
+    local_date = "2026-08-06"
+    root = tmp_path / "user-one"
+    day_rel = f"Daily/{local_date}.md"
+    repairs = []
+
+    class Writes:
+        def __init__(self, _root):
+            pass
+
+        async def run(self, *_args, guidance="", **_kwargs):
+            if guidance:
+                repairs.append(guidance)
+            note = root / day_rel
+            note.parent.mkdir(parents=True, exist_ok=True)
+            note.write_text("## 11:41 Standup\n- shipped it\n", encoding="utf-8")
+            return MemoryAgentResult(
+                conversation_id=local_date,
+                rounds=3,
+                touched=[day_rel],
+                summary="Recorded the day.",
+                verified=True,
+            )
+
+    async def fake_review(_root, **_kwargs):
+        return SimpleNamespace(
+            findings=[
+                SimpleNamespace(
+                    path=day_rel,
+                    rule="redundant",
+                    detail="'- shipped it' is already recorded in the 11:20 entry",
+                    render=lambda: f"- {day_rel} [redundant]: already recorded",
+                )
+            ],
+            reported=True,
+            rounds=4,
+            tool_calls=6,
+            warnings=[],
+        )
+
+    monkeypatch.setattr(service, "_write_agent_class", lambda: Writes)
+    monkeypatch.setattr(service, "_recovery_agent_class", lambda: None)
+    monkeypatch.setattr(service.vault, "user_root", lambda _uid: root)
+    monkeypatch.setattr(
+        "advanced_omi_backend.services.memory.agent.review_agent.review_vault_write",
+        fake_review,
+    )
+
+    success, touched = await service._add_day_memory_agent(
+        "A day digest long enough to clear the minimum-length guard.",
+        local_date,
+        "user-one",
+        source_date="2026-08-06T00:00:00+05:30",
+    )
+
+    # The day was written, so the run succeeds — a redundancy is a blemish on a real
+    # record, not a reason to throw the day away and retry it until it is skipped.
+    assert success is True
+    assert day_rel in touched
+    # But it went back for repair, and the instruction names the remedy: a write agent
+    # told to record things does not read "fix this" as "delete this".
+    assert len(repairs) == 1
+    assert "DELETING the line" in repairs[0]

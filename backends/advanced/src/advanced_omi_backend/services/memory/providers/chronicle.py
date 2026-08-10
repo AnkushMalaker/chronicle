@@ -48,6 +48,34 @@ def _safe_exception_diagnostic(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def _repair_guidance(findings: List[Any]) -> str:
+    """The repair instruction for one set of findings.
+
+    Two clauses are conditional because each is false for some finding it might
+    accompany. "The day is already recorded, do not add new content" is wrong when the
+    finding IS that the record note is missing — it forbids the very fix being asked
+    for. And a write agent told to record things does not read "fix this" as "delete
+    this", so a redundancy has to name its own remedy.
+    """
+
+    rules = {getattr(f, "rule", "") for f in findings}
+    lines = ["REPAIR ONLY. Fix exactly these problems and nothing else."]
+    if "record_missing" not in rules:
+        lines.append("The day is already recorded; do not add new content.")
+    if "redundant" in rules:
+        lines.append(
+            "A `redundant` finding is fixed by DELETING the line it names — the fact is "
+            "already recorded, so there is nothing to rewrite or merge."
+        )
+    if "unsupported" in rules:
+        lines.append(
+            "An `unsupported` finding is fixed by DELETING the line it names — do not "
+            "look for a source that justifies it."
+        )
+    lines.append("Then call verify_vault to confirm:")
+    return " ".join(lines) + "\n" + render_findings(findings)
+
+
 class MemoryService(MemoryServiceBase):
     """Memory service backed by an agentic Markdown vault (the ground truth).
 
@@ -161,6 +189,57 @@ class MemoryService(MemoryServiceBase):
     def _recovery_agent_class(self):
         backend = getattr(self.config, "write_recovery_backend", "direct")
         return self._write_agent_class(backend) if backend else None
+
+    async def _review_write(
+        self,
+        user_root: Path,
+        *,
+        source: str,
+        before: dict,
+        touched: List[str],
+        record: str,
+    ) -> List[Any]:
+        """Findings from the read-only review agent, or none if it could not judge.
+
+        Always the direct executor, whichever backend did the writing: the review is
+        worth more for being independent of the writer, and it needs only the read-only
+        tools every configured model can drive.
+        """
+        if not touched or not getattr(self.config, "review_writes", True):
+            return []
+        # Lazy: ..agent imports llm_client, which imports this package's config back.
+        from ..agent.review_agent import review_vault_write
+
+        t0 = time.perf_counter()
+        with memory_attempt("review"):
+            review = await review_vault_write(
+                user_root,
+                source=source,
+                before=before,
+                touched=touched,
+                record=record,
+            )
+        # Always logged: this costs a whole agent run, so a silent one is a cost with no
+        # visible counterpart — and "found nothing" and "never reached a verdict" have
+        # to be distinguishable from outside.
+        memory_logger.info(
+            "🔍 Write review (%s): %s over %d note(s), %d finding(s) in "
+            "%d round(s)/%d tool call(s) (%.1fs)%s%s",
+            record,
+            "verdict" if review.reported else "NO VERDICT",
+            len(touched),
+            len(review.findings),
+            review.rounds,
+            review.tool_calls,
+            time.perf_counter() - t0,
+            ("; " + "; ".join(review.warnings)) if review.warnings else "",
+            (
+                ("; " + "; ".join(f"{f.path} [{f.rule}]" for f in review.findings))
+                if review.findings
+                else ""
+            ),
+        )
+        return list(review.findings)
 
     # =========================================================================
     # ADD MEMORY
@@ -539,6 +618,18 @@ class MemoryService(MemoryServiceBase):
             required=_required(),
             forbidden_folders=forbidden_folders("day"),
         )
+        # Structural checks pass on a well-formed duplicate. A second, read-only agent
+        # reads what was added against the notes around it and reports what the vault
+        # already knew — the one failure a rule cannot decide.
+        findings.extend(
+            await self._review_write(
+                user_root,
+                source=day_digest,
+                before=existing_before,
+                touched=list(result.touched) if result else [],
+                record="day",
+            )
+        )
         repair_class = self._write_agent_class()
         if findings and result is not None and repair_class is not None:
             memory_logger.info(
@@ -552,20 +643,7 @@ class MemoryService(MemoryServiceBase):
                         day_digest,
                         local_date,
                         date=trusted_date,
-                        guidance=(
-                            # "already recorded" is false when the finding IS that the
-                            # day note is missing, and telling the agent not to add
-                            # content would then forbid the very fix being asked for.
-                            (
-                                "REPAIR ONLY. Fix exactly these problems and nothing "
-                                "else, then call verify_vault to confirm:\n"
-                                if any(f.rule == "record_missing" for f in findings)
-                                else "REPAIR ONLY. The day is already recorded; do not "
-                                "add new content. Fix exactly these problems and "
-                                "nothing else, then call verify_vault to confirm:\n"
-                            )
-                            + render_findings(findings)
-                        ),
+                        guidance=_repair_guidance(findings),
                         record="day",
                     )
                 except Exception as exc:  # noqa: BLE001 - a failed repair is not fatal
@@ -583,6 +661,17 @@ class MemoryService(MemoryServiceBase):
                 existing_before,
                 required=_required(),
                 forbidden_folders=forbidden_folders("day"),
+            )
+            # Re-review too: the repair edited notes, and only a second read can say
+            # whether it removed the duplication or reworded it.
+            findings.extend(
+                await self._review_write(
+                    user_root,
+                    source=day_digest,
+                    before=existing_before,
+                    touched=list(result.touched) if result else [],
+                    record="day",
+                )
             )
         if findings:
             # Not fatal: the day *is* recorded, and failing here would burn the day's

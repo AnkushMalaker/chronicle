@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from chronicle_tray.logs import MemoryLogHandler, configure_logging, log_buffer
+from chronicle_tray.sections.screenpipe import _screen_capture_warning
 
 
 def test_log_buffer_keeps_formatted_lines():
@@ -84,6 +85,61 @@ def test_tray_menu_offers_view_logs():
     try:
         labels = [action.text() for action in tray.contextMenu().actions()]
         assert "View Logs" in labels
+    finally:
+        tray.shutdown()
+        del tray
+        app.processEvents()
+
+
+def test_capture_warning_uses_recorder_owned_portal_state():
+    failed = {
+        "vision_capture": {
+            "requested": True,
+            "state": "failed",
+            "detail": "screen-share approval was cancelled or rejected",
+        }
+    }
+    assert _screen_capture_warning(failed, screen_enabled=True)
+    assert not _screen_capture_warning(failed, screen_enabled=False)
+    assert not _screen_capture_warning(
+        {"vision_capture": {"requested": True, "state": "starting"}},
+        screen_enabled=True,
+    )
+    assert not _screen_capture_warning({}, screen_enabled=True)
+
+
+def test_tray_uses_warning_icon_when_a_section_reports_degraded_capture():
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    # Imported after the skip guard: chronicle_tray.app imports PySide6 at module
+    # scope, so a top-level import would fail collection where Qt is absent.
+    from chronicle_tray.app import ChronicleTray, _tray_icon, _warning_icon
+
+    class WarningSection:
+        title = "ScreenPipe"
+
+        def available(self):
+            return True, ""
+
+        def build(self, menu):
+            pass
+
+        def refresh(self):
+            pass
+
+        def tooltip(self):
+            return "Screen capture unavailable — choose a screen in the Wayland prompt"
+
+        def warning(self):
+            return True
+
+        def shutdown(self):
+            pass
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    tray = ChronicleTray([WarningSection()])
+    try:
+        assert tray.icon().cacheKey() != _tray_icon().cacheKey()
+        assert "Screen capture unavailable" in tray.toolTip()
     finally:
         tray.shutdown()
         del tray

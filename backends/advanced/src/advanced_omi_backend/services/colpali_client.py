@@ -1,7 +1,7 @@
-"""Client for the Chronicle ColPali service (visual search over saved screenshots).
+"""Client for the Chronicle ColPali service (visual search over saved images).
 
 Resolved like every other GPU peer: env override, then minidisc/Tailscale discovery.
-The service is additive — screenshot search works from the vault notes without it —
+The service is additive — image search works from vault notes without it —
 so every failure degrades to ``None`` or an empty result rather than raising.
 
 Both a sync and an async client exist on purpose. The embed cron is async, while

@@ -1,9 +1,8 @@
 import json
 import subprocess
 
-import pytest
-
 import clients
+import pytest
 
 
 def completed(returncode=0, stdout="", stderr=""):
@@ -81,9 +80,28 @@ def test_runtime_reports_unknown_port_owner(monkeypatch):
     assert "unrecognized" in status["detail"]
 
 
+def test_runtime_forwards_recorder_owned_vision_capture_status(monkeypatch):
+    vision = {
+        "requested": True,
+        "state": "failed",
+        "detail": "screen-share approval was cancelled or rejected",
+    }
+    monkeypatch.setattr(clients, "_screenpipe_desktop_processes", lambda: [])
+    monkeypatch.setattr(clients, "_screenpipe_port_open", lambda: True)
+    monkeypatch.setattr(
+        clients, "_screenpipe_health", lambda: {"vision_capture": vision}
+    )
+
+    status = clients.screenpipe_runtime_status(chronicle_active=True)
+
+    assert status["vision_capture"] == vision
+
+
 def test_desktop_meeting_setting_is_read_without_rewriting(tmp_path, monkeypatch):
     settings = tmp_path / "store.bin"
-    settings.write_text(json.dumps({"settings": {"disableMeetingDetector": True, "other": 1}}))
+    settings.write_text(
+        json.dumps({"settings": {"disableMeetingDetector": True, "other": 1}})
+    )
     monkeypatch.setattr(clients, "_SCREENPIPE_SETTINGS", settings)
 
     assert clients._desktop_meeting_detection_disabled() is True

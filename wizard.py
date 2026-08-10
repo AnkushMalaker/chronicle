@@ -1436,7 +1436,7 @@ def select_llm_provider(
         "openai-llm": "1",
         "local-llm": "2",
         "llamacpp-llm": "3",
-        "qwen36-llm": "3",
+        "muse-glimmer-llm": "3",
     }
     default_choice = llm_to_choice.get(existing_llm, "1")
 

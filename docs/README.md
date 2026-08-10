@@ -39,6 +39,9 @@ day-to-day operation, and use [AGENTS.md](../AGENTS.md) for development conventi
 Point-in-time investigations. Each states its own date and scope; they are kept for
 their evidence, not as descriptions of the current system.
 
+- [Episode bounds and transcript anchoring](episode-bounds-audit-2026-08-10.md): why a
+  transcript timestamp cannot be resolved from its container, an audio-derived gate on
+  over-long episodes, and what a review of the live corpus showed
 - [Codex vault evaluation](codex-vault-evaluation-2026-07-17.md): Codex CLI memory
   executor compared against the direct tool-calling vault agent
 - [Memory rebuild audit](memory-rebuild-audit-2026-07-16.md): read-only audit of a

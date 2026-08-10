@@ -31,5 +31,9 @@ class Section:
         """One line for the tray tooltip ('' to omit)."""
         return ""
 
+    def warning(self) -> bool:
+        """Whether this section needs attention in the persistent tray icon."""
+        return False
+
     def shutdown(self) -> None:
         """Clean up background resources on quit."""

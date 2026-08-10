@@ -35,6 +35,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from ...codex_langfuse import upload_codex_trace
+from ...paid_inference_artifacts import canonical_hash, persist_paid_run
 from ..telemetry import (
     current_memory_attempt,
     memory_span,
@@ -490,7 +492,6 @@ class CodexMemoryAgent:
                 "exec",
                 "--json",
                 "--skip-git-repo-check",  # the vault is not a git repository
-                "--ephemeral",  # don't persist session files into CODEX_HOME
                 "--cd",
                 str(self.root),
                 "--sandbox",
@@ -507,6 +508,8 @@ class CodexMemoryAgent:
             env = {**os.environ, "RUST_LOG": os.environ.get("RUST_LOG", "error")}
             errors: List[str] = []
             stdout = ""
+            stderr = ""
+            returncode: Optional[int] = None
             timed_out = False
             logger.info(
                 "codex agent starting for conv=%s (sandbox=%s model=%s timeout=%ds)",
@@ -527,10 +530,12 @@ class CodexMemoryAgent:
                     cwd=str(self.root),
                 )
                 stdout = proc.stdout or ""
+                stderr = proc.stderr or ""
+                returncode = proc.returncode
                 if proc.returncode != 0:
                     errors.append(
                         f"codex exec exited {proc.returncode}: "
-                        f"{(proc.stderr or '')[-_STDERR_TAIL_CHARS:].strip()}"
+                        f"{stderr[-_STDERR_TAIL_CHARS:].strip()}"
                     )
             except subprocess.TimeoutExpired as e:
                 timed_out = True
@@ -539,11 +544,18 @@ class CodexMemoryAgent:
                     if isinstance(e.stdout, bytes)
                     else (e.stdout or "")
                 )
+                stderr = (
+                    e.stderr.decode()
+                    if isinstance(e.stderr, bytes)
+                    else (e.stderr or "")
+                )
                 errors.append(f"codex exec timed out after {timeout}s")
             except OSError as e:
                 errors.append(f"codex exec failed to start: {e}")
 
             ended_ns = time.time_ns()
+
+            upload_codex_trace(stdout, operation="memory")
 
             command_count, turn_count, event_errors, usage = self._parse_events(stdout)
             errors.extend(event_errors)
@@ -579,6 +591,36 @@ class CodexMemoryAgent:
             usage=usage,
             truncated=failed,
         )
+        try:
+            persist_paid_run(
+                operation="codex_memory",
+                request={
+                    "prompt": prompt,
+                    "conversation_id": conversation_id,
+                    "vault_before_sha256": canonical_hash(before),
+                    "model": model or "codex-default",
+                    "reasoning_effort": reasoning_effort,
+                    "sandbox_mode": sandbox_mode,
+                },
+                stdout=stdout,
+                stderr=stderr,
+                result={
+                    "summary": summary,
+                    "touched": touched,
+                    "removed": removed,
+                    "errors": errors,
+                    "usage": usage,
+                    "rounds": result.rounds,
+                    "tool_calls": command_count,
+                    "truncated": result.truncated,
+                },
+                metadata={"returncode": returncode, "timed_out": timed_out},
+                reusable=False,
+            )
+        except Exception:
+            # Do not trigger a second paid run after the first already mutated the
+            # vault solely because the auxiliary artifact volume is unavailable.
+            logger.exception("Failed to persist paid Codex memory artifact")
         logger.info(
             "codex agent done: conv=%s turns=%d commands=%d touched=%d removed=%d "
             "errors=%d tokens=in:%d/cached:%d/out:%d%s — %s",

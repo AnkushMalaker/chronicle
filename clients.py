@@ -17,6 +17,7 @@ Stdlib-only on purpose: updates.py and the node agent must always be able to
 import it, and client installs happen before any project venv exists.
 """
 
+import http.client
 import json
 import os
 import plistlib
@@ -414,6 +415,21 @@ def _screenpipe_port_open() -> bool:
         return False
 
 
+def _screenpipe_health() -> dict | None:
+    connection = http.client.HTTPConnection("127.0.0.1", _SCREENPIPE_PORT, timeout=0.4)
+    try:
+        connection.request("GET", "/health")
+        response = connection.getresponse()
+        if response.status >= 400:
+            return None
+        payload = json.loads(response.read())
+        return payload if isinstance(payload, dict) else None
+    except (OSError, http.client.HTTPException, json.JSONDecodeError):
+        return None
+    finally:
+        connection.close()
+
+
 def _desktop_meeting_detection_disabled() -> bool | None:
     try:
         settings = json.loads(_SCREENPIPE_SETTINGS.read_text(encoding="utf-8"))
@@ -456,6 +472,7 @@ def screenpipe_runtime_status(chronicle_active: bool | None = None) -> dict:
         }
 
     if chronicle_active:
+        health = _screenpipe_health() if port_open else None
         return {
             "runtime_owner": "chronicle",
             "recording_active": port_open,
@@ -466,6 +483,7 @@ def screenpipe_runtime_status(chronicle_active: bool | None = None) -> dict:
                 else "Chronicle recorder starting; API not ready"
             ),
             "desktop_pids": [],
+            "vision_capture": health.get("vision_capture") if health else None,
         }
 
     if port_open:

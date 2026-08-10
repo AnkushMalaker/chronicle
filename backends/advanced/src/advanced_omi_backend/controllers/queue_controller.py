@@ -1030,20 +1030,21 @@ def start_post_conversation_jobs(
             )
         )
 
-    # Step 5: Dispatch conversation.complete event (runs after both memory and title/summary complete)
+    # Step 5: Dispatch conversation.complete event (runs last, after the whole chain)
     # This ensures plugins receive the event after all processing is done
     event_job_id = f"event_complete_{conversation_id[:12]}"
     logger.info(
         f"🔍 DEBUG: Creating conversation complete event job with job_id={event_job_id}, conversation_id={conversation_id[:12]}"
     )
 
-    # Event job depends on memory and title/summary jobs that were actually enqueued
-    # Build dependency list excluding None values
-    event_dependencies = []
-    if memory_job:
-        event_dependencies.append(memory_job)
-    if title_summary_job:
-        event_dependencies.append(title_summary_job)
+    # Depend on the LAST link actually enqueued, not on a fixed pair. Every job here
+    # is skippable, and each is already chained behind the one after it, so naming
+    # only memory/title left the finalizer dependency-free whenever a caller skipped
+    # both — continuous capture does. It then settled the conversation as
+    # failed/"transcription" in ~100ms, while the transcription it was meant to wait
+    # for was still tens of seconds from writing its version.
+    terminal_job = title_summary_job or memory_job or speaker_job or depends_on_job
+    event_dependencies = [terminal_job] if terminal_job else []
 
     # Enqueue event dispatch job (may have no dependencies if all jobs were skipped)
     event_dispatch_job = default_queue.enqueue(
@@ -1127,14 +1128,21 @@ def get_queue_health() -> Dict[str, Any]:
         health["redis_connection"] = f"unhealthy: {e}"
         return health
 
-    # Check each queue
+    # Check each queue. Registry sizes are read with ZCARD rather than len(registry):
+    # RQ's ``BaseRegistry.__len__`` runs ``cleanup()`` first, and StartedJobRegistry's
+    # cleanup moves expired jobs to the failed registry inside a UnixSignalDeathPenalty.
+    # signal.signal() only works on the main thread, and /health calls this through
+    # asyncio.to_thread — so as soon as any job was in the started registry the whole
+    # probe raised and the endpoint reported "Redis Connection Failed: signal only works
+    # in main thread of the main interpreter". Observing health must not mutate state
+    # anyway; reaping expired jobs belongs to the workers.
     for queue_name in QUEUE_NAMES:
         queue = get_queue(queue_name)
         health["queues"][queue_name] = {
             "count": len(queue),
-            "failed_count": len(queue.failed_job_registry),
-            "finished_count": len(queue.finished_job_registry),
-            "started_count": len(queue.started_job_registry),
+            "failed_count": redis_conn.zcard(queue.failed_job_registry.key),
+            "finished_count": redis_conn.zcard(queue.finished_job_registry.key),
+            "started_count": redis_conn.zcard(queue.started_job_registry.key),
         }
 
     # Check workers

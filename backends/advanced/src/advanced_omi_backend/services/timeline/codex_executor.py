@@ -1,18 +1,27 @@
 """Codex CLI implementation of the semantic timeline executor contract."""
 
 import asyncio
+import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
+from advanced_omi_backend.services.codex_langfuse import upload_codex_trace
 from advanced_omi_backend.services.memory.agent import codex_quota
 from advanced_omi_backend.services.memory.agent.codex_agent import (
     codex_executor_available,
 )
+from advanced_omi_backend.services.paid_inference_artifacts import (
+    load_reusable_result,
+    persist_paid_run,
+)
 
 from .contracts import TimelineAgentResult, TimelineEvidenceManifest
 from .prompt import OUTPUT_SCHEMA, build_prompt
+
+logger = logging.getLogger(__name__)
 
 
 class TimelineQuotaDeferred(RuntimeError):
@@ -27,6 +36,36 @@ _USAGE_FIELDS = (
     "output_tokens",
     "reasoning_output_tokens",
 )
+
+_GENERATED_WORKSPACE_FILES = {
+    "last-agent-message.json",
+    "output-schema.json",
+    "timeline-result.json",
+}
+
+
+def _workspace_fingerprint(workspace: Path) -> list[dict[str, Any]]:
+    """Hash every agent-readable input so cache reuse cannot cross evidence changes."""
+
+    files: list[dict[str, Any]] = []
+    for path in sorted(
+        candidate for candidate in workspace.rglob("*") if candidate.is_file()
+    ):
+        relative = path.relative_to(workspace).as_posix()
+        if relative in _GENERATED_WORKSPACE_FILES:
+            continue
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        files.append(
+            {
+                "path": relative,
+                "size": path.stat().st_size,
+                "sha256": digest.hexdigest(),
+            }
+        )
+    return files
 
 
 def _parse_usage(stdout: bytes) -> dict[str, int]:
@@ -85,10 +124,6 @@ class CodexTimelineExecutor:
         pinned_episodes: list[dict[str, Any]] | None = None,
         reasoning_effort: str | None = None,
     ) -> TimelineAgentResult:
-        usage = await asyncio.to_thread(self._check_quota)
-        available, detail = codex_executor_available()
-        if not available:
-            raise RuntimeError(detail)
         sandbox_mode = str(self.settings.get("sandbox_mode") or "workspace-write")
         schema_path = workspace / "output-schema.json"
         output_path = workspace / "timeline-result.json"
@@ -99,6 +134,7 @@ class CodexTimelineExecutor:
         # progress narration ("kind": "task", "Inspect Chronicle day inputs") replaced the
         # real episodes — silently, and only when the run happened to end on narration.
         last_message_path = workspace / "last-agent-message.json"
+        workspace_files = await asyncio.to_thread(_workspace_fingerprint, workspace)
         schema_path.write_text(json.dumps(OUTPUT_SCHEMA), encoding="utf-8")
         prompt = build_prompt(output_path.name)
         if existing_episodes:
@@ -113,10 +149,39 @@ class CodexTimelineExecutor:
                 "them, or mark their time unassigned:\n"
                 + json.dumps(pinned_episodes, default=str)[:30000]
             )
+        model = self.settings.get("model")
+        reasoning_effort = reasoning_effort or self.settings.get("reasoning_effort")
+        request = {
+            "prompt": prompt,
+            "output_schema": OUTPUT_SCHEMA,
+            "manifest": manifest.model_dump(mode="json"),
+            "existing_episodes": existing_episodes,
+            "pinned_episodes": pinned_episodes or [],
+            "model": model or "codex-default",
+            "reasoning_effort": reasoning_effort or "",
+            "sandbox_mode": sandbox_mode,
+            "required_runtime_capabilities": ["code_mode_host"],
+            "workspace_files": workspace_files,
+        }
+        try:
+            cached = await asyncio.to_thread(
+                load_reusable_result, "codex_timeline", request
+            )
+            if cached is not None:
+                result = TimelineAgentResult.model_validate(cached)
+                result.usage = {**result.usage, "cache_hits": 1}
+                logger.info("♻️ Reusing cached Codex timeline result")
+                return result
+        except Exception:
+            logger.exception("Codex timeline cache lookup failed; running provider")
+
+        usage = await asyncio.to_thread(self._check_quota)
+        available, detail = codex_executor_available()
+        if not available:
+            raise RuntimeError(detail)
         command = [
             detail,
             "exec",
-            "--ephemeral",
             "--skip-git-repo-check",
             "--color",
             "never",
@@ -133,8 +198,6 @@ class CodexTimelineExecutor:
             "--output-last-message",
             str(last_message_path),
         ]
-        model = self.settings.get("model")
-        reasoning_effort = reasoning_effort or self.settings.get("reasoning_effort")
         if model:
             command.extend(["-m", str(model)])
         if reasoning_effort:
@@ -152,12 +215,53 @@ class CodexTimelineExecutor:
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(prompt.encode()), timeout=timeout
             )
-        except TimeoutError:
+        except TimeoutError as exc:
             process.kill()
             await process.wait()
+            partial_stdout = getattr(exc, "stdout", None) or b""
+            partial_stderr = getattr(exc, "stderr", None) or b""
+            try:
+                await asyncio.to_thread(
+                    persist_paid_run,
+                    operation="codex_timeline",
+                    request=request,
+                    stdout=(
+                        partial_stdout.decode(errors="replace")
+                        if isinstance(partial_stdout, bytes)
+                        else str(partial_stdout)
+                    ),
+                    stderr=(
+                        partial_stderr.decode(errors="replace")
+                        if isinstance(partial_stderr, bytes)
+                        else str(partial_stderr)
+                    ),
+                    result=None,
+                    metadata={"error": f"timeout after {timeout}s"},
+                    reusable=False,
+                )
+            except Exception:
+                logger.exception("Failed to persist timed-out Codex timeline run")
             raise RuntimeError(f"Codex timeline analysis timed out after {timeout}s")
+        await asyncio.to_thread(
+            upload_codex_trace,
+            stdout.decode(errors="replace"),
+            operation="timeline",
+        )
         diagnostic = stderr.decode(errors="replace")[-4000:]
         if process.returncode != 0:
+            try:
+                await asyncio.to_thread(
+                    persist_paid_run,
+                    operation="codex_timeline",
+                    request=request,
+                    stdout=stdout.decode(errors="replace"),
+                    stderr=stderr.decode(errors="replace"),
+                    result=None,
+                    metadata={"returncode": process.returncode},
+                    reusable=False,
+                )
+            except Exception:
+                logger.exception("Failed to persist failed Codex timeline run")
             lowered = diagnostic.lower()
             if (
                 "rate limit" in lowered
@@ -174,9 +278,52 @@ class CodexTimelineExecutor:
         # only a fallback for a run that answered inline without writing it.
         source = output_path if output_path.is_file() else last_message_path
         if not source.is_file():
+            try:
+                await asyncio.to_thread(
+                    persist_paid_run,
+                    operation="codex_timeline",
+                    request=request,
+                    stdout=stdout.decode(errors="replace"),
+                    stderr=stderr.decode(errors="replace"),
+                    result=None,
+                    metadata={
+                        "returncode": process.returncode,
+                        "error": "no structured result",
+                    },
+                    reusable=False,
+                )
+            except Exception:
+                logger.exception("Failed to persist unstructured Codex timeline run")
             raise RuntimeError("Codex timeline analysis produced no structured result")
-        result = TimelineAgentResult.model_validate_json(
-            source.read_text(encoding="utf-8")
-        )
+        raw_result = source.read_text(encoding="utf-8")
+        try:
+            result = TimelineAgentResult.model_validate_json(raw_result)
+        except Exception as exc:
+            await asyncio.to_thread(
+                persist_paid_run,
+                operation="codex_timeline",
+                request=request,
+                stdout=stdout.decode(errors="replace"),
+                stderr=stderr.decode(errors="replace"),
+                result={"raw_structured_output": raw_result},
+                metadata={"error": f"{type(exc).__name__}: {exc}"},
+                reusable=False,
+            )
+            raise
         result.usage = {**usage, **_parse_usage(stdout)}
+        try:
+            await asyncio.to_thread(
+                persist_paid_run,
+                operation="codex_timeline",
+                request=request,
+                stdout=stdout.decode(errors="replace"),
+                stderr=stderr.decode(errors="replace"),
+                result=result.model_dump(mode="json"),
+                metadata={"returncode": process.returncode},
+                reusable=True,
+            )
+        except Exception:
+            # Never throw away the already-paid successful result and trigger a
+            # provider retry solely because the local artifact store is unhealthy.
+            logger.exception("Failed to persist paid Codex timeline artifact")
         return result

@@ -7,13 +7,14 @@ fraction AND speaker include/exclude), enqueues batch audio analysis,
 archives (hard-deletes) audio, and splits/merges conversations.
 """
 
+import hashlib
 import json
 import logging
 import re
 import shutil
 import statistics
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi.responses import FileResponse, JSONResponse
@@ -89,6 +90,8 @@ logger = logging.getLogger(__name__)
 # and report when it was hit rather than silently truncating.
 MAX_SCAN = 2000
 
+SPEAKER_REVIEW_CONTEXT_SEGMENTS = 1
+
 # Projection: lightweight metadata + cached VAD analysis + speaker labels
 # from the active transcript version's segments (no transcript text / words).
 _SCAN_PROJECTION = {
@@ -139,6 +142,157 @@ def _audit_segments(doc: dict) -> list:
             best_score = score
             best = segs
     return best
+
+
+def _speaker_review_key(conversation_id: str, segment_start: float) -> str:
+    """Stable key shared by queue selection and submitted review decisions."""
+    return f"{conversation_id}:{round(float(segment_start), 3):.3f}"
+
+
+def _speaker_review_candidates(doc: dict, reviewed_keys: set[str]) -> List[dict]:
+    """Return every reviewable identity claim in transcript order.
+
+    This deliberately performs no anomaly scoring: an identified speech segment is
+    an identity claim and therefore eligible for human review.  Context is adjacent
+    transcript evidence only, not another model's foreground/background estimate.
+    """
+    conversation_id = doc.get("conversation_id")
+    if not conversation_id:
+        return []
+    segments = _audit_segments(doc)
+    candidates = []
+    for index, segment in enumerate(segments):
+        if (segment.get("segment_type") or "speech") != "speech":
+            continue
+        claimed_speaker = segment.get("identified_as")
+        start = segment.get("start")
+        end = segment.get("end")
+        if not claimed_speaker or start is None or end is None or end <= start:
+            continue
+        review_key = _speaker_review_key(conversation_id, start)
+        if review_key in reviewed_keys:
+            continue
+
+        context = []
+        context_start = max(0, index - SPEAKER_REVIEW_CONTEXT_SEGMENTS)
+        context_end = min(len(segments), index + SPEAKER_REVIEW_CONTEXT_SEGMENTS + 1)
+        for context_index in range(context_start, context_end):
+            item = segments[context_index]
+            context.append(
+                {
+                    "position": (
+                        "current"
+                        if context_index == index
+                        else "before" if context_index < index else "after"
+                    ),
+                    "speaker": item.get("identified_as") or item.get("speaker"),
+                    "text": item.get("text") or "",
+                    "start": item.get("start"),
+                    "end": item.get("end"),
+                }
+            )
+
+        candidates.append(
+            {
+                "review_key": review_key,
+                "conversation_id": conversation_id,
+                "conversation_title": doc.get("title"),
+                "conversation_date": str(doc.get("created_at") or ""),
+                "segment_index": index,
+                "segment_start_time": float(start),
+                "start": round(float(start), 3),
+                "end": round(float(end), 3),
+                "text": segment.get("text") or "",
+                "claimed_speaker": claimed_speaker,
+                "raw_speaker": segment.get("speaker"),
+                "confidence": segment.get("confidence"),
+                "context": context,
+            }
+        )
+    return candidates
+
+
+def _select_speaker_review_batch(
+    candidates: List[dict],
+    batch_size: int,
+    threshold: float,
+    conversation_review_counts: Dict[str, int],
+    speaker_review_counts: Dict[str, int],
+) -> List[dict]:
+    """Select an information-bearing, corpus-diverse review batch.
+
+    Three of every five slots target the decision boundary; two are deterministic
+    controls from the rest of the score range.  Conversation and speaker coverage
+    precede uncertainty so one long recording or frequent person cannot monopolize
+    review.  The control lane is essential: boundary-only review cannot estimate
+    false accepts made with high model confidence.
+    """
+    if not candidates:
+        return []
+
+    def coverage(candidate: dict) -> tuple:
+        return (
+            conversation_review_counts.get(candidate["conversation_id"], 0),
+            speaker_review_counts.get(candidate["claimed_speaker"], 0),
+        )
+
+    def boundary_key(candidate: dict) -> tuple:
+        confidence = candidate.get("confidence")
+        distance = abs(float(confidence) - threshold) if confidence is not None else 2.0
+        return (*coverage(candidate), distance, candidate["review_key"])
+
+    def control_key(candidate: dict) -> tuple:
+        stable = hashlib.sha256(candidate["review_key"].encode()).hexdigest()
+        return (*coverage(candidate), stable)
+
+    boundary = sorted(candidates, key=boundary_key)
+    control_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.get("confidence") is not None
+        and abs(float(candidate["confidence"]) - threshold) >= 0.1
+    ]
+    control = sorted(control_candidates or candidates, key=control_key)
+    lane_pattern = ["boundary", "boundary", "control", "boundary", "control"]
+    picked: List[dict] = []
+    picked_keys: set[str] = set()
+    picked_conversations: set[str] = set()
+    picked_speakers: set[str] = set()
+
+    def take(pool: List[dict], require_new_speaker: bool) -> Optional[dict]:
+        for candidate in pool:
+            if candidate["review_key"] in picked_keys:
+                continue
+            if candidate["conversation_id"] in picked_conversations:
+                continue
+            if require_new_speaker and candidate["claimed_speaker"] in picked_speakers:
+                continue
+            return candidate
+        return None
+
+    for slot in range(batch_size):
+        pool = (
+            boundary
+            if lane_pattern[slot % len(lane_pattern)] == "boundary"
+            else control
+        )
+        candidate = take(pool, require_new_speaker=True)
+        if candidate is None:
+            candidate = take(pool, require_new_speaker=False)
+        if candidate is None:
+            other = control if pool is boundary else boundary
+            candidate = take(other, require_new_speaker=False)
+        if candidate is None:
+            break
+        candidate = {
+            **candidate,
+            "selection_lane": lane_pattern[slot % len(lane_pattern)],
+        }
+        picked.append(candidate)
+        picked_keys.add(candidate["review_key"])
+        picked_conversations.add(candidate["conversation_id"])
+        picked_speakers.add(candidate["claimed_speaker"])
+    return picked
 
 
 def _speakers_for_doc(doc: dict) -> List[str]:
@@ -1079,6 +1233,255 @@ async def identify_segment_clip(
     }
 
 
+def _speaker_label_reviews_collection():
+    return Conversation.get_pymongo_collection().database["speaker_label_reviews"]
+
+
+async def next_speaker_label_reviews(user: User, batch_size: int = 5):
+    """Serve a diverse active-learning batch plus calibration controls."""
+    batch_size = max(1, min(batch_size, 20))
+    scope = {} if user.is_superuser else {"user_id": str(user.user_id)}
+    review_rows = (
+        await _speaker_label_reviews_collection()
+        .find(
+            scope,
+            {"review_key": 1, "conversation_id": 1, "claimed_speaker": 1},
+        )
+        .to_list()
+    )
+    reviewed_keys = {row["review_key"] for row in review_rows}
+    conversation_review_counts: Dict[str, int] = {}
+    speaker_review_counts: Dict[str, int] = {}
+    for row in review_rows:
+        conversation_id = row.get("conversation_id")
+        speaker = row.get("claimed_speaker")
+        if conversation_id:
+            conversation_review_counts[conversation_id] = (
+                conversation_review_counts.get(conversation_id, 0) + 1
+            )
+        if speaker:
+            speaker_review_counts[speaker] = speaker_review_counts.get(speaker, 0) + 1
+
+    pending_annotation_keys = {
+        _speaker_review_key(row["conversation_id"], row["segment_start_time"])
+        async for row in Annotation.get_pymongo_collection().find(
+            {
+                **scope,
+                "annotation_type": AnnotationType.DIARIZATION.value,
+                "segment_start_time": {"$ne": None},
+            },
+            {"conversation_id": 1, "segment_start_time": 1},
+        )
+        if row.get("conversation_id") and row.get("segment_start_time") is not None
+    }
+    excluded_keys = reviewed_keys | pending_annotation_keys
+
+    query = {
+        "deleted": {"$ne": True},
+        "audio_archived": {"$ne": True},
+        "audio_chunks_count": {"$gt": 0},
+    }
+    if not user.is_superuser:
+        query["user_id"] = str(user.user_id)
+    projection = {
+        "conversation_id": 1,
+        "title": 1,
+        "created_at": 1,
+        "active_transcript_version": 1,
+        "transcript_versions.version_id": 1,
+        "transcript_versions.segments.start": 1,
+        "transcript_versions.segments.end": 1,
+        "transcript_versions.segments.text": 1,
+        "transcript_versions.segments.speaker": 1,
+        "transcript_versions.segments.identified_as": 1,
+        "transcript_versions.segments.confidence": 1,
+        "transcript_versions.segments.segment_type": 1,
+    }
+
+    candidates = []
+    conversations_scanned = 0
+    cursor = (
+        Conversation.get_pymongo_collection()
+        .find(query, projection)
+        .sort("created_at", -1)
+        .limit(MAX_SCAN)
+    )
+    async for doc in cursor:
+        conversations_scanned += 1
+        candidates.extend(_speaker_review_candidates(doc, excluded_keys))
+    threshold = float(get_diarization_settings().get("similarity_threshold", 0.5))
+    batch = _select_speaker_review_batch(
+        candidates,
+        batch_size,
+        threshold,
+        conversation_review_counts,
+        speaker_review_counts,
+    )
+    return {
+        "batch": batch,
+        "reviewed_total": len(reviewed_keys),
+        "conversations_scanned": conversations_scanned,
+        "candidate_claims": len(candidates),
+        "threshold": threshold,
+    }
+
+
+async def speaker_label_review_metrics(user: User):
+    """Human-measured assignment precision, globally and per claimed identity."""
+    scope = {} if user.is_superuser else {"user_id": str(user.user_id)}
+    rows = await _speaker_label_reviews_collection().find(scope, {"_id": 0}).to_list()
+    evaluable_verdicts = {"correct", "relabel", "unknown", "background"}
+
+    def summarize(items: List[dict]) -> dict:
+        evaluable = [row for row in items if row.get("verdict") in evaluable_verdicts]
+        correct = sum(row.get("verdict") == "correct" for row in evaluable)
+        errors: Dict[str, int] = {}
+        for row in evaluable:
+            if row.get("verdict") != "correct":
+                label = row.get("corrected_speaker") or row.get("verdict")
+                errors[label] = errors.get(label, 0) + 1
+        return {
+            "reviewed": len(items),
+            "evaluable": len(evaluable),
+            "correct": correct,
+            "precision": round(correct / len(evaluable), 4) if evaluable else None,
+            "excluded": len(items) - len(evaluable),
+            "errors": errors,
+        }
+
+    grouped: Dict[str, List[dict]] = {}
+    for row in rows:
+        grouped.setdefault(row.get("claimed_speaker") or "(unknown)", []).append(row)
+    speakers = [
+        {"speaker": speaker, **summarize(items)} for speaker, items in grouped.items()
+    ]
+    speakers.sort(key=lambda item: (-item["evaluable"], item["speaker"]))
+    return {
+        "overall": summarize(rows),
+        "boundary": summarize(
+            [row for row in rows if row.get("selection_lane") == "boundary"]
+        ),
+        "control": summarize(
+            [row for row in rows if row.get("selection_lane") == "control"]
+        ),
+        "speakers": speakers,
+    }
+
+
+async def decide_speaker_label_reviews(user: User, decisions: List[dict]):
+    """Persist verdicts and create ordinary pending diarization corrections."""
+    reviews = _speaker_label_reviews_collection()
+    recorded = corrected = 0
+    errors = []
+    now = datetime.now(timezone.utc)
+
+    for decision in decisions:
+        conversation_id = decision.get("conversation_id")
+        segment_index = decision.get("segment_index")
+        segment_start = decision.get("segment_start_time")
+        verdict = decision.get("verdict")
+        corrected_speaker = decision.get("corrected_speaker")
+        if (
+            not conversation_id
+            or segment_index is None
+            or segment_start is None
+            or verdict
+            not in {"correct", "relabel", "unknown", "background", "mixed", "bad_audio"}
+        ):
+            errors.append({"decision": decision, "error": "invalid decision"})
+            continue
+
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == conversation_id
+        )
+        if not conversation or (
+            not user.is_superuser and conversation.user_id != str(user.user_id)
+        ):
+            errors.append({"decision": decision, "error": "conversation not found"})
+            continue
+        version = _active_transcript_version(conversation)
+        if not version or segment_index >= len(version.segments):
+            errors.append({"decision": decision, "error": "segment no longer exists"})
+            continue
+        segment = version.segments[segment_index]
+        if abs(float(segment.start) - float(segment_start)) > 0.01:
+            errors.append(
+                {"decision": decision, "error": "segment changed since review"}
+            )
+            continue
+
+        target = corrected_speaker
+        if verdict == "unknown":
+            target = "Unknown Speaker"
+        elif verdict == "background":
+            target = "Background Speech"
+        elif verdict == "relabel" and not target:
+            errors.append({"decision": decision, "error": "corrected speaker required"})
+            continue
+        elif verdict not in {"relabel", "unknown", "background"}:
+            target = None
+
+        annotation_id = None
+        if target and target != (segment.identified_as or segment.speaker):
+            annotation = await Annotation.find_one(
+                Annotation.user_id == str(user.user_id),
+                Annotation.annotation_type == AnnotationType.DIARIZATION,
+                Annotation.conversation_id == conversation_id,
+                Annotation.segment_start_time == float(segment.start),
+                Annotation.processed == False,  # noqa: E712 - Beanie query expression
+            )
+            if annotation is None:
+                annotation = Annotation(
+                    annotation_type=AnnotationType.DIARIZATION,
+                    user_id=str(user.user_id),
+                    conversation_id=conversation_id,
+                    segment_index=segment_index,
+                    original_speaker=segment.identified_as or segment.speaker or "",
+                    corrected_speaker=target,
+                    segment_start_time=float(segment.start),
+                    status="accepted",
+                    processed=False,
+                )
+            else:
+                annotation.segment_index = segment_index
+                annotation.corrected_speaker = target
+                annotation.updated_at = now
+            await annotation.save()
+            annotation_id = annotation.id
+            corrected += 1
+
+        review_key = _speaker_review_key(conversation_id, segment.start)
+        await reviews.update_one(
+            {"user_id": str(user.user_id), "review_key": review_key},
+            {
+                "$set": {
+                    "user_id": str(user.user_id),
+                    "review_key": review_key,
+                    "conversation_id": conversation_id,
+                    "segment_index": segment_index,
+                    "segment_start_time": float(segment.start),
+                    "segment_end_time": float(segment.end),
+                    "claimed_speaker": segment.identified_as or segment.speaker,
+                    "model_confidence": segment.confidence,
+                    "selection_lane": decision.get("selection_lane"),
+                    "verdict": verdict,
+                    "corrected_speaker": target,
+                    "annotation_id": annotation_id,
+                    "reviewed_at": now,
+                }
+            },
+            upsert=True,
+        )
+        recorded += 1
+
+    return {
+        "status": "ok" if not errors else "partial",
+        "recorded": recorded,
+        "corrections_pending": corrected,
+        "errors": errors,
+    }
+
+
 async def get_triage_pending(user: User):
     """Count of unapplied speaker-triage decisions (pending diarization
     annotations) and how many conversations they span — drives the toolbar's
@@ -1180,14 +1583,160 @@ def _snap_split_points(
     return indices, None
 
 
+def _asr_source_version(
+    conversation: Conversation,
+) -> Optional["Conversation.TranscriptVersion"]:
+    """Walk a conversation's active version back to its underlying ASR transcript.
+
+    Same rule the memory rebuild uses: a version tagged
+    ``reprocessing_type == "speaker_diarization"`` is a derivative, so follow its
+    ``source_version_id``. A conversation that was never diarized returns its
+    active version, which *is* the ASR layer.
+    """
+    versions = {
+        version.version_id: version
+        for version in (conversation.transcript_versions or [])
+    }
+    current = versions.get(conversation.active_transcript_version or "")
+    seen: set[str] = set()
+    while current is not None and current.version_id not in seen:
+        seen.add(current.version_id)
+        metadata = current.metadata or {}
+        if metadata.get("reprocessing_type") != "speaker_diarization":
+            return current
+        source = versions.get(metadata.get("source_version_id") or "")
+        if source is None:
+            return current
+        current = source
+    return current
+
+
+def _avoid_speech_segments(
+    split_points: List[float], segments: List["Conversation.SpeakerSegment"]
+) -> Tuple[List[float], List[dict]]:
+    """Move each cut out of any speech segment it would land inside.
+
+    Slicing sends a segment wholly to the side holding its midpoint and keeps
+    only the words starting on that side, so a cut through a segment drops the
+    words beyond it from both children. ``transcript_slicing`` states this as an
+    assumption -- "split points sit inside long silence gaps, so segments never
+    straddle them" -- and nothing enforced it; two conversations here lost 4 and
+    5 words that way.
+
+    Only ``speech`` blocks a cut. An ``event`` or ``note`` segment ([laughter],
+    a tag) carries no words to lose and may be cut through.
+    """
+    speech = sorted(
+        (
+            segment
+            for segment in segments
+            if segment.segment_type == Conversation.SegmentType.SPEECH
+            and segment.end > segment.start
+        ),
+        key=lambda segment: segment.start,
+    )
+    moved: List[dict] = []
+    adjusted: List[float] = []
+    for point in split_points:
+        straddled = next(
+            (segment for segment in speech if segment.start < point < segment.end),
+            None,
+        )
+        if straddled is None:
+            adjusted.append(point)
+            continue
+        # Nearest edge, so the cut moves as little as possible.
+        target = (
+            straddled.start
+            if point - straddled.start <= straddled.end - point
+            else straddled.end
+        )
+        moved.append(
+            {
+                "requested": round(point, 3),
+                "moved_to": round(target, 3),
+                "segment": [round(straddled.start, 3), round(straddled.end, 3)],
+            }
+        )
+        adjusted.append(target)
+    return adjusted, moved
+
+
+def _slice_versions_onto_child(
+    child: Conversation,
+    parent: Conversation,
+    t0: float,
+    t1: float,
+) -> Optional[str]:
+    """Give the child a time slice of *every* one of the parent's versions.
+
+    Slicing only the active version strands the rest on a soft-deleted parent
+    nobody reads, which breaks the one thing that needs them: rebuild walks a
+    child's own versions back to the underlying ASR transcript by following
+    ``reprocessing_type == "speaker_diarization"``. A lone slice is not tagged
+    that way, so the walk stops on it and a speaker-labelled slice gets treated
+    as clean ASR -- diarization layered on diarized text.
+
+    Version ids are minted fresh per child, so ``source_version_id`` is remapped
+    to the child's copy of that source; a link whose source sliced to nothing
+    keeps pointing at the parent's id, with ``source_conversation_id`` naming
+    where to find it. Returns the child's active version id.
+    """
+    id_map: dict[str, str] = {}
+    active_version_id: Optional[str] = None
+    for version in parent.transcript_versions or []:
+        segments = slice_segments(version.segments or [], t0, t1)
+        words = slice_words(version.words or [], t0, t1)
+        if not segments and not words:
+            continue
+        new_id = str(uuid.uuid4())
+        metadata = dict(version.metadata or {})
+        source_id = metadata.get("source_version_id")
+        metadata.update(
+            {
+                "derived": "split",
+                "source_conversation_id": parent.conversation_id,
+                "source_version_id": version.version_id,
+                "time_range": [t0, t1],
+            }
+        )
+        if source_id:
+            # Keep the chain inside the child where both links survived the cut.
+            metadata["source_version_id"] = id_map.get(source_id, source_id)
+            if source_id in id_map:
+                metadata["source_conversation_id"] = child.conversation_id
+            metadata["origin_version_id"] = version.version_id
+        child.add_transcript_version(
+            version_id=new_id,
+            transcript=build_transcript_text(segments),
+            words=words,
+            segments=segments,
+            provider=version.provider,
+            model=version.model,
+            metadata=metadata,
+            set_as_active=False,
+        )
+        id_map[version.version_id] = new_id
+        if version.version_id == parent.active_transcript_version:
+            active_version_id = new_id
+
+    if active_version_id is None:
+        # The parent's active version sliced to nothing here; the newest slice
+        # that did survive is the best available answer for this child.
+        active_version_id = next(iter(reversed(id_map.values())), None)
+    if active_version_id:
+        child.set_active_transcript_version(active_version_id)
+    return active_version_id
+
+
 async def split_conversation(
     user: User, conversation_id: str, split_points: List[float]
 ):
     """Split a conversation into children at the given time points.
 
-    Chunk documents are reassigned to the children (no audio re-encode); the
-    parent's active transcript is sliced by time range; the parent is
-    soft-deleted with lineage metadata; memory + title jobs run per child.
+    Chunk documents are reassigned to the children (no audio re-encode); every
+    one of the parent's transcript versions is sliced by time range; the parent
+    is soft-deleted with lineage metadata; memory + title jobs run per child.
     Crash-safe ordering without transactions: children are created first, the
     parent is mutated last.
     """
@@ -1202,14 +1751,29 @@ async def split_conversation(
                 status_code=409, content={"error": "Conversation has no audio chunks"}
             )
 
-        boundary_indices, message = _snap_split_points(split_points, chunks)
+        # Move cuts off speech before snapping to chunks, so a boundary never
+        # lands mid-utterance and drops its far-side words.
+        active_version = _active_transcript_version(conversation)
+        requested_points = sorted(set(split_points))
+        adjusted_points, moved_cuts = _avoid_speech_segments(
+            requested_points,
+            list(active_version.segments or []) if active_version else [],
+        )
+        if moved_cuts:
+            logger.info(
+                "Split %s: moved %d cut(s) out of speech segments: %s",
+                conversation_id[:12],
+                len(moved_cuts),
+                moved_cuts,
+            )
+
+        boundary_indices, message = _snap_split_points(adjusted_points, chunks)
         if message:
             return JSONResponse(status_code=422, content={"error": message})
 
         # Build [start_index, end_index) chunk ranges for each child.
         edges = [0] + boundary_indices + [len(chunks)]
         chunk_by_index = {int(c["chunk_index"]): c for c in chunks}
-        parent_version = _active_transcript_version(conversation)
         now = datetime.now(timezone.utc)
 
         children: List[Conversation] = []
@@ -1221,6 +1785,13 @@ async def split_conversation(
             child = create_conversation(
                 user_id=conversation.user_id,
                 client_id=conversation.client_id,
+                # Inherit the parent's fencing. Splitting continuous capture must not
+                # launder it into memory-eligible conversations: create_conversation
+                # defaults to data_purpose=None/memory_excluded=False, so omitting
+                # these silently promotes every child.
+                data_purpose=conversation.data_purpose,
+                memory_excluded=conversation.memory_excluded,
+                memory_exclusion_reason=conversation.memory_exclusion_reason,
             )
             child.derived_from = Conversation.DerivedFrom(
                 operation="split",
@@ -1229,6 +1800,13 @@ async def split_conversation(
                 performed_at=now,
                 performed_by=str(user.user_id),
             )
+            # A child begins where its audio begins, not when the split ran.
+            # Consumers that date a recording by created_at would otherwise pile
+            # every child onto today instead of the day it was recorded. (The
+            # timeline itself now dates evidence by the chunks' captured_at.)
+            child.created_at = conversation.created_at + timedelta(seconds=t0)
+            child.external_source_type = conversation.external_source_type
+            child.external_source_id = conversation.external_source_id
             child.end_reason = conversation.end_reason
             child.audio_chunks_count = b - a
             child.audio_total_duration = round(
@@ -1239,27 +1817,7 @@ async def split_conversation(
             )
             child.audio_compression_ratio = conversation.audio_compression_ratio
 
-            version_id = None
-            if parent_version:
-                segments = slice_segments(parent_version.segments or [], t0, t1)
-                words = slice_words(parent_version.words or [], t0, t1)
-                if segments or words:
-                    version_id = str(uuid.uuid4())
-                    child.add_transcript_version(
-                        version_id=version_id,
-                        transcript=build_transcript_text(segments),
-                        words=words,
-                        segments=segments,
-                        provider=parent_version.provider,
-                        model=parent_version.model,
-                        metadata={
-                            "derived": "split",
-                            "source_conversation_id": conversation_id,
-                            "source_version_id": parent_version.version_id,
-                            "time_range": [t0, t1],
-                        },
-                        set_as_active=True,
-                    )
+            version_id = _slice_versions_onto_child(child, conversation, t0, t1)
 
             part = len(children) + 1
             total = len(edges) - 1
@@ -1344,6 +1902,7 @@ async def split_conversation(
         return {
             "parent_conversation_id": conversation_id,
             "children": results,
+            "cuts_moved_off_speech": moved_cuts,
         }
 
     except Exception as e:
@@ -1447,8 +2006,32 @@ async def merge_conversations(user: User, conversation_ids: List[str]):
             )
 
         now = datetime.now(timezone.utc)
-        merged = create_conversation(user_id=first.user_id, client_id=first.client_id)
+        # Fencing survives a merge, and the merged span is only memory-eligible if
+        # every source was. One promoted part means the segmentation agent judged that
+        # stretch conversational, so the merge follows it rather than the fence.
+        fenced = [s for s in sources if s.memory_excluded]
+        merged = create_conversation(
+            user_id=first.user_id,
+            client_id=first.client_id,
+            data_purpose=(
+                first.data_purpose
+                if len(fenced) == len(sources)
+                else next(
+                    (s.data_purpose for s in sources if not s.memory_excluded), None
+                )
+            ),
+            memory_excluded=len(fenced) == len(sources),
+            memory_exclusion_reason=(
+                first.memory_exclusion_reason if len(fenced) == len(sources) else None
+            ),
+        )
         merged.created_at = first.created_at
+        # Where the audio came from survives a merge too. The timeline selects its
+        # audio evidence by external_source_type and reads the capture direction out
+        # of external_source_id, so a merged recording that drops them disappears from
+        # the timeline and loses its media/speech role.
+        merged.external_source_type = first.external_source_type
+        merged.external_source_id = first.external_source_id
         merged.derived_from = Conversation.DerivedFrom(
             operation="merge",
             source_conversation_ids=[s.conversation_id for s in sources],
@@ -1464,48 +2047,97 @@ async def merge_conversations(user: User, conversation_ids: List[str]):
         )
         merged.audio_compression_ratio = first.audio_compression_ratio
 
-        # Concatenate transcripts with cumulative offsets + seam notes.
-        merged_segments: List[Conversation.SpeakerSegment] = []
-        merged_words: List[Conversation.Word] = []
-        provider = None
-        model = None
-        offset = 0.0
-        prev = None
-        for source in sources:
-            version = _active_transcript_version(source)
-            if prev is not None:
-                gap_seconds = max(
-                    0.0,
-                    (source.created_at - prev.created_at).total_seconds()
-                    - float(stats[prev.conversation_id]["duration"]),
-                )
-                merged_segments.append(
-                    Conversation.SpeakerSegment(
-                        start=round(offset, 3),
-                        end=round(offset, 3),
-                        text=(
-                            f"[merged: {max(1, round(gap_seconds / 60))} min gap "
-                            "between recordings elided]"
-                        ),
-                        speaker="system",
-                        segment_type=Conversation.SegmentType.NOTE,
-                    )
-                )
-            if version:
-                merged_segments.extend(shift_segments(version.segments or [], offset))
-                merged_words.extend(shift_words(version.words or [], offset))
-                provider = provider or version.provider
-                model = model or version.model
-            offset += float(stats[source.conversation_id]["duration"])
-            prev = source
+        def _concatenate(pick) -> tuple:
+            """Concatenate one layer across the sources, with cumulative offsets.
 
+            Called once per layer so the merged conversation keeps a real
+            ``asr -> speaker`` chain instead of collapsing to a single version
+            whose sources are stranded on the soft-deleted originals.
+            """
+            merged_segments: List[Conversation.SpeakerSegment] = []
+            merged_words: List[Conversation.Word] = []
+            provider = None
+            model = None
+            offset = 0.0
+            prev = None
+            for source in sources:
+                version = pick(source)
+                if prev is not None:
+                    gap_seconds = max(
+                        0.0,
+                        (source.created_at - prev.created_at).total_seconds()
+                        - float(stats[prev.conversation_id]["duration"]),
+                    )
+                    merged_segments.append(
+                        Conversation.SpeakerSegment(
+                            start=round(offset, 3),
+                            end=round(offset, 3),
+                            text=(
+                                f"[merged: {max(1, round(gap_seconds / 60))} min gap "
+                                "between recordings elided]"
+                            ),
+                            speaker="system",
+                            segment_type=Conversation.SegmentType.NOTE,
+                        )
+                    )
+                if version:
+                    merged_segments.extend(
+                        shift_segments(version.segments or [], offset)
+                    )
+                    merged_words.extend(shift_words(version.words or [], offset))
+                    provider = provider or version.provider
+                    model = model or version.model
+                offset += float(stats[source.conversation_id]["duration"])
+                prev = source
+            return merged_segments, merged_words, provider, model
+
+        def _has_content(segments, words) -> bool:
+            return any(
+                seg.segment_type == Conversation.SegmentType.SPEECH for seg in segments
+            ) or bool(words)
+
+        source_ids = [s.conversation_id for s in sources]
+        # An ASR layer distinct from the active one only exists if some source
+        # was diarized; without that the two concatenations are the same text.
+        diarized = any(
+            _asr_source_version(source) is not _active_transcript_version(source)
+            for source in sources
+        )
+        asr_version_id = None
+        if diarized:
+            segments, words, provider, model = _concatenate(_asr_source_version)
+            if _has_content(segments, words):
+                asr_version_id = str(uuid.uuid4())
+                merged.add_transcript_version(
+                    version_id=asr_version_id,
+                    transcript=build_transcript_text(segments),
+                    words=words,
+                    segments=segments,
+                    provider=provider,
+                    model=model,
+                    metadata={
+                        "derived": "merge",
+                        "layer": "asr",
+                        "source_conversation_ids": source_ids,
+                    },
+                    set_as_active=False,
+                )
+
+        merged_segments, merged_words, provider, model = _concatenate(
+            _active_transcript_version
+        )
         version_id = None
-        has_content = any(
-            seg.segment_type == Conversation.SegmentType.SPEECH
-            for seg in merged_segments
-        ) or bool(merged_words)
-        if has_content:
+        if _has_content(merged_segments, merged_words):
             version_id = str(uuid.uuid4())
+            metadata = {
+                "derived": "merge",
+                "source_conversation_ids": source_ids,
+            }
+            if asr_version_id:
+                # Tagged so the rebuild's walk-back finds the merged ASR layer
+                # instead of stopping on speaker-labelled text.
+                metadata["reprocessing_type"] = "speaker_diarization"
+                metadata["source_version_id"] = asr_version_id
             merged.add_transcript_version(
                 version_id=version_id,
                 transcript=build_transcript_text(merged_segments),
@@ -1513,10 +2145,7 @@ async def merge_conversations(user: User, conversation_ids: List[str]):
                 segments=merged_segments,
                 provider=provider,
                 model=model,
-                metadata={
-                    "derived": "merge",
-                    "source_conversation_ids": [s.conversation_id for s in sources],
-                },
+                metadata=metadata,
                 set_as_active=True,
             )
 

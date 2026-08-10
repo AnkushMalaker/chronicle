@@ -10,6 +10,8 @@ import time
 import traceback
 from typing import Any, Dict
 
+import numpy as np
+
 from advanced_omi_backend.auth import generate_jwt_for_user
 from advanced_omi_backend.config import get_diarization_settings, get_misc_settings
 from advanced_omi_backend.constants import (
@@ -31,7 +33,16 @@ from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggre
 from advanced_omi_backend.services.forced_alignment import (
     synthesize_words_via_alignment,
 )
-from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
+from advanced_omi_backend.services.observability import record_event_sync
+from advanced_omi_backend.services.transcript_integrity import (
+    TranscriptTimingError,
+    load_transcript_audio_ranges,
+    validate_and_normalize_transcript_timing,
+)
+from advanced_omi_backend.speaker_recognition_client import (
+    SPEAKER_IDENTIFY_CONCURRENCY,
+    SpeakerRecognitionClient,
+)
 from advanced_omi_backend.users import get_user_by_id
 from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
 from advanced_omi_backend.utils.job_utils import update_job_meta
@@ -43,6 +54,59 @@ logger = logging.getLogger(__name__)
 
 PROPAGATION_MIN_VOTES = 2
 HUMAN_LABEL_START_TOLERANCE_SECONDS = 0.75
+AUDIO_CONTINUITY_TOLERANCE_SECONDS = 0.25
+
+
+def _audio_ranges_cover_continuously(
+    ranges: list[tuple[float, float]], duration: float
+) -> bool:
+    """Whether full-conversation audio can be reconstructed without inventing time."""
+    if not ranges or duration <= 0:
+        return False
+    ordered = sorted((float(start), float(end)) for start, end in ranges)
+    if ordered[0][0] > AUDIO_CONTINUITY_TOLERANCE_SECONDS:
+        return False
+    covered_until = ordered[0][1]
+    for start, end in ordered[1:]:
+        if start - covered_until > AUDIO_CONTINUITY_TOLERANCE_SECONDS:
+            return False
+        covered_until = max(covered_until, end)
+    return covered_until + AUDIO_CONTINUITY_TOLERANCE_SECONDS >= duration
+
+
+def _is_speech_segment(segment: Any) -> bool:
+    """Recover ordinary speech when an imported provider mislabeled it as an event."""
+    return (
+        getattr(segment, "segment_type", "speech") == "speech"
+        or classify_segment_text(getattr(segment, "text", "")) == "speech"
+    )
+
+
+def _pool_returned_segment_embeddings(
+    segments: list[dict], unknown_label_map: dict[str, str]
+) -> dict[str, list[float]]:
+    """Pool identification embeddings by the final label without re-decoding audio."""
+    grouped: dict[str, list[np.ndarray]] = {}
+    for segment in segments:
+        values = segment.get("_evaluation_embedding")
+        if not values:
+            continue
+        embedding = np.asarray(values, dtype=np.float32).reshape(-1)
+        norm = float(np.linalg.norm(embedding))
+        if not np.all(np.isfinite(embedding)) or norm == 0.0:
+            continue
+        label = segment.get("identified_as") or unknown_label_map.get(
+            segment.get("speaker", "Unknown"), UNKNOWN_SPEAKER_PREFIX
+        )
+        grouped.setdefault(label, []).append(embedding / norm)
+
+    pooled = {}
+    for label, embeddings in grouped.items():
+        centroid = np.mean(np.stack(embeddings), axis=0)
+        norm = float(np.linalg.norm(centroid))
+        if np.all(np.isfinite(centroid)) and norm > 0.0:
+            pooled[label] = (centroid / norm).tolist()
+    return pooled
 
 
 def _apply_human_speaker_overlays(segments: list, annotations: list) -> list[dict]:
@@ -196,7 +260,7 @@ async def _apply_background_references(
                 else BACKGROUND_SPEECH_LABEL
             )
             segment["status"] = "background_reference"
-    semaphore = asyncio.Semaphore(3)
+    semaphore = asyncio.Semaphore(SPEAKER_IDENTIFY_CONCURRENCY)
     ledger_records: list[dict] = []
 
     async def classify(segment: dict) -> None:
@@ -204,10 +268,16 @@ async def _apply_background_references(
         if duration < 1.0 or duration > 15.0:
             return
         async with semaphore:
-            wav = await reconstruct_audio_segment(
-                conversation_id, float(segment["start"]), float(segment["end"])
-            )
-            embedded = await speaker_client.extract_speaker_embedding(wav)
+            if segment.get("_evaluation_embedding"):
+                embedded = {
+                    "embedding": segment["_evaluation_embedding"],
+                    "embedding_model": segment.get("_embedding_model"),
+                }
+            else:
+                wav = await reconstruct_audio_segment(
+                    conversation_id, float(segment["start"]), float(segment["end"])
+                )
+                embedded = await speaker_client.extract_speaker_embedding(wav)
             if embedded.get("error") or "embedding" not in embedded:
                 return
             scores = {}
@@ -303,6 +373,10 @@ class SpeakerReprocessFailed(SpeakerServiceError):
     leaves the conversation exactly as it was, and surfaces an error — instead of silently
     leaving a new version with the old (unimproved) labels and reporting success.
     """
+
+
+class SpeakerDataIntegrityError(Exception):
+    """Speaker recognition was blocked by invalid local transcript/audio data."""
 
 
 @async_job(redis=True, beanie=True)
@@ -534,6 +608,47 @@ async def recognise_speakers_job(
     # All reads below use the source version.
     transcript_version = source_version
 
+    # Reject stale split/trim clocks before constructing audio or touching the remote
+    # service. This makes a data-integrity incident explicit and keeps service-health
+    # reporting honest.
+    preflight_segments = [
+        {
+            "start": segment.start,
+            "end": segment.end,
+            "text": segment.text,
+        }
+        for segment in (transcript_version.segments or [])
+    ]
+    preflight_words = [
+        {"start": word.start, "end": word.end, "word": word.word}
+        for word in (transcript_version.words or [])
+    ]
+    try:
+        audio_ranges = await load_transcript_audio_ranges(conversation_id)
+        validate_and_normalize_transcript_timing(
+            preflight_segments,
+            preflight_words,
+            audio_duration=conversation.audio_total_duration or 0.0,
+            audio_ranges=audio_ranges,
+        )
+    except TranscriptTimingError as error:
+        reason = f"{error.code}: {error}"
+        conversation.transcript_integrity_error = reason
+        await conversation.save()
+        record_event_sync(
+            severity="error",
+            category="data_integrity",
+            source="speaker_recognition",
+            title="Speaker recognition blocked by transcript timing",
+            detail=reason,
+            user_id=str(user_id) if user_id else None,
+            client_id=conversation.client_id,
+            conversation_id=conversation_id,
+            metadata={**error.details, "version_id": transcript_version.version_id},
+            incident_key=f"transcript-integrity:{conversation_id}",
+        )
+        raise SpeakerDataIntegrityError(reason) from error
+
     # Check if speaker recognition is enabled
     speaker_client = SpeakerRecognitionClient()
     if not speaker_client.enabled:
@@ -544,6 +659,22 @@ async def recognise_speakers_job(
             "version_id": version_id,
             "speaker_recognition_enabled": False,
             "processing_time_seconds": 0,
+        }
+
+    if transcript_version.segments and not any(
+        _is_speech_segment(segment) for segment in transcript_version.segments
+    ):
+        logger.info(
+            "🎤 Transcript contains only non-speech events; no speaker work needed"
+        )
+        return {
+            "success": True,
+            "conversation_id": conversation_id,
+            "version_id": version_id,
+            "speaker_recognition_enabled": True,
+            "identified_speakers": [],
+            "skip_reason": "No speech segments to identify",
+            "processing_time_seconds": time.time() - start_time,
         }
 
     # Get provider capabilities from metadata
@@ -643,8 +774,7 @@ async def recognise_speakers_job(
         speech_for_align = [
             {"start": s.start, "end": s.end, "text": s.text}
             for s in transcript_version.segments
-            if getattr(s, "segment_type", "speech") == "speech"
-            and (s.text or "").strip()
+            if _is_speech_segment(s) and (s.text or "").strip()
         ]
         total_dur = max((s.end for s in transcript_version.segments), default=0.0)
         if speech_for_align and total_dur > 0:
@@ -658,7 +788,18 @@ async def recognise_speakers_job(
 
     # Check if we can run pyannote diarization
     # Pyannote requires word timestamps to align speaker segments with text
-    can_run_pyannote = bool(actual_words) and not use_provider_diarization
+    continuous_audio = _audio_ranges_cover_continuously(
+        audio_ranges,
+        float(conversation.audio_total_duration or 0.0),
+    )
+    can_run_pyannote = (
+        bool(actual_words) and not use_provider_diarization and continuous_audio
+    )
+    if actual_words and not use_provider_diarization and not continuous_audio:
+        logger.warning(
+            "🎤 Audio has chunk gaps; using existing transcript segments instead of "
+            "full-conversation diarization"
+        )
 
     if not actual_words and not provider_diarized:
         if not transcript_version.segments:
@@ -694,9 +835,7 @@ async def recognise_speakers_job(
             # Covers: provider already diarized, no word timestamps but segments exist, etc.
             # Only send speech segments for identification; skip event/note segments
             speech_segments = [
-                s
-                for s in transcript_version.segments
-                if getattr(s, "segment_type", "speech") == "speech"
+                s for s in transcript_version.segments if _is_speech_segment(s)
             ]
             logger.info(
                 f"🎤 Using segment-level speaker identification on {len(speech_segments)} speech segments "
@@ -764,6 +903,23 @@ async def recognise_speakers_job(
                 f"🎤 Speaker recognition service error: {error_type} - {error_message}"
             )
 
+            if error_type == "transcript_data_error":
+                conversation.transcript_integrity_error = error_message
+                await conversation.save()
+                record_event_sync(
+                    severity="error",
+                    category="data_integrity",
+                    source="speaker_recognition",
+                    title="Speaker recognition blocked by transcript timing",
+                    detail=error_message,
+                    user_id=str(user_id) if user_id else None,
+                    client_id=conversation.client_id,
+                    conversation_id=conversation_id,
+                    metadata={"version_id": transcript_version.version_id},
+                    incident_key=f"transcript-integrity:{conversation_id}",
+                )
+                raise SpeakerDataIntegrityError(error_message)
+
             # Connection/timeout errors → skip gracefully (existing behavior).
             # Exception: in create mode (manual reprocess) we have nothing to write, so
             # surface the failure instead of creating an empty/no-op version.
@@ -808,9 +964,7 @@ async def recognise_speakers_job(
         # yields identified names or "Unknown Speaker 1..N" — never a bare provider label.
         if ran_pyannote_diarization and not (speaker_result or {}).get("segments"):
             speech_segments = [
-                s
-                for s in transcript_version.segments
-                if getattr(s, "segment_type", "speech") == "speech"
+                s for s in transcript_version.segments if _is_speech_segment(s)
             ]
             if speech_segments:
                 logger.warning(
@@ -978,9 +1132,7 @@ async def recognise_speakers_job(
         # Re-insert non-speech segments (event/note) that were skipped during identification
         # They need to be merged back into position based on timestamps
         non_speech_segments = [
-            s
-            for s in transcript_version.segments
-            if getattr(s, "segment_type", "speech") != "speech"
+            s for s in transcript_version.segments if not _is_speech_segment(s)
         ]
         if non_speech_segments:
             for ns_seg in non_speech_segments:
@@ -1051,12 +1203,16 @@ async def recognise_speakers_job(
             }
         else:
             # The provider/segment-identification path (identify_provider_segments)
-            # returns no centroids — compute them here from the final segments (keys are
-            # already display labels) so EVERY new active version carries centroids and
-            # the drift check never goes blind after a reprocess or reingest.
-            centroids_map, _ = await compute_cluster_centroids(
-                conversation_id, updated_segments, speaker_client
+            # can return the embeddings it already computed. Pool those directly so
+            # reprocessing does not reconstruct and embed the whole conversation again.
+            centroids_map = _pool_returned_segment_embeddings(
+                speaker_segments, unknown_label_map
             )
+            if not centroids_map:
+                # Pyannote and older callers do not return per-segment embeddings.
+                centroids_map, _ = await compute_cluster_centroids(
+                    conversation_id, updated_segments, speaker_client
+                )
 
         if create_mode:
             # Build the new version only now that we have a usable result. Carry the

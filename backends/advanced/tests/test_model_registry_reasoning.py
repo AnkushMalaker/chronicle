@@ -24,3 +24,40 @@ def test_gpt_5_4_preserves_none_reasoning_effort():
 
 def test_unversioned_gpt_5_uses_minimal_reasoning_effort():
     assert _operation("gpt-5-mini").to_api_params()["reasoning_effort"] == "minimal"
+
+
+def test_muse_sampling_and_reasoning_prompt_follow_model_card():
+    operation = ResolvedLLMOperation(
+        model_def=ModelDef(
+            name="muse-glimmer-llm",
+            model_name="meta-models/Muse-Glimmer-30B-GGUF:kquant-17gb",
+            model_type="llm",
+            model_provider="llamacpp",
+            model_url="http://llama-cpp-llm:8080/v1",
+            thinking=True,
+            capabilities=["vision"],
+            system_prompt_prefix="Reasoning strength: high",
+            model_params={"temperature": 1.0, "top_p": 0.95, "top_k": 64},
+        ),
+        temperature=1.0,
+        max_tokens=4096,
+        reasoning_effort="high",
+    )
+
+    params = operation.to_api_params()
+    assert params["temperature"] == 1.0
+    assert params["top_p"] == 0.95
+    assert params["extra_body"] == {
+        "top_k": 64,
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+
+    original = [{"role": "system", "content": "Use Chronicle tools."}]
+    prepared = operation.prepare_messages(original)
+    assert prepared == [
+        {
+            "role": "system",
+            "content": "Reasoning strength: high\n\nUse Chronicle tools.",
+        }
+    ]
+    assert original == [{"role": "system", "content": "Use Chronicle tools."}]

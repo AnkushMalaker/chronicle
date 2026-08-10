@@ -55,7 +55,7 @@ class _ConfigManager:
         return list(names)
 
 
-def _setup(module, config, *, choices, pi_model="qwen36-llm"):
+def _setup(module, config, *, choices, pi_model="muse-glimmer-llm"):
     setup = object.__new__(module.ChronicleSetup)
     setup.console = _Console()
     setup.config = {}
@@ -70,7 +70,7 @@ def _setup(module, config, *, choices, pi_model="qwen36-llm"):
 def test_standalone_llm_rerun_preserves_qwen_registry_default(init_module):
     setup = _setup(
         init_module,
-        {"defaults": {"llm": "qwen36-llm", "embedding": "llamacpp-embed"}},
+        {"defaults": {"llm": "muse-glimmer-llm", "embedding": "llamacpp-embed"}},
         choices=("5",),
     )
     setup.args = SimpleNamespace()
@@ -78,10 +78,10 @@ def test_standalone_llm_rerun_preserves_qwen_registry_default(init_module):
     setup.setup_llm()
 
     assert setup.config_manager.config["defaults"] == {
-        "llm": "qwen36-llm",
+        "llm": "muse-glimmer-llm",
         "embedding": "llamacpp-embed",
     }
-    assert setup.config_manager.synced == ["qwen36-llm", "llamacpp-embed"]
+    assert setup.config_manager.synced == ["muse-glimmer-llm", "llamacpp-embed"]
 
 
 @pytest.mark.parametrize("recovery", [None, "pi", "codex"])
@@ -89,13 +89,13 @@ def test_rerun_preserves_explicit_write_recovery_backend(init_module, recovery):
     setup = _setup(
         init_module,
         {
-            "defaults": {"llm": "qwen36-llm"},
+            "defaults": {"llm": "muse-glimmer-llm"},
             "memory": {
                 "agents": {
                     "write": {"backend": "pi", "recovery_backend": recovery},
                     "search": {"backend": "pi"},
                 },
-                "backends": {"pi": {"model": "qwen36-llm"}},
+                "backends": {"pi": {"model": "muse-glimmer-llm"}},
             },
         },
         choices=("3", "2"),
@@ -113,7 +113,7 @@ def test_rerun_rejects_unknown_write_recovery_backend(init_module):
     setup = _setup(
         init_module,
         {
-            "defaults": {"llm": "qwen36-llm"},
+            "defaults": {"llm": "muse-glimmer-llm"},
             "memory": {
                 "agents": {
                     "write": {
@@ -122,7 +122,7 @@ def test_rerun_rejects_unknown_write_recovery_backend(init_module):
                     },
                     "search": {"backend": "pi"},
                 },
-                "backends": {"pi": {"model": "qwen36-llm"}},
+                "backends": {"pi": {"model": "muse-glimmer-llm"}},
             },
         },
         choices=("3", "2"),
@@ -136,7 +136,7 @@ def test_wizard_removes_obsolete_flat_executor_and_operation(init_module):
     setup = _setup(
         init_module,
         {
-            "defaults": {"llm": "qwen36-llm"},
+            "defaults": {"llm": "muse-glimmer-llm"},
             "memory": {
                 "agent_executor": "codex",
                 "codex": {"model": "gpt-5.4-mini"},
@@ -179,7 +179,7 @@ def test_pi_model_must_be_openai_compatible_llm_in_effective_registry(
     setup = _setup(
         init_module,
         {
-            "defaults": {"llm": "qwen36-llm"},
+            "defaults": {"llm": "muse-glimmer-llm"},
             "models": [
                 {
                     "name": "custom-embed",
@@ -378,7 +378,7 @@ def test_codex_without_auth_warns_that_readiness_fails(
     setup = _setup(
         init_module,
         {
-            "defaults": {"llm": "qwen36-llm"},
+            "defaults": {"llm": "muse-glimmer-llm"},
             "memory": {"agents": {}, "backends": {}},
         },
         choices=("2", "1"),
@@ -400,7 +400,7 @@ def test_recovery_only_codex_sets_auth_mount_and_warns_readiness(
     setup = _setup(
         init_module,
         {
-            "defaults": {"llm": "qwen36-llm"},
+            "defaults": {"llm": "muse-glimmer-llm"},
             "memory": {
                 "agents": {
                     "write": {

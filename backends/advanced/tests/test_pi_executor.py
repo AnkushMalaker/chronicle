@@ -247,6 +247,8 @@ def test_config_uses_exact_pi_backend_and_registry_operation(monkeypatch):
         api_family="openai",
         thinking=True,
         model_params={"context_window": 16384},
+        capabilities=[],
+        system_prompt_prefix="You are Qwen.",
     )
     resolved = SimpleNamespace(
         model_def=model_def,
@@ -293,6 +295,8 @@ def test_config_uses_exact_pi_backend_and_registry_operation(monkeypatch):
     assert config.context_window == 8192
     assert config.timeout_seconds == 77
     assert config.temperature == 0.37
+    assert config.input_modalities == ["text"]
+    assert config.system_prompt_prefix == "You are Qwen."
     assert config.compat == {
         "supportsDeveloperRole": False,
         "supportsReasoningEffort": False,
@@ -307,6 +311,8 @@ def test_config_accepts_max_thinking_and_explicit_compat_overrides(monkeypatch):
         model_provider="custom-openai",
         api_family="openai",
         thinking=True,
+        capabilities=["vision"],
+        system_prompt_prefix="",
         model_params={
             "pi_compat": {
                 "thinkingFormat": "deepseek",
@@ -340,6 +346,7 @@ def test_config_accepts_max_thinking_and_explicit_compat_overrides(monkeypatch):
     config = pi_agent._resolve_pi_config("memory_write")
 
     assert config.thinking == "max"
+    assert config.input_modalities == ["text", "image"]
     assert config.compat == {
         "supportsDeveloperRole": True,
         "supportsReasoningEffort": False,
@@ -382,6 +389,8 @@ def test_config_rejects_output_budget_without_prompt_headroom(monkeypatch):
         api_family="openai",
         thinking=True,
         model_params={},
+        capabilities=[],
+        system_prompt_prefix="",
     )
     resolved = SimpleNamespace(
         model_def=model_def,

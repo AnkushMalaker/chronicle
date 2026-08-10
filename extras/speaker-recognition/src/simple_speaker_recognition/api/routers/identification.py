@@ -1,7 +1,9 @@
 """Speaker identification and diarization endpoints."""
 
+import asyncio
 import json
 import logging
+import os
 import shutil
 import tempfile
 from datetime import datetime
@@ -21,6 +23,9 @@ from simple_speaker_recognition.core.backend_client import BackendClient
 from simple_speaker_recognition.core.cluster_identify import assign_clusters_to_speakers
 from simple_speaker_recognition.core.models import (
     DiarizeAndIdentifyRequest,
+    IdentifyBatchItemResponse,
+    IdentifyBatchResponse,
+    IdentifyBatchSummary,
     IdentifyResponse,
     SpeakerStatus,
 )
@@ -34,6 +39,12 @@ from simple_speaker_recognition.utils.audio_processing import get_audio_info
 
 router = APIRouter()
 log = logging.getLogger("speaker_service")
+IDENTIFY_BATCH_MAX_ITEMS = int(os.getenv("IDENTIFY_BATCH_MAX_ITEMS", "32"))
+IDENTIFY_BATCH_MAX_BYTES = int(
+    os.getenv("IDENTIFY_BATCH_MAX_BYTES", str(32 * 1024 * 1024))
+)
+IDENTIFY_BATCH_MAX_SECONDS = float(os.getenv("IDENTIFY_BATCH_MAX_SECONDS", "240"))
+_batch_inference_lock = asyncio.Lock()
 
 
 # Dependency functions - will be resolved during integration
@@ -279,17 +290,14 @@ async def diarize_and_identify(
                 speaker_info = None
                 confidence = 0.0
 
-                # Try to identify speaker (UnifiedSpeakerDB handles speaker existence check internally)
-                # Temporarily override threshold for this identification
-                original_threshold = db.similarity_thr
-                db.similarity_thr = threshold
-                try:
-                    found, speaker_info, confidence = await db.identify(
-                        emb, user_id=user_id
-                    )
-                    confidence = validate_confidence(confidence, "diarize_and_identify")
-                finally:
-                    db.similarity_thr = original_threshold
+                # Threshold is request-local. The database object is shared by all
+                # requests, so mutating its default here would race other callers.
+                found, speaker_info, confidence = await db.identify(
+                    emb,
+                    user_id=user_id,
+                    similarity_threshold=threshold,
+                )
+                confidence = validate_confidence(confidence, "diarize_and_identify")
 
                 # Build enhanced segment
                 enhanced_segment = {
@@ -919,26 +927,23 @@ async def identify(
         tmp.write(await file.read())
         tmp_path = Path(tmp.name)
 
-        # Debug: Copy WAV file to debug directory
-        try:
-            debug_dir = Path("/app/debug")
-            if not debug_dir.exists():
-                log.error(f"Debug directory does not exist, creating: {debug_dir}")
-
-            # Create filename with timestamp and original filename
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # milliseconds
-            original_name = (
-                getattr(file, "filename", "utterance.wav") or "utterance.wav"
-            )
-            debug_filename = f"{timestamp}_{original_name}"
-            debug_path = debug_dir / debug_filename
-
-            # Copy the temp file to debug location
-            shutil.copy2(tmp_path, debug_path)
-
-            log.info(f"🐛 [DEBUG] WAV file dumped to: {debug_path}")
-        except Exception as e:
-            log.warning(f"Failed to dump debug WAV file: {e}")
+        if os.getenv("SPEAKER_DEBUG_AUDIO_DUMP", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }:
+            try:
+                debug_dir = Path(os.getenv("SPEAKER_DEBUG_AUDIO_DIR", "/app/debug"))
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+                original_name = (
+                    getattr(file, "filename", "utterance.wav") or "utterance.wav"
+                )
+                debug_path = debug_dir / f"{timestamp}_{original_name}"
+                shutil.copy2(tmp_path, debug_path)
+                log.info("Debug WAV dumped to %s", debug_path)
+            except Exception as error:
+                log.warning("Failed to dump debug WAV file: %s", error)
 
     try:
         # Get audio info for duration
@@ -969,16 +974,12 @@ async def identify(
         speaker_info = None
         confidence = 0.0
 
-        # Temporarily override threshold for this identification
-        original_threshold = db.similarity_thr
-        db.similarity_thr = threshold
-        try:
-            found, speaker_info, confidence, candidates = (
-                await db.identify_with_candidates(emb, user_id=user_id)
-            )
-            confidence = validate_confidence(confidence, "speaker_identification")
-        finally:
-            db.similarity_thr = original_threshold
+        found, speaker_info, confidence, candidates = await db.identify_with_candidates(
+            emb,
+            user_id=user_id,
+            similarity_threshold=threshold,
+        )
+        confidence = validate_confidence(confidence, "speaker_identification")
 
         # Build response
         if found and speaker_info:
@@ -1020,6 +1021,136 @@ async def identify(
         raise HTTPException(500, f"Speaker identification failed: {str(e)}") from e
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+@router.post("/identify/batch", response_model=IdentifyBatchResponse)
+async def identify_batch(
+    files: List[UploadFile] = File(..., description="Ordered audio clips"),
+    segment_ids: List[str] = Form(..., description="Stable ID for each audio clip"),
+    similarity_threshold: Optional[float] = Form(
+        default=None,
+        description="Request-wide similarity threshold override",
+    ),
+    user_id: Optional[int] = Form(
+        default=None,
+        description="User whose enrolled speakers may be matched",
+    ),
+    include_embeddings: bool = Form(
+        default=False,
+        description="Return unit embeddings for trusted internal reuse",
+    ),
+    db: UnifiedSpeakerDB = Depends(get_db),
+):
+    """Identify many independent speaker clips with one model/gallery batch."""
+    if len(files) != len(segment_ids):
+        raise HTTPException(422, "files and segment_ids must have equal lengths")
+    if not files:
+        raise HTTPException(422, "At least one audio clip is required")
+    if len(files) > IDENTIFY_BATCH_MAX_ITEMS:
+        raise HTTPException(
+            413,
+            f"Batch has {len(files)} clips; maximum is {IDENTIFY_BATCH_MAX_ITEMS}",
+        )
+
+    threshold = (
+        db.similarity_thr if similarity_threshold is None else similarity_threshold
+    )
+    audio_backend = get_audio_backend()
+    results: List[Optional[IdentifyBatchItemResponse]] = [None] * len(files)
+    valid_positions: List[int] = []
+    valid_waves = []
+    durations: Dict[int, float] = {}
+    total_bytes = 0
+    total_seconds = 0.0
+
+    for position, (file, segment_id) in enumerate(zip(files, segment_ids)):
+        content = await file.read()
+        total_bytes += len(content)
+        if total_bytes > IDENTIFY_BATCH_MAX_BYTES:
+            raise HTTPException(
+                413,
+                f"Batch exceeds {IDENTIFY_BATCH_MAX_BYTES} encoded bytes",
+            )
+        try:
+            wave = audio_backend.load_wave_bytes(content)
+            duration = wave.shape[-1] / 16_000
+            total_seconds += duration
+            if total_seconds > IDENTIFY_BATCH_MAX_SECONDS:
+                raise HTTPException(
+                    413,
+                    f"Batch exceeds {IDENTIFY_BATCH_MAX_SECONDS:.0f} decoded seconds",
+                )
+            valid_positions.append(position)
+            valid_waves.append(wave)
+            durations[position] = duration
+        except HTTPException:
+            raise
+        except (ValueError, RuntimeError) as error:
+            results[position] = IdentifyBatchItemResponse(
+                segment_id=segment_id,
+                found=False,
+                speaker_id=None,
+                speaker_name=None,
+                confidence=0.0,
+                status=SpeakerStatus.ERROR,
+                similarity_threshold=threshold,
+                duration=0.0,
+                candidates=[],
+                error="invalid_audio",
+                message=str(error),
+            )
+
+    if valid_waves:
+        try:
+            async with _batch_inference_lock:
+                embeddings = await audio_backend.async_embed_batch(valid_waves)
+                identified = await db.identify_batch_with_candidates(
+                    embeddings,
+                    user_id=user_id,
+                    similarity_threshold=threshold,
+                )
+        except Exception as error:
+            log.exception("Batch speaker identification failed")
+            raise HTTPException(503, "Speaker batch inference failed") from error
+        if len(identified) != len(valid_positions):
+            raise HTTPException(500, "Speaker batch returned the wrong result count")
+        for embedding_index, (position, identification) in enumerate(
+            zip(valid_positions, identified)
+        ):
+            found, speaker_info, confidence, candidates = identification
+            confidence = validate_confidence(confidence, "speaker_identification_batch")
+            results[position] = IdentifyBatchItemResponse(
+                segment_id=segment_ids[position],
+                found=found,
+                speaker_id=speaker_info["id"] if speaker_info else None,
+                speaker_name=speaker_info["name"] if speaker_info else None,
+                confidence=round(float(confidence), 3),
+                status=(SpeakerStatus.IDENTIFIED if found else SpeakerStatus.UNKNOWN),
+                similarity_threshold=threshold,
+                duration=round(durations[position], 3),
+                candidates=candidates,
+                embedding=(
+                    embeddings[embedding_index].tolist() if include_embeddings else None
+                ),
+                embedding_model=(
+                    getattr(audio_backend, "EMBEDDING_MODEL_ID", None)
+                    if include_embeddings
+                    else None
+                ),
+            )
+
+    ordered_results = [result for result in results if result is not None]
+    if len(ordered_results) != len(files):
+        raise HTTPException(500, "Speaker batch did not produce every result")
+    failed = sum(result.status == SpeakerStatus.ERROR for result in ordered_results)
+    return IdentifyBatchResponse(
+        results=ordered_results,
+        batch=IdentifyBatchSummary(
+            requested=len(files),
+            processed=len(files) - failed,
+            failed=failed,
+        ),
+    )
 
 
 @router.post("/annotations/analyze-segments")

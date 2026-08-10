@@ -865,7 +865,7 @@ function SpeakerConfiguration({ user }: { user: any }) {
   const [speakerServiceStatus, setSpeakerServiceStatus] = useState<any>(null)
   const [enrolledSpeakers, setEnrolledSpeakers] = useState<any[]>([])
   const [primarySpeakers, setPrimarySpeakers] = useState<any[]>([])
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('')
   // Wake-word speaker gate: only let a wake word fire for selected speakers.
@@ -1022,9 +1022,26 @@ function SpeakerConfiguration({ user }: { user: any }) {
 
       {/* Loading State */}
       {loading && (
-        <div className="flex items-center justify-center py-8">
-          <RefreshCw className="h-6 w-6 animate-spin text-blue-600 mr-2" />
-          <span className="text-gray-600 dark:text-gray-400">Loading speaker data...</span>
+        <div role="status" aria-label="Loading speaker data" aria-busy="true">
+          <div className="mb-3 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+            <RefreshCw className="h-3.5 w-3.5 animate-spin text-blue-600" />
+            Checking enrolled speakers
+          </div>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+            {[0, 1, 2].map(index => (
+              <div
+                key={index}
+                className="flex animate-pulse items-center gap-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700"
+              >
+                <div className="h-9 w-9 flex-shrink-0 rounded-full bg-gray-200 dark:bg-gray-700" />
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="h-3.5 w-24 rounded bg-gray-200 dark:bg-gray-700" />
+                  <div className="h-2.5 w-16 rounded bg-gray-100 dark:bg-gray-700/70" />
+                </div>
+              </div>
+            ))}
+          </div>
+          <span className="sr-only">Loading speaker configuration and enrolled speakers.</span>
         </div>
       )}
 

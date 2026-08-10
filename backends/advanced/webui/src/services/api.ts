@@ -632,8 +632,6 @@ export const systemApi = {
   getReadiness: () => api.get('/readiness'),
   getMetrics: () => api.get('/api/metrics'),
   getConfigDiagnostics: () => api.get('/api/config/diagnostics'),
-  getProcessorStatus: () => api.get('/api/processor/status'),
-  getProcessorTasks: () => api.get('/api/processor/tasks'),
   getActiveClients: () => api.get('/api/clients/active'),
   getDiarizationSettings: () => api.get('/api/diarization-settings'),
   saveDiarizationSettings: (settings: any) => api.post('/api/diarization-settings', settings),
@@ -1041,6 +1039,61 @@ export interface SegmentIdentifyResponse {
   confidence: number | null
   threshold?: number
   status: string | null
+}
+
+export type SpeakerLabelReviewVerdict =
+  | 'correct'
+  | 'relabel'
+  | 'unknown'
+  | 'background'
+  | 'mixed'
+  | 'bad_audio'
+
+export interface SpeakerLabelReviewClip {
+  review_key: string
+  conversation_id: string
+  conversation_title: string | null
+  conversation_date: string
+  segment_index: number
+  segment_start_time: number
+  start: number
+  end: number
+  text: string
+  claimed_speaker: string
+  raw_speaker: string | null
+  confidence: number | null
+  selection_lane: 'boundary' | 'control'
+  context: Array<{
+    position: 'before' | 'current' | 'after'
+    speaker: string | null
+    text: string
+    start: number
+    end: number
+  }>
+}
+
+export interface SpeakerLabelReviewBatch {
+  batch: SpeakerLabelReviewClip[]
+  reviewed_total: number
+  conversations_scanned: number
+  candidate_claims: number
+  threshold: number
+}
+
+export interface SpeakerLabelReviewSummary {
+  reviewed: number
+  evaluable: number
+  correct: number
+  precision: number | null
+  excluded: number
+  errors: Record<string, number>
+}
+
+export interface SpeakerLabelReviewMetrics {
+  overall: SpeakerLabelReviewSummary
+  boundary: SpeakerLabelReviewSummary
+  control: SpeakerLabelReviewSummary
+  speakers: Array<SpeakerLabelReviewSummary & { speaker: string }>
 }
 
 export interface TriageApplyResponse {
@@ -1730,6 +1783,33 @@ export const dataAuditApi = {
       `/api/data-audit/conversations/${conversationId}/segments/identify`,
       { start, end }
     ),
+
+  getNextSpeakerLabelReviews: (batchSize = 5) =>
+    api.get<SpeakerLabelReviewBatch>('/api/data-audit/speaker-label-reviews/next', {
+      params: { batch_size: batchSize },
+    }),
+
+  getSpeakerLabelReviewMetrics: () =>
+    api.get<SpeakerLabelReviewMetrics>('/api/data-audit/speaker-label-reviews/metrics'),
+
+  decideSpeakerLabelReviews: (
+    decisions: Array<{
+      conversation_id: string
+      segment_index: number
+      segment_start_time: number
+      claimed_speaker: string
+      confidence: number | null
+      selection_lane: 'boundary' | 'control'
+      verdict: SpeakerLabelReviewVerdict
+      corrected_speaker?: string
+    }>
+  ) =>
+    api.post<{
+      status: 'ok' | 'partial'
+      recorded: number
+      corrections_pending: number
+      errors: Array<{ error: string }>
+    }>('/api/data-audit/speaker-label-reviews/decide', { decisions }),
 
   // Guided enrollment: next batch of highest-information clips for a speaker.
   guidedEnrollmentSuggest: (

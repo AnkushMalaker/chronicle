@@ -55,9 +55,11 @@ def _apply_diarization_label(segment, corrected_speaker: str) -> None:
     playback. Any other label is a normal speaker correction.
     """
     segment.speaker = corrected_speaker
-    if corrected_speaker in {NOISE_LABEL, BACKGROUND_SPEECH_LABEL}:
-        segment.identified_as = None
-        segment.confidence = None
+    # A human correction supersedes the model identity claim.  Keeping the old
+    # ``identified_as`` makes every consumer that prefers recognized identities
+    # (including Data Audit speaker gates) continue to see the rejected name.
+    segment.identified_as = None
+    segment.confidence = None
     if corrected_speaker == NOISE_LABEL:
         segment.segment_type = Conversation.SegmentType.EVENT.value
 

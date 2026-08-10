@@ -50,7 +50,7 @@ REPO_ROOT = SERVICE_DIR.parent.parent
 DEFAULT_PI_CONTEXT_WINDOW = 32768
 DEFAULT_PI_MAX_TOKENS = 4096
 PI_PROMPT_HEADROOM_TOKENS = 1024
-MANAGED_LLAMACPP_REGISTRY_MODELS = {"llamacpp-llm", "qwen36-llm"}
+MANAGED_LLAMACPP_REGISTRY_MODELS = {"llamacpp-llm", "muse-glimmer-llm"}
 
 
 class ChronicleSetup:
@@ -1349,7 +1349,7 @@ class ChronicleSetup:
             existing_pi = {}
 
         configured_llm = str(
-            self.config_manager.get_config_defaults().get("llm") or "qwen36-llm"
+            self.config_manager.get_config_defaults().get("llm") or "muse-glimmer-llm"
         )
 
         codex_config = {

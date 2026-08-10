@@ -44,6 +44,9 @@ class FakeCollection:
     def find(self, _query, projection=None):
         return AsyncCursor(self.documents.values())
 
+    async def count_documents(self, _query):
+        return len(self.documents)
+
     async def delete_many(self, _query):
         deleted = len(self.documents)
         self.documents.clear()
@@ -140,6 +143,91 @@ async def test_archive_round_trips_bson_audio_and_files(tmp_path: Path):
         target_data / "conversation_docs/user-1/People/Ada.md"
     ).read_text() == "# Ada\n"
     assert (target_data / "audio_chunks/legacy.wav").read_bytes() == b"RIFF-audio"
+
+
+@pytest.mark.asyncio
+async def test_export_reports_completed_database_file_and_finalize_stages(
+    tmp_path: Path,
+):
+    source = FakeDatabase(
+        {
+            "conversations": [
+                {"_id": ObjectId(), "conversation_id": "conversation-progress"}
+            ]
+        }
+    )
+    source_data = tmp_path / "source"
+    note = source_data / "conversation_docs/user/Daily/2026-08-10.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("progress", encoding="utf-8")
+    events = []
+
+    await create_data_archive(
+        source,
+        tmp_path / "progress.chronicle",
+        data_dir=source_data,
+        progress=events.append,
+    )
+
+    completed = [event for event in events if event.completed]
+    assert [event.stage for event in completed] == [
+        "export_database",
+        "export_files",
+        "finalize_archive",
+    ]
+    assert completed[0].current == completed[0].total == 1
+    assert completed[1].current == completed[1].total == len("progress")
+
+
+@pytest.mark.asyncio
+async def test_import_reports_named_stage_and_item_progress(tmp_path: Path):
+    conversation_id = "conversation-progress"
+    source = FakeDatabase(
+        {
+            "conversations": [{"_id": ObjectId(), "conversation_id": conversation_id}],
+            "audio_chunks": [
+                {
+                    "_id": ObjectId(),
+                    "conversation_id": conversation_id,
+                    "chunk_index": 0,
+                    "audio_data": b"progress-audio",
+                }
+            ],
+        }
+    )
+    source_data = tmp_path / "source"
+    note = source_data / "conversation_docs/user/People/Progress.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("progress", encoding="utf-8")
+    archive_path = tmp_path / "progress.chronicle"
+    await create_data_archive(source, archive_path, data_dir=source_data)
+
+    events = []
+    await import_data_archive(
+        FakeDatabase({}),
+        archive_path,
+        data_dir=tmp_path / "target",
+        replace=True,
+        progress=events.append,
+    )
+
+    completed_stages = {event.stage for event in events if event.completed}
+    assert completed_stages == {
+        "verify",
+        "scan_audio",
+        "decode_archive_duplicates",
+        "restore_database",
+        "restore_files",
+    }
+    for stage in completed_stages:
+        stage_events = [event for event in events if event.stage == stage]
+        assert stage_events[-1].completed is True
+        assert stage_events[-1].current == stage_events[-1].total
+    scan_events = [event for event in events if event.stage == "scan_audio"]
+    assert scan_events[-1].unit == "documents"
+    assert scan_events[-1].current == 1
+    restore_events = [event for event in events if event.stage == "restore_database"]
+    assert any("audio_chunks" in event.detail for event in restore_events)
 
 
 @pytest.mark.asyncio

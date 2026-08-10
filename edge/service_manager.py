@@ -170,6 +170,59 @@ def _record_operation(service: str, action: str) -> dict:
     return op
 
 
+def _report_operation_event(op: dict) -> None:
+    """Append a service-control operation to the backend's rolling event ledger."""
+    token = os.environ.get("SYSTEM_EVENT_INGEST_TOKEN") or TOKEN
+    if not token:
+        logger.warning(
+            "Operation %s/%s was not added to the system-event ledger: no ingest token",
+            op["service"],
+            op["action"],
+        )
+        return
+
+    status = op["status"]
+    service = op["service"]
+    action = op["action"]
+    operation_id = op["id"]
+    metadata = {
+        "event_type": "service_operation",
+        "operation_id": operation_id,
+        "node": platform.node(),
+        "service": service,
+        "action": action,
+        "status": status,
+        "ok": op["ok"],
+        "started_at": op["started_at"],
+        "finished_at": op["finished_at"],
+        "phase": op["phase"],
+    }
+    detail = op["log"].strip() or None
+    payload = {
+        "severity": "error" if status == "failed" else "info",
+        "category": "service",
+        "source": f"service-manager:{platform.node()}",
+        "title": f"{action.capitalize()} {service} {status} ({operation_id})",
+        "detail": detail,
+        "metadata": metadata,
+    }
+    try:
+        response = requests.post(
+            f"{_BACKEND_URL}/api/admin/system-events/ingest",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning(
+            "Operation %s/%s could not be added to the system-event ledger: %s",
+            service,
+            action,
+            exc,
+        )
+
+
 def _run_operation(op: dict, fn):
     """Run a compose operation in a thread, capturing services.py console output.
 
@@ -194,6 +247,7 @@ def _run_operation(op: dict, fn):
             services.console = original_console
             op["log"] = buf.getvalue()[-8000:]
             op["finished_at"] = time.time()
+            _report_operation_event(op)
             _busy_lock.release()
             logger.info(
                 "Operation %s %s → %s", op["action"], op["service"], op["status"]
@@ -209,6 +263,7 @@ def _start_operation(service: str, action: str, fn) -> dict:
         )
     op = _record_operation(service, action)
     logger.info("Operation %s %s started (%s)", action, service, op["id"])
+    _report_operation_event(op)
     _run_operation(op, fn)
     return op
 

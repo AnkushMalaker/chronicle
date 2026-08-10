@@ -18,7 +18,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Iterable, Iterator, Optional
+from typing import Any, BinaryIO, Callable, Iterable, Iterator, Optional
 from urllib.parse import quote
 
 from bson import BSON
@@ -32,7 +32,12 @@ ARCHIVE_SUFFIX = ".chronicle"
 DATABASE_PREFIX = "database/"
 FILES_PREFIX = "files/"
 MANIFEST_PATH = "manifest.json"
-FILE_ROOTS = ("conversation_docs", "memory_md", "audio_chunks")
+FILE_ROOTS = (
+    "conversation_docs",
+    "memory_md",
+    "audio_chunks",
+    "paid_inference_artifacts",
+)
 DERIVED_MEMORY_COLLECTIONS = frozenset({"memory_audit"})
 SYNC_MARKERS = frozenset({".stfolder", ".stignore"})
 
@@ -62,6 +67,31 @@ class ImportSummary:
     skipped_collections: tuple[str, ...]
     duplicate_audio_warnings: tuple["DuplicateAudioWarning", ...]
     duplicate_chunk_warnings: tuple["DuplicateChunkWarning", ...] = ()
+
+
+@dataclass(frozen=True)
+class ArchiveProgress:
+    """One observable checkpoint in an archive operation."""
+
+    stage: str
+    current: int
+    total: int
+    unit: str
+    detail: str
+    completed: bool = False
+
+
+ProgressCallback = Callable[[ArchiveProgress], None]
+
+
+@dataclass(frozen=True)
+class VerifiedArchive:
+    """A checksum-verified archive snapshot that has not changed on disk."""
+
+    path: Path
+    size: int
+    mtime_ns: int
+    manifest: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -102,6 +132,30 @@ class _DigestWriter:
         return self.digest.hexdigest()
 
 
+def _report_progress(
+    callback: Optional[ProgressCallback],
+    *,
+    stage: str,
+    current: int,
+    total: int,
+    unit: str,
+    detail: str,
+    completed: bool = False,
+) -> None:
+    if callback is None:
+        return
+    callback(
+        ArchiveProgress(
+            stage=stage,
+            current=current,
+            total=total,
+            unit=unit,
+            detail=detail,
+            completed=completed,
+        )
+    )
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -140,6 +194,7 @@ async def create_data_archive(
     data_dir: Path,
     overwrite: bool = False,
     exclude_audio_conversation_ids: Iterable[str] = (),
+    progress: Optional[ProgressCallback] = None,
 ) -> ArchiveSummary:
     """Export all Mongo collections and durable filesystem data to one archive.
 
@@ -187,6 +242,20 @@ async def create_data_archive(
                 for name in await database.list_collection_names()
                 if not name.startswith("system.")
             )
+            collection_counts = {
+                name: await database[name].count_documents({})
+                for name in collection_names
+            }
+            export_document_total = sum(collection_counts.values())
+            scanned_documents = 0
+            _report_progress(
+                progress,
+                stage="export_database",
+                current=0,
+                total=export_document_total,
+                unit="documents",
+                detail=f"Exporting {len(collection_names):,} MongoDB collections",
+            )
             for collection_name in collection_names:
                 member = _collection_member(collection_name)
                 count = 0
@@ -204,6 +273,16 @@ async def create_data_archive(
                         )
                     skip_audio = excluded_audio and collection_name == "audio_chunks"
                     async for document in cursor:
+                        scanned_documents += 1
+                        if scanned_documents % 500 == 0:
+                            _report_progress(
+                                progress,
+                                stage="export_database",
+                                current=scanned_documents,
+                                total=export_document_total,
+                                unit="documents",
+                                detail=collection_name,
+                            )
                         if (
                             skip_audio
                             and str(document.get("conversation_id", ""))
@@ -223,8 +302,28 @@ async def create_data_archive(
                     "kind": "collection",
                 }
                 total_documents += count
+            _report_progress(
+                progress,
+                stage="export_database",
+                current=export_document_total,
+                total=export_document_total,
+                unit="documents",
+                detail=f"Exported {total_documents:,} MongoDB documents",
+                completed=True,
+            )
 
-            for source_path, member in _iter_regular_files(data_dir):
+            regular_files = list(_iter_regular_files(data_dir))
+            export_file_bytes = sum(path.stat().st_size for path, _ in regular_files)
+            exported_file_bytes = 0
+            _report_progress(
+                progress,
+                stage="export_files",
+                current=0,
+                total=export_file_bytes,
+                unit="bytes",
+                detail=f"Exporting {len(regular_files):,} filesystem files",
+            )
+            for source_path, member in regular_files:
                 _safe_member_path(member)
                 with source_path.open("rb") as source, archive.open(
                     member, mode="w", force_zip64=True
@@ -232,19 +331,54 @@ async def create_data_archive(
                     writer = _DigestWriter(stream)
                     for chunk in iter(lambda: source.read(1024 * 1024), b""):
                         writer.write(chunk)
+                        exported_file_bytes += len(chunk)
+                        _report_progress(
+                            progress,
+                            stage="export_files",
+                            current=exported_file_bytes,
+                            total=export_file_bytes,
+                            unit="bytes",
+                            detail=member,
+                        )
                 manifest["files"][member] = {
                     "sha256": writer.sha256,
                     "size": writer.size,
                     "kind": "data_file",
                 }
                 total_files += 1
+            _report_progress(
+                progress,
+                stage="export_files",
+                current=export_file_bytes,
+                total=export_file_bytes,
+                unit="bytes",
+                detail=f"Exported {total_files:,} filesystem files",
+                completed=True,
+            )
 
+            _report_progress(
+                progress,
+                stage="finalize_archive",
+                current=0,
+                total=1,
+                unit="steps",
+                detail="Writing manifest and committing archive",
+            )
             archive.writestr(
                 MANIFEST_PATH,
                 json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"),
             )
 
         temp_path.replace(output_path)
+        _report_progress(
+            progress,
+            stage="finalize_archive",
+            current=1,
+            total=1,
+            unit="steps",
+            detail="Archive committed atomically",
+            completed=True,
+        )
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise
@@ -293,11 +427,27 @@ def _load_manifest(archive: zipfile.ZipFile) -> dict[str, Any]:
     return manifest
 
 
-def verify_data_archive(archive_path: Path) -> dict[str, Any]:
+def verify_data_archive(
+    archive_path: Path,
+    *,
+    progress: Optional[ProgressCallback] = None,
+) -> dict[str, Any]:
     """Validate structure, CRCs, sizes, and SHA-256 hashes before import."""
     try:
         with zipfile.ZipFile(archive_path, mode="r", allowZip64=True) as archive:
             manifest = _load_manifest(archive)
+            total_bytes = sum(
+                int(metadata.get("size", 0)) for metadata in manifest["files"].values()
+            )
+            verified_bytes = 0
+            _report_progress(
+                progress,
+                stage="verify",
+                current=0,
+                total=total_bytes,
+                unit="bytes",
+                detail="Reading archive members",
+            )
             for member, expected in manifest["files"].items():
                 digest = hashlib.sha256()
                 size = 0
@@ -305,6 +455,15 @@ def verify_data_archive(archive_path: Path) -> dict[str, Any]:
                     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                         digest.update(chunk)
                         size += len(chunk)
+                        verified_bytes += len(chunk)
+                        _report_progress(
+                            progress,
+                            stage="verify",
+                            current=verified_bytes,
+                            total=total_bytes,
+                            unit="bytes",
+                            detail=member,
+                        )
                 if size != expected.get("size"):
                     raise ArchiveError(
                         f"Archive size mismatch for {member}: expected "
@@ -312,9 +471,38 @@ def verify_data_archive(archive_path: Path) -> dict[str, Any]:
                     )
                 if digest.hexdigest() != expected.get("sha256"):
                     raise ArchiveError(f"Archive checksum mismatch for {member}")
+            _report_progress(
+                progress,
+                stage="verify",
+                current=total_bytes,
+                total=total_bytes,
+                unit="bytes",
+                detail="All archive checksums passed",
+                completed=True,
+            )
             return manifest
     except zipfile.BadZipFile as exc:
         raise ArchiveError(f"Not a valid Chronicle archive: {archive_path}") from exc
+
+
+def verify_data_archive_snapshot(
+    archive_path: Path,
+    *,
+    progress: Optional[ProgressCallback] = None,
+) -> VerifiedArchive:
+    """Verify an archive and bind the result to its current filesystem identity."""
+    resolved = archive_path.expanduser().resolve()
+    before = resolved.stat()
+    manifest = verify_data_archive(resolved, progress=progress)
+    after = resolved.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ArchiveError("Archive changed while it was being verified")
+    return VerifiedArchive(
+        path=resolved,
+        size=after.st_size,
+        mtime_ns=after.st_mtime_ns,
+        manifest=manifest,
+    )
 
 
 def _iter_bson(stream: BinaryIO) -> Iterator[dict[str, Any]]:
@@ -399,50 +587,85 @@ def _finalize_audio_structures(
     return structures
 
 
-def _archive_audio_fingerprints(
-    archive: zipfile.ZipFile, manifest: dict[str, Any]
-) -> dict[str, str]:
+def _archive_audio_metadata(
+    archive: zipfile.ZipFile,
+    manifest: dict[str, Any],
+    *,
+    progress: Optional[ProgressCallback] = None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Build compressed fingerprints and structures in one archive scan."""
     metadata = manifest["collections"].get("audio_chunks")
     if not metadata:
-        return {}
-    chunks: dict[str, list[tuple[int, bytes]]] = {}
+        _report_progress(
+            progress,
+            stage="scan_audio",
+            current=0,
+            total=0,
+            unit="documents",
+            detail="No archived audio chunks",
+            completed=True,
+        )
+        return {}, {}
+    expected_count = int(metadata.get("documents", 0))
+    fingerprints: dict[str, list[tuple[int, bytes]]] = {}
+    structures: dict[str, list[tuple[int, int, int, int]]] = {}
+    scanned = 0
+    _report_progress(
+        progress,
+        stage="scan_audio",
+        current=0,
+        total=expected_count,
+        unit="documents",
+        detail="Fingerprinting archived audio chunks",
+    )
     with archive.open(metadata["member"], mode="r") as stream:
         for document, duplicate in _iter_unique_audio_chunks(_iter_bson(stream)):
+            scanned += 1
             if duplicate:
                 continue
             conversation_id = document.get("conversation_id")
             if not conversation_id:
                 raise ArchiveError("Audio chunk has no conversation_id")
+            conversation_id = str(conversation_id)
             chunk_index = int(document.get("chunk_index", 0))
-            chunks.setdefault(str(conversation_id), []).append(
+            fingerprints.setdefault(conversation_id, []).append(
                 (chunk_index, _chunk_digest(document))
             )
-    return _finalize_audio_fingerprints(chunks)
-
-
-def _archive_audio_structures(
-    archive: zipfile.ZipFile, manifest: dict[str, Any]
-) -> dict[str, str]:
-    metadata = manifest["collections"].get("audio_chunks")
-    if not metadata:
-        return {}
-    chunks: dict[str, list[tuple[int, int, int, int]]] = {}
-    with archive.open(metadata["member"], mode="r") as stream:
-        for document, duplicate in _iter_unique_audio_chunks(_iter_bson(stream)):
-            if duplicate:
-                continue
-            conversation_id = document.get("conversation_id")
-            if not conversation_id:
-                raise ArchiveError("Audio chunk has no conversation_id")
-            chunks.setdefault(str(conversation_id), []).append(
+            structures.setdefault(conversation_id, []).append(
                 (
-                    int(document.get("chunk_index", 0)),
+                    chunk_index,
                     int(document.get("original_size", 0)),
                     int(document.get("sample_rate", 16000)),
                     int(document.get("channels", 1)),
                 )
             )
-    return _finalize_audio_structures(chunks)
+            if scanned % 500 == 0:
+                _report_progress(
+                    progress,
+                    stage="scan_audio",
+                    current=scanned,
+                    total=expected_count,
+                    unit="documents",
+                    detail=f"Fingerprinting {conversation_id}",
+                )
+    if scanned != expected_count:
+        raise ArchiveError(
+            "Document count mismatch while scanning audio_chunks: "
+            f"expected {expected_count}, scanned {scanned}"
+        )
+    _report_progress(
+        progress,
+        stage="scan_audio",
+        current=scanned,
+        total=expected_count,
+        unit="documents",
+        detail=f"Fingerprint scan complete ({len(fingerprints)} conversations)",
+        completed=True,
+    )
+    return (
+        _finalize_audio_fingerprints(fingerprints),
+        _finalize_audio_structures(structures),
+    )
 
 
 async def _database_audio_fingerprints(database: Any) -> dict[str, str]:
@@ -497,12 +720,37 @@ async def _database_audio_structures(database: Any) -> dict[str, str]:
 
 async def _pcm_fingerprints(
     chunks: dict[str, list[dict[str, Any]]],
+    *,
+    progress: Optional[ProgressCallback] = None,
+    stage: str = "decode_duplicates",
 ) -> dict[str, str]:
     semaphore = asyncio.Semaphore(4)
+    completed = 0
+    total = len(chunks)
+    _report_progress(
+        progress,
+        stage=stage,
+        current=0,
+        total=total,
+        unit="conversations",
+        detail="Decoding duplicate candidates",
+    )
+    if total == 0:
+        _report_progress(
+            progress,
+            stage=stage,
+            current=0,
+            total=0,
+            unit="conversations",
+            detail="No duplicate candidates to decode",
+            completed=True,
+        )
+        return {}
 
     async def fingerprint_conversation(
         conversation_id: str, documents: list[dict[str, Any]]
     ) -> tuple[str, str]:
+        nonlocal completed
         async with semaphore:
             digest = hashlib.sha256()
             for document in sorted(
@@ -519,6 +767,16 @@ async def _pcm_fingerprints(
                         f"Could not decode audio for duplicate check: {conversation_id}"
                     ) from exc
                 digest.update(pcm)
+            completed += 1
+            _report_progress(
+                progress,
+                stage=stage,
+                current=completed,
+                total=total,
+                unit="conversations",
+                detail=conversation_id,
+                completed=completed == total,
+            )
             return conversation_id, digest.hexdigest()
 
     results = await asyncio.gather(
@@ -534,8 +792,19 @@ async def _archive_pcm_fingerprints(
     archive: zipfile.ZipFile,
     manifest: dict[str, Any],
     conversation_ids: set[str],
+    *,
+    progress: Optional[ProgressCallback] = None,
 ) -> dict[str, str]:
     if not conversation_ids:
+        _report_progress(
+            progress,
+            stage="decode_archive_duplicates",
+            current=0,
+            total=0,
+            unit="conversations",
+            detail="No archive duplicate candidates",
+            completed=True,
+        )
         return {}
     metadata = manifest["collections"].get("audio_chunks")
     if not metadata:
@@ -548,13 +817,29 @@ async def _archive_pcm_fingerprints(
             conversation_id = str(document.get("conversation_id", ""))
             if conversation_id in conversation_ids:
                 chunks[conversation_id].append(document)
-    return await _pcm_fingerprints(chunks)
+    return await _pcm_fingerprints(
+        chunks,
+        progress=progress,
+        stage="decode_archive_duplicates",
+    )
 
 
 async def _database_pcm_fingerprints(
-    database: Any, conversation_ids: set[str]
+    database: Any,
+    conversation_ids: set[str],
+    *,
+    progress: Optional[ProgressCallback] = None,
 ) -> dict[str, str]:
     if not conversation_ids:
+        _report_progress(
+            progress,
+            stage="decode_database_duplicates",
+            current=0,
+            total=0,
+            unit="conversations",
+            detail="No existing-database duplicate candidates",
+            completed=True,
+        )
         return {}
     chunks: dict[str, list[dict[str, Any]]] = defaultdict(list)
     cursor = database["audio_chunks"].find(
@@ -571,7 +856,11 @@ async def _database_pcm_fingerprints(
         conversation_id = str(document.get("conversation_id", ""))
         if conversation_id in conversation_ids:
             chunks[conversation_id].append(document)
-    return await _pcm_fingerprints(chunks)
+    return await _pcm_fingerprints(
+        chunks,
+        progress=progress,
+        stage="decode_database_duplicates",
+    )
 
 
 def _conversation_sort_key(document: dict[str, Any]) -> tuple[float, str]:
@@ -623,9 +912,13 @@ async def _duplicate_audio_plan(
     manifest: dict[str, Any],
     *,
     replace: bool,
+    progress: Optional[ProgressCallback] = None,
 ) -> tuple[set[str], tuple[DuplicateAudioWarning, ...]]:
-    archive_fingerprints = _archive_audio_fingerprints(archive, manifest)
-    archive_structures = _archive_audio_structures(archive, manifest)
+    archive_fingerprints, archive_structures = _archive_audio_metadata(
+        archive,
+        manifest,
+        progress=progress,
+    )
     existing_fingerprints: dict[str, str] = {}
     existing_structures: dict[str, str] = {}
     if not replace:
@@ -656,9 +949,18 @@ async def _duplicate_audio_plan(
         )
 
     archive_pcm = await _archive_pcm_fingerprints(
-        archive, manifest, candidate_archive_ids
+        archive,
+        manifest,
+        candidate_archive_ids,
+        progress=progress,
     )
-    existing_pcm = await _database_pcm_fingerprints(database, candidate_existing_ids)
+    existing_pcm: dict[str, str] = {}
+    if not replace:
+        existing_pcm = await _database_pcm_fingerprints(
+            database,
+            candidate_existing_ids,
+            progress=progress,
+        )
     for conversation_id, fingerprint in archive_pcm.items():
         archive_fingerprints[conversation_id] = f"pcm:{fingerprint}"
     for conversation_id, fingerprint in existing_pcm.items():
@@ -750,6 +1052,9 @@ async def _restore_collection(
     replace: bool,
     skipped_conversation_ids: set[str],
     batch_size: int = 500,
+    progress: Optional[ProgressCallback] = None,
+    progress_offset: int = 0,
+    progress_total: int = 0,
 ) -> tuple[int, tuple[DuplicateChunkWarning, ...]]:
     collection = database[collection_name]
     if replace:
@@ -774,6 +1079,17 @@ async def _restore_collection(
     with archive.open(member, mode="r") as stream:
         for document in _iter_bson(stream):
             scanned += 1
+            if scanned % batch_size == 0:
+                _report_progress(
+                    progress,
+                    stage="restore_database",
+                    current=progress_offset + scanned,
+                    total=progress_total,
+                    unit="documents",
+                    detail=(
+                        f"{collection_name}: {scanned:,}/{expected_count:,} documents"
+                    ),
+                )
             if "_id" not in document:
                 raise ArchiveError(f"Document in {collection_name} has no _id")
             if str(document.get("conversation_id", "")) in skipped_conversation_ids:
@@ -823,6 +1139,14 @@ async def _restore_collection(
             f"Document count mismatch for {collection_name}: "
             f"expected {expected_count}, scanned {scanned}"
         )
+    _report_progress(
+        progress,
+        stage="restore_database",
+        current=progress_offset + scanned,
+        total=progress_total,
+        unit="documents",
+        detail=f"Completed {collection_name} ({scanned:,} documents)",
+    )
     return restored, tuple(chunk_warnings)
 
 
@@ -885,6 +1209,7 @@ def _restore_data_files(
     data_dir: Path,
     *,
     replace: bool,
+    progress: Optional[ProgressCallback] = None,
 ) -> int:
     members = [
         member
@@ -896,6 +1221,18 @@ def _restore_data_files(
             data_dir, manifest.get("file_roots", list(FILE_ROOTS))
         )
     restored = 0
+    restored_bytes = 0
+    total_bytes = sum(
+        int(manifest["files"][member].get("size", 0)) for member in members
+    )
+    _report_progress(
+        progress,
+        stage="restore_files",
+        current=0,
+        total=total_bytes,
+        unit="bytes",
+        detail=f"Restoring {len(members):,} filesystem files",
+    )
     for member in members:
         destination = _destination_for_data_member(data_dir, member)
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -904,12 +1241,31 @@ def _restore_data_files(
             with archive.open(member, mode="r") as source, temp_path.open(
                 "wb"
             ) as target:
-                shutil.copyfileobj(source, target, length=1024 * 1024)
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    target.write(chunk)
+                    restored_bytes += len(chunk)
+                    _report_progress(
+                        progress,
+                        stage="restore_files",
+                        current=restored_bytes,
+                        total=total_bytes,
+                        unit="bytes",
+                        detail=member,
+                    )
             temp_path.replace(destination)
         except Exception:
             temp_path.unlink(missing_ok=True)
             raise
         restored += 1
+    _report_progress(
+        progress,
+        stage="restore_files",
+        current=total_bytes,
+        total=total_bytes,
+        unit="bytes",
+        detail=f"Restored {restored:,} filesystem files",
+        completed=True,
+    )
     return restored
 
 
@@ -921,9 +1277,21 @@ async def import_data_archive(
     replace: bool = False,
     restore_files: bool = True,
     fresh_memory: bool = False,
+    progress: Optional[ProgressCallback] = None,
+    verified_archive: Optional[VerifiedArchive] = None,
 ) -> ImportSummary:
     """Verify and import an archive, optionally excluding all derived memory state."""
-    manifest = verify_data_archive(archive_path)
+    resolved_archive_path = archive_path.expanduser().resolve()
+    if verified_archive is None:
+        manifest = verify_data_archive(resolved_archive_path, progress=progress)
+    else:
+        current = resolved_archive_path.stat()
+        if verified_archive.path != resolved_archive_path or (
+            verified_archive.size,
+            verified_archive.mtime_ns,
+        ) != (current.st_size, current.st_mtime_ns):
+            raise ArchiveError("Archive changed after checksum verification")
+        manifest = verified_archive.manifest
     if fresh_memory and restore_files:
         raise ArchiveError("fresh_memory cannot be combined with restore_files")
 
@@ -933,9 +1301,27 @@ async def import_data_archive(
     restored_files = 0
     duplicate_warnings: tuple[DuplicateAudioWarning, ...] = ()
     duplicate_chunk_warnings: list[DuplicateChunkWarning] = []
-    with zipfile.ZipFile(archive_path, mode="r", allowZip64=True) as archive:
+    with zipfile.ZipFile(resolved_archive_path, mode="r", allowZip64=True) as archive:
         skipped_conversation_ids, duplicate_warnings = await _duplicate_audio_plan(
-            database, archive, manifest, replace=replace
+            database,
+            archive,
+            manifest,
+            replace=replace,
+            progress=progress,
+        )
+        restored_document_offset = 0
+        total_restore_documents = sum(
+            int(metadata.get("documents", 0))
+            for collection_name, metadata in manifest["collections"].items()
+            if collection_name not in skipped
+        )
+        _report_progress(
+            progress,
+            stage="restore_database",
+            current=0,
+            total=total_restore_documents,
+            unit="documents",
+            detail="Restoring MongoDB collections",
         )
         for collection_name, metadata in manifest["collections"].items():
             if collection_name in skipped:
@@ -948,13 +1334,30 @@ async def import_data_archive(
                 metadata["documents"],
                 replace=replace,
                 skipped_conversation_ids=skipped_conversation_ids,
+                progress=progress,
+                progress_offset=restored_document_offset,
+                progress_total=total_restore_documents,
             )
+            restored_document_offset += int(metadata.get("documents", 0))
             restored_documents += restored_count
             duplicate_chunk_warnings.extend(collection_chunk_warnings)
             restored_collections += 1
+        _report_progress(
+            progress,
+            stage="restore_database",
+            current=total_restore_documents,
+            total=total_restore_documents,
+            unit="documents",
+            detail=f"Restored {restored_collections:,} MongoDB collections",
+            completed=True,
+        )
         if restore_files:
             restored_files = _restore_data_files(
-                archive, manifest, data_dir, replace=replace
+                archive,
+                manifest,
+                data_dir,
+                replace=replace,
+                progress=progress,
             )
 
     return ImportSummary(

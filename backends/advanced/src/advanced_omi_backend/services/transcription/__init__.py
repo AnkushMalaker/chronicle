@@ -230,6 +230,7 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         self._name = model.model_provider or model.name
         # Load capabilities from config.yml model definition
         self._capabilities = set(model.capabilities) if model.capabilities else set()
+        self._allow_fallback = model_name is None
 
     @property
     def name(self) -> str:
@@ -318,15 +319,40 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
                 logger.debug(f"Transcription cache lookup skipped: {e}")
                 cache = None
 
-        result = await self._transcribe_uncached(
-            audio_data,
-            sample_rate,
-            diarize=diarize,
-            context_info=context_info,
-            progress_callback=progress_callback,
-            priority=priority,
-            **kwargs,
-        )
+        try:
+            result = await self._transcribe_uncached(
+                audio_data,
+                sample_rate,
+                diarize=diarize,
+                context_info=context_info,
+                progress_callback=progress_callback,
+                priority=priority,
+                **kwargs,
+            )
+        except Exception:
+            registry = get_models_registry()
+            fallback_name = (
+                registry.defaults.get("fallback_stt")
+                if registry and self._allow_fallback
+                else None
+            )
+            if not fallback_name or fallback_name == self.model.name:
+                raise
+            logger.exception(
+                "Primary STT '%s' failed; retrying with fallback '%s'",
+                self.model.name,
+                fallback_name,
+            )
+            fallback = RegistryBatchTranscriptionProvider(model_name=fallback_name)
+            return await fallback.transcribe(
+                audio_data,
+                sample_rate,
+                diarize=diarize,
+                context_info=context_info,
+                progress_callback=progress_callback,
+                priority=priority,
+                **kwargs,
+            )
 
         # Don't cache an empty transcript: the key doesn't cover the ASR
         # service's gate settings, so a cached "" would outlive a threshold change.

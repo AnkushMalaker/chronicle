@@ -11,6 +11,14 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.prompt import Confirm
 from rich.table import Table
 
@@ -18,9 +26,11 @@ from advanced_omi_backend.database import get_database
 from advanced_omi_backend.services.data_archive import (
     ARCHIVE_SUFFIX,
     ArchiveError,
+    ArchiveProgress,
     create_data_archive,
     import_data_archive,
     verify_data_archive,
+    verify_data_archive_snapshot,
 )
 from advanced_omi_backend.services.memory.rebuild import (
     TIMELINE_STAGES,
@@ -33,6 +43,76 @@ from advanced_omi_backend.services.memory.rebuild import (
 
 console = Console()
 DATA_DIR = Path("/app/data")
+
+IMPORT_STAGE_LABELS = {
+    "export_database": "Export MongoDB",
+    "export_files": "Export filesystem",
+    "finalize_archive": "Finalize archive",
+    "verify": "Verify checksums",
+    "scan_audio": "Scan audio identities",
+    "decode_archive_duplicates": "Decode duplicate candidates",
+    "decode_database_duplicates": "Compare existing audio",
+    "restore_database": "Restore MongoDB",
+    "restore_files": "Restore filesystem",
+}
+
+
+class ArchiveProgressDisplay:
+    """Persistent, stage-aware rendering for long archive operations."""
+
+    def __init__(self, stage_order: list[str]):
+        self.stage_order = stage_order
+        self.task_ids: dict[str, int] = {}
+        self.progress = Progress(
+            SpinnerColumn(finished_text="[green]✓[/green]"),
+            TextColumn("{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("{task.fields[amount]}"),
+            TextColumn("[dim]{task.fields[detail]}[/dim]"),
+            TimeElapsedColumn(),
+            console=console,
+        )
+
+    def __enter__(self):
+        self.progress.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return self.progress.__exit__(exc_type, exc_value, traceback)
+
+    def update(self, event: ArchiveProgress) -> None:
+        if event.stage not in self.stage_order:
+            self.stage_order.append(event.stage)
+        task_id = self.task_ids.get(event.stage)
+        total = max(event.total, 1)
+        if task_id is None:
+            stage_number = self.stage_order.index(event.stage) + 1
+            label = IMPORT_STAGE_LABELS.get(
+                event.stage, event.stage.replace("_", " ").title()
+            )
+            task_id = self.progress.add_task(
+                f"Stage {stage_number}/{len(self.stage_order)} · {label}",
+                total=total,
+                amount="",
+                detail="",
+            )
+            self.task_ids[event.stage] = task_id
+        completed = total if event.completed else min(event.current, total)
+        amount = (
+            f"{_human_size(event.current)} / {_human_size(event.total)}"
+            if event.unit == "bytes"
+            else f"{event.current:,} / {event.total:,} {event.unit}"
+        )
+        self.progress.update(
+            task_id,
+            completed=completed,
+            total=total,
+            amount=amount,
+            detail=event.detail,
+        )
+        if event.completed:
+            self.progress.stop_task(task_id)
 
 
 def _human_size(value: int) -> str:
@@ -86,13 +166,16 @@ async def _run_export(args: argparse.Namespace) -> None:
     database = await _connect_database()
     output = args.output or _default_archive_path()
     excluded = _read_id_list(args.exclude_audio_for) if args.exclude_audio_for else []
-    with console.status("Exporting Chronicle data..."):
+    with ArchiveProgressDisplay(
+        ["export_database", "export_files", "finalize_archive"]
+    ) as progress:
         summary = await create_data_archive(
             database,
             output,
             data_dir=args.data_dir,
             overwrite=args.overwrite,
             exclude_audio_conversation_ids=excluded,
+            progress=progress.update,
         )
     excluded_note = ""
     if summary.excluded_audio_conversations:
@@ -116,14 +199,17 @@ async def _run_export(args: argparse.Namespace) -> None:
 
 
 async def _run_verify(args: argparse.Namespace) -> None:
-    with console.status("Verifying archive checksums..."):
-        manifest = verify_data_archive(args.archive)
+    with ArchiveProgressDisplay(["verify"]) as progress:
+        manifest = verify_data_archive(args.archive, progress=progress.update)
     console.print(_manifest_table(manifest))
     console.print("[green]Archive verification passed.[/green]")
 
 
 async def _rebuild(database, args: argparse.Namespace):
     from_stage = RebuildStage(args.rebuild_from)
+    console.print(
+        f"[cyan]Rebuild stage 1/3 · Plan inputs from {from_stage.value}[/cyan]"
+    )
     plan = await build_rebuild_plan(
         database,
         args.user_id,
@@ -153,6 +239,7 @@ async def _rebuild(database, args: argparse.Namespace):
             "per-conversation memory path does not run."
         )
     if getattr(args, "dry_run", False):
+        console.print("[green]✓ Rebuild stage 1/3 · Plan complete (dry run)[/green]")
         return None
     extra = (
         " Existing timeline runs, days, and episodes are deleted so analysis starts "
@@ -167,6 +254,10 @@ async def _rebuild(database, args: argparse.Namespace):
         args.force,
     )
     backup_dir = None if args.no_vault_backup else args.data_dir / "backups"
+    console.print(
+        "[green]✓ Rebuild stage 1/3 · Plan complete[/green]\n"
+        "[cyan]Rebuild stage 2/3 · Clear derived state and queue day work[/cyan]"
+    )
     result = await execute_memory_rebuild(
         database,
         plan,
@@ -175,6 +266,10 @@ async def _rebuild(database, args: argparse.Namespace):
         from_stage=from_stage,
     )
     backup_text = str(result.vault_backup) if result.vault_backup else "not needed"
+    console.print(
+        "[green]✓ Rebuild stage 2/3 · Derived state cleared and jobs queued[/green]\n"
+        "[cyan]Rebuild stage 3/3 · Workers process days chronologically[/cyan]"
+    )
     console.print(
         Panel(
             f"[green]Memory rebuild queued[/green]\n"
@@ -204,23 +299,35 @@ async def _run_import(args: argparse.Namespace) -> None:
             "archive contains all users. Import first, then run rebuild-memory "
             "--user-id for a selective rebuild."
         )
-    with console.status("Verifying archive before import..."):
-        manifest = verify_data_archive(args.archive)
-    console.print(_manifest_table(manifest))
-    destructive = args.replace or args.rebuild_from
-    if destructive:
-        _require_confirmation(
-            "Replace mode clears each archived Mongo collection before restore. Fresh "
-            "rebuild mode also deletes current derived vault and audit state.",
-            args.force,
-        )
-        # One confirmation covers the complete import + derived-data rebuild.
-        if args.rebuild_from:
-            args.force = True
-
-    database = await _connect_database()
     restore_files = not args.database_only and not args.rebuild_from
-    with console.status("Importing verified Chronicle archive..."):
+    stage_order = [
+        "verify",
+        "scan_audio",
+        "decode_archive_duplicates",
+    ]
+    if not args.replace:
+        stage_order.append("decode_database_duplicates")
+    stage_order.append("restore_database")
+    if restore_files:
+        stage_order.append("restore_files")
+    with ArchiveProgressDisplay(stage_order) as progress:
+        verified_archive = verify_data_archive_snapshot(
+            args.archive,
+            progress=progress.update,
+        )
+        console.print(_manifest_table(verified_archive.manifest))
+        destructive = args.replace or args.rebuild_from
+        if destructive:
+            _require_confirmation(
+                "Replace mode clears each archived Mongo collection before restore. Fresh "
+                "rebuild mode also deletes current derived vault and audit state.",
+                args.force,
+            )
+            # One confirmation covers the complete import + derived-data rebuild.
+            if args.rebuild_from:
+                args.force = True
+
+        database = await _connect_database()
         summary = await import_data_archive(
             database,
             args.archive,
@@ -228,6 +335,8 @@ async def _run_import(args: argparse.Namespace) -> None:
             replace=args.replace,
             restore_files=restore_files,
             fresh_memory=bool(args.rebuild_from),
+            progress=progress.update,
+            verified_archive=verified_archive,
         )
     console.print(
         f"[green]Imported {summary.documents} documents from "

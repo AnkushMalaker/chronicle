@@ -134,6 +134,31 @@ class IdentifyResponse(BaseModel):
     )
 
 
+class IdentifyBatchItemResponse(IdentifyResponse):
+    """One ordered result from batch speaker identification."""
+
+    segment_id: str
+    error: Optional[str] = None
+    message: Optional[str] = None
+    embedding: Optional[List[float]] = None
+    embedding_model: Optional[str] = None
+
+
+class IdentifyBatchSummary(BaseModel):
+    """Aggregate processing counts for a batch request."""
+
+    requested: int
+    processed: int
+    failed: int
+
+
+class IdentifyBatchResponse(BaseModel):
+    """Ordered results and aggregate counts for batch identification."""
+
+    results: List[IdentifyBatchItemResponse]
+    batch: IdentifyBatchSummary
+
+
 class InferenceRequest(BaseModel):
     """Request model for speaker inference on diarized segments."""
 

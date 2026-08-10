@@ -299,10 +299,12 @@ class OpenAIProvider(LLMProviderBase):
             client = op.get_client(is_async=True)
             response = await client.chat.completions.create(
                 **op.to_api_params(),
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": chunk},
-                ],
+                messages=op.prepare_messages(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": chunk},
+                    ]
+                ),
             )
             facts = (response.choices[0].message.content or "").strip()
             if not facts:
@@ -393,7 +395,7 @@ class OpenAIProvider(LLMProviderBase):
             client = op.get_client(is_async=True)
             response = await client.chat.completions.create(
                 **op.to_api_params(),
-                messages=update_memory_messages,
+                messages=op.prepare_messages(update_memory_messages),
             )
             content = (response.choices[0].message.content or "").strip()
             if not content:
@@ -479,7 +481,7 @@ class OpenAIProvider(LLMProviderBase):
             client = op.get_client(is_async=True)
             response = await client.chat.completions.create(
                 **op.to_api_params(),
-                messages=messages,
+                messages=op.prepare_messages(messages),
             )
             content = (response.choices[0].message.content or "").strip()
 

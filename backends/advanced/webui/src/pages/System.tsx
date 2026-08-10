@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Activity, RefreshCw, CheckCircle, XCircle, AlertCircle, Users, Database, Server, MoreVertical, RotateCcw, Power, Smartphone, Copy, Check } from 'lucide-react'
+import { Activity, RefreshCw, CheckCircle, XCircle, AlertCircle, Users, Database, MoreVertical, RotateCcw, Power, Smartphone, Copy, Check } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
@@ -107,7 +107,6 @@ export default function System() {
   const readinessData = systemData?.readinessData ?? null
   const metricsData = systemData?.metricsData ?? null
   const configDiagnostics = systemData?.configDiagnostics ?? null
-  const processorStatus = systemData?.processorStatus ?? null
   const activeClients = systemData?.activeClients ?? []
   const error = systemError?.message ?? null
   const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt) : null
@@ -607,75 +606,6 @@ export default function System() {
                 </div>
               ))}
             </div>
-          </div>
-        )}
-
-        {/* Processor Status */}
-        {processorStatus && (
-          <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
-              <Server className="h-5 w-5 mr-2 text-blue-600" />
-              Processor Status
-            </h3>
-            <div className="grid grid-cols-2 gap-4 mb-6">
-              <div className="bg-gray-50 dark:bg-gray-700 rounded-md p-3">
-                <div className="text-sm text-gray-600 dark:text-gray-400">Audio Queue</div>
-                <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-                  {processorStatus.audio_queue_size}
-                </div>
-              </div>
-              <div className="bg-gray-50 dark:bg-gray-700 rounded-md p-3">
-                <div className="text-sm text-gray-600 dark:text-gray-400">Transcription Queue</div>
-                <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-                  {processorStatus.transcription_queue_size}
-                </div>
-              </div>
-              <div className="bg-gray-50 dark:bg-gray-700 rounded-md p-3">
-                <div className="text-sm text-gray-600 dark:text-gray-400">Memory Queue</div>
-                <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-                  {processorStatus.memory_queue_size}
-                </div>
-              </div>
-              <div className="bg-gray-50 dark:bg-gray-700 rounded-md p-3">
-                <div className="text-sm text-gray-600 dark:text-gray-400">Active Tasks</div>
-                <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-                  {processorStatus.active_tasks}
-                </div>
-              </div>
-            </div>
-
-            {/* Worker Information */}
-            {(processorStatus as any).workers && (
-              <div className="mt-4 border-t border-gray-200 dark:border-gray-600 pt-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                    RQ Workers
-                  </h4>
-                  <span className="text-sm text-gray-600 dark:text-gray-400">
-                    {(processorStatus as any).workers.active} / {(processorStatus as any).workers.total} active
-                  </span>
-                </div>
-                <div className="space-y-2">
-                  {(processorStatus as any).workers.details?.map((worker: any, idx: number) => (
-                    <div key={idx} className="flex items-center justify-between bg-gray-50 dark:bg-gray-700 rounded px-3 py-2 text-sm">
-                      <div className="flex items-center space-x-3">
-                        <span className={`w-2 h-2 rounded-full ${worker.state === 'idle' ? 'bg-green-500' : 'bg-blue-500'}`}></span>
-                        <div className="flex flex-col">
-                          <span className="text-gray-900 dark:text-gray-100 font-medium">RQ Worker #{idx + 1}</span>
-                          <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">{worker.name.substring(0, 8)}...</span>
-                        </div>
-                      </div>
-                      <div className="flex items-center space-x-3">
-                        <span className="text-gray-600 dark:text-gray-400 text-xs">{worker.queues?.join(', ')}</span>
-                        <span className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600 dark:bg-gray-600 dark:text-gray-300">
-                          {worker.state}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         )}
 

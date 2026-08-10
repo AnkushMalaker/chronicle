@@ -230,6 +230,12 @@ class Conversation(Document):
         "actual chunks). Such conversations are excluded from the data-audit list and "
         "surfaced on the System Errors page instead of being repeatedly re-analyzed.",
     )
+    transcript_integrity_error: Optional[str] = Field(
+        None,
+        description="Set when a transcription response cannot describe the current "
+        "conversation audio timeline. The exact paid-provider response remains in the "
+        "content-hash cache, but it is not promoted to an active transcript.",
+    )
 
     # Split/merge lineage (data-audit feature)
     derived_from: Optional["Conversation.DerivedFrom"] = Field(

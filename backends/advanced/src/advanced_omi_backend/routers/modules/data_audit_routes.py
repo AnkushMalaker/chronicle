@@ -298,6 +298,25 @@ class IdentifySegmentRequest(BaseModel):
     end: float = Field(..., gt=0.0, description="Segment end time in seconds")
 
 
+class SpeakerLabelReviewDecision(BaseModel):
+    conversation_id: str
+    segment_index: int = Field(..., ge=0)
+    segment_start_time: float = Field(..., ge=0.0)
+    claimed_speaker: str
+    confidence: Optional[float] = None
+    selection_lane: Optional[Literal["boundary", "control"]] = None
+    verdict: Literal[
+        "correct", "relabel", "unknown", "background", "mixed", "bad_audio"
+    ]
+    corrected_speaker: Optional[str] = None
+
+
+class SpeakerLabelReviewRequest(BaseModel):
+    decisions: List[SpeakerLabelReviewDecision] = Field(
+        ..., min_length=1, max_length=20
+    )
+
+
 @router.post("/conversations/{conversation_id}/segments/identify")
 async def identify_segment(
     conversation_id: str,
@@ -308,6 +327,36 @@ async def identify_segment(
     speaker + cosine for the clip (even below the match threshold)."""
     return await data_audit_controller.identify_segment_clip(
         current_user, conversation_id, body.start, body.end
+    )
+
+
+@router.get("/speaker-label-reviews/next")
+async def next_speaker_label_reviews(
+    batch_size: int = Query(5, ge=1, le=20),
+    current_user: User = Depends(current_active_user),
+):
+    """Next corpus-wide batch of speaker identity claims for human review."""
+    return await data_audit_controller.next_speaker_label_reviews(
+        current_user, batch_size
+    )
+
+
+@router.get("/speaker-label-reviews/metrics")
+async def speaker_label_review_metrics(
+    current_user: User = Depends(current_active_user),
+):
+    """Measured identity precision from completed human reviews."""
+    return await data_audit_controller.speaker_label_review_metrics(current_user)
+
+
+@router.post("/speaker-label-reviews/decide")
+async def decide_speaker_label_reviews(
+    body: SpeakerLabelReviewRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Record verdicts; relabels become ordinary pending diarization annotations."""
+    return await data_audit_controller.decide_speaker_label_reviews(
+        current_user, [decision.model_dump() for decision in body.decisions]
     )
 
 

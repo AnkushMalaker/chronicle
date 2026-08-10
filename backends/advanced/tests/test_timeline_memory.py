@@ -252,6 +252,10 @@ async def test_promotion_only_touches_cited_capture_evidence(monkeypatch):
     monkeypatch.setattr(
         discovery.Conversation, "get_pymongo_collection", lambda: collection
     )
+    # This test is about which recordings promotion selects. Resolving a cited id to
+    # whatever is live now needs a real database and is covered by
+    # tests/test_recording_refs.py.
+    monkeypatch.setattr(discovery, "resolve_live_recordings", _identity)
     monkeypatch.setattr(
         discovery.default_queue,
         "enqueue",
@@ -371,3 +375,7 @@ def test_digest_trims_transcripts_when_conversational_episodes_exceed_budget():
     assert any("trimmed" in item for item in dropped)
     # Both conversations survive as content; only their tails are cut.
     assert "Standup" in digest and "One-on-one" in digest
+
+
+async def _identity(conversation_ids):
+    return set(conversation_ids)

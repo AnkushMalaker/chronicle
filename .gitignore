@@ -49,6 +49,7 @@ example/*
 **/audio_chunks/*
 **/mongo_data/*
 .cursor/*
+.zed/*
 .locks
 blobs
 transcription_results.csv
@@ -84,6 +85,10 @@ extras/speaker-omni-experimental/cache/*
 
 # Discovery agent PID file
 edge/.discovery-agent.pid
+
+# Local Graphify knowledge graph. Agents query this directly; it is generated
+# per checkout and hidden from the editor explorer via .vscode/settings.json.
+graphify-out/
 
 # AI Stuff: keep machine-local Claude state ignored, but track the shared skill link.
 .claude/*

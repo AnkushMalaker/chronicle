@@ -10,8 +10,10 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.user import User
 from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
 from advanced_omi_backend.utils.logging_utils import mask_dict
+from advanced_omi_backend.utils.user_time import format_user_datetime
 
 from .email_service import SMTPEmailService
 from .templates import format_html_email, format_text_email
@@ -208,14 +210,17 @@ class EmailSummarizerPlugin(BasePlugin):
             # Format and send
             created_at = conversation.created_at
             duration = conversation.audio_total_duration or 0
+            user = await User.get(context.user_id)
+            timezone_name = user.timezone if user else None
 
-            subject = self._format_subject(created_at)
+            subject = self._format_subject(created_at, timezone_name)
             body_html = format_html_email(
                 summary=summary,
                 transcript=transcript,
                 conversation_id=conversation_id,
                 duration=duration,
                 created_at=created_at,
+                timezone_name=timezone_name,
             )
             body_text = format_text_email(
                 summary=summary,
@@ -223,6 +228,7 @@ class EmailSummarizerPlugin(BasePlugin):
                 conversation_id=conversation_id,
                 duration=duration,
                 created_at=created_at,
+                timezone_name=timezone_name,
             )
 
             success = await self.email_service.send_email(
@@ -257,7 +263,11 @@ class EmailSummarizerPlugin(BasePlugin):
             )
             return PluginResult(success=False, message=f"Error: {str(e)}")
 
-    def _format_subject(self, created_at: Optional[datetime] = None) -> str:
+    def _format_subject(
+        self,
+        created_at: Optional[datetime] = None,
+        timezone_name: Optional[str] = None,
+    ) -> str:
         """
         Format email subject line.
 
@@ -268,7 +278,9 @@ class EmailSummarizerPlugin(BasePlugin):
             Formatted subject line
         """
         if created_at:
-            date_str = created_at.strftime("%b %d, %Y at %I:%M %p")
+            date_str = format_user_datetime(
+                created_at, timezone_name, "%b %d, %Y at %I:%M %p %Z"
+            )
             return f"{self.subject_prefix} - {date_str}"
         else:
             return self.subject_prefix

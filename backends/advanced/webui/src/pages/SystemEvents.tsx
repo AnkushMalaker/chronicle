@@ -67,14 +67,13 @@ function EventRow({
   const sev = SEVERITY_STYLE[event.severity] ?? SEVERITY_STYLE.info
   const SevIcon = sev.Icon
   const expandable = !!(event.detail || event.traceback || Object.keys(event.metadata || {}).length)
+  const detailsId = `system-event-details-${event.id}`
 
   return (
     <div className={`rounded-lg border overflow-hidden ${event.acked ? 'border-gray-200 opacity-60 dark:border-gray-700' : selected ? 'border-green-400 dark:border-green-600' : 'border-gray-200 dark:border-gray-700'}`}>
-      <button
-        type="button"
-        onClick={() => expandable && setOpen(o => !o)}
+      <div
         className={`flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5 text-left ${
-          expandable ? 'hover:bg-gray-50 dark:hover:bg-gray-700/50 cursor-pointer' : 'cursor-default'
+          expandable ? 'hover:bg-gray-50 dark:hover:bg-gray-700/50' : ''
         }`}
       >
         {!event.acked && (
@@ -88,22 +87,44 @@ function EventRow({
           />
         )}
 
-        <span className="flex-shrink-0 w-4 text-gray-400">
-          {expandable ? (open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />) : null}
-        </span>
-
-        <span className={`inline-flex items-center gap-1 flex-shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${sev.chip}`}>
-          <SevIcon className="h-3.5 w-3.5" />
-          {event.severity}
-        </span>
-
-        <span className={`flex-shrink-0 rounded px-1.5 py-0.5 text-xs font-medium ${CATEGORY_CHIP[event.category] || CATEGORY_CHIP.log}`}>
-          {event.category}
-        </span>
-
-        <span className="min-w-0 flex-1 truncate text-sm text-gray-800 dark:text-gray-200" title={event.title}>
-          {event.title}
-        </span>
+        {expandable ? (
+          <button
+            type="button"
+            onClick={() => setOpen(o => !o)}
+            aria-expanded={open}
+            aria-controls={detailsId}
+            className="flex min-w-0 flex-1 items-center gap-3 text-left"
+            title={open ? 'Collapse event details' : 'Expand event details'}
+          >
+            <span className="w-4 flex-shrink-0 text-gray-400">
+              {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+            </span>
+            <span className={`inline-flex flex-shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${sev.chip}`}>
+              <SevIcon className="h-3.5 w-3.5" />
+              {event.severity}
+            </span>
+            <span className={`flex-shrink-0 rounded px-1.5 py-0.5 text-xs font-medium ${CATEGORY_CHIP[event.category] || CATEGORY_CHIP.log}`}>
+              {event.category}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-sm text-gray-800 dark:text-gray-200" title={event.title}>
+              {event.title}
+            </span>
+          </button>
+        ) : (
+          <>
+            <span className="w-4 flex-shrink-0" />
+            <span className={`inline-flex flex-shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${sev.chip}`}>
+              <SevIcon className="h-3.5 w-3.5" />
+              {event.severity}
+            </span>
+            <span className={`flex-shrink-0 rounded px-1.5 py-0.5 text-xs font-medium ${CATEGORY_CHIP[event.category] || CATEGORY_CHIP.log}`}>
+              {event.category}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-sm text-gray-800 dark:text-gray-200" title={event.title}>
+              {event.title}
+            </span>
+          </>
+        )}
 
         {event.count > 1 && (
           <span className="flex-shrink-0 rounded-full bg-gray-200 px-1.5 py-0.5 text-xs font-semibold text-gray-700 dark:bg-gray-600 dark:text-gray-200" title="Times this event recurred">
@@ -146,10 +167,10 @@ function EventRow({
             <Check className="h-3.5 w-3.5" />
           </button>
         )}
-      </button>
+      </div>
 
       {open && expandable && (
-        <div className="border-t border-gray-100 px-4 py-3 dark:border-gray-700/60">
+        <div id={detailsId} className="border-t border-gray-100 px-4 py-3 dark:border-gray-700/60">
           {event.detail && (
             <pre className="mb-2 overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-gray-200 bg-gray-50 p-2 text-xs text-gray-700 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300">
               {event.detail}
@@ -213,6 +234,57 @@ const WINDOWS = [
   { value: 24 * 30, label: 'Last 30d' },
 ]
 
+type SimilarityField = 'severity' | 'category' | 'source' | 'client_id' | 'user_id'
+
+const SIMILARITY_FIELDS: SimilarityField[] = [
+  'severity',
+  'category',
+  'source',
+  'client_id',
+  'user_id',
+]
+
+function findSimilarEvents(events: SystemEvent[], selectedIds: Set<string>): SystemEvent[] {
+  const selectedEvents = events.filter(event => selectedIds.has(event.id))
+  if (selectedEvents.length === 0) return []
+
+  const first = selectedEvents[0]
+  const hasCommonTitle = selectedEvents.every(event => event.title === first.title)
+  if (hasCommonTitle) {
+    return events.filter(event => !event.acked && event.title === first.title)
+  }
+
+  const commonFields = SIMILARITY_FIELDS.filter(field => {
+    const value = first[field]
+    return value != null && value !== '' && selectedEvents.every(event => event[field] === value)
+  })
+  if (commonFields.length === 0) return []
+
+  return events.filter(event =>
+    !event.acked && commonFields.every(field => event[field] === first[field])
+  )
+}
+
+function describeSimilarSelection(events: SystemEvent[], selectedIds: Set<string>): string {
+  const selectedEvents = events.filter(event => selectedIds.has(event.id))
+  if (selectedEvents.length === 0) return ''
+
+  const first = selectedEvents[0]
+  if (selectedEvents.every(event => event.title === first.title)) {
+    return `Matches exact title: ${first.title}`
+  }
+
+  const commonFields = SIMILARITY_FIELDS.filter(field => {
+    const value = first[field]
+    return value != null && value !== '' && selectedEvents.every(event => event[field] === value)
+  })
+  if (commonFields.length === 0) {
+    return 'Unavailable: the selected events have different titles and no shared severity, category, source, client, or user.'
+  }
+
+  return `Matches shared ${commonFields.join(', ')}.`
+}
+
 export default function SystemEvents() {
   const { isAdmin } = useAuth()
   const queryClient = useQueryClient()
@@ -254,6 +326,13 @@ export default function SystemEvents() {
   const sources = Object.keys(summary?.by_source ?? {})
   const unackedVisibleIds = events.filter(e => !e.acked).map(e => e.id)
   const allVisibleSelected = unackedVisibleIds.length > 0 && unackedVisibleIds.every(id => selected.has(id))
+  const similarEvents = findSimilarEvents(events, selected)
+  const similarEventIds = similarEvents.map(event => event.id)
+  const hasNewSimilarEvents = similarEventIds.some(id => !selected.has(id))
+  const similarSelectionDescription = describeSimilarSelection(events, selected)
+  const similarSelectionTitle = hasNewSimilarEvents
+    ? similarSelectionDescription
+    : `${similarSelectionDescription} ${similarEventIds.length > 0 ? 'All visible matches are already selected.' : ''}`.trim()
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ['system-events'] })
@@ -282,6 +361,10 @@ export default function SystemEvents() {
       }
       return new Set([...prev, ...unackedVisibleIds])
     })
+  }
+
+  const selectSimilar = () => {
+    setSelected(prev => new Set([...prev, ...similarEventIds]))
   }
 
   const onAckSelected = () => {
@@ -438,6 +521,20 @@ export default function SystemEvents() {
           disabled={unackedVisibleIds.length === 0}
           onChange={toggleSelectAllVisible}
         />
+
+        {selected.size > 0 && (
+          <span title={similarSelectionTitle}>
+            <button
+              type="button"
+              onClick={selectSimilar}
+              disabled={!hasNewSimilarEvents}
+              className="rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700"
+              aria-label={`Select similar. ${similarSelectionTitle}`}
+            >
+              Select similar (experimental)
+            </button>
+          </span>
+        )}
       </div>
 
       {/* List */}

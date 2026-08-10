@@ -12,6 +12,7 @@ is implemented.
 """
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -28,12 +29,60 @@ from aiohttp import ClientConnectorError
 from advanced_omi_backend.config import get_diarization_settings
 from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.models.conversation import Conversation
-from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
+from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_ranges
 from advanced_omi_backend.utils.audio_extraction import extract_audio_for_results
 from advanced_omi_backend.utils.audio_utils import pcm_to_wav_bytes
 from advanced_omi_backend.utils.segment_utils import is_non_speech
 
 logger = logging.getLogger(__name__)
+
+SPEAKER_IDENTIFY_CONCURRENCY = int(os.getenv("SPEAKER_IDENTIFY_CONCURRENCY", "8"))
+SPEAKER_IDENTIFY_BATCH_SIZE = int(os.getenv("SPEAKER_IDENTIFY_BATCH_SIZE", "32"))
+SPEAKER_IDENTIFY_BATCH_MAX_SECONDS = float(
+    os.getenv("SPEAKER_IDENTIFY_BATCH_MAX_SECONDS", "220")
+)
+
+
+def _pack_identification_batches(
+    segments: List[Dict],
+    indices: List[int],
+    *,
+    max_items: int,
+    max_seconds: float,
+) -> List[List[int]]:
+    """Pack ordered segments under both service item and duration limits."""
+    if max_items < 1 or max_seconds <= 0:
+        raise ValueError("Speaker batch limits must be positive")
+    batches: List[List[int]] = []
+    current: List[int] = []
+    current_seconds = 0.0
+    for index in indices:
+        duration = max(
+            0.0, float(segments[index]["end"]) - float(segments[index]["start"])
+        )
+        if current and (
+            len(current) >= max_items or current_seconds + duration > max_seconds
+        ):
+            batches.append(current)
+            current = []
+            current_seconds = 0.0
+        current.append(index)
+        current_seconds += duration
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _require_wav_audio(wav_bytes: bytes) -> None:
+    """Reject an empty/invalid local reconstruction before calling the service."""
+
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
+            frames = wav_file.getnframes()
+    except (EOFError, wave.Error) as error:
+        raise ValueError("Reconstructed segment contains no decodable audio") from error
+    if frames <= 0:
+        raise ValueError("Reconstructed segment contains no audio frames")
 
 
 def _select_label_mappings(
@@ -423,6 +472,7 @@ class SpeakerRecognitionClient:
                 "confidence": 0.0,
                 "status": "error",
             }
+
         except asyncio.TimeoutError:
             logger.error("🎤 Timeout calling speaker service /identify")
             return {
@@ -447,6 +497,71 @@ class SpeakerRecognitionClient:
                 "confidence": 0.0,
                 "status": "error",
             }
+
+    async def identify_batch(
+        self,
+        clips: List[tuple[str, bytes]],
+        user_id: Optional[str] = None,
+        similarity_threshold: Optional[float] = None,
+        *,
+        session: Optional[aiohttp.ClientSession] = None,
+        include_embeddings: bool = False,
+    ) -> Dict:
+        """Identify an ordered clip batch through one HTTP request."""
+        if not clips:
+            return {
+                "results": [],
+                "batch": {"requested": 0, "processed": 0, "failed": 0},
+            }
+        owns_session = session is None
+        if session is None:
+            session = aiohttp.ClientSession()
+        try:
+            form_data = aiohttp.FormData()
+            for segment_id, audio_wav_bytes in clips:
+                _require_wav_audio(audio_wav_bytes)
+                form_data.add_field(
+                    "files",
+                    audio_wav_bytes,
+                    filename=f"segment-{segment_id}.wav",
+                    content_type="audio/wav",
+                )
+                form_data.add_field("segment_ids", segment_id)
+            if user_id is not None:
+                form_data.add_field("user_id", "1")
+            if similarity_threshold is not None:
+                form_data.add_field("similarity_threshold", str(similarity_threshold))
+            form_data.add_field("include_embeddings", str(include_embeddings).lower())
+            async with session.post(
+                f"{self.service_url}/identify/batch",
+                data=form_data,
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as response:
+                if response.status != 200:
+                    response_text = await response.text()
+                    return {
+                        "error": "server_error",
+                        "message": f"HTTP {response.status}: {response_text[:500]}",
+                        "results": [],
+                    }
+                return await response.json()
+        except ClientConnectorError as error:
+            return {
+                "error": "connection_failed",
+                "message": str(error),
+                "results": [],
+            }
+        except asyncio.TimeoutError as error:
+            return {"error": "timeout", "message": str(error), "results": []}
+        except aiohttp.ClientError as error:
+            return {
+                "error": "client_error",
+                "message": str(error),
+                "results": [],
+            }
+        finally:
+            if owns_session:
+                await session.close()
 
     async def identify_provider_segments(
         self,
@@ -544,53 +659,63 @@ class SpeakerRecognitionClient:
                     f"🎤 Label '{label}': no segments >= {min_segment_duration}s, skipping identification"
                 )
 
-        # Extract audio and identify concurrently with semaphore
-        semaphore = asyncio.Semaphore(3)
-
-        async def _identify_one(seg: Dict) -> Optional[Dict]:
-            async with semaphore:
-                try:
-                    wav_bytes = await reconstruct_audio_segment(
-                        conversation_id, seg["start"], seg["end"]
-                    )
-                    result = await self.identify_segment(
-                        wav_bytes,
-                        user_id=user_id,
-                        similarity_threshold=similarity_threshold,
-                    )
-                    return result
-                except Exception as e:
-                    logger.warning(
-                        f"🎤 Failed to identify segment [{seg['start']:.1f}-{seg['end']:.1f}]: {e}"
-                    )
-                    return None
-
-        # Collect identification tasks
-        label_tasks: Dict[str, List[asyncio.Task]] = {}
-        all_tasks = []
+        sample_refs: List[tuple[str, Dict]] = []
         for label, samples in label_samples.items():
-            tasks = []
             for seg in samples:
-                task = asyncio.create_task(_identify_one(seg))
-                tasks.append(task)
-                all_tasks.append(task)
-            label_tasks[label] = tasks
+                sample_refs.append((label, seg))
 
-        # Wait for all
-        if all_tasks:
-            await asyncio.gather(*all_tasks, return_exceptions=True)
+        sample_results: List[Optional[Dict]] = [None] * len(sample_refs)
+        async with aiohttp.ClientSession() as session:
+            for offset in range(0, len(sample_refs), SPEAKER_IDENTIFY_BATCH_SIZE):
+                batch_refs = sample_refs[offset : offset + SPEAKER_IDENTIFY_BATCH_SIZE]
+                ranges = [(seg["start"], seg["end"]) for _, seg in batch_refs]
+                try:
+                    wav_files = await reconstruct_audio_ranges(conversation_id, ranges)
+                    for wav_file in wav_files:
+                        _require_wav_audio(wav_file)
+                except ValueError as error:
+                    logger.warning(
+                        "🎤 Failed to reconstruct %d majority-vote samples: %s",
+                        len(batch_refs),
+                        error,
+                    )
+                    continue
+
+                batch_response = await self.identify_batch(
+                    [
+                        (str(offset + index), wav_file)
+                        for index, wav_file in enumerate(wav_files)
+                    ],
+                    user_id=user_id,
+                    similarity_threshold=similarity_threshold,
+                    session=session,
+                )
+                if batch_response.get("error"):
+                    logger.warning(
+                        "🎤 Failed to identify %d majority-vote samples: %s",
+                        len(batch_refs),
+                        batch_response.get("message", "Batch failed"),
+                    )
+                    continue
+                response_by_id = {
+                    str(result["segment_id"]): result
+                    for result in batch_response.get("results", [])
+                }
+                for index in range(len(batch_refs)):
+                    sample_results[offset + index] = response_by_id.get(
+                        str(offset + index)
+                    )
 
         # Majority-vote per label
         label_votes: Dict[str, List[tuple[str, float]]] = {}
         identification_evidence: Dict[str, Dict] = {}
-        for label, tasks in label_tasks.items():
+        result_offset = 0
+        for label, samples in label_samples.items():
             votes: List[tuple[str, float]] = []
             sample_evidence = []
-            for sample, task in zip(label_samples[label], tasks):
-                try:
-                    result = task.result()
-                except Exception:
-                    result = None
+            for sample in samples:
+                result = sample_results[result_offset]
+                result_offset += 1
                 sample_evidence.append(
                     {
                         "start": sample["start"],
@@ -702,47 +827,82 @@ class SpeakerRecognitionClient:
             f"(min_duration={min_segment_duration}s)"
         )
 
-        semaphore = asyncio.Semaphore(3)
-
-        async def _identify_one(seg: Dict) -> Optional[Dict]:
-            async with semaphore:
-                try:
-                    wav_bytes = await reconstruct_audio_segment(
-                        conversation_id, seg["start"], seg["end"]
-                    )
-                    return await self.identify_segment(
-                        wav_bytes,
-                        user_id=user_id,
-                        similarity_threshold=similarity_threshold,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"🎤 Failed to identify segment [{seg['start']:.1f}-{seg['end']:.1f}]: {e}"
-                    )
-                    return None
-
-        # Build tasks for speech segments that meet the duration threshold
-        seg_tasks: List[tuple] = []  # (original_index, task_or_None)
-        all_tasks = []
+        eligible_indices = []
         for i, seg in enumerate(segments):
             if i in non_speech_indices:
-                seg_tasks.append((i, None))
                 continue
             duration = seg["end"] - seg["start"]
             if duration >= min_segment_duration:
-                task = asyncio.create_task(_identify_one(seg))
-                seg_tasks.append((i, task))
-                all_tasks.append(task)
-            else:
-                seg_tasks.append((i, None))  # too short
+                eligible_indices.append(i)
 
-        if all_tasks:
-            await asyncio.gather(*all_tasks, return_exceptions=True)
+        segment_results: List[Optional[Dict]] = [None] * len(segments)
+        async with aiohttp.ClientSession() as session:
+            batches = _pack_identification_batches(
+                segments,
+                eligible_indices,
+                max_items=SPEAKER_IDENTIFY_BATCH_SIZE,
+                max_seconds=SPEAKER_IDENTIFY_BATCH_MAX_SECONDS,
+            )
+            for batch_indices in batches:
+                batch_ranges = [
+                    (segments[index]["start"], segments[index]["end"])
+                    for index in batch_indices
+                ]
+                try:
+                    wav_files = await reconstruct_audio_ranges(
+                        conversation_id,
+                        batch_ranges,
+                    )
+                    for wav_file in wav_files:
+                        _require_wav_audio(wav_file)
+                except ValueError as error:
+                    logger.error(
+                        "Transcript/audio data error for %d-segment batch: %s",
+                        len(batch_indices),
+                        error,
+                    )
+                    for index in batch_indices:
+                        segment_results[index] = {
+                            "_local_error": "transcript_data_error",
+                            "message": str(error),
+                        }
+                    continue
+
+                batch_response = await self.identify_batch(
+                    [
+                        (str(index), wav_file)
+                        for index, wav_file in zip(batch_indices, wav_files)
+                    ],
+                    user_id=user_id,
+                    similarity_threshold=similarity_threshold,
+                    session=session,
+                    include_embeddings=True,
+                )
+                if batch_response.get("error"):
+                    for index in batch_indices:
+                        segment_results[index] = {
+                            "_local_error": "speaker_client_error",
+                            "message": batch_response.get("message", "Batch failed"),
+                        }
+                    continue
+                response_by_id = {
+                    str(result["segment_id"]): result
+                    for result in batch_response.get("results", [])
+                }
+                for index in batch_indices:
+                    segment_results[index] = response_by_id.get(
+                        str(index),
+                        {
+                            "_local_error": "speaker_client_error",
+                            "message": "Batch response omitted this segment",
+                        },
+                    )
 
         # Build result segments
         result_segments = []
         identified_count = 0
         error_count = 0
+        data_error_count = 0
         for i, seg in enumerate(segments):
             label = seg.get("speaker", "Unknown")
 
@@ -760,11 +920,7 @@ class SpeakerRecognitionClient:
                 )
                 continue
 
-            # Find the matching task entry
-            task_entry = seg_tasks[i]
-            task = task_entry[1]
-
-            if task is None:
+            if i not in eligible_indices:
                 # Too short for identification
                 result_segments.append(
                     {
@@ -779,13 +935,9 @@ class SpeakerRecognitionClient:
                 )
                 continue
 
-            try:
-                result = task.result()
-            except Exception:
-                result = None
+            result = segment_results[i]
 
-            # None result means _identify_one raised an exception (audio reconstruction or service call)
-            if result is None:
+            if result is None or result.get("_local_error") == "speaker_client_error":
                 error_count += 1
                 result_segments.append(
                     {
@@ -800,9 +952,33 @@ class SpeakerRecognitionClient:
                 )
                 continue
 
+            if result.get("_local_error") == "transcript_data_error":
+                data_error_count += 1
+                result_segments.append(
+                    {
+                        "start": seg["start"],
+                        "end": seg["end"],
+                        "text": seg.get("text", ""),
+                        "speaker": label,
+                        "identified_as": None,
+                        "confidence": 0.0,
+                        "status": "data_error",
+                        "error": result.get("message"),
+                    }
+                )
+                continue
+
             if result.get("found"):
                 name = result.get("speaker_name", label)
                 confidence = result.get("confidence", 0.0)
+                embedding_context = (
+                    {
+                        "_evaluation_embedding": result["embedding"],
+                        "_embedding_model": result.get("embedding_model"),
+                    }
+                    if result.get("embedding")
+                    else {}
+                )
                 result_segments.append(
                     {
                         "start": seg["start"],
@@ -812,6 +988,7 @@ class SpeakerRecognitionClient:
                         "identified_as": name,
                         "confidence": confidence,
                         "status": "identified",
+                        **embedding_context,
                     }
                 )
                 identified_count += 1
@@ -830,6 +1007,14 @@ class SpeakerRecognitionClient:
                     }
                 )
             else:
+                embedding_context = (
+                    {
+                        "_evaluation_embedding": result["embedding"],
+                        "_embedding_model": result.get("embedding_model"),
+                    }
+                    if result.get("embedding")
+                    else {}
+                )
                 result_segments.append(
                     {
                         "start": seg["start"],
@@ -839,20 +1024,32 @@ class SpeakerRecognitionClient:
                         "identified_as": None,
                         "confidence": 0.0,
                         "status": "unknown",
+                        **embedding_context,
                     }
                 )
 
         logger.info(
             f"🎤 Per-segment identification complete: "
             f"{identified_count}/{len(speech_segments)} segments identified, "
-            f"{error_count} errors, "
+            f"{error_count} service/client errors, {data_error_count} data errors, "
             f"{len(result_segments)} total segments"
         )
 
         result = {"segments": result_segments}
 
-        # If all speech segments errored, surface this as a service error
-        if error_count > 0 and error_count == len(all_tasks):
+        # Local transcript/audio failures never say the remote service is unhealthy.
+        # Prefer the data signal for a mixed all-failed batch: at least one request was
+        # never sent remotely, so reporting the service itself as wholly down is false.
+        all_failed = error_count + data_error_count == len(eligible_indices)
+        if data_error_count > 0 and all_failed:
+            result["error"] = "transcript_data_error"
+            result["message"] = (
+                f"{data_error_count} segment(s) fall outside the conversation audio; "
+                f"{error_count} other identification request(s) failed. "
+                "The transcript timing data is invalid."
+            )
+        # If all remote requests errored, surface this as a service error.
+        elif error_count > 0 and error_count == len(eligible_indices):
             result["error"] = "speaker_service_error"
             result["message"] = (
                 f"All {error_count} identification requests failed. "
@@ -860,6 +1057,8 @@ class SpeakerRecognitionClient:
             )
         elif error_count > 0:
             result["partial_errors"] = error_count
+        if data_error_count > 0 and "error" not in result:
+            result["data_errors"] = data_error_count
 
         return result
 

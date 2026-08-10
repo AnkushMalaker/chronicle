@@ -43,15 +43,20 @@ LLM_MODELS = {
         "ctx_size": 8192,
         "thinking": True,
     },
-    "unsloth/Qwen3.6-27B-GGUF": {
-        "hf": "unsloth/Qwen3.6-27B-GGUF:Q4_K_M",
-        # Dense 27B, so unlike the GLM MoE above every parameter is read per token
-        # — it needs ~16.8GB of weights resident and the whole card to itself.
-        "description": "Qwen 3.6 27B Q4_K_M (~17GB, dense, thinking, needs a free 24GB GPU)",
-        # Validated on a 24GB A30: Q8 KV at 64K uses 18,344 MiB with the
-        # text-only/no-projector profile and has effectively the same 7.5K-token
-        # prompt-processing speed as 32K.
-        "ctx_size": 65536,
+    "meta-models/Muse-Glimmer-30B-GGUF": {
+        "hf": "meta-models/Muse-Glimmer-30B-GGUF",
+        "hf_file": "muse-glimmer-30B-kquant-17gb.gguf",
+        "model_name": (
+            "meta-models/Muse-Glimmer-30B-GGUF:" "muse-glimmer-30B-kquant-17gb.gguf"
+        ),
+        "draft_url": (
+            "https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF/resolve/"
+            "main/dflash-kquant.gguf"
+        ),
+        "description": (
+            "Muse Glimmer 30B K-Quant-17GB (agentic, vision, DFlash, 24GB GPU)"
+        ),
+        "ctx_size": 131072,
         "thinking": True,
     },
     "bartowski/Qwen2.5-7B-Instruct-GGUF": {
@@ -68,17 +73,17 @@ LLM_MODELS = {
     },
 }
 
-DEFAULT_LLM_REPO = "ggml-org/gemma-4-12B-it-GGUF"
-QWEN36_REPO = "unsloth/Qwen3.6-27B-GGUF"
-MANAGED_LLAMACPP_REGISTRY_MODELS = {"llamacpp-llm", "qwen36-llm"}
+MUSE_GLIMMER_REPO = "meta-models/Muse-Glimmer-30B-GGUF"
+DEFAULT_LLM_REPO = MUSE_GLIMMER_REPO
+MANAGED_LLAMACPP_REGISTRY_MODELS = {"llamacpp-llm", "muse-glimmer-llm"}
 DEFAULT_CUSTOM_CONTEXT_WINDOW = 8192
 DEFAULT_PI_MAX_TOKENS = 4096
 PI_PROMPT_HEADROOM_TOKENS = 1024
 TAILSCALE_IPV4_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
-# llama.cpp's documented defaults for the knobs Chronicle changes in the Qwen
-# text-agent profile. Keeping these explicit prevents a rerun from leaving stale
-# Qwen-only values behind when another model is selected.
+# llama.cpp's documented defaults for the knobs Chronicle changes in specialized
+# serving profiles. Keeping these explicit prevents a rerun from leaving stale
+# model-specific values behind when another model is selected.
 DEFAULT_SERVER_PROFILE = {
     "LLAMA_ARG_N_PARALLEL": "1",
     "LLAMA_ARG_FLASH_ATTN": "auto",
@@ -87,20 +92,30 @@ DEFAULT_SERVER_PROFILE = {
     "LLAMA_ARG_CACHE_TYPE_V": "f16",
     "LLAMA_ARG_MMPROJ_AUTO": "true",
     "LLAMA_ARG_THINK_BUDGET": "-1",
+    "LLAMA_ARG_REASONING": "auto",
+    "LLAMA_ARG_SPEC_TYPE": "none",
+    "LLAMA_ARG_SPEC_DRAFT_MODEL": "",
+    "LLAMA_ARG_SPEC_DRAFT_N_MAX": "3",
+    "LLAMA_ARG_FIT": "on",
+    "LLAMA_DRAFT_MODEL_URL": "",
 }
-QWEN_TEXT_SERVER_PROFILE = {
+MUSE_GLIMMER_SERVER_PROFILE = {
     **DEFAULT_SERVER_PROFILE,
     "LLAMA_ARG_N_PARALLEL": "1",
     "LLAMA_ARG_FLASH_ATTN": "on",
     "LLAMA_ARG_CACHE_TYPE_K": "q8_0",
     "LLAMA_ARG_CACHE_TYPE_V": "q8_0",
-    # `-hf` otherwise auto-downloads and loads Qwen's ~0.93GB vision projector.
-    # Chronicle's local memory service is text-only.
-    "LLAMA_ARG_MMPROJ_AUTO": "false",
-    # Thinking is unrestricted by default, and a memory prompt already reaches ~15K
-    # of the served window. Cap the trace so an unbounded one cannot crowd out the
-    # transcript and tool results the agent still has to read.
-    "LLAMA_ARG_THINK_BUDGET": "2000",
+    "LLAMA_ARG_MMPROJ_AUTO": "true",
+    "LLAMA_ARG_THINK_BUDGET": "-1",
+    "LLAMA_ARG_REASONING": "on",
+    "LLAMA_ARG_SPEC_TYPE": "draft-dflash",
+    "LLAMA_ARG_SPEC_DRAFT_MODEL": "/cache/dflash-kquant.gguf",
+    "LLAMA_ARG_SPEC_DRAFT_N_MAX": "4",
+    # Do not silently shrink the advertised 131K window to make a bad fit appear
+    # healthy. The official 17GB target, projector, and drafter are designed for a
+    # 24GB device; startup should fail loudly if the actual device cannot hold them.
+    "LLAMA_ARG_FIT": "off",
+    "LLAMA_DRAFT_MODEL_URL": LLM_MODELS[MUSE_GLIMMER_REPO]["draft_url"],
 }
 
 # Embedding model options
@@ -455,14 +470,14 @@ class LLMServicesSetup:
         """Map a served GGUF to the Chronicle registry entry that identifies it."""
         hf_ref = str(llm_info.get("hf") or "")
         upstream_repo = hf_ref.split(":", 1)[0]
-        if llm_repo == QWEN36_REPO or upstream_repo == QWEN36_REPO:
-            return "qwen36-llm"
+        if llm_repo == MUSE_GLIMMER_REPO or upstream_repo == MUSE_GLIMMER_REPO:
+            return "muse-glimmer-llm"
         return "llamacpp-llm"
 
     @classmethod
     def _server_profile(cls, llm_repo, llm_info) -> Dict[str, str]:
-        if cls._registry_llm_name(llm_repo, llm_info) == "qwen36-llm":
-            return dict(QWEN_TEXT_SERVER_PROFILE)
+        if cls._registry_llm_name(llm_repo, llm_info) == "muse-glimmer-llm":
+            return dict(MUSE_GLIMMER_SERVER_PROFILE)
         return dict(DEFAULT_SERVER_PROFILE)
 
     @staticmethod
@@ -555,7 +570,9 @@ class LLMServicesSetup:
             raise ValueError(
                 f"{registry_llm} was not available after syncing defaults.yml"
             )
-        model_identity = llm_info.get("hf") or llm_info.get("file")
+        model_identity = (
+            llm_info.get("model_name") or llm_info.get("hf") or llm_info.get("file")
+        )
         if not str(model_identity or "").strip():
             raise ValueError(
                 "Selected llama.cpp model has no HuggingFace or file identity"
@@ -683,6 +700,7 @@ class LLMServicesSetup:
             # LLM_MODEL_FILE (local file) drives the model source; the compose
             # file prefers the HF repo when it is set.
             self.config["LLM_HF_REPO"] = llm_info.get("hf", "")
+            self.config["LLM_HF_FILE"] = llm_info.get("hf_file", "")
             self.config["EMBED_HF_REPO"] = embed_info.get("hf", "")
             self.config["LLM_MODEL_FILE"] = llm_info.get("file", "model.gguf")
             self.config["EMBED_MODEL_FILE"] = embed_info.get("file", "embed-model.gguf")

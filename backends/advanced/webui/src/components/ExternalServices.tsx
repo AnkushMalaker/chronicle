@@ -346,19 +346,36 @@ export default function ExternalServices({
 
   if (!isAdmin) return null
 
-  // Initial load — show a skeleton card so it's clear status is being fetched
-  // (the node-agent / cluster discovery can take a few seconds), rather than a
-  // blank space where the section will appear.
+  // Cluster discovery can take several seconds. Reserve the real list's shape so
+  // the rest of the System page does not jump when service data arrives.
   if (isLoading) {
     return (
-      <Card raised padded={false} className="p-6">
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4 flex items-center">
-          <Wrench className="h-5 w-5 mr-2 text-blue-600" />
-          {title}
-        </h3>
-        <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
-          <RefreshCw className="h-4 w-4 text-blue-500 animate-spin" />
-          <span>Loading services…</span>
+      <Card raised padded={false} className="p-6" aria-busy="true">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="flex items-center text-lg font-semibold text-gray-900 dark:text-gray-100">
+            <Wrench className="mr-2 h-5 w-5 text-blue-600" />
+            {title}
+          </h3>
+          <span className="inline-flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+            <RefreshCw className="h-3.5 w-3.5 animate-spin text-blue-500" />
+            Checking service health
+          </span>
+        </div>
+        <div className="space-y-3" role="status" aria-label="Loading external services">
+          {[0, 1, 2].map(index => (
+            <div
+              key={index}
+              className="flex animate-pulse items-center gap-3 rounded-lg border border-gray-200 bg-gray-50/70 p-3 dark:border-gray-700 dark:bg-gray-900/30"
+            >
+              <div className="h-9 w-9 flex-shrink-0 rounded-md bg-gray-200 dark:bg-gray-700" />
+              <div className="min-w-0 flex-1 space-y-2">
+                <div className="h-3 w-32 rounded bg-gray-200 dark:bg-gray-700" />
+                <div className="h-2.5 w-full max-w-sm rounded bg-gray-100 dark:bg-gray-700/70" />
+              </div>
+              <div className="h-6 w-16 flex-shrink-0 rounded-full bg-gray-200 dark:bg-gray-700" />
+            </div>
+          ))}
+          <span className="sr-only">Discovering nodes and checking service health.</span>
         </div>
       </Card>
     )

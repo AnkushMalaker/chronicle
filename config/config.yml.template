@@ -437,7 +437,7 @@ memory:
       limit_id: ''
     pi:
       # Chronicle model-registry name, not the upstream API model string.
-      model: qwen36-llm
+      model: muse-glimmer-llm
       timeout_seconds: 900
       context_window: 65536
       max_tokens: 4096

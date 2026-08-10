@@ -323,7 +323,7 @@ async def _generate_with_op(
         api_params["model"] = model
     if not model_supports_temperature(api_params.get("model")):
         api_params.pop("temperature", None)
-    api_params["messages"] = [{"role": "user", "content": prompt}]
+    api_params["messages"] = op.prepare_messages([{"role": "user", "content": prompt}])
     response = await client.chat.completions.create(**api_params)
     choice = response.choices[0]
     content = (choice.message.content or "").strip()
@@ -432,7 +432,7 @@ async def async_chat_with_tools(
             api_params["temperature"] = temperature
         if model_override is not None:
             api_params["model"] = model_override
-        api_params["messages"] = messages
+        api_params["messages"] = op.prepare_messages(messages)
         if tools:
             api_params["tools"] = tools
         return await client.chat.completions.create(**api_params)
@@ -541,7 +541,7 @@ async def async_chat_with_tools_stream(
             api_params["temperature"] = temperature
         if model_override is not None:
             api_params["model"] = model_override
-        api_params["messages"] = messages
+        api_params["messages"] = op.prepare_messages(messages)
         if tools:
             api_params["tools"] = tools
         api_params["stream"] = True
@@ -634,25 +634,35 @@ async def _async_health_check_named_default(
     result = {"base_url": url, "default_model": model_def.model_name}
     if not model_def.api_key or not url or not model_def.model_name:
         return {**result, "status": "⚠️ Configuration incomplete", "healthy": False}
-    try:
-        client = create_openai_client(
-            api_key=model_def.api_key, base_url=url, is_async=True
-        )
-        await asyncio.wait_for(client.models.list(), timeout=5.0)
-        return {**result, "status": "✅ Connected", "healthy": True}
-    except openai.AuthenticationError:
-        return {**result, "status": "❌ Auth Failed — check API key", "healthy": False}
-    except asyncio.TimeoutError:
-        return {**result, "status": "❌ Connection Timeout", "healthy": False}
-    except openai.APIConnectionError:
-        return {
-            **result,
-            "status": "❌ Connection Failed — service unreachable",
-            "healthy": False,
-        }
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"{label} health check failed: {e}")
-        return {**result, "status": f"❌ Error: {e}", "healthy": False}
+    for attempt in range(2):
+        try:
+            client = create_openai_client(
+                api_key=model_def.api_key, base_url=url, is_async=True
+            )
+            await asyncio.wait_for(client.models.list(), timeout=5.0)
+            return {**result, "status": "✅ Connected", "healthy": True}
+        except openai.AuthenticationError:
+            return {
+                **result,
+                "status": "❌ Auth Failed — check API key",
+                "healthy": False,
+            }
+        except asyncio.TimeoutError:
+            if attempt == 0:
+                logger.info("%s health check timed out; retrying once", label)
+                continue
+            return {**result, "status": "❌ Connection Timeout", "healthy": False}
+        except openai.APIConnectionError:
+            return {
+                **result,
+                "status": "❌ Connection Failed — service unreachable",
+                "healthy": False,
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"{label} health check failed: {e}")
+            return {**result, "status": f"❌ Error: {e}", "healthy": False}
+
+    raise RuntimeError("unreachable named LLM health-check state")
 
 
 async def async_health_check_fast() -> Optional[Dict]:

@@ -55,7 +55,7 @@ RUN git clone ${NOTESMD_REPO} /src \
 FROM debian:bookworm-slim AS codex-fetcher
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-ARG CODEX_VERSION=0.144.4
+ARG CODEX_VERSION=0.147.0
 ARG TARGETARCH
 RUN case "${TARGETARCH:-amd64}" in \
       arm64) triple=aarch64-unknown-linux-musl ;; \
@@ -63,7 +63,11 @@ RUN case "${TARGETARCH:-amd64}" in \
     esac \
     && curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${triple}.tar.gz" \
        | tar -xz -C /tmp \
-    && install -m 0755 "/tmp/codex-${triple}" /usr/local/bin/codex
+    && curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-code-mode-host-${triple}.tar.gz" \
+       | tar -xz -C /tmp \
+    && install -m 0755 "/tmp/codex-${triple}" /usr/local/bin/codex \
+    && install -m 0755 "/tmp/codex-code-mode-host-${triple}" \
+       /usr/local/bin/codex-code-mode-host
 
 
 # ============================================
@@ -98,6 +102,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=notesmd-builder /out/notesmd-cli /usr/local/bin/notesmd-cli
 # Codex CLI on PATH for the optional Codex memory-write backend.
 COPY --from=codex-fetcher /usr/local/bin/codex /usr/local/bin/codex
+COPY --from=codex-fetcher /usr/local/bin/codex-code-mode-host /usr/local/bin/codex-code-mode-host
 # Pi CLI and its compatible Node runtime. npm itself is not needed at runtime.
 COPY --from=pi-fetcher /usr/local/bin/node /usr/local/bin/node
 COPY --from=pi-fetcher /usr/local/LICENSE /usr/local/LICENSE.node

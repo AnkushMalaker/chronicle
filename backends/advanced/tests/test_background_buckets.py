@@ -527,3 +527,44 @@ async def test_background_reference_does_not_override_stronger_foreground(monkey
     # The foreground identification wins outright — nothing recorded, not even
     # as unsure: a familiar voice beating the bucket is not a close call.
     assert ledger == []
+
+
+@pytest.mark.asyncio
+async def test_background_reference_reuses_identification_embedding(monkeypatch):
+    segments = [
+        {
+            "start": 0.0,
+            "end": 3.0,
+            "identified_as": None,
+            "confidence": 0.1,
+            "_evaluation_embedding": [1.0, 0.0],
+            "_embedding_model": "wespeaker-test",
+        }
+    ]
+
+    async def should_not_reconstruct(*_args):
+        raise AssertionError("identification audio must not be reconstructed twice")
+
+    class SpeakerClient:
+        async def extract_speaker_embedding(self, _wav):
+            raise AssertionError("identification audio must not be embedded twice")
+
+    async def match(_user, embeddings, bucket_type, model):
+        assert embeddings == [[1.0, 0.0]]
+        assert model == "wespeaker-test"
+        similarity = 0.8 if bucket_type == "background_speech" else 0.2
+        return {"results": [{"bucket_similarity": similarity}]}
+
+    monkeypatch.setattr(
+        speaker_jobs, "reconstruct_audio_segment", should_not_reconstruct
+    )
+    monkeypatch.setattr(
+        speaker_jobs.background_bucket_controller, "match_embeddings", match
+    )
+    _stub_suppression_ledger(monkeypatch)
+
+    await speaker_jobs._apply_background_references(
+        "conversation", segments, _StubUser(), SpeakerClient()
+    )
+
+    assert segments[0]["identified_as"] == "Background Speech"

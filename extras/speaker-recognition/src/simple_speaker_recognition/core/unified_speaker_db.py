@@ -67,15 +67,16 @@ class UnifiedSpeakerDB:
             self.index = faiss.IndexFlatIP(self.emb_dim)
 
             vectors = []
-            for i, speaker in enumerate(speakers):
+            for speaker in speakers:
                 embedding_data = cast(Optional[str], speaker.embedding_data)
                 if embedding_data:
                     try:
                         embedding = np.array(
                             json.loads(embedding_data), dtype=np.float32
                         )
+                        vector_index = len(vectors)
                         vectors.append(embedding)
-                        self.faiss_to_speaker[i] = (
+                        self.faiss_to_speaker[vector_index] = (
                             cast(int, speaker.user_id),
                             cast(str, speaker.id),
                         )
@@ -248,43 +249,65 @@ class UnifiedSpeakerDB:
         Each candidate is {id, name, user_id, similarity, distance}. Empty list if the
         index is empty or nothing matches the user filter.
         """
-        if self.index.ntotal == 0:
+        return (await self._rank_candidates_batch([embedding], user_id=user_id))[0]
+
+    async def _rank_candidates_batch(
+        self,
+        embeddings: List[np.ndarray] | np.ndarray,
+        user_id: Optional[int] = None,
+    ) -> List[List[Dict]]:
+        """Rank gallery candidates for many embeddings with one FAISS and SQL query."""
+        matrix = np.asarray(embeddings, dtype=np.float32)
+        if matrix.ndim == 1:
+            matrix = matrix.reshape(1, -1)
+        if matrix.ndim != 2 or matrix.shape[1] != self.emb_dim:
+            raise ValueError(
+                f"Expected embeddings shaped (N, {self.emb_dim}), got {matrix.shape}"
+            )
+        if not len(matrix):
             return []
+        if self.index.ntotal == 0:
+            return [[] for _ in range(len(matrix))]
 
-        # Normalize query embedding
-        query_emb = _normalize(embedding.astype(np.float32))
+        normalized = _normalize(matrix)
+        k = min(10, self.index.ntotal)
+        similarities, indices = self.index.search(normalized, k)
 
-        # Use FAISS to find nearest neighbors
-        k = min(10, self.index.ntotal)  # Search top-k candidates
-        similarities, indices = self.index.search(query_emb.reshape(1, -1), k)
+        candidate_keys = {
+            self.faiss_to_speaker[index]
+            for row in indices
+            for index in row
+            if index != -1
+            and index in self.faiss_to_speaker
+            and (user_id is None or self.faiss_to_speaker[index][0] == user_id)
+        }
 
         db = get_db_session()
         try:
-            all_candidates: List[Dict] = []
-            for idx, similarity in zip(indices[0], similarities[0]):
-                if idx == -1:  # FAISS returns -1 for invalid indices
-                    continue
-                if idx not in self.faiss_to_speaker:
-                    continue
-
-                candidate_user_id, speaker_id = self.faiss_to_speaker[idx]
-
-                # Apply user filter if specified
-                if user_id is not None and candidate_user_id != user_id:
-                    continue
-
-                # FAISS IndexFlatIP returns inner product for normalized vectors (cosine)
-                cosine_similarity = float(similarity)
-
-                speaker = (
-                    db.query(Speaker)
-                    .filter(
-                        Speaker.id == speaker_id, Speaker.user_id == candidate_user_id
-                    )
-                    .first()
-                )
-                if speaker:
-                    all_candidates.append(
+            speaker_ids = [speaker_id for _, speaker_id in candidate_keys]
+            speakers = (
+                db.query(Speaker).filter(Speaker.id.in_(speaker_ids)).all()
+                if speaker_ids
+                else []
+            )
+            metadata = {
+                (cast(int, speaker.user_id), cast(str, speaker.id)): speaker
+                for speaker in speakers
+            }
+            ranked_rows: List[List[Dict]] = []
+            for row_indices, row_similarities in zip(indices, similarities):
+                candidates: List[Dict] = []
+                for index, similarity in zip(row_indices, row_similarities):
+                    if index == -1 or index not in self.faiss_to_speaker:
+                        continue
+                    candidate_user_id, speaker_id = self.faiss_to_speaker[index]
+                    if user_id is not None and candidate_user_id != user_id:
+                        continue
+                    speaker = metadata.get((candidate_user_id, speaker_id))
+                    if speaker is None:
+                        continue
+                    cosine_similarity = float(similarity)
+                    candidates.append(
                         {
                             "id": speaker.id,
                             "name": speaker.name,
@@ -293,66 +316,87 @@ class UnifiedSpeakerDB:
                             "distance": 1.0 - cosine_similarity,
                         }
                     )
-
-            ranked = sorted(all_candidates, key=lambda c: c["similarity"], reverse=True)
-
-            if ranked:
-                log.info("Speaker identification candidates:")
-                for candidate in ranked:
-                    log.info(
-                        f"  {candidate['name']} ({candidate['id']}): "
-                        f"similarity={candidate['similarity']:.4f}, "
-                        f"distance={candidate['distance']:.4f}"
+                ranked_rows.append(
+                    sorted(
+                        candidates, key=lambda item: item["similarity"], reverse=True
                     )
-                log.info(f"Threshold: {self.similarity_thr:.4f}")
-            else:
-                log.info("No valid candidates found for identification")
-
-            return ranked
+                )
+            return ranked_rows
         except Exception as e:
             log.error("Error during identification: %s", e)
-            return []
+            raise
         finally:
             db.close()
 
     async def identify(
-        self, embedding: np.ndarray, user_id: Optional[int] = None
+        self,
+        embedding: np.ndarray,
+        user_id: Optional[int] = None,
+        similarity_threshold: Optional[float] = None,
     ) -> Tuple[bool, Optional[Dict], float]:
         """Identify speaker from embedding using FAISS search (best match only)."""
         found, speaker, similarity, _ = await self.identify_with_candidates(
-            embedding, user_id=user_id
+            embedding,
+            user_id=user_id,
+            similarity_threshold=similarity_threshold,
         )
         return found, speaker, similarity
 
     async def identify_with_candidates(
-        self, embedding: np.ndarray, user_id: Optional[int] = None
+        self,
+        embedding: np.ndarray,
+        user_id: Optional[int] = None,
+        similarity_threshold: Optional[float] = None,
     ) -> Tuple[bool, Optional[Dict], float, List[Dict]]:
         """Like :meth:`identify` but also returns the ranked candidate list.
 
         Lets callers apply an open-set margin (best vs. runner-up) and exclusive
         assignment across multiple diarized speakers.
         """
-        ranked = await self._rank_candidates(embedding, user_id=user_id)
-        if not ranked:
-            return False, None, 0.0, []
-
-        best = ranked[0]
-        best_similarity = best["similarity"]
-        if best_similarity >= self.similarity_thr:
-            best_speaker = {
-                "id": best["id"],
-                "name": best["name"],
-                "user_id": best["user_id"],
-            }
-            log.info(
-                "Identified speaker: %s (similarity: %.4f)",
-                best["name"],
-                best_similarity,
+        return (
+            await self.identify_batch_with_candidates(
+                [np.asarray(embedding, dtype=np.float32).reshape(-1)],
+                user_id=user_id,
+                similarity_threshold=similarity_threshold,
             )
-            return True, best_speaker, best_similarity, ranked
+        )[0]
 
-        log.info("No speaker identified (best similarity: %.4f)", best_similarity)
-        return False, None, best_similarity, ranked
+    async def identify_batch_with_candidates(
+        self,
+        embeddings: List[np.ndarray] | np.ndarray,
+        user_id: Optional[int] = None,
+        similarity_threshold: Optional[float] = None,
+    ) -> List[Tuple[bool, Optional[Dict], float, List[Dict]]]:
+        """Identify an ordered embedding batch using one gallery lookup."""
+        threshold = (
+            self.similarity_thr
+            if similarity_threshold is None
+            else similarity_threshold
+        )
+        ranked_rows = await self._rank_candidates_batch(embeddings, user_id=user_id)
+        results: List[Tuple[bool, Optional[Dict], float, List[Dict]]] = []
+        for ranked in ranked_rows:
+            if not ranked:
+                results.append((False, None, 0.0, []))
+                continue
+            best = ranked[0]
+            best_similarity = best["similarity"]
+            if best_similarity >= threshold:
+                results.append(
+                    (
+                        True,
+                        {
+                            "id": best["id"],
+                            "name": best["name"],
+                            "user_id": best["user_id"],
+                        },
+                        best_similarity,
+                        ranked,
+                    )
+                )
+            else:
+                results.append((False, None, best_similarity, ranked))
+        return results
 
     async def verify(
         self, speaker_id: str, embedding: np.ndarray, user_id: int

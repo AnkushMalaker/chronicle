@@ -8,8 +8,11 @@ generates a consolidated LLM recap, and emails it to the user.
 import html
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Optional
+
+from bson import ObjectId
+from email_summarizer.email_service import SMTPEmailService
 
 from advanced_omi_backend.database import get_database
 from advanced_omi_backend.llm_client import async_generate
@@ -18,8 +21,7 @@ from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginR
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.utils.logging_utils import mask_dict
-from bson import ObjectId
-from email_summarizer.email_service import SMTPEmailService
+from advanced_omi_backend.utils.user_time import format_user_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -181,14 +183,10 @@ class HourlyRecapPlugin(BasePlugin):
                 f"{self.lookback_minutes}m"
             )
 
-            # 2. Build conversation block for LLM prompt
-            conversations_block = self._build_conversations_block(conversations)
-
-            # 3. Generate consolidated recap via LLM
-            recap = await self._generate_recap(conversations_block)
-
-            # 4. Look up user email
-            user_email = await self._get_user_email(context.user_id)
+            # 2. Look up user email and presentation timezone
+            user_email, timezone_name = await self._get_user_preferences(
+                context.user_id
+            )
             if not user_email:
                 logger.warning(
                     f"No notification_email for user {context.user_id}, "
@@ -199,10 +197,17 @@ class HourlyRecapPlugin(BasePlugin):
                     message=f"No email configured for user {context.user_id}",
                 )
 
-            # 5. Format and send email
-            subject = self._format_subject()
-            body_html = self._format_html(recap, conversations)
-            body_text = self._format_text(recap, conversations)
+            conversations_block = self._build_conversations_block(
+                conversations, timezone_name
+            )
+
+            # 3. Generate consolidated recap via LLM
+            recap = await self._generate_recap(conversations_block)
+
+            # 4. Format and send email
+            subject = self._format_subject(timezone_name)
+            body_html = self._format_html(recap, conversations, timezone_name)
+            body_text = self._format_text(recap, conversations, timezone_name)
 
             success = await self.email_service.send_email(
                 to_email=user_email,
@@ -235,11 +240,19 @@ class HourlyRecapPlugin(BasePlugin):
             logger.error(f"Error in hourly recap plugin: {e}", exc_info=True)
             return PluginResult(success=False, message=f"Error: {str(e)}")
 
-    def _build_conversations_block(self, conversations: List[Conversation]) -> str:
+    def _build_conversations_block(
+        self,
+        conversations: List[Conversation],
+        timezone_name: Optional[str],
+    ) -> str:
         """Build a text block summarizing each conversation for the LLM prompt."""
         parts = []
         for i, conv in enumerate(conversations, 1):
-            created = conv.created_at.strftime("%I:%M %p") if conv.created_at else "N/A"
+            created = (
+                format_user_datetime(conv.created_at, timezone_name, "%I:%M %p %Z")
+                if conv.created_at
+                else "N/A"
+            )
             duration = (
                 f"{int(conv.audio_total_duration // 60)}m {int(conv.audio_total_duration % 60)}s"
                 if conv.audio_total_duration
@@ -288,40 +301,55 @@ class HourlyRecapPlugin(BasePlugin):
             logger.warning("Using fallback: raw conversation summaries")
             return conversations_block
 
-    async def _get_user_email(self, user_id: str) -> Optional[str]:
-        """Get notification email for a user."""
+    async def _get_user_preferences(
+        self, user_id: str
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Get the notification email and presentation timezone for a user."""
         try:
             user = await self.db["users"].find_one({"_id": ObjectId(user_id)})
             if not user:
                 logger.warning(f"User {user_id} not found")
-                return None
+                return None, None
 
             notification_email = user.get("notification_email")
             if not notification_email:
                 logger.warning(f"User {user_id} has no notification_email set")
-                return None
+                return None, user.get("timezone")
 
-            return notification_email
+            return notification_email, user.get("timezone")
 
         except Exception as e:
             logger.error(f"Error fetching user email: {e}", exc_info=True)
-            return None
+            return None, None
 
-    def _format_subject(self) -> str:
+    def _format_subject(self, timezone_name: Optional[str]) -> str:
         """Format email subject line."""
-        now = datetime.utcnow().strftime("%b %d, %Y at %I:%M %p")
+        now = format_user_datetime(
+            datetime.now(UTC), timezone_name, "%b %d, %Y at %I:%M %p %Z"
+        )
         return f"{self.subject_prefix} - {now}"
 
-    def _format_html(self, recap: str, conversations: List[Conversation]) -> str:
+    def _format_html(
+        self,
+        recap: str,
+        conversations: List[Conversation],
+        timezone_name: Optional[str],
+    ) -> str:
         """Format HTML email body."""
-        now_str = datetime.utcnow().strftime("%B %d, %Y at %I:%M %p")
+        now_str = format_user_datetime(
+            datetime.now(UTC), timezone_name, "%B %d, %Y at %I:%M %p %Z"
+        )
         recap_escaped = html.escape(recap, quote=True).replace("\n", "<br>")
 
         # Build conversation list items
         conv_items = ""
         for conv in conversations:
             title = html.escape(conv.title or "Untitled", quote=True)
-            created = conv.created_at.strftime("%I:%M %p") if conv.created_at else "N/A"
+            created = (
+                format_user_datetime(conv.created_at, timezone_name, "%I:%M %p %Z")
+                if conv.created_at
+                else "N/A"
+            )
             duration = (
                 f"{int(conv.audio_total_duration // 60)}m {int(conv.audio_total_duration % 60)}s"
                 if conv.audio_total_duration
@@ -420,14 +448,25 @@ class HourlyRecapPlugin(BasePlugin):
 </html>
 """
 
-    def _format_text(self, recap: str, conversations: List[Conversation]) -> str:
+    def _format_text(
+        self,
+        recap: str,
+        conversations: List[Conversation],
+        timezone_name: Optional[str],
+    ) -> str:
         """Format plain text email body."""
-        now_str = datetime.utcnow().strftime("%B %d, %Y at %I:%M %p")
+        now_str = format_user_datetime(
+            datetime.now(UTC), timezone_name, "%B %d, %Y at %I:%M %p %Z"
+        )
 
         conv_lines = []
         for i, conv in enumerate(conversations, 1):
             title = conv.title or "Untitled"
-            created = conv.created_at.strftime("%I:%M %p") if conv.created_at else "N/A"
+            created = (
+                format_user_datetime(conv.created_at, timezone_name, "%I:%M %p %Z")
+                if conv.created_at
+                else "N/A"
+            )
             duration = (
                 f"{int(conv.audio_total_duration // 60)}m {int(conv.audio_total_duration % 60)}s"
                 if conv.audio_total_duration

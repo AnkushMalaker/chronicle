@@ -106,6 +106,13 @@ class ModelDef(BaseModel):
     model_params: Dict[str, Any] = Field(
         default_factory=dict, description="Model-specific parameters"
     )
+    system_prompt_prefix: str = Field(
+        default="",
+        description=(
+            "Provider/model instruction prepended to system prompts, such as Muse "
+            "Glimmer's documented reasoning-strength control."
+        ),
+    )
     model_output: Optional[str] = Field(
         default=None, description="Output format: json, text, vector, etc."
     )
@@ -299,13 +306,20 @@ class ResolvedLLMOperation(BaseModel):
         openai_reasoning = is_reasoning_model(model_name)
 
         params: Dict[str, Any] = {"model": model_name}
+        model_params = self.model_def.model_params or {}
         if not openai_reasoning:
             params["temperature"] = self.temperature
+            if model_params.get("top_p") is not None:
+                params["top_p"] = model_params["top_p"]
         if self.max_tokens is not None:
             key = "max_completion_tokens" if openai_reasoning else "max_tokens"
             params[key] = self.max_tokens
         if self.response_format is not None:
             params["response_format"] = self.response_format
+
+        extra_body: Dict[str, Any] = {}
+        if model_params.get("top_k") is not None:
+            extra_body["top_k"] = model_params["top_k"]
 
         if self.reasoning_effort:
             if openai_reasoning:
@@ -325,10 +339,27 @@ class ResolvedLLMOperation(BaseModel):
                     "off",
                     "0",
                 )
-                params["extra_body"] = {
-                    "chat_template_kwargs": {"enable_thinking": enable}
-                }
+                extra_body["chat_template_kwargs"] = {"enable_thinking": enable}
+        if extra_body:
+            params["extra_body"] = extra_body
         return params
+
+    def prepare_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Apply the selected model's documented system-prompt contract."""
+        prefix = self.model_def.system_prompt_prefix.strip()
+        prepared = [dict(message) for message in messages]
+        if not prefix:
+            return prepared
+        for message in prepared:
+            if message.get("role") != "system":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                message["content"] = f"{prefix}\n\n{content}"
+                return prepared
+            break
+        prepared.insert(0, {"role": "system", "content": prefix})
+        return prepared
 
     def get_client(self, is_async: bool = False):
         """Create an OpenAI-compatible client for this operation.

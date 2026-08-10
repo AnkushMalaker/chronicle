@@ -1194,7 +1194,7 @@ def _validate_memory_mapping(memory_section: dict) -> None:
     pi = backends.get("pi") or {}
     if not isinstance(pi, dict):
         raise ValueError("memory.backends.pi must be a mapping")
-    model_name = str(pi.get("model") or "qwen36-llm").strip()
+    model_name = str(pi.get("model") or "muse-glimmer-llm").strip()
     registry = get_models_registry()
     model = registry.get_by_name(model_name) if registry else None
     if model is None:

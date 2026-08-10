@@ -10,9 +10,11 @@ This module provides functions for:
 All FFmpeg operations use subprocess with proper error handling and cleanup.
 """
 
+import array
 import asyncio
 import io
 import logging
+import math
 import time
 import wave
 from datetime import datetime, timedelta
@@ -737,16 +739,12 @@ async def reconstruct_audio_segment(
         ...     f.write(wav_bytes)
     """
     start_timer = time.time()
-
-    clipped_pcm, sample_rate, channels = await get_clipped_pcm_for_time_range(
-        conversation_id, start_time, end_time
-    )
-
-    wav_bytes = await build_wav_from_pcm(
-        pcm_data=clipped_pcm,
-        sample_rate=sample_rate,
-        channels=channels,
-    )
+    wav_bytes = (
+        await reconstruct_audio_ranges(
+            conversation_id,
+            [(start_time, end_time)],
+        )
+    )[0]
 
     processing_time = time.time() - start_timer
 
@@ -758,6 +756,154 @@ async def reconstruct_audio_segment(
     )
 
     return wav_bytes
+
+
+async def reconstruct_audio_ranges(
+    conversation_id: str,
+    ranges: List[tuple[float, float]],
+    *,
+    max_window_seconds: float = 120.0,
+) -> List[bytes]:
+    """Reconstruct ordered ranges while decoding each bounded audio window once.
+
+    Unlike :func:`reconstruct_audio_segment`, this corpus-oriented path never
+    materializes the multi-megabyte Conversation model. It projects only duration,
+    groups nearby transcript ranges into bounded windows, fetches raw chunk documents,
+    and slices several WAV clips from each decoded PCM buffer.
+    """
+    if not ranges:
+        return []
+    if max_window_seconds <= 0:
+        raise ValueError("max_window_seconds must be positive")
+
+    conversation = await Conversation.get_pymongo_collection().find_one(
+        {"conversation_id": conversation_id, "deleted": {"$ne": True}},
+        {"_id": 0, "audio_total_duration": 1},
+    )
+    if conversation is None:
+        raise ValueError(f"Conversation {conversation_id} not found")
+    total_duration = float(conversation.get("audio_total_duration") or 0.0)
+    if total_duration <= 0:
+        raise ValueError(f"Conversation {conversation_id} has no audio")
+
+    indexed_ranges = []
+    for index, (start_time, end_time) in enumerate(ranges):
+        start = float(start_time)
+        end = min(float(end_time), total_duration)
+        if start < 0 or end <= start:
+            raise ValueError(
+                f"Invalid time range [{start_time}, {end_time}] for {conversation_id}"
+            )
+        indexed_ranges.append((index, start, end))
+    indexed_ranges.sort(key=lambda item: (item[1], item[2]))
+
+    windows: List[List[tuple[int, float, float]]] = []
+    for item in indexed_ranges:
+        if not windows or item[2] - windows[-1][0][1] > max_window_seconds:
+            windows.append([item])
+        else:
+            windows[-1].append(item)
+
+    results: List[Optional[bytes]] = [None] * len(ranges)
+    chunk_collection = AudioChunkDocument.get_pymongo_collection()
+    for window in windows:
+        window_start = min(item[1] for item in window)
+        window_end = max(item[2] for item in window)
+        chunks = await (
+            chunk_collection.find(
+                {
+                    "conversation_id": conversation_id,
+                    "start_time": {"$lt": window_end},
+                    "end_time": {"$gt": window_start},
+                    "deleted": {"$ne": True},
+                },
+                {
+                    "_id": 0,
+                    "audio_data": 1,
+                    "start_time": 1,
+                    "end_time": 1,
+                    "chunk_index": 1,
+                    "sample_rate": 1,
+                    "channels": 1,
+                },
+            )
+            .sort("chunk_index", 1)
+            .to_list(length=None)
+        )
+        if not chunks:
+            raise ValueError(
+                f"No audio chunks cover [{window_start}, {window_end}] in {conversation_id}"
+            )
+        chunk_islands: List[List[dict]] = []
+        for chunk in chunks:
+            if (
+                not chunk_islands
+                or float(chunk["start_time"]) - float(chunk_islands[-1][-1]["end_time"])
+                > 0.25
+            ):
+                chunk_islands.append([chunk])
+            else:
+                chunk_islands[-1].append(chunk)
+
+        for island in chunk_islands:
+            island_start = float(island[0]["start_time"])
+            island_end = float(island[-1]["end_time"])
+            island_ranges = [
+                item
+                for item in window
+                if item[1] >= island_start - 0.25 and item[2] <= island_end + 0.25
+            ]
+            if not island_ranges:
+                continue
+
+            sample_rate = int(island[0]["sample_rate"])
+            channels = int(island[0]["channels"])
+            if any(
+                int(chunk["sample_rate"]) != sample_rate
+                or int(chunk["channels"]) != channels
+                for chunk in island
+            ):
+                raise ValueError(
+                    "Audio format changes inside one reconstruction island"
+                )
+            pcm_data = await decode_opus_to_pcm(
+                opus_data=b"".join(bytes(chunk["audio_data"]) for chunk in island),
+                sample_rate=sample_rate,
+                channels=channels,
+            )
+            bytes_per_frame = channels * 2
+            bytes_per_second = sample_rate * bytes_per_frame
+            tolerance_bytes = int(0.25 * bytes_per_second)
+
+            for original_index, start, end in island_ranges:
+                start_byte = int((start - island_start) * bytes_per_second)
+                end_byte = int((end - island_start) * bytes_per_second)
+                start_byte = max(0, start_byte - start_byte % bytes_per_frame)
+                end_byte = min(len(pcm_data), end_byte - end_byte % bytes_per_frame)
+                expected_bytes = int((end - start) * bytes_per_second)
+                clipped = pcm_data[start_byte:end_byte]
+                if len(clipped) + tolerance_bytes < expected_bytes:
+                    raise ValueError(
+                        f"Decoded audio is too short for range [{start}, {end}] "
+                        f"in {conversation_id}"
+                    )
+                results[original_index] = await build_wav_from_pcm(
+                    clipped,
+                    sample_rate=sample_rate,
+                    channels=channels,
+                )
+
+        missing = [item for item in window if results[item[0]] is None]
+        if missing:
+            _, start, end = missing[0]
+            raise ValueError(
+                f"Audio chunk gap prevents exact range reconstruction for "
+                f"[{start}, {end}] in {conversation_id}"
+            )
+
+    if any(result is None for result in results):
+        raise RuntimeError("Range reconstruction did not produce every requested clip")
+    return [result for result in results if result is not None]
 
 
 def filter_transcript_by_time(
@@ -1217,3 +1363,51 @@ async def wait_for_audio_chunks(
         f"(conversation: {conversation_id[:12]}) — caller decides how to handle"
     )
     return False
+
+
+# Peak target for a normalized preview. Not full scale: a little headroom keeps a
+# boosted clip from clipping on playback.
+PREVIEW_PEAK = 0.89
+# Beyond this the source is silence, and multiplying silence only produces loud
+# silence while making the noise floor sound like a fault.
+MAX_PREVIEW_GAIN = 200.0
+
+
+def normalize_wav_peak(wav: bytes) -> tuple[bytes, float]:
+    """Peak-normalize a WAV clip, returning it with the applied gain in dB.
+
+    Written for review tools that ask a human to judge audio. The clips worth judging
+    are often far below the ones that behave normally — measured across one episode,
+    windows where VAD reported speech but the transcriber produced nothing ran -43 to
+    -58 dBFS RMS, against -15 to -42 for windows that transcribed cleanly. Played raw
+    those are indistinguishable from silence, and a listener concludes the tool is
+    broken rather than that the audio is quiet.
+
+    The gain is returned rather than swallowed, because it is itself evidence: "this
+    needed +42 dB" says something about the window, and anyone judging loudness has to
+    know they are not hearing the original level.
+
+    Non-16-bit input is returned untouched with zero gain.
+    """
+
+    with wave.open(io.BytesIO(wav)) as source:
+        params = source.getparams()
+        frames = source.readframes(source.getnframes())
+    if params.sampwidth != 2 or not frames:
+        return wav, 0.0
+    samples = array.array("h")
+    samples.frombytes(frames)
+    peak = max((abs(value) for value in samples), default=0)
+    if peak == 0:
+        return wav, 0.0
+    gain = min(PREVIEW_PEAK * 32767 / peak, MAX_PREVIEW_GAIN)
+    if gain <= 1.0:
+        return wav, 0.0
+    boosted = array.array(
+        "h", (max(-32768, min(32767, int(value * gain))) for value in samples)
+    )
+    out = io.BytesIO()
+    with wave.open(out, "wb") as sink:
+        sink.setparams(params)
+        sink.writeframes(boosted.tobytes())
+    return out.getvalue(), round(20 * math.log10(gain), 1)

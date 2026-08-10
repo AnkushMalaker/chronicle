@@ -8,7 +8,7 @@ import wave
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from beanie import PydanticObjectId
 from starlette.datastructures import UploadFile
@@ -90,7 +90,7 @@ def group_audio_sessions(items: list[DeviceInputItem]) -> list[list[DeviceInputI
 
 
 def plan_session_cuts(
-    speech_fraction: list[float | None],
+    speech_fraction: Sequence[float | None],
     bucket_seconds: float,
     *,
     target_seconds: float = _TARGET_SESSION.total_seconds(),
@@ -121,17 +121,30 @@ def plan_session_cuts(
     if bucket_seconds <= 0 or not speech_fraction:
         return []
     total = len(speech_fraction) * bucket_seconds
-    quiet = [not fraction for fraction in speech_fraction]
+    # A window nothing was measured in has no honest seam. ``None`` means "the VAD
+    # returned no verdict" -- profile_pcm_audio emits an all-``None`` series when
+    # scoring fails outright -- so an unscored window is *uniformly* unknown, the
+    # longest "quiet" run is the whole thing, and its midpoint is the blind target cut
+    # this function exists to remove. It hides itself too: such a window also reports
+    # as carrying no speech at all, so the "no cut landed in speech" check passes
+    # vacuously. Measured during the corpus re-bound: 18 windows, 17.5 hours, every
+    # cut at exactly 30:00. Leaving it whole hands the decision to the caller, which
+    # is the only party that can tell "silent" from "never analysed".
+    if not any(fraction is not None for fraction in speech_fraction):
+        return []
+    # Measured silence is a real seam. An unscored bucket is a *weaker* one: given the
+    # choice, cut where nothing is known rather than through speech we can see.
+    measured_quiet = [
+        fraction is not None and not fraction for fraction in speech_fraction
+    ]
+    quiet = [fraction is None or not fraction for fraction in speech_fraction]
     min_buckets = max(1, int(min_quiet_seconds / bucket_seconds))
 
     def quiet_cut(low: float, high: float) -> float | None:
+        first, last = int(low // bucket_seconds), int(high // bucket_seconds)
         return _longest_quiet_run(
-            quiet,
-            bucket_seconds,
-            int(low // bucket_seconds),
-            int(high // bucket_seconds),
-            min_buckets,
-        )
+            measured_quiet, bucket_seconds, first, last, min_buckets
+        ) or _longest_quiet_run(quiet, bucket_seconds, first, last, min_buckets)
 
     cuts: list[float] = []
     window_start = 0.0
@@ -142,8 +155,15 @@ def plan_session_cuts(
         forced = remaining > max_seconds
         # Never leave a stub: the search starts half a target in, and stops half a
         # target short of the end so the tail is a recording rather than a fragment.
+        # That tail bound is measured from the end of the whole window, not from
+        # ``low`` — using ``low`` subtracts ``window_start`` a second time, so every
+        # iteration after the first searches a band that has silently collapsed
+        # towards its own start. Invisible at a 30-minute target inside a 2-hour cap,
+        # where the loop never reaches a third pass, but it costs a longer window
+        # every seam after the first.
         low = window_start + target_seconds * 0.5
-        cut = quiet_cut(low, min(window_start + target_seconds * 1.5, total - low))
+        high = min(window_start + target_seconds * 1.5, total - target_seconds * 0.5)
+        cut = quiet_cut(low, high)
         if cut is None and forced:
             # Past the safety cap something has to give — take the quietest point
             # anywhere inside the cap before resorting to the cap itself.

@@ -338,10 +338,26 @@ async def get_db() -> UnifiedSpeakerDB:
 
 @app.get("/health")
 async def health(db: UnifiedSpeakerDB = Depends(get_db)):
-    """Health check — exercises CUDA so a poisoned context reports unhealthy.
+    """Lightweight process liveness check.
 
-    Returns 503 when the GPU probe fails, so the container healthcheck (``curl -f``)
-    flips to ``unhealthy`` instead of reporting green while every /identify 500s.
+    This route must remain responsive while a long diarization owns the GPU. CUDA
+    fault detection is handled by the background watchdog and the readiness route.
+    """
+    return {
+        "status": "ok",
+        "version": "0.2.0-refactored",
+        "device": str(device),
+        "speakers": db.get_speaker_count(),
+        "architecture": "modular-routers",
+    }
+
+
+@app.get("/readiness")
+async def readiness(db: UnifiedSpeakerDB = Depends(get_db)):
+    """Exercise CUDA and report whether the service can run inference.
+
+    The probe may wait behind an active GPU workload; callers needing process
+    liveness should use ``/health`` instead.
     """
     cuda_error = await asyncio.to_thread(_probe_cuda)
     body = {
