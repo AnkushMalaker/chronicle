@@ -64,6 +64,9 @@ from advanced_omi_backend.routers.modules.websocket_routes import (
 )
 from advanced_omi_backend.services.audio_service import get_audio_stream_service
 from advanced_omi_backend.services.audio_stream import AudioStreamProducer
+from advanced_omi_backend.services.audio_stream.reclaim import (
+    reclaim_settled_audio_streams,
+)
 from advanced_omi_backend.services.device_audio_ingest import process_device_audio
 from advanced_omi_backend.services.device_context import purge_screen_context
 from advanced_omi_backend.services.immich_discovery import scan_immich_memories
@@ -335,6 +338,7 @@ async def lifespan(app: FastAPI):
                 "manual_memory_visual_index", process_manual_memory_visual_index
             )
             register_cron_job("episode_memory", process_episode_memory)
+            register_cron_job("audio_stream_reclaim", reclaim_settled_audio_streams)
 
             scheduler = get_scheduler()
             await scheduler.start()

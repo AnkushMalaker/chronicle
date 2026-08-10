@@ -12,6 +12,7 @@ import logging
 import os
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -379,69 +380,93 @@ def get_jobs(
     }
 
 
-def all_jobs_complete_for_client(client_id: str) -> bool:
+@dataclass(frozen=True)
+class PendingWork:
+    """Who owns the non-terminal jobs, as stamped on the jobs themselves.
+
+    ``session_ids`` is the precise answer and ``client_ids`` the fallback for jobs
+    that only know their device — see :func:`pending_work_owners`.
     """
-    Check if all jobs associated with a client are in terminal states.
 
-    Checks jobs with client_id in job.meta.
-    Traverses dependency chains to include dependent jobs.
+    session_ids: frozenset
+    client_ids: frozenset
 
-    Args:
-        client_id: The client device identifier to check jobs for
 
-    Returns:
-        True if all jobs are complete (or no jobs found), False if any job is still processing
+def pending_work_owners() -> PendingWork:
+    """Owners of every job that is not yet in a terminal state.
+
+    Two properties matter, and the old per-client scan had neither.
+
+    **It is proportional to work in flight, not to history.** Only the four
+    registries that can hold a non-terminal job are read. Finished, failed, and
+    canceled are terminal *by definition* — the completeness test is
+    ``is_finished or is_failed or is_canceled``, which every member of them
+    satisfies — so reading them could only confirm what their membership already
+    states. They are also where the jobs are: this deployment held 2,535 of its
+    2,536 jobs there, and the previous version re-fetched all of them from Redis
+    on every call, once per session.
+
+    **It is asked once.** The registries do not vary by owner, so a caller
+    classifying N sessions scans once and does N membership tests, rather than
+    running N identical scans.
+
+    Attribution prefers ``meta["session_id"]`` and falls back to
+    ``meta["client_id"]``. A job carrying neither — the deferred tail of a
+    post-conversation chain, say — inherits from the job it is waiting on, walking
+    up ``dependency_ids``. That replaces the old downward ``dependent_ids`` walk,
+    which needed the terminal registries as its starting points.
     """
-    processed_job_ids = set()
-
-    def is_job_complete(job):
-        """Recursively check if job and all its dependents are terminal."""
-        if job.id in processed_job_ids:
-            return True
-        processed_job_ids.add(job.id)
-
-        # Check if this job is terminal
-        if not (job.is_finished or job.is_failed or job.is_canceled):
-            logger.debug(f"Job {job.id} ({job.func_name}) is not terminal")
-            return False
-
-        # Check dependent jobs
-        for dep_id in job.dependent_ids or []:
-            try:
-                dep_job = Job.fetch(dep_id, connection=redis_conn)
-                if not is_job_complete(dep_job):
-                    return False
-            except Exception as e:
-                logger.debug(f"Error fetching dependent job {dep_id}: {e}")
-
-        return True
-
-    # Find all jobs for this client
+    session_ids: set = set()
+    client_ids: set = set()
     all_queues = [transcription_queue, memory_queue, audio_queue, default_queue]
+
     for queue in all_queues:
-        registries = [
+        pending_job_ids: list = []
+        for job_ids in (
             queue.job_ids,
             queue.started_job_registry.get_job_ids(),
-            queue.finished_job_registry.get_job_ids(),
-            queue.failed_job_registry.get_job_ids(),
-            queue.canceled_job_registry.get_job_ids(),
-            ScheduledJobRegistry(queue=queue).get_job_ids(),
             DeferredJobRegistry(queue=queue).get_job_ids(),
-        ]
+            ScheduledJobRegistry(queue=queue).get_job_ids(),
+        ):
+            pending_job_ids.extend(job_ids)
 
-        for job_ids in registries:
-            for job_id in job_ids:
-                try:
-                    job = Job.fetch(job_id, connection=redis_conn)
+        for job_id in pending_job_ids:
+            try:
+                job = Job.fetch(job_id, connection=redis_conn)
+            except Exception as e:
+                logger.debug(f"Error checking job {job_id}: {e}")
+                continue
 
-                    # Only check jobs with client_id in meta
-                    if job.meta and job.meta.get("client_id") == client_id:
-                        if not is_job_complete(job):
-                            return False
-                except Exception as e:
-                    logger.debug(f"Error checking job {job_id}: {e}")
+            session_id, client_id = _owner_of_job(job)
+            if session_id:
+                session_ids.add(session_id)
+            if client_id:
+                client_ids.add(client_id)
 
-    return True
+    return PendingWork(frozenset(session_ids), frozenset(client_ids))
+
+
+def _owner_of_job(job, _depth: int = 0) -> tuple:
+    """Resolve ``(session_id, client_id)`` for a job, following dependencies up."""
+    meta = job.meta or {}
+    session_id = meta.get("session_id")
+    client_id = meta.get("client_id")
+    if session_id or client_id:
+        return session_id, client_id
+    # A chain is a handful of jobs deep (speakers → memory → title → dispatch);
+    # the bound only stops a cycle from becoming an infinite walk.
+    if _depth >= 8:
+        return None, None
+    for dependency_id in job.dependency_ids or []:
+        try:
+            parent = Job.fetch(dependency_id, connection=redis_conn)
+        except Exception as e:
+            logger.debug(f"Error fetching dependency {dependency_id}: {e}")
+            continue
+        resolved = _owner_of_job(parent, _depth + 1)
+        if resolved[0] or resolved[1]:
+            return resolved
+    return None, None
 
 
 # Job statuses that mean a speech-detection job is still live, so re-enqueuing
@@ -517,7 +542,15 @@ def enqueue_audio_persistence(
             retry=Retry(max=1000, interval=[1, 5, 15, 30, 60, 300]),
             job_id=job_id,
             description=f"Audio persistence for session {session_id}",
-            meta={"client_id": client_id, "session_level": True},
+            # session_id is what makes this job attributable to one recording
+            # rather than to the device: a device outlives its sessions, so
+            # attributing by client_id alone lets a new session's work keep every
+            # earlier session on the same device looking unsettled.
+            meta={
+                "session_id": session_id,
+                "client_id": client_id,
+                "session_level": True,
+            },
         )
         logger.info(
             f"📥 RQ: Enqueued audio persistence job {audio_job.id} on audio queue "
@@ -630,7 +663,11 @@ def enqueue_speech_detection(
             failure_ttl=86400,  # Cleanup failed jobs after 24h
             job_id=f"speech-detect_{session_id}_{uuid.uuid4().hex[:8]}",
             description="Listening for speech...",
-            meta={"client_id": client_id, "session_level": True},
+            meta={
+                "session_id": session_id,
+                "client_id": client_id,
+                "session_level": True,
+            },
         )
         # Track the live job for both single-flight and WebSocket cleanup.
         redis_conn.set(job_key, speech_job.id, ex=86400)
@@ -1128,120 +1165,3 @@ def get_queue_health() -> Dict[str, Any]:
         )
 
     return health
-
-
-async def cleanup_stuck_stream_workers(request):
-    """Delete only empty consumers and audio streams proven durably consumed.
-
-    Pending deliveries are never claimed or acknowledged here. Only the consumer
-    that committed its side effect may ACK a message.
-    """
-    try:
-        redis_client = request.app.state.redis_audio_stream
-        if not redis_client:
-            return JSONResponse(
-                status_code=503,
-                content={"error": "Redis client for audio streaming not initialized"},
-            )
-
-        cleanup_results = {}
-        total_deleted_consumers = 0
-        total_deleted_streams = 0
-        stream_keys = await redis_client.keys("audio:stream:*")
-
-        for stream_key in stream_keys:
-            stream_name = (
-                stream_key.decode() if isinstance(stream_key, bytes) else stream_key
-            )
-            try:
-                # Defuse legacy expiry before any inspection. If inspection fails,
-                # retaining raw bytes is the fail-closed outcome.
-                await redis_client.persist(stream_name)
-                raw_groups = await redis_client.execute_command(
-                    "XINFO", "GROUPS", stream_name
-                )
-                groups = parse_consumer_groups(raw_groups or [])
-                deleted_consumers = 0
-
-                for group_name in groups:
-                    consumers = await redis_client.execute_command(
-                        "XINFO", "CONSUMERS", stream_name, group_name
-                    )
-                    for consumer in consumers:
-                        values = {}
-                        for index in range(0, len(consumer), 2):
-                            key = consumer[index]
-                            value = consumer[index + 1]
-                            if isinstance(key, bytes):
-                                key = key.decode()
-                            if isinstance(value, bytes):
-                                value = value.decode()
-                            values[str(key)] = value
-
-                        consumer_name = str(values.get("name", "unknown"))
-                        pending = int(values.get("pending", 0))
-                        idle_ms = int(values.get("idle", 0))
-                        if idle_ms > 300000 and pending == 0:
-                            await redis_client.execute_command(
-                                "XGROUP",
-                                "DELCONSUMER",
-                                stream_name,
-                                group_name,
-                                consumer_name,
-                            )
-                            deleted_consumers += 1
-
-                total_deleted_consumers += deleted_consumers
-                session_id = stream_name.removeprefix("audio:stream:")
-                status = await SessionStore(redis_client).get_status(session_id)
-                if status not in (SessionStatus.FINALIZING, SessionStatus.FINISHED):
-                    cleanup_results[stream_name] = {
-                        "message": f"session_not_terminal:{status}",
-                        "cleaned": 0,
-                        "deleted_consumers": deleted_consumers,
-                        "deleted_stream": False,
-                        "retained_pending": sum(
-                            group.pending for group in groups.values()
-                        ),
-                    }
-                    continue
-
-                decision = await delete_stream_if_durable(
-                    redis_client,
-                    stream_name,
-                    required_groups={AUDIO_PERSISTENCE_GROUP},
-                )
-                if decision.safe_to_delete:
-                    total_deleted_streams += 1
-
-                cleanup_results[stream_name] = {
-                    "message": decision.reason,
-                    "cleaned": 0,
-                    "deleted_consumers": deleted_consumers,
-                    "deleted_stream": decision.safe_to_delete,
-                    "retained_pending": sum(
-                        group.pending for group in decision.groups.values()
-                    ),
-                }
-            except Exception as error:
-                cleanup_results[stream_name] = {
-                    "error": str(error),
-                    "cleaned": 0,
-                    "deleted_stream": False,
-                }
-
-        return {
-            "success": True,
-            "total_cleaned": 0,
-            "total_deleted_consumers": total_deleted_consumers,
-            "total_deleted_streams": total_deleted_streams,
-            "streams": cleanup_results,
-            "providers": cleanup_results,
-            "timestamp": time.time(),
-        }
-    except Exception as error:
-        logger.error(f"Error cleaning up stuck workers: {error}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Failed to cleanup stuck workers: {str(error)}"},
-        )

@@ -20,6 +20,9 @@ from advanced_omi_backend.controllers import (
 )
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services import plugin_assistant
+from advanced_omi_backend.services.audio_stream.reclaim import (
+    reclaim_settled_audio_streams,
+)
 from advanced_omi_backend.services.plugin_service import get_plugin_router
 from advanced_omi_backend.services.status_reconciler import (
     reconcile_conversation_statuses,
@@ -658,22 +661,23 @@ async def get_streaming_status(
     return await session_controller.get_streaming_status(request)
 
 
-@router.post("/streaming/cleanup")
-async def cleanup_stuck_stream_workers(
-    request: Request, current_user: User = Depends(current_superuser)
+@router.post("/streaming/reclaim")
+async def reclaim_audio_streams(
+    max_streams: int = 25, current_user: User = Depends(current_superuser)
 ):
-    """Clean up stuck Redis Stream workers and pending messages. Admin only."""
-    return await queue_controller.cleanup_stuck_stream_workers(request)
+    """Run the audio-stream reclaim sweep now, instead of waiting for its cron.
 
+    This is deliberately the *same function* the ``audio_stream_reclaim`` cron job
+    runs, not a parallel implementation. It replaces three buttons that between them
+    called two endpoints implementing overlapping cleanup with different rules and
+    misleading names — one that claimed to force-delete active streams but could
+    not, and one named for stuck workers that by design refuses to touch them.
 
-@router.post("/streaming/cleanup-sessions")
-async def cleanup_old_sessions(
-    request: Request,
-    max_age_seconds: int = 3600,
-    current_user: User = Depends(current_superuser),
-):
-    """Clean up old session tracking metadata. Admin only."""
-    return await session_controller.cleanup_old_sessions(request, max_age_seconds)
+    Nothing here is a decision an operator needs to make: it is housekeeping that
+    now happens on a timer. The endpoint remains so a sweep can be run on demand
+    while diagnosing. Admin only.
+    """
+    return await reclaim_settled_audio_streams(max_streams=max_streams)
 
 
 # External Service Management Endpoints (proxied to host service-manager agent)

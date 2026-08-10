@@ -7,20 +7,23 @@ This module manages Redis-based audio streaming sessions, including:
 - Session lifecycle tracking
 """
 
+import asyncio
 import logging
 import time
 
 from fastapi.responses import JSONResponse
 
 from advanced_omi_backend.controllers.queue_controller import (
-    all_jobs_complete_for_client,
+    PendingWork,
     default_queue,
     memory_queue,
+    pending_work_owners,
     transcription_queue,
 )
 from advanced_omi_backend.services.audio_stream.durability import (
     AUDIO_PERSISTENCE_GROUP,
     delete_stream_if_durable,
+    session_append_closed,
 )
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
@@ -29,6 +32,59 @@ from advanced_omi_backend.services.audio_stream.session_store import (
 )
 
 logger = logging.getLogger(__name__)
+
+# How long a settled session's hash is kept before Redis reclaims it. Applied once,
+# at the moment the session is first observed drained, so it never counts down on
+# live work. Without it the store only grows: the oldest completed session found
+# here was 50 days old and was still being re-examined on every poll.
+SETTLED_SESSION_RETENTION_SECONDS = 7 * 24 * 3600
+
+
+def _is_uninitialized(view: SessionView) -> bool:
+    """Whether a hash exists but never became a session.
+
+    Test probes and abandoned initializations leave hashes carrying no device, no
+    status, and no start time. They can never reach FINISHED, so they were reported
+    as active indefinitely — two such hashes here were being shown as live
+    recordings with an age of 56 years.
+    """
+    return not view.client_id and view.status is None and view.started_at == 0.0
+
+
+def _newest_session_per_client(views: list) -> dict:
+    """Map each device to its most recently started session."""
+    newest: dict = {}
+    for view in views:
+        if not view.client_id:
+            continue
+        current = newest.get(view.client_id)
+        if current is None or view.started_at > current[1]:
+            newest[view.client_id] = (view.session_id, view.started_at)
+    return {client: session for client, (session, _) in newest.items()}
+
+
+def _jobs_drained(
+    view: SessionView, pending: PendingWork, newest_by_client: dict
+) -> bool:
+    """Whether this session's work has all reached a terminal state.
+
+    Drainage is monotonic, so a recorded observation is authoritative and is never
+    recomputed — that is what keeps a long-settled session free.
+
+    Otherwise the session is matched against the owners of the work actually in
+    flight. Jobs stamped with a ``session_id`` answer exactly. A job that knows only
+    its device is attributed to that device's *newest* session, because a job
+    enqueued now belongs to the recording happening now: attributing it to every
+    session the device ever had is what previously kept finished sessions pinned
+    open behind their successor's work.
+    """
+    if view.jobs_drained_at is not None:
+        return True
+    if view.session_id in pending.session_ids:
+        return False
+    if view.client_id in pending.client_ids:
+        return newest_by_client.get(view.client_id) != view.session_id
+    return True
 
 
 def _session_info_dict(view: SessionView, conversation_count: int) -> dict:
@@ -76,13 +132,28 @@ async def get_streaming_status(request):
         active_sessions = []
         completed_sessions_from_redis = []
 
-        async for view in store.iter_views():
+        views = [v async for v in store.iter_views() if not _is_uninitialized(v)]
+        newest_by_client = _newest_session_per_client(views)
+
+        # One scan for the whole response, off the event loop. The registries do not
+        # vary by session, so the previous per-session call repeated an identical
+        # scan once per view — 67 of them here — with blocking redis-py inside an
+        # `async def`, which pins the single uvicorn loop thread and stalls every
+        # other request in the process. Skipped entirely once every session has
+        # already settled, which is the steady state.
+        pending = (
+            await asyncio.to_thread(pending_work_owners)
+            if any(v.jobs_drained_at is None for v in views)
+            else PendingWork(frozenset(), frozenset())
+        )
+
+        for view in views:
             conversation_count = await store.get_conversation_count(view.session_id)
             session_obj = _session_info_dict(view, conversation_count)
 
             # Separate active and completed sessions
             # Check if all jobs are complete (including failed jobs)
-            all_jobs_done = all_jobs_complete_for_client(view.client_id)
+            all_jobs_done = _jobs_drained(view, pending, newest_by_client)
 
             # Session is completed ONLY when:
             # 1. Status was already set to "finished" by an authoritative source
@@ -94,6 +165,13 @@ async def get_streaming_status(request):
             # all jobs are briefly terminal. Writing "finished" during this gap kills
             # the session permanently.
             if view.status == SessionStatus.FINISHED and all_jobs_done:
+                if view.jobs_drained_at is None:
+                    # Both terminal conditions hold, and neither can revert, so the
+                    # answer is recorded rather than re-derived on the next poll —
+                    # and the hash starts its retention countdown.
+                    await store.mark_jobs_drained(
+                        view.session_id, retention=SETTLED_SESSION_RETENTION_SECONDS
+                    )
                 completed_sessions_from_redis.append(
                     {
                         "session_id": view.session_id,
@@ -362,98 +440,4 @@ async def get_streaming_status(request):
         return JSONResponse(
             status_code=500,
             content={"error": f"Failed to get streaming status: {str(e)}"},
-        )
-
-
-async def cleanup_old_sessions(request, max_age_seconds: int = 3600):
-    """Clean terminal metadata only after the raw audio log is durably drained."""
-    try:
-        redis_client = request.app.state.redis_audio_stream
-        if not redis_client:
-            return JSONResponse(
-                status_code=503,
-                content={"error": "Redis client for audio streaming not initialized"},
-            )
-
-        store = SessionStore(redis_client)
-        views = [view async for view in store.iter_views()]
-        by_stream = {view.stream_name: view for view in views if view.stream_name}
-        current_time = time.time()
-        cleaned_streams = 0
-        stream_details = []
-
-        for stream_key in await redis_client.keys("audio:stream:*"):
-            stream_name = (
-                stream_key.decode() if isinstance(stream_key, bytes) else stream_key
-            )
-            view = by_stream.get(stream_name)
-
-            # A momentarily-drained group on an ACTIVE or unknown session is not a
-            # terminal state; the producer may append again immediately.
-            if view is None or view.status not in (
-                SessionStatus.FINALIZING,
-                SessionStatus.FINISHED,
-            ):
-                await redis_client.persist(stream_name)
-                stream_details.append(
-                    {
-                        "stream_name": stream_name,
-                        "deleted": False,
-                        "reason": "session_not_terminal",
-                    }
-                )
-                continue
-
-            await redis_client.persist(stream_name)
-            decision = await delete_stream_if_durable(
-                redis_client,
-                stream_name,
-                required_groups={AUDIO_PERSISTENCE_GROUP},
-            )
-            cleaned_streams += int(decision.safe_to_delete)
-            stream_details.append(
-                {
-                    "stream_name": stream_name,
-                    "deleted": decision.safe_to_delete,
-                    "reason": decision.reason,
-                }
-            )
-
-        cleaned_sessions = 0
-        session_details = []
-        for view in views:
-            age_seconds = current_time - view.started_at
-            stream_name = view.stream_name
-            stream_exists = bool(stream_name and await redis_client.exists(stream_name))
-            should_clean = (
-                view.status is SessionStatus.FINISHED
-                and age_seconds > max_age_seconds
-                and not stream_exists
-            )
-            if not should_clean:
-                continue
-
-            await store.delete(view.session_id)
-            cleaned_sessions += 1
-            session_details.append(
-                {
-                    "session_id": view.session_id,
-                    "age_seconds": age_seconds,
-                    "status": view.status.value,
-                }
-            )
-
-        return {
-            "success": True,
-            "cleaned_sessions": cleaned_sessions,
-            "cleaned_streams": cleaned_streams,
-            "cleaned_session_details": session_details,
-            "cleaned_stream_details": stream_details,
-            "timestamp": time.time(),
-        }
-    except Exception as error:
-        logger.error(f"Error cleaning up old sessions: {error}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Failed to cleanup old sessions: {str(error)}"},
         )

@@ -44,6 +44,45 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/queue", tags=["queue"])
 
 
+# A job's raw result is unbounded: one transcribe_full_audio_job carries the full
+# word-timing array (10,223 entries, 752 KB) alongside the transcript, so listing a
+# few hundred jobs produced a 3.3 MB response that took 40s locally and 72s through
+# Caddy — past the WebUI's 60s client timeout, which is why the Queue page never
+# rendered. A list only ever reads small scalars off a result (memory counts,
+# speaker names, durations, transcript length), so oversized values are replaced by
+# a descriptor here. GET /api/queue/jobs/{job_id} still returns the result in full.
+#
+# A truncated string becomes {"truncated", "length", "preview"}, where `length` is
+# the original character count — a consumer reading `.length` off it still gets the
+# real answer rather than a shortened one. Lists keep their type and are cut to
+# their first entries, so `.join`/`[i]` on a result list cannot break.
+_RESULT_MAX_STR = 200
+_RESULT_MAX_ITEMS = 20
+_RESULT_MAX_DEPTH = 6
+
+
+def summarize_job_result(value, _depth: int = 0):
+    """Bound a job result to something safe to send in a list response."""
+    if _depth >= _RESULT_MAX_DEPTH:
+        return {"truncated": True}
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        if len(value) <= _RESULT_MAX_STR:
+            return value
+        return {
+            "truncated": True,
+            "length": len(value),
+            "preview": value[:_RESULT_MAX_STR],
+        }
+    if isinstance(value, dict):
+        return {str(k): summarize_job_result(v, _depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        items = list(value)[:_RESULT_MAX_ITEMS]
+        return [summarize_job_result(v, _depth + 1) for v in items]
+    return summarize_job_result(str(value), _depth)
+
+
 @router.get("/jobs")
 async def list_jobs(
     limit: int = Query(20, ge=1, le=100, description="Number of jobs to return"),
@@ -272,7 +311,7 @@ async def get_jobs_by_client(
                     ),
                     "ended_at": job.ended_at.isoformat() if job.ended_at else None,
                     "description": job.description or "",
-                    "result": job.result,
+                    "result": summarize_job_result(job.result),
                     "meta": job.meta if job.meta else {},
                     "args": job.args,
                     "kwargs": job.kwargs if job.kwargs else {},
@@ -1141,7 +1180,7 @@ async def get_dashboard_data(
                                     "status": status_name,
                                     "priority": "normal",  # RQ doesn't have priority concept
                                     "data": {"description": job.description or ""},
-                                    "result": job.result,
+                                    "result": summarize_job_result(job.result),
                                     "meta": job.meta if job.meta else {},
                                     "kwargs": job.kwargs if job.kwargs else {},
                                     "error_message": (
@@ -1297,7 +1336,7 @@ async def get_dashboard_data(
                                             else None
                                         ),
                                         "description": job.description or "",
-                                        "result": job.result,
+                                        "result": summarize_job_result(job.result),
                                         "meta": job.meta if job.meta else {},
                                         "error_message": (
                                             str(job.exc_info) if job.exc_info else None

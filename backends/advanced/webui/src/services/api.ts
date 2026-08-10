@@ -862,8 +862,10 @@ export const queueApi = {
   cancelJob: (jobId: string) => api.delete(`/api/queue/jobs/${jobId}`),
 
   // Cleanup operations
-  cleanupStuckWorkers: () => api.post('/api/streaming/cleanup'),
-  cleanupOldSessions: (maxAgeSeconds: number = 3600) => api.post(`/api/streaming/cleanup-sessions?max_age_seconds=${maxAgeSeconds}`),
+  // Runs the same sweep as the audio_stream_reclaim cron. Replaced cleanupStuckWorkers
+  // and cleanupOldSessions, which were two overlapping implementations behind three
+  // buttons whose names described neither.
+  reclaimStreams: () => api.post('/api/streaming/reclaim'),
 
   // Job flush operations
   flushJobs: (flushAll: boolean, body: any) => {

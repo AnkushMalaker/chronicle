@@ -9,6 +9,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Iterable, Mapping, Sequence
 
+from advanced_omi_backend.services.audio_stream.session_store import (
+    SessionStatus,
+    SessionStore,
+)
+
 AUDIO_PERSISTENCE_GROUP = "audio_persistence"
 
 
@@ -175,3 +180,34 @@ async def delete_stream_if_durable(
     if decision.safe_to_delete:
         await redis_client.delete(stream_name)
     return decision
+
+
+_APPEND_CLOSED_STATUSES = (SessionStatus.FINALIZING, SessionStatus.FINISHED)
+
+
+async def session_append_closed(redis_client, session_id: str) -> bool:
+    """Whether the producer can no longer append to this session's stream.
+
+    Retention gates on this rather than on status alone because a *missing* session
+    hash read as "not terminal" and so blocked deletion permanently. The producer
+    appends only while the hash says ACTIVE, and a live session's hash is explicitly
+    persisted — never given a TTL — so an absent hash means the session is gone, not
+    that it might still be running. Treating absence as non-terminal stranded the
+    write-ahead log of every session whose hash had been reclaimed: 5 of 11 streams
+    on this deployment, holding 764 MB that nothing could ever free.
+
+    This is not a weakening of the fail-closed rule. Nothing is deleted on the
+    strength of this answer alone — :func:`inspect_stream_retention` still has to
+    prove every registered group has zero pending and zero lag, and the persistence
+    consumer acknowledges only after a journaled Mongo commit. This decides whether
+    the question may be *asked*, not what the answer is.
+
+    A hash that exists but carries no status stays retained: a session can be
+    resurrected with partial fields, so that case is genuinely ambiguous.
+    """
+    status = await SessionStore(redis_client).get_status(session_id)
+    if status in _APPEND_CLOSED_STATUSES:
+        return True
+    if status is None:
+        return not await SessionStore(redis_client).exists(session_id)
+    return False

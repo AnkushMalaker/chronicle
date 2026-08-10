@@ -377,39 +377,31 @@ const Queue: React.FC = () => {
     return () => document.removeEventListener('keydown', handleEscape);
   }, [selectedJob, showFlushModal, selectedEvent]);
 
-  const cleanupStuckWorkers = async () => {
-    if (!confirm('This will clean up all stuck workers and pending messages. Continue?')) return;
-
+  // One control replaces three. "Cleanup Old Sessions" and "Remove All Streams"
+  // called the same endpoint with a different age parameter that only affected
+  // session metadata — so the second did not do what its name or its confirmation
+  // dialog claimed. "Cleanup Stuck Workers" was named for the one thing it refuses
+  // to do: only the consumer that committed a side effect may acknowledge its own
+  // messages, so a genuinely stuck consumer is reported, never force-cleared.
+  //
+  // Reclaiming is now continuous (the audio_stream_reclaim cron). This button runs
+  // that same sweep on demand while diagnosing.
+  const reclaimStreams = async () => {
     try {
-      const response = await queueApi.cleanupStuckWorkers();
-      const data = response.data;
-
-      alert(`✅ Cleanup complete!\n\nTotal cleaned: ${data.total_cleaned} messages\n\n${
-        Object.entries(data.providers).map(([provider, result]: [string, any]) =>
-          `${provider}: ${result.message || result.error || 'Unknown'}`
-        ).join('\n')
-      }`);
-
+      const { data } = await queueApi.reclaimStreams();
+      const blocked = Object.entries(data.blocked ?? {});
+      alert(
+        `Reclaimed ${data.reclaimed} of ${data.examined} stream(s); ` +
+        `dropped ${data.dropped_consumers} finished consumer(s).` +
+        (blocked.length
+          ? `\n\nBlocked by an undrained consumer — see System Errors:\n` +
+            blocked.map(([name, reason]) => `${name.replace('audio:stream:', '')}: ${reason}`).join('\n')
+          : '')
+      );
       invalidateQueue();
     } catch (error: any) {
-      console.error('❌ Error during cleanup:', error);
-      alert(`Failed to cleanup workers: ${error.response?.data?.error || error.message}`);
-    }
-  };
-
-  const cleanupOldSessions = async () => {
-    if (!confirm('This will remove old and stuck "finalizing" sessions from the dashboard. Continue?')) return;
-
-    try {
-      const response = await queueApi.cleanupOldSessions(3600); // 1 hour
-      const data = response.data;
-
-      alert(`✅ Cleanup complete!\n\nRemoved ${data.cleaned_sessions} old session(s) and ${data.cleaned_streams} stream(s)`);
-
-      invalidateQueue();
-    } catch (error: any) {
-      console.error('❌ Error during cleanup:', error);
-      alert(`Failed to cleanup sessions: ${error.response?.data?.error || error.message}`);
+      console.error('Error reclaiming streams:', error);
+      alert(`Failed to reclaim streams: ${error.response?.data?.error || error.message}`);
     }
   };
 
@@ -756,45 +748,10 @@ const Queue: React.FC = () => {
                 variant="secondary"
                 size="md"
                 icon={<RotateCcw className="w-4 h-4" />}
-                title="Remove old sessions (>1 hour old)"
-                onClick={cleanupOldSessions}
+                title="Reclaim the write-ahead log of finished recordings now. Runs automatically every 15 minutes; nothing is deleted until Redis proves every consumer has drained it."
+                onClick={reclaimStreams}
               >
-                Cleanup Old Sessions
-              </Button>
-              {streamingStatus?.stream_health && Object.keys(streamingStatus.stream_health).length > 0 && (
-                <Button
-                  variant="danger"
-                  size="md"
-                  icon={<Trash2 className="w-4 h-4" />}
-                  title="Force remove ALL active streams"
-                  onClick={async () => {
-                    const streamCount = Object.keys(streamingStatus.stream_health).length;
-                    if (!streamingStatus || !confirm(`Remove ALL ${streamCount} active streams? This will force-delete all streams including actively streaming ones.`)) return;
-
-                    try {
-                      const response = await queueApi.cleanupOldSessions(0); // 0 seconds = all sessions
-                      const data = response.data;
-                      alert(`✅ Removed ${data.cleaned_streams} stream(s)`);
-                      invalidateQueue();
-                    } catch (error: any) {
-                      console.error('❌ Error removing streams:', error);
-                      alert(`Failed to remove streams: ${error.response?.data?.error || error.message}`);
-                    }
-                  }}
-                >
-                  Remove All Streams ({Object.keys(streamingStatus.stream_health).length})
-                </Button>
-              )}
-              <Button
-                variant="secondary"
-                size="md"
-                icon={<RotateCcw className="w-4 h-4" />}
-                title="Clean up stuck workers and pending messages"
-                onClick={cleanupStuckWorkers}
-              >
-                Cleanup Stuck Workers{streamingStatus?.stream_health && Object.values(streamingStatus.stream_health).some((s: any) => s.total_pending > 0) && ` (${
-                  Object.values(streamingStatus.stream_health).reduce((sum: number, s: any) => sum + (s.total_pending || 0), 0)
-                })`}
+                Reclaim Finished Streams
               </Button>
             </div>
           </div>

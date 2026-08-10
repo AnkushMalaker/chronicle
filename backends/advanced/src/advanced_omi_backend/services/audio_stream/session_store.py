@@ -119,6 +119,9 @@ class SessionView:
     last_chunk_at: float = 0.0
     finalized_at: Optional[float] = None
     completed_at: Optional[float] = None
+    # When this session's jobs were first observed to have all settled. Set once
+    # and never cleared — see SessionStore.mark_jobs_drained.
+    jobs_drained_at: Optional[float] = None
     speech_detected_at: str = ""
     # counters
     chunks_published: int = 0
@@ -213,6 +216,7 @@ class SessionView:
             last_chunk_at=ffloat("last_chunk_at") or 0.0,
             finalized_at=ffloat("finalized_at"),
             completed_at=ffloat("completed_at"),
+            jobs_drained_at=ffloat("jobs_drained_at"),
             speech_detected_at=s("speech_detected_at"),
             chunks_published=fint("chunks_published"),
             transcription_seconds_sent=ffloat("transcription_seconds_sent") or 0.0,
@@ -387,6 +391,27 @@ class SessionStore:
 
     async def expire_session(self, session_id: str, ttl: int) -> None:
         await self._redis.expire(self._key(session_id), ttl)
+
+    async def mark_jobs_drained(self, session_id: str, *, retention: int) -> None:
+        """Freeze the terminal fact that a finished session's work has settled.
+
+        Drainage is monotonic: a session that has finished and whose jobs are all
+        in a terminal state can never acquire more. Recording the first observation
+        is what lets readers stop re-deriving it — otherwise every poll re-answers
+        the same question about every session that ever existed, which is how a
+        50-day-old session ended up costing a scan of the whole job history.
+
+        ``hsetnx`` keeps the earliest observation if two readers race.
+
+        Settling is also what makes the hash disposable, so the retention TTL is
+        applied at the same moment. This is the only bound on the session store's
+        growth. A live session is explicitly ``persist``ed, so a TTL can only ever
+        land on one that is done — and because the caller only reaches here while
+        ``jobs_drained_at`` is unset, the countdown is never refreshed.
+        """
+        key = self._key(session_id)
+        await self._redis.hsetnx(key, "jobs_drained_at", str(time.time()))
+        await self._redis.expire(key, retention)
 
     async def persist_session(self, session_id: str) -> None:
         """Remove any TTL so the hash lives as long as the session is active.

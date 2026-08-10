@@ -965,6 +965,14 @@ cron_jobs:
     description: "Expire conversation screen context whose conversation is gone"
     enabled: true
     schedule: "0 4 * * *"
+  audio_stream_reclaim:
+    description: "Delete raw-audio write-ahead logs whose recording is over and fully persisted"
+    enabled: true
+    # Deletion is otherwise attempted once per recording, so a restart or crash at
+    # the wrong moment strands the log forever — this deployment accumulated 764 MB
+    # that way. The safety rule is unchanged and fail-closed: a log is deleted only
+    # when every consumer group proves zero pending and zero lag.
+    schedule: "*/15 * * * *"
   timeline_analysis:
     description: "Reconcile changed current-day capture evidence into semantic episodes"
     enabled: true

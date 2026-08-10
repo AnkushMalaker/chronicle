@@ -51,23 +51,3 @@ export function useFlushJobs() {
     },
   })
 }
-
-export function useCleanupStuckWorkers() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: () => queueApi.cleanupStuckWorkers(),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['queue'] })
-    },
-  })
-}
-
-export function useCleanupOldSessions() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (maxAgeSeconds?: number) => queueApi.cleanupOldSessions(maxAgeSeconds),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['queue'] })
-    },
-  })
-}
