@@ -4,7 +4,7 @@ Consumes ``audio:stream:*`` with a dedicated consumer group
 ``wakeword_detection`` (registered in the backend's ``_EXPECTED_GROUPS`` so the
 streaming consumer won't delete streams out from under our pending entries).
 
-For each client stream it maintains per-client wake state in
+For each session stream it maintains per-session wake state in
 :class:`HermesDetector`. On a captured turn it resolves the command text from
 the existing ``transcription:results:{session_id}`` stream (no second ASR) and
 publishes a ``wake_word.detected`` message to the ``wakeword:detections`` stream
@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Dict
 
 import redis.asyncio as redis
+from redis import exceptions as redis_exceptions
+
 from detector import (
     RECEPTIVE_FIELD_SECONDS,
     SAMPLE_RATE,
@@ -28,7 +30,6 @@ from detector import (
     HermesDetector,
     WakeEvent,
 )
-from redis import exceptions as redis_exceptions
 from samples import PENDING, SampleStore
 
 logger = logging.getLogger(__name__)
@@ -75,9 +76,7 @@ SAVE_BUFFER_STATE = os.getenv("WAKEWORD_SAVE_BUFFER_STATE", "1").lower() not in 
 class WakeWordConsumer:
     """Discovers audio streams and runs acoustic wake detection on each."""
 
-    def __init__(
-        self, detector: HermesDetector, redis_url: str, sample_store: SampleStore
-    ):
+    def __init__(self, detector: HermesDetector, redis_url: str, sample_store: SampleStore):
         """Initialize the consumer.
 
         Args:
@@ -91,25 +90,29 @@ class WakeWordConsumer:
         self.redis_client: redis.Redis | None = None
         self.consumer_name = f"wakeword-worker-{os.getpid()}"
         self.running = False
-        # client_id -> asyncio.Task processing that stream
+        # session_id -> asyncio.Task processing that stream
         self._stream_tasks: Dict[str, asyncio.Task] = {}
-        # client_id -> live wake state, so HTTP handlers can prime a stream.
+        # session_id -> live wake state, so HTTP handlers can prime a stream.
         self._states: Dict[str, ClientWakeState] = {}
+        # session_id -> stable device client_id, resolved from session metadata.
+        self._client_ids: Dict[str, str] = {}
 
     def active_clients(self) -> list[dict]:
         """List currently-processing streams (for the data-collection UI)."""
         out = []
-        for client_id, task in self._stream_tasks.items():
+        for session_id, task in self._stream_tasks.items():
             if task.done():
                 continue
-            state = self._states.get(client_id)
+            client_id = self._client_ids.get(session_id)
+            state = self._states.get(session_id)
+            if client_id is None or state is None:
+                continue
             out.append(
                 {
                     "client_id": client_id,
+                    "session_id": session_id,
                     "priming": bool(state and state.priming),
-                    "prime_wakeword": (
-                        state.prime_wakeword if state and state.priming else None
-                    ),
+                    "prime_wakeword": (state.prime_wakeword if state and state.priming else None),
                     "armed": bool(state and state.armed),
                 }
             )
@@ -121,12 +124,17 @@ class WakeWordConsumer:
         Returns False if the stream is unknown. Raises ValueError if ``wakeword``
         is not a configured wake word.
         """
-        state = self._states.get(client_id)
-        task = self._stream_tasks.get(client_id)
-        if state is None or task is None or task.done():
-            return False
-        self.detector.start_priming(state, client_id, wakeword)
-        return True
+        # A reconnect can briefly leave an older session draining. Walk newest
+        # first so the command targets the device's current live stream.
+        for session_id in reversed(self._stream_tasks):
+            if self._client_ids.get(session_id) != client_id:
+                continue
+            state = self._states.get(session_id)
+            task = self._stream_tasks.get(session_id)
+            if state is not None and task is not None and not task.done():
+                self.detector.start_priming(state, client_id, wakeword)
+                return True
+        return False
 
     def unprime(self, client_id: str) -> bool:
         """Manually end an in-progress prime capture (UI 'stop'). False if unknown.
@@ -134,20 +142,21 @@ class WakeWordConsumer:
         The per-stream task finalizes and saves on its next frame, so the captured
         attempt always lands in the review queue rather than being dropped.
         """
-        state = self._states.get(client_id)
-        task = self._stream_tasks.get(client_id)
-        if state is None or task is None or task.done():
-            return False
-        self.detector.stop_priming(state)
-        return True
+        for session_id in reversed(self._stream_tasks):
+            if self._client_ids.get(session_id) != client_id:
+                continue
+            state = self._states.get(session_id)
+            task = self._stream_tasks.get(session_id)
+            if state is not None and task is not None and not task.done():
+                self.detector.stop_priming(state)
+                return True
+        return False
 
     async def start(self) -> None:
         """Connect to Redis and run the discovery + processing loop."""
         self.redis_client = redis.from_url(self.redis_url)
         self.running = True
-        logger.info(
-            f"WakeWordConsumer started (group={GROUP_NAME}, redis={self.redis_url})"
-        )
+        logger.info(f"WakeWordConsumer started (group={GROUP_NAME}, redis={self.redis_url})")
         try:
             while self.running:
                 # A transient Redis failure (e.g. Redis restarting during a stack
@@ -161,9 +170,7 @@ class WakeWordConsumer:
                 except asyncio.CancelledError:
                     raise
                 except redis_exceptions.RedisError as e:
-                    logger.warning(
-                        f"Redis error in discovery loop (retrying in 2s): {e}"
-                    )
+                    logger.warning(f"Redis error in discovery loop (retrying in 2s): {e}")
                     await asyncio.sleep(2.0)
                 except Exception as e:  # noqa: BLE001 - loop must never die silently
                     logger.error(
@@ -180,9 +187,9 @@ class WakeWordConsumer:
 
     async def _discover_and_spawn(self) -> None:
         streams = await self._discover_streams()
-        live_clients: set[str] = set()
+        live_sessions: set[str] = set()
         for stream_name in streams:
-            client_id = stream_name.replace("audio:stream:", "")
+            session_id = stream_name.removeprefix("audio:stream:")
             # A device that drops without a clean end-marker leaves its
             # audio:stream key behind (session stuck "active"). Without this
             # check we'd re-spawn a task for that dead key every time the
@@ -190,26 +197,28 @@ class WakeWordConsumer:
             # stream". Only process streams that got a chunk recently.
             if not await self._stream_is_live(stream_name):
                 continue
-            live_clients.add(client_id)
-            task = self._stream_tasks.get(client_id)
+            live_sessions.add(session_id)
+            task = self._stream_tasks.get(session_id)
             if task is None or task.done():
                 if task is not None and task.done():
                     # Surface any exception from the finished task.
                     exc = task.exception()
                     if exc is not None:
-                        logger.error(f"Stream task for '{client_id}' failed: {exc}")
-                self._stream_tasks[client_id] = asyncio.create_task(
-                    self._process_stream(stream_name, client_id)
+                        logger.error(f"Stream task for '{session_id}' failed: {exc}")
+                self._stream_tasks[session_id] = asyncio.create_task(
+                    self._process_stream(stream_name, session_id)
                 )
         # Reap tasks whose stream is gone or has gone stale, so they stop being
         # reported as active streams (and free their per-client detector state).
-        for client_id, task in list(self._stream_tasks.items()):
+        for session_id, task in list(self._stream_tasks.items()):
             if task.done():
-                self._stream_tasks.pop(client_id, None)
-            elif client_id not in live_clients:
-                logger.info(f"Reaping wake stream task for stale '{client_id}'")
+                self._stream_tasks.pop(session_id, None)
+                self._client_ids.pop(session_id, None)
+            elif session_id not in live_sessions:
+                logger.info(f"Reaping wake stream task for stale '{session_id}'")
                 task.cancel()
-                self._stream_tasks.pop(client_id, None)
+                self._stream_tasks.pop(session_id, None)
+                self._client_ids.pop(session_id, None)
 
     async def _stream_is_live(self, stream_name: str) -> bool:
         """True if the stream received a chunk within the idle window.
@@ -237,29 +246,26 @@ class WakeWordConsumer:
         streams: list[str] = []
         cursor = b"0"
         while cursor:
-            cursor, keys = await self.redis_client.scan(
-                cursor, match=STREAM_PATTERN, count=100
-            )
+            cursor, keys = await self.redis_client.scan(cursor, match=STREAM_PATTERN, count=100)
             streams.extend(k.decode() if isinstance(k, bytes) else k for k in keys)
         return streams
 
     async def _setup_group(self, stream_name: str) -> None:
         try:
-            await self.redis_client.xgroup_create(
-                stream_name, GROUP_NAME, "0", mkstream=True
-            )
+            await self.redis_client.xgroup_create(stream_name, GROUP_NAME, "0", mkstream=True)
             logger.debug(f"Created group {GROUP_NAME} for {stream_name}")
         except redis_exceptions.ResponseError as e:
             if "BUSYGROUP" not in str(e):
                 raise
 
-    async def _process_stream(self, stream_name: str, client_id: str) -> None:
+    async def _process_stream(self, stream_name: str, session_id: str) -> None:
         await self._setup_group(stream_name)
+        client_id = await self._lookup_client_id(session_id)
         state = self.detector.new_client_state()
-        self._states[client_id] = state
-        session_id = client_id  # session_id == client_id in this pipeline
+        self._states[session_id] = state
+        self._client_ids[session_id] = client_id
         last_activity = time.time()
-        logger.info(f"▶ Processing wake stream '{stream_name}'")
+        logger.info(f"▶ Processing wake stream '{stream_name}' for client '{client_id}'")
 
         try:
             while self.running:
@@ -274,24 +280,18 @@ class WakeWordConsumer:
                 if not messages:
                     if time.time() - last_activity > STREAM_IDLE_TIMEOUT_SECONDS:
                         await self._flush(state, client_id, session_id)
-                        logger.info(
-                            f"Stream '{stream_name}' idle — ending wake processing"
-                        )
+                        logger.info(f"Stream '{stream_name}' idle — ending wake processing")
                         return
                     continue
 
                 for _stream, stream_messages in messages:
                     for message_id, fields in stream_messages:
                         msg_id = (
-                            message_id.decode()
-                            if isinstance(message_id, bytes)
-                            else message_id
+                            message_id.decode() if isinstance(message_id, bytes) else message_id
                         )
                         try:
                             if fields.get(b"end_marker") or fields.get("end_marker"):
-                                await self.redis_client.xack(
-                                    stream_name, GROUP_NAME, msg_id
-                                )
+                                await self.redis_client.xack(stream_name, GROUP_NAME, msg_id)
                                 await self._flush(state, client_id, session_id)
                                 logger.info(f"End marker on '{stream_name}' — ending")
                                 return
@@ -310,11 +310,10 @@ class WakeWordConsumer:
                                 if event is not None:
                                     await self._handle_event(event)
                         finally:
-                            await self.redis_client.xack(
-                                stream_name, GROUP_NAME, msg_id
-                            )
+                            await self.redis_client.xack(stream_name, GROUP_NAME, msg_id)
         finally:
-            self._states.pop(client_id, None)
+            self._states.pop(session_id, None)
+            self._client_ids.pop(session_id, None)
 
     async def _flush(self, state, client_id: str, session_id: str) -> None:
         """Finalize an armed-but-uncaptured turn when the stream ends/goes idle."""
@@ -397,9 +396,7 @@ class WakeWordConsumer:
                 f"💾 saved {bucket} sample {rec['id']} ({len(pcm)}B"
                 f"{', +buffer-state' if rec.get('has_buffer_state') else ''})"
             )
-        except (
-            Exception
-        ) as e:  # noqa: BLE001 - data collection must never break dispatch
+        except Exception as e:  # noqa: BLE001 - data collection must never break dispatch
             logger.error(f"Failed to save {bucket} sample: {e}", exc_info=True)
 
     async def _publish_detection(self, event: WakeEvent) -> None:
@@ -463,9 +460,7 @@ class WakeWordConsumer:
             f"({len(event.audio)}B audio, reason={event.reason})"
         )
 
-    async def _on_armed(
-        self, state: ClientWakeState, client_id: str, session_id: str
-    ) -> None:
+    async def _on_armed(self, state: ClientWakeState, client_id: str, session_id: str) -> None:
         """Push a UI pulse the instant the wake word arms (before capture/ASR)."""
         # Listening tone FIRST — a pure ack needing only client_id, so it never waits
         # behind the user lookup / SSE below (keeps the cue instant under load).
@@ -512,9 +507,7 @@ class WakeWordConsumer:
             {"audio_b64": audio_b64, "format": "wav", "announcement": True},
         )
 
-    async def _publish_downlink(
-        self, client_id: str, msg_type: str, data: dict
-    ) -> None:
+    async def _publish_downlink(self, client_id: str, msg_type: str, data: dict) -> None:
         """Push a control message to the device via ``device:downlink:{client_id}``.
 
         The backend's WebSocket handler subscribes to this channel and forwards the
@@ -526,9 +519,7 @@ class WakeWordConsumer:
         try:
             message = json.dumps({"type": msg_type, "data": data})
             await self.redis_client.publish(f"device:downlink:{client_id}", message)
-        except (
-            Exception
-        ) as e:  # noqa: BLE001 - downlink is best-effort, never break dispatch
+        except Exception as e:  # noqa: BLE001 - downlink is best-effort, never break dispatch
             logger.debug(f"Failed to publish downlink {msg_type}: {e}")
 
     async def _publish_sse(self, user_id: str, event_type: str, data: dict) -> None:
@@ -540,13 +531,9 @@ class WakeWordConsumer:
         if not user_id:
             return
         try:
-            message = json.dumps(
-                {"event": event_type, "data": data, "timestamp": time.time()}
-            )
+            message = json.dumps({"event": event_type, "data": data, "timestamp": time.time()})
             await self.redis_client.publish(f"sse:{user_id}", message)
-        except (
-            Exception
-        ) as e:  # noqa: BLE001 - SSE is best-effort, never break dispatch
+        except Exception as e:  # noqa: BLE001 - SSE is best-effort, never break dispatch
             logger.debug(f"Failed to publish SSE {event_type}: {e}")
 
     async def _lookup_user_id(self, session_id: str) -> str:
@@ -559,9 +546,25 @@ class WakeWordConsumer:
             logger.warning(f"Could not read user_id for {session_id}: {e}")
         return ""
 
+    async def _lookup_client_id(self, session_id: str) -> str:
+        """Resolve the stable device id from authoritative session metadata."""
+        if self.redis_client is None:
+            raise RuntimeError("Redis is not connected")
+        value = await self.redis_client.hget(f"audio:session:{session_id}", "client_id")
+        if value is None:
+            raise RuntimeError(f"Audio session '{session_id}' has no client_id")
+        client_id = value.decode() if isinstance(value, bytes) else str(value)
+        client_id = client_id.strip()
+        if not client_id:
+            raise RuntimeError(f"Audio session '{session_id}' has an empty client_id")
+        return client_id
+
     async def _shutdown(self) -> None:
         for task in self._stream_tasks.values():
             task.cancel()
+        self._stream_tasks.clear()
+        self._states.clear()
+        self._client_ids.clear()
         if self.redis_client is not None:
             await self.redis_client.aclose()
         logger.info("WakeWordConsumer stopped")
