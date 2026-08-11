@@ -21,12 +21,16 @@ import redis.asyncio as redis
 from redis import exceptions as redis_exceptions
 from websockets.exceptions import ConnectionClosed
 
-from advanced_omi_backend.client_manager import get_client_owner_async
 from advanced_omi_backend.heartbeat import beat
 from advanced_omi_backend.models.user import get_user_by_id
 from advanced_omi_backend.observability.otel_setup import set_span_attrs
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.plugins.router import PluginRouter
+from advanced_omi_backend.redis_keys import (
+    SessionId,
+    parse_audio_stream_name,
+    transcription_results_stream,
+)
 from advanced_omi_backend.services.audio_stream.durability import (
     AUDIO_PERSISTENCE_GROUP,
     delete_stream_if_durable,
@@ -397,7 +401,7 @@ class StreamingTranscriptionConsumer:
         for attempt in range(attempts):
             try:
                 await self.provider.start_stream(
-                    client_id=session_id,
+                    stream_id=session_id,
                     sample_rate=sample_rate,
                     diarize=self._provider_has_diarization,
                 )
@@ -467,7 +471,7 @@ class StreamingTranscriptionConsumer:
         # Tear down dead provider-side state; the socket is already gone so
         # errors here are expected and ignored.
         try:
-            await self.provider.end_stream(client_id=session_id)
+            await self.provider.end_stream(stream_id=session_id)
         except Exception:
             pass
 
@@ -497,7 +501,7 @@ class StreamingTranscriptionConsumer:
         completion_status = "1"
         try:
             # Get final result from provider
-            final_result = await self.provider.end_stream(client_id=session_id)
+            final_result = await self.provider.end_stream(stream_id=session_id)
 
             # If there's a final result, publish it
             if final_result and final_result.get("text"):
@@ -605,7 +609,7 @@ class StreamingTranscriptionConsumer:
 
             # Send audio chunk to provider WebSocket and get result
             result = await self.provider.process_audio_chunk(
-                client_id=session_id, audio_chunk=audio_chunk
+                stream_id=session_id, audio_chunk=audio_chunk
             )
 
             # Update last activity and advance the session-relative audio clock
@@ -728,8 +732,10 @@ class StreamingTranscriptionConsumer:
             return None, 0.0
 
         try:
-            # Resolve user_id for speaker scoping
-            user_id = await self._get_user_id_from_client_id(session_id)
+            identity = await self._resolve_session_identity(session_id)
+            if identity is None:
+                return None, 0.0
+            user_id, _client_id = identity
 
             # Convert buffered PCM to WAV
             wav_bytes = pcm_to_wav_bytes(
@@ -823,7 +829,8 @@ class StreamingTranscriptionConsumer:
         """
         set_span_attrs(pipeline_stage="transcription_streaming")
         try:
-            stream_name = f"transcription:results:{session_id}"
+            session_ref = SessionId.from_value(session_id, "session_id")
+            stream_name = str(transcription_results_stream(session_ref))
 
             # Get words and segments directly
             words = result.get("words") or []
@@ -857,24 +864,36 @@ class StreamingTranscriptionConsumer:
                 f"Error storing final result for {session_id}: {e}", exc_info=True
             )
 
-    async def _get_user_id_from_client_id(self, client_id: str) -> Optional[str]:
+    async def _resolve_session_identity(
+        self, session_id: str
+    ) -> Optional[tuple[str, str]]:
         """
-        Look up user_id from client_id using ClientManager (async Redis lookup).
+        Resolve the user and device identity attached to an audio session.
 
-        Args:
-            client_id: Client ID to search for
-
-        Returns:
-            user_id if found, None otherwise
+        ``session_id`` and ``client_id`` are different identities. The session hash
+        is the authoritative join point between them; using one as a fallback for
+        the other reintroduces the class of routing bug this consumer must prevent.
         """
-        user_id = await get_client_owner_async(client_id)
-
-        if user_id:
-            logger.debug(f"Found user_id {user_id} for client_id {client_id} via Redis")
-        else:
-            logger.warning(f"No user_id found for client_id {client_id} in Redis")
-
-        return user_id
+        view = await self.store.read(session_id)
+        if view is None:
+            logger.warning(
+                f"No audio session metadata found for session_id {session_id}. "
+                "Dependent processing will not run."
+            )
+            return None
+        if not view.user_id:
+            logger.warning(
+                f"Audio session {session_id} has no user_id. "
+                "Dependent processing will not run."
+            )
+            return None
+        if not view.client_id:
+            logger.warning(
+                f"Audio session {session_id} has no client_id. "
+                "Dependent processing will not run."
+            )
+            return None
+        return view.user_id, view.client_id
 
     async def trigger_plugins(
         self, session_id: str, result: Dict, speaker_name: Optional[str] = None
@@ -888,20 +907,15 @@ class StreamingTranscriptionConsumer:
         - If speaker identification is unavailable, plugins still fire (no blocking).
 
         Args:
-            session_id: Session ID (client_id from stream name)
+            session_id: Audio session ID from the Redis stream name
             result: Final transcription result
             speaker_name: Identified speaker name (or None if unavailable)
         """
         try:
-            # Find user_id by looking up session with matching client_id
-            user_id = await self._get_user_id_from_client_id(session_id)
-
-            if not user_id:
-                logger.warning(
-                    f"Could not find user_id for client_id {session_id}. "
-                    "Plugins will not be triggered."
-                )
+            identity = await self._resolve_session_identity(session_id)
+            if identity is None:
                 return
+            user_id, client_id = identity
 
             # Primary speaker gating
             if speaker_name:
@@ -923,15 +937,14 @@ class StreamingTranscriptionConsumer:
 
             # Wake-word follow-up: if a follow-up window is open for this session,
             # treat this utterance as a contextual follow-up (no wake word needed)
-            # and stop — don't run normal transcript dispatch for it. session_id
-            # here is the client_id (the stream key).
+            # and stop — don't run normal transcript dispatch for it.
             try:
                 handled = await maybe_handle_followup(
                     self.redis_client,
                     self.plugin_router,
                     user_id=user_id,
                     session_id=session_id,
-                    client_id=session_id,
+                    client_id=client_id,
                     text=result.get("text", ""),
                 )
                 if handled:
@@ -944,6 +957,7 @@ class StreamingTranscriptionConsumer:
             plugin_data = {
                 "transcript": result.get("text", ""),
                 "session_id": session_id,
+                "client_id": client_id,
                 "words": result.get("words") or [],
                 "segments": result.get("segments", []),
                 "confidence": result.get("confidence", 0.0),
@@ -964,7 +978,7 @@ class StreamingTranscriptionConsumer:
                 event=PluginEvent.TRANSCRIPT_STREAMING,
                 user_id=user_id,
                 data=plugin_data,
-                metadata={"client_id": session_id},
+                metadata={"client_id": client_id, "session_id": session_id},
             )
 
             if plugin_results:
@@ -987,7 +1001,7 @@ class StreamingTranscriptionConsumer:
             stream_name: Redis stream name (e.g., "audio:stream:user01-phone")
         """
         # Extract session_id from stream name (format: audio:stream:{session_id})
-        session_id = stream_name.replace("audio:stream:", "")
+        session_id = str(parse_audio_stream_name(stream_name))
 
         # Track this stream
         self.active_streams[stream_name] = {
@@ -1167,7 +1181,7 @@ class StreamingTranscriptionConsumer:
         wakeword_detection also block deletion when present. There is deliberately no
         age/TTL fallback: inability to prove durability means retaining the stream.
         """
-        session_id = stream_name.removeprefix("audio:stream:")
+        session_id = str(parse_audio_stream_name(stream_name))
         if not await session_append_closed(self.redis_client, session_id):
             logger.debug(
                 f"Retaining stream {stream_name}: session may still append to it"
@@ -1239,7 +1253,7 @@ class StreamingTranscriptionConsumer:
                     # end_session_stream sets transcription:complete:{session_id} with 5-min TTL.
                     # Without this check, re-discovered streams spawn zombie tasks that each
                     # open a new transcription provider connection, exhausting connection limits.
-                    session_id = stream_name.replace("audio:stream:", "")
+                    session_id = str(parse_audio_stream_name(stream_name))
                     completion_key = f"transcription:complete:{session_id}"
                     if await self.redis_client.exists(completion_key):
                         # The flag can outlive the provider stream it describes: a

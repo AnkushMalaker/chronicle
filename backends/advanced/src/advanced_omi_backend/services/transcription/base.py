@@ -103,12 +103,12 @@ class StreamingTranscriptionProvider(BaseTranscriptionProvider):
 
     @abc.abstractmethod
     async def start_stream(
-        self, client_id: str, sample_rate: int = 16000, diarize: bool = False
+        self, stream_id: str, sample_rate: int = 16000, diarize: bool = False
     ):
-        """Start a transcription stream for a client.
+        """Start a transcription stream.
 
         Args:
-            client_id: Unique client identifier
+            stream_id: Unique provider stream/session identifier
             sample_rate: Audio sample rate
             diarize: Whether to enable speaker diarization (provider-dependent)
         """
@@ -116,7 +116,7 @@ class StreamingTranscriptionProvider(BaseTranscriptionProvider):
 
     @abc.abstractmethod
     async def process_audio_chunk(
-        self, client_id: str, audio_chunk: bytes
+        self, stream_id: str, audio_chunk: bytes
     ) -> Optional[dict]:
         """
         Process audio chunk and return partial/final transcription.
@@ -127,7 +127,7 @@ class StreamingTranscriptionProvider(BaseTranscriptionProvider):
         pass
 
     @abc.abstractmethod
-    async def end_stream(self, client_id: str) -> dict:
+    async def end_stream(self, stream_id: str) -> dict:
         """End stream and return final transcription with word-level timestamps."""
         pass
 

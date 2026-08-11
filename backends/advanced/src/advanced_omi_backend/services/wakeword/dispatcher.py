@@ -30,6 +30,7 @@ from advanced_omi_backend.services.audio_stream.aggregator import (
     TranscriptionResultsAggregator,
 )
 from advanced_omi_backend.services.transcription import get_transcription_provider
+from advanced_omi_backend.services.wakeword.contracts import WakeDetectionEvent
 from advanced_omi_backend.services.wakeword.executor import (
     execute_voice_command,
     get_current_conversation_id,
@@ -186,31 +187,27 @@ class WakeWordDispatcher:
         if isinstance(raw, bytes):
             raw = raw.decode()
         payload = json.loads(raw)
+        event = WakeDetectionEvent.from_payload(payload)
 
-        session_id = payload.get("session_id", "")
-        user_id = payload.get("user_id", "")
-
-        if not user_id:
-            logger.warning(
-                f"wake-word detection for session '{session_id}' has no user_id; skipping"
-            )
-            return
+        session_id = event.session_id
+        session_id_value = str(event.session_id)
+        client_id = event.client_id
+        user_id = str(event.user_id)
 
         # Resolve the command text from the captured turn. The source is
         # configurable (backend.wakeword.command_source):
         #   batch                -> batch-transcribe the captured audio (default-quality)
         #   streaming            -> trust the live streaming transcript, skip batch ASR
         #   batch_then_streaming -> batch ASR, fall back to streaming with a warning
-        audio_b64 = payload.get("audio_b64", "")
-        sample_rate = int(payload.get("sample_rate", 16000))
-        detected_at = float(payload.get("detected_at") or 0.0)
+        audio_b64 = event.audio_b64
+        sample_rate = event.sample_rate
+        detected_at = event.detected_at
         command_source = get_wakeword_command_source()
         # Silence gate: the wakeword service flags captures that contained no real
         # speech (a false arm with nothing said). Skip batch ASR on those — self-
         # diarizing ASR (e.g. VibeVoice) hallucinates phantom commands on near-
         # silent audio, which would then be acted on as a real command.
-        has_speech = bool(payload.get("has_speech", True))
-        client_id = payload.get("client_id", session_id)
+        has_speech = event.has_speech
 
         # Speaker presence gate (per-user allowlist). When the user has enabled the
         # gate, an acoustic wake word only dispatches a command if one of their
@@ -233,10 +230,10 @@ class WakeWordDispatcher:
                 user_id,
                 "wake.blocked",
                 {
-                    "client_id": client_id,
-                    "session_id": session_id,
+                    "client_id": str(client_id),
+                    "session_id": session_id_value,
                     "reason": gate["reason"],
-                    "wakeword": payload.get("wakeword"),
+                    "wakeword": event.wakeword,
                     "identified": gate.get("identified"),
                 },
             )
@@ -262,11 +259,13 @@ class WakeWordDispatcher:
         #   "no_audio"          -> capture carried no audio at all
         if not audio_b64:
             asr_status = "no_audio"
-            logger.warning(f"wake-word detection for '{session_id}' carried no audio")
+            logger.warning(
+                f"wake-word detection for '{session_id_value}' carried no audio"
+            )
         elif not has_speech:
             asr_status = "skipped_silence"
             logger.info(
-                f"wake-word detection for '{session_id}' was near-silent; "
+                f"wake-word detection for '{session_id_value}' was near-silent; "
                 f"skipping batch ASR (silence gate)"
             )
         else:
@@ -279,7 +278,7 @@ class WakeWordDispatcher:
                 command_source=command_source,
                 pcm=pcm,
                 sample_rate=sample_rate,
-                session_id=session_id,
+                session_id=session_id_value,
                 user_id=user_id,
                 detected_at=detected_at,
                 capture_secs=capture_secs,
@@ -287,7 +286,7 @@ class WakeWordDispatcher:
             asr_ms = (time.perf_counter() - _asr_start) * 1000.0
 
         conversation_id = await get_current_conversation_id(
-            self.redis_client, session_id
+            self.redis_client, session_id_value
         )
 
         # Funnel through the shared executor so the acoustic wake path and the
@@ -304,10 +303,10 @@ class WakeWordDispatcher:
             source="wake",
             asr_status=asr_status,
             has_speech=has_speech,
-            wakeword=payload.get("wakeword"),
-            also_fired=payload.get("also_fired", []),
-            score=payload.get("score"),
-            reason=payload.get("reason"),
+            wakeword=event.wakeword,
+            also_fired=event.also_fired,
+            score=event.score,
+            reason=event.reason,
             capture_secs=capture_secs,
             asr_ms=asr_ms,
         )

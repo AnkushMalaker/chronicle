@@ -287,14 +287,15 @@ class SessionStore:
     ) -> None:
         """Create the session hash (status=active). Single atomic write.
 
-        ``session_id`` is stable across reconnects (it equals ``client_id``), so a
-        reconnecting device re-initializes the SAME hash. Connection-scoped fields
-        must therefore be RESET here, not left to carry over from the previous
-        connection: a stale ``transcription_error`` would make the next speech
-        detection job break on iteration 1, a stale ``transcription_seconds_sent``
-        would shift the new connection's transcript timestamps by a bogus offset,
-        and a stale ``completion_reason`` would misclassify the new connection's
-        diagnostics. They are explicitly cleared in the mapping below.
+        ``session_id`` is the audio-session identity; ``client_id`` is the connected
+        device identity. They may differ, and the session hash is the authoritative
+        join point between them. Re-initializing a session hash must RESET
+        connection-scoped fields instead of carrying them over: a stale
+        ``transcription_error`` would make the next speech detection job break on
+        iteration 1, a stale ``transcription_seconds_sent`` would shift the
+        connection's transcript timestamps by a bogus offset, and a stale
+        ``completion_reason`` would misclassify diagnostics. They are explicitly
+        cleared in the mapping below.
         """
         now = str(time.time())
         await self._redis.hset(

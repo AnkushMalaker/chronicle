@@ -42,6 +42,7 @@ from advanced_omi_backend.model_registry import get_models_registry
 from advanced_omi_backend.models.conversation import create_conversation
 from advanced_omi_backend.plugins.events import BUTTON_STATE_TO_EVENT, ButtonState
 from advanced_omi_backend.redis_factory import create_async_redis
+from advanced_omi_backend.redis_keys import ClientId, device_downlink_channel
 from advanced_omi_backend.services.audio_stream.conversation_lifecycle import (
     ensure_active_session_placeholder,
 )
@@ -199,7 +200,9 @@ async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) ->
             )
 
 
-async def subscribe_to_device_downlink(websocket: WebSocket, client_id: str) -> None:
+async def subscribe_to_device_downlink(
+    websocket: WebSocket, client_id: ClientId
+) -> None:
     """Forward backend→device control messages from Redis Pub/Sub to the device WebSocket.
 
     Any backend component (wake-word service, plugins) can push a message to a
@@ -209,10 +212,13 @@ async def subscribe_to_device_downlink(websocket: WebSocket, client_id: str) -> 
 
     Runs as a background task for the lifetime of the WebSocket connection.
     """
-    channel = f"device:downlink:{client_id}"
+    if not isinstance(client_id, ClientId):
+        raise TypeError("subscribe_to_device_downlink requires ClientId")
+    client_id_value = str(client_id)
+    channel = str(device_downlink_channel(client_id))
     redis_client = None
     pubsub = None
-    opus_stream = is_opus_streaming_client(client_id)
+    opus_stream = is_opus_streaming_client(client_id_value)
 
     try:
         redis_client = create_async_redis(decode_responses=True)
@@ -253,14 +259,14 @@ async def subscribe_to_device_downlink(websocket: WebSocket, client_id: str) -> 
                         # device; for others there's nothing streaming to cancel, so
                         # just forward the control frame best-effort.
                         if opus_stream:
-                            await stop_play_audio(websocket, client_id)
+                            await stop_play_audio(websocket, client_id_value)
                         else:
                             await websocket.send_json(payload)
                     elif opus_stream and msg_type == "play-audio":
                         # RAM-limited devices can't take a big base64 WAV frame;
                         # transcode + stream it as small Opus packets instead.
                         streamed = await stream_play_audio_as_opus(
-                            websocket, payload.get("data") or {}, client_id
+                            websocket, payload.get("data") or {}, client_id_value
                         )
                         if not streamed:
                             await websocket.send_json(payload)  # fallback
@@ -1545,7 +1551,9 @@ async def _websocket_session(ws, token, device_name, connection_type):
         audio_stream_producer = get_audio_stream_producer()
 
         # Forward backend→device control messages (tones, TTS) for this device.
-        downlink_task = asyncio.create_task(subscribe_to_device_downlink(ws, client_id))
+        downlink_task = asyncio.create_task(
+            subscribe_to_device_downlink(ws, ClientId.from_value(client_id))
+        )
 
         yield (client_id, client_state, user, audio_stream_producer, interim_holder)
 

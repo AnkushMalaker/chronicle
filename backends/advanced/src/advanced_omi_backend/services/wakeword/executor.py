@@ -28,6 +28,7 @@ import redis.asyncio as redis
 
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.plugins.router import PluginRouter
+from advanced_omi_backend.redis_keys import ClientId, SessionId, device_downlink_channel
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 from advanced_omi_backend.services.tts_client import synthesize_speech
 from advanced_omi_backend.services.wakeword.timing import WakeTimer
@@ -133,15 +134,15 @@ _TONE_GENERATORS = {
 
 
 async def play_tone_on_device(
-    redis_client: redis.Redis, client_id: str, tone: str = "thinking"
+    redis_client: redis.Redis, client_id: ClientId, tone: str = "thinking"
 ) -> None:
     """Play a short notification tone on the device via its downlink channel.
 
     Uses the same inline ``play-audio`` path as :func:`speak_on_device`, so every
     client type (HAVPE relay, phone, web UI) plays it. Best-effort; never raises.
     """
-    if not client_id:
-        return
+    if not isinstance(client_id, ClientId):
+        raise TypeError("play_tone_on_device requires ClientId")
     generator = _TONE_GENERATORS.get(tone)
     if generator is None:
         logger.debug(f"Unknown tone '{tone}'; not playing")
@@ -151,7 +152,9 @@ async def play_tone_on_device(
         return
     msg = {"type": "play-audio", "data": {"audio_b64": audio_b64, "format": "wav"}}
     try:
-        await redis_client.publish(f"device:downlink:{client_id}", json.dumps(msg))
+        await redis_client.publish(
+            str(device_downlink_channel(client_id)), json.dumps(msg)
+        )
         logger.info(f"🔔 Sent '{tone}' tone to device {client_id}")
     except Exception as e:  # noqa: BLE001 - tone output is best-effort
         logger.debug(f"Failed to publish '{tone}' tone downlink for {client_id}: {e}")
@@ -165,7 +168,7 @@ _LED_THINK_COLOR = {"r": 1.0, "g": 0.45, "b": 0.0}  # amber
 
 async def set_device_led(
     redis_client: redis.Redis,
-    client_id: str,
+    client_id: ClientId,
     *,
     effect: str,
     color: Optional[dict] = None,
@@ -179,8 +182,8 @@ async def set_device_led(
     unknown downlink types). The firmware reverts to its connectivity colour after
     ``duration`` seconds. Best-effort; never raises.
     """
-    if not client_id:
-        return
+    if not isinstance(client_id, ClientId):
+        raise TypeError("set_device_led requires ClientId")
     data: dict[str, Any] = {
         "effect": effect,
         "brightness": brightness,
@@ -190,21 +193,23 @@ async def set_device_led(
         data.update(color)
     msg = {"type": "led-control", "data": data}
     try:
-        await redis_client.publish(f"device:downlink:{client_id}", json.dumps(msg))
+        await redis_client.publish(
+            str(device_downlink_channel(client_id)), json.dumps(msg)
+        )
     except Exception as e:  # noqa: BLE001 - LED feedback is best-effort
         logger.debug(f"Failed to publish led-control downlink for {client_id}: {e}")
 
 
-def _ctx_key(session_id: str) -> str:
+def _ctx_key(session_id: str | SessionId) -> str:
     return f"followup:ctx:{session_id}"
 
 
-def _mute_key(session_id: str) -> str:
+def _mute_key(session_id: str | SessionId) -> str:
     return f"followup:mute:{session_id}"
 
 
 async def open_followup_window(
-    redis_client: redis.Redis, session_id: str, command: str
+    redis_client: redis.Redis, session_id: str | SessionId, command: str
 ) -> None:
     """Open/refresh the follow-up window, recording the command just executed."""
     if not session_id:
@@ -214,7 +219,7 @@ async def open_followup_window(
 
 
 async def get_followup_ctx(
-    redis_client: redis.Redis, session_id: str
+    redis_client: redis.Redis, session_id: str | SessionId
 ) -> Optional[dict]:
     """Return the open follow-up context for a session, or None if the window is closed."""
     if not session_id:
@@ -230,13 +235,15 @@ async def get_followup_ctx(
         return None
 
 
-async def clear_followup_window(redis_client: redis.Redis, session_id: str) -> None:
+async def clear_followup_window(
+    redis_client: redis.Redis, session_id: str | SessionId
+) -> None:
     if not session_id:
         return
     await redis_client.delete(_ctx_key(session_id))
 
 
-async def is_muted(redis_client: redis.Redis, session_id: str) -> bool:
+async def is_muted(redis_client: redis.Redis, session_id: str | SessionId) -> bool:
     """True while the device is (likely) still playing our spoken reply.
 
     Guards against the device mic capturing the assistant's own TTS reply and
@@ -247,7 +254,9 @@ async def is_muted(redis_client: redis.Redis, session_id: str) -> bool:
     return bool(await redis_client.exists(_mute_key(session_id)))
 
 
-async def _set_mute(redis_client: redis.Redis, session_id: str, secs: float) -> None:
+async def _set_mute(
+    redis_client: redis.Redis, session_id: str | SessionId, secs: float
+) -> None:
     if not session_id or secs <= 0:
         return
     # Redis EX is integer seconds; round up so short replies still get a floor.
@@ -255,7 +264,7 @@ async def _set_mute(redis_client: redis.Redis, session_id: str, secs: float) -> 
 
 
 async def get_current_conversation_id(
-    redis_client: redis.Redis, session_id: str
+    redis_client: redis.Redis, session_id: str | SessionId
 ) -> Optional[str]:
     """Resolve the active conversation id for a session, if any."""
     if not session_id:
@@ -284,8 +293,8 @@ async def publish_sse(
 
 async def speak_on_device(
     redis_client: redis.Redis,
-    client_id: str,
-    session_id: str,
+    client_id: ClientId,
+    session_id: SessionId,
     text: str,
     timer: Optional[WakeTimer] = None,
 ) -> None:
@@ -296,7 +305,11 @@ async def speak_on_device(
     bytes on the LAN. When ``timer`` is given, records the synthesis duration, the
     downlink moment, and the estimated playback length.
     """
-    if not client_id or not text:
+    if not isinstance(client_id, ClientId):
+        raise TypeError("speak_on_device requires ClientId")
+    if not isinstance(session_id, SessionId):
+        raise TypeError("speak_on_device requires SessionId")
+    if not text:
         return
     _tts_start = time.perf_counter()
     audio = await synthesize_speech(text)
@@ -317,7 +330,9 @@ async def speak_on_device(
         },
     }
     try:
-        await redis_client.publish(f"device:downlink:{client_id}", json.dumps(msg))
+        await redis_client.publish(
+            str(device_downlink_channel(client_id)), json.dumps(msg)
+        )
         if timer is not None:
             timer.mark_downlink()
         logger.info(f"🔊 Sent TTS reply ({len(audio)}B) to device {client_id}")
@@ -330,8 +345,8 @@ async def execute_voice_command(
     plugin_router: PluginRouter,
     *,
     user_id: str,
-    session_id: str,
-    client_id: str,
+    session_id: SessionId,
+    client_id: ClientId,
     command: str,
     conversation_id: Optional[str] = None,
     source: str = "wake",
@@ -360,8 +375,14 @@ async def execute_voice_command(
     declines and a slower one takes over, a "thinking" tone plays on the device so
     the agentic wait reads as intentional.
     """
+    if not isinstance(session_id, SessionId):
+        raise TypeError("execute_voice_command requires SessionId")
+    if not isinstance(client_id, ClientId):
+        raise TypeError("execute_voice_command requires ClientId")
+    session_id_value = str(session_id)
+    client_id_value = str(client_id)
     timer = WakeTimer(
-        session_id=session_id,
+        session_id=session_id_value,
         source=source,
         asr_status=asr_status,
         command=command,
@@ -385,8 +406,8 @@ async def execute_voice_command(
 
     data: dict[str, Any] = {
         "command": command,
-        "client_id": client_id,
-        "session_id": session_id,
+        "client_id": client_id_value,
+        "session_id": session_id_value,
         "conversation_id": conversation_id,
         "wakeword": wakeword,
         "also_fired": also_fired or [],
@@ -399,7 +420,7 @@ async def execute_voice_command(
 
     logger.info(
         f"🎙️ Executing voice command (source={source}, user={user_id}, "
-        f"session={session_id}, command='{command[:50]}')"
+        f"session={session_id_value}, command='{command[:50]}')"
     )
     # "Thinking" ring while we dispatch — the agent path (e.g. Hermes) can take many
     # seconds, so the wait should read as intentional. Refreshes the end-of-turn cue.
@@ -420,8 +441,8 @@ async def execute_voice_command(
             user_id=user_id,
             data=data,
             metadata={
-                "client_id": client_id,
-                "session_id": session_id,
+                "client_id": client_id_value,
+                "session_id": session_id_value,
                 "conversation_id": conversation_id,
                 "command": command,
                 "wakeword": wakeword,
@@ -448,7 +469,7 @@ async def execute_voice_command(
                 "command": command,
                 "reply": reply,
                 "conversation_id": conversation_id,
-                "client_id": client_id,
+                "client_id": client_id_value,
                 "asr_status": asr_status,
                 "source": source,
             },
@@ -469,7 +490,7 @@ async def execute_voice_command(
                 {
                     "open": True,
                     "window_secs": FOLLOWUP_WINDOW_SECS,
-                    "client_id": client_id,
+                    "client_id": client_id_value,
                     "command": command,
                 },
             )

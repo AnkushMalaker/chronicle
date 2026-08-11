@@ -27,6 +27,7 @@ from advanced_omi_backend.plugins.router import (
     PluginRouter,
     normalize_text_for_wake_word,
 )
+from advanced_omi_backend.redis_keys import ClientId, SessionId
 from advanced_omi_backend.services.wakeword.executor import (
     execute_voice_command,
     get_current_conversation_id,
@@ -206,12 +207,14 @@ async def maybe_handle_followup(
 
     logger.info("Follow-up %r -> %r (prev=%r)", text, resolved, last_command)
     conversation_id = await get_current_conversation_id(redis_client, session_id)
+    session_ref = SessionId.from_value(session_id)
+    client_ref = ClientId.from_value(client_id)
     await execute_voice_command(
         redis_client,
         plugin_router,
         user_id=user_id,
-        session_id=session_id,
-        client_id=client_id,
+        session_id=session_ref,
+        client_id=client_ref,
         command=resolved,
         conversation_id=conversation_id,
         source="followup",
@@ -295,6 +298,8 @@ async def handle_dial_followup(
         "Dial %s -> %r (axis=%s, prev=%r)", direction, resolved, axis, last_command
     )
     conversation_id = await get_current_conversation_id(redis_client, session_id)
+    session_ref = SessionId.from_value(session_id)
+    client_ref = ClientId.from_value(client_id)
     # quiet=True: no spoken "warmer" per detent and no backend LED effect (the
     # lights changing is the feedback; the device shows its own local dial ring).
     # source="followup" re-opens the window on success, so consecutive turns work.
@@ -302,8 +307,8 @@ async def handle_dial_followup(
         redis_client,
         plugin_router,
         user_id=user_id,
-        session_id=session_id,
-        client_id=client_id,
+        session_id=session_ref,
+        client_id=client_ref,
         command=resolved,
         conversation_id=conversation_id,
         source="followup",

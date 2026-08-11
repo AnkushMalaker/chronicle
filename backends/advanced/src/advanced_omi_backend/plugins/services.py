@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Optional
 
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.redis_factory import create_async_redis
+from advanced_omi_backend.redis_keys import ClientId, device_downlink_channel
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 from advanced_omi_backend.users import User
 
@@ -135,7 +136,10 @@ class PluginServices:
             logger.warning("stop_playback called with no client_id")
             return False
         message = json.dumps({"type": "stop-audio", "data": {}})
-        await self._async_redis.publish(f"device:downlink:{client_id}", message)
+        client_ref = ClientId.from_value(client_id)
+        await self._async_redis.publish(
+            str(device_downlink_channel(client_ref)), message
+        )
         logger.info(f"⏹ Requested stop-audio for {client_id}")
         return True
 

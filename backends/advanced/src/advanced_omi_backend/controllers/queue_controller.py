@@ -691,9 +691,9 @@ def start_streaming_jobs(
     2. Audio persistence job - writes audio chunks to WAV file (file rotation per conversation)
 
     Args:
-        session_id: Stream session ID (equals client_id for streaming)
+        session_id: Stream/audio session ID
         user_id: User identifier
-        client_id: Client identifier
+        client_id: Connected device identifier
 
     Returns:
         Dict with job IDs: {'speech_detection': job_id, 'audio_persistence': job_id}

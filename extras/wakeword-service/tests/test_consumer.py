@@ -8,11 +8,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from consumer import GROUP_NAME, WakeWordConsumer
 from detector import WakeEvent
+from identities import AudioStreamName, ClientId, SessionId, device_downlink_channel
 
 
 class FakeRedis:
     def __init__(self):
         self.read_count = 0
+        self.published = []
 
     async def hget(self, key, field):
         assert key == "audio:session:session-uuid"
@@ -43,6 +45,10 @@ class FakeRedis:
     async def xack(self, *args):
         return 1
 
+    async def publish(self, channel, message):
+        self.published.append((channel, message))
+        return 1
+
 
 class FakeDetector:
     def __init__(self):
@@ -51,11 +57,11 @@ class FakeDetector:
     def new_client_state(self):
         return SimpleNamespace(armed=False, priming=False)
 
-    async def process_frame(self, state, client_id, session_id, pcm):
-        self.calls.append((client_id, session_id))
+    async def process_frame(self, state, session_ref, pcm):
+        self.calls.append((str(session_ref.client_id), str(session_ref.session_id)))
         return WakeEvent(
-            client_id=client_id,
-            session_id=session_id,
+            client_id=session_ref.client_id,
+            session_id=session_ref.session_id,
             wakeword="hey_hermes",
             audio=pcm,
             arm_time=1.0,
@@ -64,7 +70,7 @@ class FakeDetector:
             reason="test",
         )
 
-    def flush(self, state, client_id, session_id):
+    def flush(self, state, session_ref):
         return None
 
 
@@ -81,9 +87,21 @@ async def test_process_stream_keeps_client_and_session_id_distinct():
 
     consumer._handle_event = capture_event
 
-    await consumer._process_stream("audio:stream:session-uuid", "session-uuid")
+    await consumer._process_stream(
+        AudioStreamName.from_value("audio:stream:session-uuid"),
+        SessionId.from_value("session-uuid"),
+    )
 
     assert detector.calls == [("a421c9-elato", "session-uuid")]
-    assert [(event.client_id, event.session_id) for event in events] == [
+    assert [(str(event.client_id), str(event.session_id)) for event in events] == [
         ("a421c9-elato", "session-uuid")
     ]
+
+
+def test_device_downlink_channel_requires_client_identity():
+    assert str(device_downlink_channel(ClientId.from_value("a421c9-elato"))) == (
+        "device:downlink:a421c9-elato"
+    )
+
+    with pytest.raises(TypeError, match="ClientId"):
+        device_downlink_channel(SessionId.from_value("session-uuid"))

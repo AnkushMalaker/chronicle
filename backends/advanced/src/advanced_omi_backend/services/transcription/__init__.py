@@ -679,7 +679,7 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         )
 
     async def start_stream(
-        self, client_id: str, sample_rate: int = 16000, diarize: bool = False
+        self, stream_id: str, sample_rate: int = 16000, diarize: bool = False
     ):
         base_url = self.model.resolved_url()
         ops = self.model.operations or {}
@@ -752,7 +752,7 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         if start_msg:
             # Inject session_id if placeholder present
             start_msg = json.loads(json.dumps(start_msg))  # deep copy
-            start_msg.setdefault("session_id", client_id)
+            start_msg.setdefault("session_id", stream_id)
             # Apply sample rate and diarization if present
             if "config" in start_msg and isinstance(start_msg["config"], dict):
                 start_msg["config"].setdefault("sample_rate", sample_rate)
@@ -766,7 +766,7 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
             except Exception:
                 pass
 
-        self._streams[client_id] = {
+        self._streams[stream_id] = {
             "ws": ws,
             "sample_rate": sample_rate,
             "final": None,
@@ -774,11 +774,11 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         }
 
     async def process_audio_chunk(
-        self, client_id: str, audio_chunk: bytes
+        self, stream_id: str, audio_chunk: bytes
     ) -> dict | None:
-        if client_id not in self._streams:
+        if stream_id not in self._streams:
             return None
-        ws = self._streams[client_id]["ws"]
+        ws = self._streams[stream_id]["ws"]
         ops = self.model.operations or {}
 
         # Send chunk header if required (for providers like Parakeet)
@@ -786,8 +786,8 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         if chunk_hdr:
             hdr = json.loads(json.dumps(chunk_hdr))
             hdr.setdefault("type", "audio_chunk")
-            hdr.setdefault("session_id", client_id)
-            hdr.setdefault("rate", self._streams[client_id]["sample_rate"])
+            hdr.setdefault("session_id", stream_id)
+            hdr.setdefault("rate", self._streams[stream_id]["sample_rate"])
             await ws.send(json.dumps(hdr))
 
         # Send audio chunk (raw bytes for Deepgram, or after header for others)
@@ -862,13 +862,13 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
             # healthy socket that simply has no transcript available yet.
             raise
         except Exception as e:
-            logger.error(f"Error processing audio chunk result for {client_id}: {e}")
+            logger.error(f"Error processing audio chunk result for {stream_id}: {e}")
             return None
 
-    async def end_stream(self, client_id: str) -> dict:
-        if client_id not in self._streams:
+    async def end_stream(self, stream_id: str) -> dict:
+        if stream_id not in self._streams:
             return {"text": "", "words": [], "segments": []}
-        ws = self._streams[client_id]["ws"]
+        ws = self._streams[stream_id]["ws"]
         ops = self.model.operations or {}
         end_msg = (ops.get("end", {}) or {}).get("message", {"type": "stop"})
         await ws.send(json.dumps(end_msg))
@@ -896,7 +896,7 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         except Exception:
             pass
 
-        self._streams.pop(client_id, None)
+        self._streams.pop(stream_id, None)
 
         if not isinstance(final, dict):
             return {"text": "", "words": [], "segments": []}

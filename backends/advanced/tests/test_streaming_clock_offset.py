@@ -15,11 +15,13 @@ provider stream, and all stored results must stay on one monotonic timeline.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from fakeredis import aioredis as fake_aioredis
 
 import advanced_omi_backend.services.transcription.streaming_consumer as sc_module
+from advanced_omi_backend.redis_keys import SessionId, audio_session
 from advanced_omi_backend.services.transcription.streaming_consumer import (
     StreamingTranscriptionConsumer,
     _apply_time_offset,
@@ -84,12 +86,12 @@ class FakeStreamingProvider:
         self.sessions_started = 0
         self.dead = False
 
-    async def start_stream(self, client_id, sample_rate=16000, diarize=False):
+    async def start_stream(self, stream_id, sample_rate=16000, diarize=False):
         self.sessions_started += 1
         self.clock = 0.0  # the bug trigger: every new WS session restarts at 0
         self.dead = False
 
-    async def process_audio_chunk(self, client_id, audio_chunk):
+    async def process_audio_chunk(self, stream_id, audio_chunk):
         if self.dead:
             raise ConnectionError("provider socket closed")
         secs = len(audio_chunk) / BYTES_PER_SECOND
@@ -105,7 +107,7 @@ class FakeStreamingProvider:
             "confidence": 1.0,
         }
 
-    async def end_stream(self, client_id):
+    async def end_stream(self, stream_id):
         if self.dead:
             raise ConnectionError("provider socket closed")
         return {"text": "", "words": [], "segments": []}
@@ -126,6 +128,15 @@ async def _stored_word_starts(redis, session_id):
     for _, fields in entries:
         words.extend(json.loads(fields[b"words"]))
     return [w["start"] for w in words]
+
+
+async def _write_session_identity(
+    redis, session_id: str, client_id: str, user_id: str = "user-1"
+) -> None:
+    await redis.hset(
+        audio_session(SessionId.from_value(session_id)),
+        mapping={"user_id": user_id, "client_id": client_id},
+    )
 
 
 async def test_timestamps_stay_monotonic_across_reconnect(consumer):
@@ -178,3 +189,110 @@ async def test_clock_survives_consumer_restart_via_session_store(consumer, monke
 
     starts = await _stored_word_starts(redis, session_id)
     assert starts[-1] == pytest.approx(3.0)
+
+
+async def test_streaming_followup_uses_session_metadata_client_id(
+    consumer, monkeypatch
+):
+    c, _provider, redis = consumer
+    session_id = "session-uuid"
+    client_id = "a421c9-elato"
+    seen = {}
+
+    await _write_session_identity(redis, session_id, client_id)
+
+    async def capture_followup(
+        redis_client, plugin_router, *, user_id, session_id, client_id, text
+    ):
+        seen.update(
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "client_id": client_id,
+                "text": text,
+            }
+        )
+        return True
+
+    monkeypatch.setattr(sc_module, "maybe_handle_followup", capture_followup)
+    c.plugin_router = SimpleNamespace()
+
+    await c.trigger_plugins(session_id, {"text": "make it warmer", "words": []})
+
+    assert seen == {
+        "user_id": "user-1",
+        "session_id": session_id,
+        "client_id": client_id,
+        "text": "make it warmer",
+    }
+
+
+async def test_streaming_plugin_dispatch_uses_session_metadata_client_id(
+    consumer, monkeypatch
+):
+    c, _provider, redis = consumer
+    session_id = "session-uuid"
+    client_id = "a421c9-elato"
+    seen = {}
+
+    await _write_session_identity(redis, session_id, client_id)
+
+    async def ignore_followup(
+        redis_client, plugin_router, *, user_id, session_id, client_id, text
+    ):
+        return False
+
+    class CapturingRouter:
+        async def dispatch_event(self, *, event, user_id, data, metadata):
+            seen.update(
+                {
+                    "event": event,
+                    "user_id": user_id,
+                    "data": data,
+                    "metadata": metadata,
+                }
+            )
+            return [{"ok": True}]
+
+    monkeypatch.setattr(sc_module, "maybe_handle_followup", ignore_followup)
+    c.plugin_router = CapturingRouter()
+
+    await c.trigger_plugins(
+        session_id,
+        {
+            "text": "please summarize",
+            "words": [],
+            "segments": [],
+            "confidence": 0.75,
+        },
+    )
+
+    assert seen["event"] == sc_module.PluginEvent.TRANSCRIPT_STREAMING
+    assert seen["user_id"] == "user-1"
+    assert seen["data"]["session_id"] == session_id
+    assert seen["data"]["client_id"] == client_id
+    assert seen["metadata"] == {"client_id": client_id, "session_id": session_id}
+
+
+async def test_speaker_identification_uses_session_metadata_user_id(consumer):
+    c, _provider, redis = consumer
+    session_id = "session-uuid"
+    client_id = "a421c9-elato"
+    seen = {}
+
+    await _write_session_identity(redis, session_id, client_id)
+    c._audio_buffers[session_id] = bytearray(b"\x00" * 3200)
+
+    async def identify_segment(*, audio_wav_bytes, user_id):
+        seen["user_id"] = user_id
+        seen["audio_wav_bytes"] = audio_wav_bytes
+        return {"found": True, "speaker_name": "Ankush", "confidence": 0.9}
+
+    c.speaker_client = SimpleNamespace(enabled=True, identify_segment=identify_segment)
+
+    speaker_name, confidence = await c._identify_speaker(session_id)
+
+    assert speaker_name == "Ankush"
+    assert confidence == pytest.approx(0.9)
+    assert seen["user_id"] == "user-1"
+    assert seen["audio_wav_bytes"].startswith(b"RIFF")
