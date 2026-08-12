@@ -18,6 +18,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from simple_speaker_recognition import database
+from simple_speaker_recognition.api.core import utils
 from simple_speaker_recognition.core import unified_speaker_db
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.database import Base
@@ -152,3 +154,27 @@ def test_two_tenants_coexist_on_a_cold_database(tmp_path):
     assert sorted(u.id for u in UserQueries.get_all_users(session)) == sorted(
         [ALICE, BOB]
     )
+
+
+def test_the_owning_tenant_comes_from_the_record_not_the_id(tmp_path, monkeypatch):
+    """A stored owner beats the id convention, which can disagree with it.
+
+    Enrolment creates the speaker, so on that path the id is the only statement of
+    the tenant and is honoured. Once a row exists the column is authoritative — an
+    imported or re-owned speaker keeps an id whose prefix is simply wrong.
+    """
+
+    engine = create_engine(f"sqlite:///{tmp_path/'owners.db'}")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(database, "get_db_session", factory, raising=False)
+
+    session = factory()
+    UserQueries.get_or_create_user(session, ALICE)
+    session.add(Speaker(id="user_1_legacy", name="Imported", user_id=ALICE))
+    session.commit()
+
+    # The id says tenant "1"; the record says ALICE. The record wins.
+    assert utils.extract_user_id_from_speaker_id("user_1_legacy") == ALICE
+    # An unknown speaker is being created, so its id states the tenant.
+    assert utils.extract_user_id_from_speaker_id(f"user_{ALICE}_speaker_ab12") == ALICE

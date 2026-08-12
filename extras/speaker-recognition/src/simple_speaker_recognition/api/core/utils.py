@@ -106,29 +106,47 @@ def secure_temp_file(suffix: str = ".wav") -> tempfile._TemporaryFileWrapper:
 
 
 def extract_user_id_from_speaker_id(speaker_id: str) -> str:
-    """Return the tenant that owns ``speaker_id``, read from the speaker row.
+    """Return the tenant for ``speaker_id``: its recorded owner, else the id's prefix.
 
-    Deliberately a lookup rather than a parse. The id is *conventionally*
-    ``user_{user_id}_speaker_{hex}``, but that convention is not the ownership
-    record — the ``speakers.user_id`` column is, and it stays right when a speaker is
-    imported, renamed, or created by a client that formats ids differently. The old
-    ``int(speaker_id.split("_")[1])`` also stopped working the moment a tenant became
-    a Chronicle ObjectId, which is not an integer.
+    The stored ``speakers.user_id`` is the ownership record and wins whenever the
+    speaker exists — it stays right for a speaker that was imported, renamed, or
+    created by a client that formats ids differently, none of which the id convention
+    survives.
+
+    The convention ``user_{user_id}_speaker_{...}`` is only consulted when no such
+    speaker exists yet, because enrolment *creates* one and the id is currently how
+    the caller states the tenant. That is a weak contract and the reason the audit
+    says a tenant should not be inferred from a SpeakerId; removing it needs an
+    explicit ``user_id`` on /enroll/upload, /enroll/batch and /enroll/append and on
+    each of their callers (Chronicle's client, the speaker WebUI, and two scripts).
+
+    Returns a string either way. It used to return ``int(parts[1])``, which stopped
+    parsing the moment a tenant became a Chronicle ObjectId.
     """
 
-    # Imported here to avoid a circular import: database.queries imports the API
-    # models that this utils module is itself imported by.
+    # Imported here rather than at module scope: database.queries imports the API
+    # models that this module is itself imported by.
     from simple_speaker_recognition.database import get_db_session
     from simple_speaker_recognition.database.models import Speaker
 
     db = get_db_session()
     try:
         speaker = db.query(Speaker).filter(Speaker.id == speaker_id).first()
-        if speaker is None:
-            raise HTTPException(404, f"Speaker not found: {speaker_id}")
-        return str(speaker.user_id)
+        if speaker is not None:
+            return str(speaker.user_id)
     finally:
         db.close()
+
+    if not speaker_id.startswith("user_"):
+        raise HTTPException(
+            400,
+            "Unknown speaker and unrecognised id: expected "
+            f"'user_{{user_id}}_...', got: {speaker_id}",
+        )
+    parts = speaker_id.split("_")
+    if len(parts) < 3 or not parts[1]:
+        raise HTTPException(400, f"Cannot determine the owning user from: {speaker_id}")
+    return parts[1]
 
 
 def validate_confidence(confidence: Any, context: str = "") -> float:
