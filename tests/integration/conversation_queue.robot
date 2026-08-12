@@ -77,9 +77,9 @@ Test Reprocess Conversation Job Queue
 
     Log    Created conversation: ${conversation_id}    INFO
 
-    # Wait for initial upload started to complete (transcription job chain)
-    Log    Waiting for initial conversation started to complete...    INFO
-    Sleep    10s    # Give time for initial job chain (transcription -> speaker -> memory)
+    # Wait for the initial transcript itself; a fixed sleep races a busy CI worker.
+    Log    Waiting for initial transcription to complete...    INFO
+    Wait For Job Status    ${conversation}[transcript_job_id]    finished    timeout=60s    interval=3s
 
     # Get conversation to verify initial state
     ${initial_conversation}=    Get Conversation By ID    ${conversation_id}
