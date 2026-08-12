@@ -42,7 +42,11 @@ USER = "69b80e5894aa9ec334a421c9"
 async def init_db():
     """Beanie refuses to *construct* a Document before initialization, so the two
     mapping tests need a database even though they never write to one."""
-    client = AsyncIOMotorClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017"))
+    # 27018, matching conftest's ``mongo_service`` gate and every other Mongo test.
+    # Dialling 27017 while the gate probes 27018 means the module only runs where
+    # both ports have a server: CI publishes 27018 only, so it skipped the gate and
+    # then failed to connect.
+    client = AsyncIOMotorClient(os.getenv("MONGODB_URI", "mongodb://localhost:27018"))
     name = os.getenv("TEST_DB_NAME", "test_legacy_backups")
     await init_beanie(database=client[name], document_models=[Conversation])
     yield
