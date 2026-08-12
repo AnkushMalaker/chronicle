@@ -1211,7 +1211,7 @@
       {
         "word": "looks",
         "start": 59.903,
-        "end": 61.875,
+        "end": 60.032,
         "confidence": 0.86591697,
         "speaker": "C"
       }
@@ -1279,7 +1279,7 @@
       },
       {
         "start": 59.823,
-        "end": 61.875,
+        "end": 60.032,
         "speaker": "C",
         "text": "It looks"
       }

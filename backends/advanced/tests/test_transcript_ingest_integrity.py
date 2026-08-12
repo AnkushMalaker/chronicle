@@ -1,6 +1,8 @@
 import io
+import json
 import wave
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -80,6 +82,19 @@ def test_stale_transcript_clock_is_rejected():
     assert raised.value.code == "transcript_timing_out_of_bounds"
     assert raised.value.details["audio_duration"] == 130.0
     assert raised.value.details["max_timing"] == 885.9
+
+
+def test_committed_transcription_cassettes_fit_their_audio_duration():
+    cassette_dir = Path(__file__).parents[3] / "tests" / "cassettes"
+
+    for cassette_path in sorted(cassette_dir.glob("*.json")):
+        cassette = json.loads(cassette_path.read_text())
+        batch = cassette["batch"]
+        validate_and_normalize_transcript_timing(
+            batch.get("segments", []),
+            batch.get("words", []),
+            audio_duration=cassette["duration_seconds"],
+        )
 
 
 def test_invalid_segment_order_is_rejected():
