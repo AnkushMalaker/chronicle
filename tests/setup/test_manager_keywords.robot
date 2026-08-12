@@ -60,8 +60,8 @@ Clear Test Databases
         Log To Console    MongoDB cleared (preserved admin user only)
     END
 
-    # Clear admin user's registered_clients dict to prevent client_id counter increments
-    Run Process    ${CONTAINER_ENGINE} exec ${MONGO_CONTAINER} mongosh test_db --eval "db.users.updateOne({'email':'${ADMIN_EMAIL}'}, {\\$set: {'registered_clients': {}}})"    shell=True
+    # Clear the admin user's registered client list to keep device ids deterministic.
+    Run Process    ${CONTAINER_ENGINE} exec ${MONGO_CONTAINER} mongosh test_db --eval "db.users.updateOne({'email':'${ADMIN_EMAIL}'}, {\\$set: {'registered_clients': []}})"    shell=True
 
     # Clear audio files (except fixtures subfolder)
     Run Process    bash    -c    find ${BACKEND_DIR}/data/test_audio_chunks -maxdepth 1 -name "*.wav" -delete || true    shell=True
