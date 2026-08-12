@@ -170,6 +170,27 @@ def build_worker_definitions() -> List[WorkerDefinition]:
         )
     )
 
+    # 1x dedicated Summary Worker - serves ONLY the `summary` queue. The local
+    # llama.cpp deployment exposes one inference slot, so allowing all six general
+    # workers to begin summary calls merely moves waiting time inside running jobs,
+    # where RQ correctly counts it against their 30s/60s/300s execution timeouts.
+    # Keeping that wait in Redis means timeout clocks start only when model capacity
+    # is actually available.
+    workers.append(
+        WorkerDefinition(
+            name="rq-summary-worker",
+            command=[
+                "python",
+                "-m",
+                "advanced_omi_backend.workers.rq_worker_entry",
+                "summary",
+            ],
+            worker_type=WorkerType.RQ_WORKER,
+            queues=["summary"],
+            restart_on_failure=True,
+        )
+    )
+
     # Audio Persistence Workers - Single-queue workers (audio queue)
     # Multiple workers allow concurrent audio persistence for multiple sessions
     for i in range(1, 4):  # 3 audio workers

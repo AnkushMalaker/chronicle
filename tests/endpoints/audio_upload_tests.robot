@@ -180,7 +180,7 @@ Audio Upload Client ID Generation Test
     [Tags]    audio-upload	queue
 
     # Upload first file with specific device name
-    ${device_name}=    Set Variable    test-upload-device
+    ${device_name}=    Set Variable    testupload
     ${conversation1}=    Upload Audio File    ${TEST_AUDIO_FILE}    device_name=${device_name}
     ${client_id1}=    Set Variable    ${conversation1}[client_id]
     ${conversation_id1}=    Set Variable    ${conversation1}[conversation_id]
