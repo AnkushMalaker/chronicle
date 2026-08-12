@@ -1525,6 +1525,7 @@ class SpeakerRecognitionClient:
                 )
                 form_data.add_field("speaker_id", speaker_id)
                 form_data.add_field("speaker_name", speaker_name)
+                form_data.add_field("user_id", user_id)
 
                 async with session.post(
                     f"{self.service_url}/enroll/upload",

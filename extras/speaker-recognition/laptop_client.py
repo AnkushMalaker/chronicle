@@ -82,13 +82,19 @@ class SpeakerClient:
         logger.info(f"Health check response: {health_response}")
         return health_response
 
-    async def enroll_speaker(self, speaker_id: str, speaker_name: str, audio_path: str):
+    async def enroll_speaker(
+        self, speaker_id: str, speaker_name: str, user_id: str, audio_path: str
+    ):
         """Enroll a speaker from audio file by uploading it."""
         if not self.session:
             raise RuntimeError("Client not initialized")
 
         # Prepare query parameters
-        params = {"speaker_id": speaker_id, "speaker_name": speaker_name}
+        params = {
+            "speaker_id": speaker_id,
+            "speaker_name": speaker_name,
+            "user_id": user_id,
+        }
 
         # Prepare file upload
         with open(audio_path, "rb") as f:
@@ -275,7 +281,7 @@ async def cmd_enroll(args):
 
             # Enroll speaker
             result = await client.enroll_speaker(
-                args.speaker_id, args.speaker_name, audio_path
+                args.speaker_id, args.speaker_name, args.user_id, audio_path
             )
             logger.info(f"Server response: {result}")
 
@@ -524,6 +530,9 @@ def main():
     # Enroll command
     enroll_parser = subparsers.add_parser("enroll", help="Enroll a new speaker")
     enroll_parser.add_argument("--speaker-id", required=True, help="Unique speaker ID")
+    enroll_parser.add_argument(
+        "--user-id", required=True, help="Chronicle user id owning the speaker"
+    )
     enroll_parser.add_argument(
         "--speaker-name", required=True, help="Speaker display name"
     )

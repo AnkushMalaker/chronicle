@@ -70,6 +70,7 @@ def enroll_single_file(
     file_path: str,
     speaker_id: str,
     speaker_name: str,
+    user_id: str,
     start: Optional[float] = None,
     end: Optional[float] = None,
     service_url: str = None,
@@ -84,7 +85,11 @@ def enroll_single_file(
     try:
         with open(file_path, "rb") as f:
             files = {"file": (os.path.basename(file_path), f, "audio/wav")}
-            data = {"speaker_id": speaker_id, "speaker_name": speaker_name}
+            data = {
+                "speaker_id": speaker_id,
+                "speaker_name": speaker_name,
+                "user_id": user_id,
+            }
 
             if start is not None:
                 data["start"] = start
@@ -118,7 +123,7 @@ def enroll_single_file(
 
 
 def enroll_multiple_files(
-    file_paths: List[str], speaker_id: str, speaker_name: str
+    file_paths: List[str], speaker_id: str, speaker_name: str, user_id: str
 ) -> bool:
     """Enroll speaker from multiple audio files for better accuracy."""
     valid_files = [f for f in file_paths if os.path.exists(f)]
@@ -138,7 +143,11 @@ def enroll_multiple_files(
                     ("files", (os.path.basename(file_path), content, "audio/wav"))
                 )
 
-        data = {"speaker_id": speaker_id, "speaker_name": speaker_name}
+        data = {
+            "speaker_id": speaker_id,
+            "speaker_name": speaker_name,
+            "user_id": user_id,
+        }
 
         response = requests.post(
             f"{SPEAKER_SERVICE_URL}/enroll/batch", files=files, data=data
@@ -161,7 +170,9 @@ def enroll_multiple_files(
         return False
 
 
-def enroll_from_directory(directory: str, speaker_id: str, speaker_name: str) -> bool:
+def enroll_from_directory(
+    directory: str, speaker_id: str, speaker_name: str, user_id: str
+) -> bool:
     """Enroll speaker from all audio files in a directory."""
     audio_extensions = {".wav", ".flac", ".mp3", ".m4a", ".ogg"}
     dir_path = Path(directory)
@@ -179,7 +190,7 @@ def enroll_from_directory(directory: str, speaker_id: str, speaker_name: str) ->
         return False
 
     logger.info(f"Found {len(audio_files)} audio files in {directory}")
-    return enroll_multiple_files(audio_files, speaker_id, speaker_name)
+    return enroll_multiple_files(audio_files, speaker_id, speaker_name, user_id)
 
 
 def download_youtube_audio(
@@ -316,6 +327,9 @@ def main():
 
     # Speaker info arguments
     parser.add_argument("--id", help="Speaker ID (required for enrollment)")
+    parser.add_argument(
+        "--user-id", help="Chronicle user id owning the speaker (required to enroll)"
+    )
     parser.add_argument("--name", help="Speaker display name (required for enrollment)")
 
     # Optional arguments
@@ -347,25 +361,29 @@ def main():
 
     else:
         # Enrollment actions require ID and name
-        if not args.id or not args.name:
-            logger.error("❌ --id and --name are required for enrollment")
+        if not args.id or not args.name or not args.user_id:
+            logger.error("❌ --id, --name and --user-id are required for enrollment")
             return 1
 
         if args.file:
             success = enroll_single_file(
-                args.file, args.id, args.name, args.start, args.end
+                args.file, args.id, args.name, args.user_id, args.start, args.end
             )
 
         elif args.files:
-            success = enroll_multiple_files(args.files, args.id, args.name)
+            success = enroll_multiple_files(
+                args.files, args.id, args.name, args.user_id
+            )
 
         elif args.dir:
-            success = enroll_from_directory(args.dir, args.id, args.name)
+            success = enroll_from_directory(args.dir, args.id, args.name, args.user_id)
 
         elif args.youtube:
             audio_path = download_youtube_audio(args.youtube, args.start, args.end)
             if audio_path:
-                success = enroll_single_file(audio_path, args.id, args.name)
+                success = enroll_single_file(
+                    audio_path, args.id, args.name, args.user_id
+                )
                 os.unlink(audio_path)  # Clean up temporary file
             else:
                 success = False

@@ -50,6 +50,8 @@ SPEAKER_SERVICE_PORT = int(
     )
 )
 SPEAKER_SERVICE_URL = f"http://localhost:{SPEAKER_SERVICE_PORT}"
+# The tenant this suite enrols under. Opaque to the service.
+TEST_USER_ID = "1"
 
 
 def _command_exists(cmd: str) -> bool:
@@ -222,7 +224,11 @@ def test_speaker_recognition_pipeline(speaker_service):
             ("files", (f"evan_{i:03d}.wav", open(file_path, "rb"), "audio/wav"))
         )
 
-    data = {"speaker_id": "user_1_evan_test", "speaker_name": "Evan Test"}
+    data = {
+        "speaker_id": "user_1_evan_test",
+        "speaker_name": "Evan Test",
+        "user_id": TEST_USER_ID,
+    }
     r = requests.post(
         f"{SPEAKER_SERVICE_URL}/enroll/batch", files=files, data=data, timeout=120
     )
@@ -246,7 +252,11 @@ def test_speaker_recognition_pipeline(speaker_service):
             ("files", (f"katelyn_{i:03d}.wav", open(file_path, "rb"), "audio/wav"))
         )
 
-    data = {"speaker_id": "user_1_katelyn_test", "speaker_name": "Katelyn Test"}
+    data = {
+        "speaker_id": "user_1_katelyn_test",
+        "speaker_name": "Katelyn Test",
+        "user_id": TEST_USER_ID,
+    }
     r = requests.post(
         f"{SPEAKER_SERVICE_URL}/enroll/batch", files=files, data=data, timeout=120
     )
@@ -265,7 +275,7 @@ def test_speaker_recognition_pipeline(speaker_service):
     # Phase 4: Speaker Database Verification
     print("💾 Phase 4: Speaker database verification...")
     speakers_response = requests.get(
-        f"{SPEAKER_SERVICE_URL}/speakers?user_id=1", timeout=10
+        f"{SPEAKER_SERVICE_URL}/speakers?user_id={TEST_USER_ID}", timeout=10
     )
     assert (
         speakers_response.status_code == 200
@@ -288,7 +298,7 @@ def test_speaker_recognition_pipeline(speaker_service):
     evan_test_file = sorted(evan_files)[0]
     with open(evan_test_file, "rb") as f:
         files = {"file": (evan_test_file.name, f, "audio/wav")}
-        data = {"similarity_threshold": "0.10", "user_id": "1"}
+        data = {"similarity_threshold": "0.10", "user_id": TEST_USER_ID}
         r = requests.post(
             f"{SPEAKER_SERVICE_URL}/identify", files=files, data=data, timeout=60
         )
@@ -307,7 +317,7 @@ def test_speaker_recognition_pipeline(speaker_service):
     katelyn_test_file = sorted(katelyn_files)[0]
     with open(katelyn_test_file, "rb") as f:
         files = {"file": (katelyn_test_file.name, f, "audio/wav")}
-        data = {"similarity_threshold": "0.10", "user_id": "1"}
+        data = {"similarity_threshold": "0.10", "user_id": TEST_USER_ID}
         r = requests.post(
             f"{SPEAKER_SERVICE_URL}/identify", files=files, data=data, timeout=60
         )
@@ -333,7 +343,7 @@ def test_speaker_recognition_pipeline(speaker_service):
     with open(conversation_file, "rb") as f:
         files = {"file": (conversation_file.name, f, "audio/wav")}
         params = {
-            "user_id": "1",
+            "user_id": TEST_USER_ID,
             "min_duration": "1.0",
             "similarity_threshold": "0.10",  # Lower threshold for conversation
             "min_speakers": "1",
@@ -438,7 +448,7 @@ def test_speaker_recognition_pipeline(speaker_service):
         files = {"file": (conversation_file.name, f, "audio/wav")}
         data = {
             "transcript_data": json.dumps(sample_transcript_data),
-            "user_id": "1",
+            "user_id": TEST_USER_ID,
             "min_duration": "1.0",
             "similarity_threshold": "0.10",
             "min_speakers": "1",

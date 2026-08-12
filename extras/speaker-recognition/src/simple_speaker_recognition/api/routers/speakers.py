@@ -10,8 +10,7 @@ from typing import Optional
 import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-
-from simple_speaker_recognition.api.core.utils import extract_user_id_from_speaker_id
+from simple_speaker_recognition.api.core.utils import owner_of_speaker
 from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.database import get_db_session
@@ -203,7 +202,7 @@ async def get_speaker_audio_files(
 ):
     """Get list of saved audio files for a speaker."""
     # Extract user_id from speaker_id for authorization
-    user_id = extract_user_id_from_speaker_id(speaker_id)
+    user_id = owner_of_speaker(speaker_id)
 
     # Check if speaker exists
     db_session = get_db_session()
@@ -262,7 +261,7 @@ async def download_speaker_audio_file(
 ):
     """Download a specific audio file for a speaker."""
     # Extract user_id from speaker_id for authorization
-    user_id = extract_user_id_from_speaker_id(speaker_id)
+    user_id = owner_of_speaker(speaker_id)
 
     # Check if speaker exists
     db_session = get_db_session()
@@ -334,7 +333,7 @@ async def delete_speaker(
     """Delete a speaker and optionally delete associated audio files."""
     try:
         # Extract user_id from speaker_id for authorization
-        user_id = extract_user_id_from_speaker_id(speaker_id)
+        user_id = owner_of_speaker(speaker_id)
 
         # Delete audio files if requested
         audio_deleted = False

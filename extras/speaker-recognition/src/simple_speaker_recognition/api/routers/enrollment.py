@@ -10,17 +10,16 @@ from typing import List, Optional
 
 import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy import func
-
 from simple_speaker_recognition.api.core.utils import (
-    extract_user_id_from_speaker_id,
     get_data_directory,
+    owner_of_speaker,
     secure_temp_file,
 )
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.database import get_db_session
 from simple_speaker_recognition.database.models import Speaker, SpeakerAudioSegment
 from simple_speaker_recognition.utils.audio_processing import get_audio_info
+from sqlalchemy import func
 
 # These will be imported from the main service.py when we integrate
 # from ..service import get_db, audio_backend, auth
@@ -256,13 +255,12 @@ async def enroll_upload(
     file: UploadFile = File(..., description="WAV/FLAC <3 min"),
     speaker_id: str = Form(..., description="Unique speaker identifier"),
     speaker_name: str = Form(..., description="Speaker display name"),
+    user_id: str = Form(..., description="Chronicle user id owning this speaker"),
     start: Optional[float] = Form(None, description="Start time in seconds"),
     end: Optional[float] = Form(None, description="End time in seconds"),
     db: UnifiedSpeakerDB = Depends(get_db),
 ):
     """Enroll a speaker from uploaded audio file."""
-    # Extract user_id from speaker_id
-    user_id = extract_user_id_from_speaker_id(speaker_id)
     log.info(f"Enrolling speaker: {speaker_name} (ID: {speaker_id}, User: {user_id})")
 
     # Check for duplicate speaker name (allow updates to existing speaker with same ID)
@@ -377,11 +375,10 @@ async def enroll_batch(
     ),
     speaker_id: str = Form(..., description="Unique speaker identifier"),
     speaker_name: str = Form(..., description="Speaker display name"),
+    user_id: str = Form(..., description="Chronicle user id owning this speaker"),
     db: UnifiedSpeakerDB = Depends(get_db),
 ):
     """Enroll a speaker using multiple audio segments, computing average embedding."""
-    # Extract user_id from speaker_id
-    user_id = extract_user_id_from_speaker_id(speaker_id)
     log.info(
         f"Batch enrolling speaker: {speaker_name} (ID: {speaker_id}, User: {user_id}) with {len(files)} files"
     )
@@ -544,8 +541,8 @@ async def enroll_append(
     db: UnifiedSpeakerDB = Depends(get_db),
 ):
     """Append audio segments to an existing speaker, computing weighted average embedding."""
-    # Extract user_id from speaker_id
-    user_id = extract_user_id_from_speaker_id(speaker_id)
+    # The speaker must already exist, so its recorded owner is authoritative.
+    user_id = owner_of_speaker(speaker_id)
     log.info(
         f"Appending to speaker: {speaker_id} (User: {user_id}) with {len(files)} files"
     )

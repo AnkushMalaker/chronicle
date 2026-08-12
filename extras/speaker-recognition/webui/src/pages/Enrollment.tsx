@@ -429,6 +429,7 @@ export default function Enrollment() {
       // BatchEnrollRequest expects exactly these field names
       formData.append('speaker_name', currentSession.speakerName)
       formData.append('speaker_id', speakerId)
+      formData.append('user_id', String(user.id))
 
       // Add all audio files (backend expects 'files' field for batch enrollment)
       for (const audio of currentSession.audioFiles) {

@@ -664,6 +664,8 @@ export default function Annotation() {
 
       formData.append('speaker_id', newSpeakerId)
       formData.append('speaker_name', speakerLabel)
+      // /enroll/batch requires this; /enroll/append ignores it.
+      formData.append('user_id', String(user.id))
 
       audioBlobs.forEach((blob, index) => {
         formData.append('files', blob, `segment_${String(index + 1).padStart(3, '0')}.wav`)

@@ -15,9 +15,7 @@ import json
 
 import numpy as np
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
+from fastapi import HTTPException
 from simple_speaker_recognition import database
 from simple_speaker_recognition.api.core import utils
 from simple_speaker_recognition.core import unified_speaker_db
@@ -25,6 +23,8 @@ from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.database import Base
 from simple_speaker_recognition.database.models import Speaker, User
 from simple_speaker_recognition.database.queries import UserQueries
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 ALICE = "69b80e5894aa9ec334a421c9"
 BOB = "69b80e5894aa9ec334b53d70"
@@ -157,11 +157,9 @@ def test_two_tenants_coexist_on_a_cold_database(tmp_path):
 
 
 def test_the_owning_tenant_comes_from_the_record_not_the_id(tmp_path, monkeypatch):
-    """A stored owner beats the id convention, which can disagree with it.
+    """Ownership is read from the speaker row, never parsed out of its id.
 
-    Enrolment creates the speaker, so on that path the id is the only statement of
-    the tenant and is honoured. Once a row exists the column is authoritative — an
-    imported or re-owned speaker keeps an id whose prefix is simply wrong.
+    An imported or re-owned speaker keeps an id whose prefix names someone else.
     """
 
     engine = create_engine(f"sqlite:///{tmp_path/'owners.db'}")
@@ -174,7 +172,10 @@ def test_the_owning_tenant_comes_from_the_record_not_the_id(tmp_path, monkeypatc
     session.add(Speaker(id="user_1_legacy", name="Imported", user_id=ALICE))
     session.commit()
 
-    # The id says tenant "1"; the record says ALICE. The record wins.
-    assert utils.extract_user_id_from_speaker_id("user_1_legacy") == ALICE
-    # An unknown speaker is being created, so its id states the tenant.
-    assert utils.extract_user_id_from_speaker_id(f"user_{ALICE}_speaker_ab12") == ALICE
+    # The id says tenant "1"; the record says ALICE.
+    assert utils.owner_of_speaker("user_1_legacy") == ALICE
+
+    # An unknown speaker is not guessed at from its id: enrolment supplies user_id.
+    with pytest.raises(HTTPException) as caught:
+        utils.owner_of_speaker(f"user_{ALICE}_speaker_neverenrolled")
+    assert caught.value.status_code == 404

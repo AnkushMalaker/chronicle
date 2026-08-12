@@ -97,12 +97,14 @@ class ApiService {
   async enrollSpeaker(
     speakerId: string,
     speakerName: string,
+    userId: string,
     audioFile: File
   ): Promise<any> {
     const formData = new FormData()
     formData.append('file', audioFile)
     formData.append('speaker_id', speakerId)
     formData.append('speaker_name', speakerName)
+    formData.append('user_id', userId)
 
     const response = await api.post('/enroll/upload', formData, {
       headers: {
@@ -116,6 +118,7 @@ class ApiService {
   async enrollSpeakerBatch(
     speakerId: string,
     speakerName: string,
+    userId: string,
     audioFiles: File[]
   ): Promise<any> {
     const formData = new FormData()
@@ -125,6 +128,7 @@ class ApiService {
     })
     formData.append('speaker_name', speakerName)
     formData.append('speaker_id', speakerId)
+    formData.append('user_id', userId)
 
     const response = await api.post('/enroll/batch', formData, {
       headers: {
