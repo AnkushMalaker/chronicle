@@ -11,6 +11,10 @@ from advanced_omi_backend.controllers import websocket_controller
 pytestmark = pytest.mark.unit
 
 
+async def _ignore_sse(*args, **kwargs):
+    return None
+
+
 class FailingFinalizeProducer:
     async def finalize_session(self, *args, **kwargs):
         raise RuntimeError("flush failed")
@@ -95,7 +99,7 @@ async def test_stop_transitions_after_wal_terminal_commit(monkeypatch):
 
     state = ClientState("client-1", "user-1")
     state.stream_session_id = "session-1"
-    monkeypatch.setattr(websocket_controller, "publish_sse_event", lambda *a, **k: None)
+    monkeypatch.setattr(websocket_controller, "publish_sse_event_async", _ignore_sse)
 
     await websocket_controller._finalize_streaming_session(
         state,
@@ -193,7 +197,7 @@ async def test_connect_assigns_durable_owner_before_enqueuing_workers(monkeypatc
         websocket_controller, "ensure_active_session_placeholder", assign_owner
     )
     monkeypatch.setattr(websocket_controller, "start_streaming_jobs", start_jobs)
-    monkeypatch.setattr(websocket_controller, "publish_sse_event", lambda *a, **k: None)
+    monkeypatch.setattr(websocket_controller, "publish_sse_event_async", _ignore_sse)
     monkeypatch.setattr(
         websocket_controller.uuid,
         "uuid4",
@@ -270,7 +274,7 @@ async def test_reconnect_uses_a_distinct_capture_session_and_wal(monkeypatch):
             "audio_persistence": "persist-1",
         },
     )
-    monkeypatch.setattr(websocket_controller, "publish_sse_event", lambda *a, **k: None)
+    monkeypatch.setattr(websocket_controller, "publish_sse_event_async", _ignore_sse)
 
     first = ClientState("client-1", "user-1")
     second = ClientState("client-1", "user-1")

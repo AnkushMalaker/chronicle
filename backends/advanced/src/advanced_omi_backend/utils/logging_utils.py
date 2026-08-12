@@ -129,7 +129,7 @@ def mask_dict(
 def mask_string(
     text: str, patterns: Optional[List[str]] = None, mask: str = SECRET_MASK
 ) -> str:
-    """
+    r"""
     Mask sensitive patterns in strings (e.g., tokens in error messages).
 
     Args:

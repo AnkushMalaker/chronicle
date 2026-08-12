@@ -51,11 +51,16 @@ jobs:
           version: "latest"
 
       - name: Run unit tests with coverage
+        # fastapi/uvicorn are the node agent's own runtime deps: tests/unit imports
+        # edge/service_manager.py, which serves the WebUI's service controls. They are
+        # not in setup-requirements.txt, which covers the wizard rather than the agent.
         run: >-
           uv run
           --with-requirements setup-requirements.txt
           --with pytest
           --with pytest-cov
+          --with fastapi
+          --with uvicorn
           pytest tests/unit
           --cov
           --cov-config=.coveragerc
@@ -153,8 +158,15 @@ jobs:
         run: uv sync --locked --group test
 
       - name: Run unit tests with coverage
+        # chronicle_setup comes in on the command line rather than as a path dep:
+        # tests/test_memory_setup_wizard.py loads backends/advanced/init.py, which
+        # imports it, but ../../extras is outside the Docker build context, so
+        # declaring it in pyproject.toml would break the image build. Same reasoning
+        # as the chronicle-wearable-sdk git source there.
         run: >-
-          uv run --group test pytest
+          uv run --group test
+          --with ../../extras/chronicle-setup
+          pytest
           --cov=advanced_omi_backend
           --cov-report=term-missing
           --cov-report=xml

@@ -32,6 +32,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Sequence
 from .vault_scaffold import VaultPathError, safe_vault_relative_path
 
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+_DAY_DIGEST_RANGE_RE = re.compile(r"^###\s+(\d{2}:\d{2}–\d{2}:\d{2})\s+·", re.MULTILINE)
+_DAY_NOTE_RANGE_RE = re.compile(
+    r"^-\s+(?:\*\*)?(\d{2}:\d{2}–\d{2}:\d{2})(?:\*\*)?\s+·",
+    re.MULTILINE,
+)
 
 # Long-lived structured notes carry a stable spine plus the aggregation embed that
 # auto-lists their conversations. A note missing either is malformed forever.
@@ -148,6 +153,47 @@ def illegal_path_reason(rel: str) -> str:
     return ""
 
 
+def root_note_role_reason(
+    root: Path, rel: str, before: str | None, content: str
+) -> str:
+    """Why a changed root Markdown note is not a valid category hub.
+
+    Content notes live one folder deep.  Root Markdown is reserved for the thin hub
+    notes that make category wikilinks resolve and embed their matching Obsidian Base.
+    Organic categories remain open-ended, but they must be created as the complete
+    template/base/hub bundle rather than by dropping an entity or topic at the root.
+    """
+
+    path = Path(rel)
+    if len(path.parts) != 1 or path.suffix != ".md":
+        return ""
+
+    category = path.stem
+    if before is not None:
+        return (
+            "root Markdown files are category hubs, not captured-content notes. Do not "
+            "edit the hub; put durable content in its category folder (for a topic, "
+            f"`Topics/{category}.md`)."
+        )
+
+    template = root / "Templates" / f"{category} Template.md"
+    base = root / "Templates" / "Bases" / f"{category}.base"
+    is_complete_hub = (
+        template.is_file()
+        and base.is_file()
+        and f"# {category}" in content
+        and f"![[{category}.base]]" in content
+    )
+    if is_complete_hub:
+        return ""
+    return (
+        "root Markdown files are reserved for category hubs created as a matching "
+        "template/base/hub bundle. If this is a topic, move it to "
+        f"`Topics/{category}.md`; if it is a new recurring kind of thing, create the "
+        "category first and file the note under `<Category>/<Title>.md`."
+    )
+
+
 def _markdown_files(root: Path) -> Dict[str, str]:
     """Every readable ``*.md`` in the vault, keyed by vault-relative POSIX path."""
 
@@ -161,6 +207,52 @@ def _markdown_files(root: Path) -> Dict[str, str]:
         except OSError:
             continue
     return out
+
+
+def verify_day_episode_ranges(note_path: Path, day_digest: str) -> List[Finding]:
+    """Require the Daily episode index to mirror the active timeline exactly.
+
+    A day can be analysed again after it was already written. The write agent used to
+    interpret "add only what is missing" literally: it appended a newly discovered
+    episode but retained stale time ranges for every existing episode. The write then
+    looked healthy even though the vault no longer represented the active run.
+
+    The semantic wording stays agentic, but the episode index is a source-backed
+    contract: one ordered bullet per supplied episode, with the exact range selected by
+    segmentation. Raw transcripts remain outside the vault.
+    """
+
+    expected = _DAY_DIGEST_RANGE_RE.findall(day_digest or "")
+    try:
+        note = note_path.read_text(encoding="utf-8")
+    except OSError:
+        note = ""
+
+    episodes_heading = re.search(r"^##\s+Episodes\s*$", note, re.MULTILINE)
+    if episodes_heading is None:
+        section = ""
+    else:
+        section_start = episodes_heading.end()
+        next_heading = _H2_RE.search(note, section_start)
+        section_end = next_heading.start() if next_heading else len(note)
+        section = note[section_start:section_end]
+    actual = _DAY_NOTE_RANGE_RE.findall(section)
+
+    if actual == expected:
+        return []
+
+    rel = "/".join(note_path.parts[-2:])
+    return [
+        Finding(
+            rel,
+            "episode_ranges",
+            "replace only the `## Episodes` section with exactly one chronological "
+            "bullet per supplied day episode, using each source range verbatim and "
+            "removing every stale or duplicate bullet. "
+            f"Expected {len(expected)} range(s): {', '.join(expected) or '(none)'}. "
+            f"Found {len(actual)}: {', '.join(actual) or '(none)' }.",
+        )
+    ]
 
 
 def verify_vault_changes(
@@ -231,6 +323,10 @@ def verify_vault_changes(
         reason = illegal_path_reason(rel)
         if reason:
             findings.append(Finding(rel, "illegal_path", reason))
+
+        reason = root_note_role_reason(root, rel, was, content)
+        if reason:
+            findings.append(Finding(rel, "root_note_role", reason))
 
         reason = non_person_note_reason(rel)
         if reason:

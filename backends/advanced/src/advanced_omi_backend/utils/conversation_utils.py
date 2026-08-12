@@ -12,12 +12,31 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from advanced_omi_backend.config import get_speech_detection_settings
+from advanced_omi_backend.constants import TITLE_NOT_GENERATED
 from advanced_omi_backend.llm_client import async_generate
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.prompt_optimizer import get_user_prompt
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 
 logger = logging.getLogger(__name__)
+
+
+def has_legacy_title_summary_fallback(
+    *, title: Optional[str], summary: Optional[str], transcript: str
+) -> bool:
+    """Detect the retired exception fallback that copied raw transcript prefixes.
+
+    This fingerprint is intentionally exact. It identifies known-corrupt historical
+    output without guessing that every naturally short or quoted title is invalid.
+    """
+    if not transcript:
+        return False
+    words = transcript.split()[:6]
+    fallback_title = " ".join(words)
+    if len(fallback_title) > 40:
+        fallback_title = f"{fallback_title[:40]}..."
+    fallback_summary = f"{transcript[:120]}..." if len(transcript) > 120 else transcript
+    return title == fallback_title or summary == fallback_summary
 
 
 def is_meaningful_speech(combined_results: dict) -> bool:
@@ -174,94 +193,88 @@ def analyze_speech(transcript_data: dict) -> dict:
     }
 
 
-async def generate_title_and_summary(
-    text: str,
-    segments: Optional[list] = None,
-    user_id: Optional[str] = None,
-) -> tuple[str, str]:
-    """
-    Generate title and short summary in a single LLM call using full conversation context.
-
-    Args:
-        text: Conversation transcript (used if segments not provided)
-        segments: Optional list of speaker segments with structure:
-            [{"speaker": str, "text": str, "start": float, "end": float}, ...]
-            If provided, uses speaker-formatted text for richer context
-        user_id: Optional user ID for per-user prompt override resolution
-
-    Returns:
-        Tuple of (title, short_summary)
-    """
-    # Format conversation text from segments if provided
+def _format_conversation_for_summary(
+    text: str, segments: Optional[list]
+) -> tuple[str, bool]:
+    """Return speaker-formatted transcript text and whether speakers were present."""
     conversation_text = text
     include_speakers = False
-
     if segments:
-        formatted_text = ""
-        speakers_in_conv = set()
+        formatted_lines = []
+        speakers_in_conversation = set()
         for segment in segments:
             speaker = segment.speaker or ""
             segment_text = segment.text.strip() if segment.text else ""
-            if segment_text:
-                if speaker:
-                    formatted_text += f"{speaker}: {segment_text}\n"
-                    speakers_in_conv.add(speaker)
-                else:
-                    formatted_text += f"{segment_text}\n"
+            if not segment_text:
+                continue
+            if speaker:
+                formatted_lines.append(f"{speaker}: {segment_text}")
+                speakers_in_conversation.add(speaker)
+            else:
+                formatted_lines.append(segment_text)
+        if formatted_lines:
+            conversation_text = "\n".join(formatted_lines)
+            include_speakers = bool(speakers_in_conversation)
+    return conversation_text, include_speakers
 
-        if formatted_text.strip():
-            conversation_text = formatted_text
-            include_speakers = len(speakers_in_conv) > 0
 
+async def generate_conversation_title(
+    text: str,
+    segments: Optional[list] = None,
+    user_id: Optional[str] = None,
+) -> str:
+    """Generate a concise title independently from both summaries."""
+    conversation_text, _ = _format_conversation_for_summary(text, segments)
     if not conversation_text or len(conversation_text.strip()) < 10:
-        return "Conversation", "No content"
+        return TITLE_NOT_GENERATED
 
-    try:
-        speaker_instruction = (
-            '- Include speaker names when relevant in the summary (e.g., "John discusses X with Sarah")\n'
-            if include_speakers
-            else ""
-        )
-
-        prompt_text = await get_user_prompt(
-            "conversation.title_summary",
-            user_id,
-            speaker_instruction=speaker_instruction,
-        )
-
-        prompt = f"""{prompt_text}
+    prompt_text = await get_user_prompt("conversation.title", user_id)
+    prompt = f"""{prompt_text}
 
 TRANSCRIPT:
 "{conversation_text}"
 """
+    response = await async_generate(prompt, operation="conversation_title")
+    for line in response.strip().split("\n"):
+        line = line.strip()
+        if line.startswith("Title:"):
+            return line.replace("Title:", "").strip().strip('"').strip("'")
+    return response.strip().strip('"').strip("'") or TITLE_NOT_GENERATED
 
-        response = await async_generate(prompt, operation="title_summary")
 
-        # Parse response for Title: and Summary: lines
-        title = None
-        summary = None
-        for line in response.strip().split("\n"):
-            line = line.strip()
-            if line.startswith("Title:"):
-                title = line.replace("Title:", "").strip().strip('"').strip("'")
-            elif line.startswith("Summary:"):
-                summary = line.replace("Summary:", "").strip().strip('"').strip("'")
+async def generate_short_summary(
+    text: str,
+    segments: Optional[list] = None,
+    user_id: Optional[str] = None,
+) -> str:
+    """Generate the short list-view summary independently from the title."""
+    conversation_text, include_speakers = _format_conversation_for_summary(
+        text, segments
+    )
+    if not conversation_text or len(conversation_text.strip()) < 10:
+        return "No content"
 
-        title = title or "Conversation"
-        summary = summary or "No content"
+    speaker_instruction = (
+        '- Include speaker names when relevant (e.g., "John discusses X with Sarah")\n'
+        if include_speakers
+        else ""
+    )
+    prompt_text = await get_user_prompt(
+        "conversation.short_summary",
+        user_id,
+        speaker_instruction=speaker_instruction,
+    )
+    prompt = f"""{prompt_text}
 
-        return title, summary
-
-    except Exception as e:
-        logger.warning(f"Failed to generate title and summary: {e}")
-        # Fallback
-        words = text.split()[:6]
-        fallback_title = " ".join(words)
-        fallback_title = (
-            fallback_title[:40] + "..." if len(fallback_title) > 40 else fallback_title
-        )
-        fallback_summary = text[:120] + "..." if len(text) > 120 else text
-        return fallback_title or "Conversation", fallback_summary or "No content"
+TRANSCRIPT:
+"{conversation_text}"
+"""
+    response = await async_generate(prompt, operation="short_summary")
+    for line in response.strip().split("\n"):
+        line = line.strip()
+        if line.startswith("Summary:"):
+            return line.replace("Summary:", "").strip().strip('"').strip("'")
+    return response.strip().strip('"').strip("'") or "No content"
 
 
 async def generate_detailed_summary(
@@ -289,76 +302,44 @@ async def generate_detailed_summary(
     Returns:
         str: Comprehensive detailed summary (multiple paragraphs) or fallback
     """
-    # Format conversation text from segments if provided
-    conversation_text = text
-    include_speakers = False
-
-    if segments:
-        formatted_text = ""
-        speakers_in_conv = set()
-        for segment in segments:
-            speaker = segment.speaker or ""
-            segment_text = segment.text.strip() if segment.text else ""
-            if segment_text:
-                if speaker:
-                    formatted_text += f"{speaker}: {segment_text}\n"
-                    speakers_in_conv.add(speaker)
-                else:
-                    formatted_text += f"{segment_text}\n"
-
-        if formatted_text.strip():
-            conversation_text = formatted_text
-            include_speakers = len(speakers_in_conv) > 0
+    conversation_text, include_speakers = _format_conversation_for_summary(
+        text, segments
+    )
 
     if not conversation_text or len(conversation_text.strip()) < 10:
         return "No meaningful content to summarize"
 
-    try:
-        speaker_instruction = (
-            """- Attribute key points and statements to specific speakers when relevant
+    speaker_instruction = (
+        """- Attribute key points and statements to specific speakers when relevant
 - Capture the flow of conversation between participants
 - Note any agreements, disagreements, or important exchanges
 """
-            if include_speakers
-            else ""
-        )
+        if include_speakers
+        else ""
+    )
 
-        memory_section = ""
-        if memory_context:
-            memory_section = f"""CONTEXT ABOUT THE USER (from prior conversations):
+    memory_section = ""
+    if memory_context:
+        memory_section = f"""CONTEXT ABOUT THE USER (from prior conversations):
 {memory_context}
 
 """
 
-        registry = get_prompt_registry()
-        prompt_text = await registry.get_prompt(
-            "conversation.detailed_summary",
-            speaker_instruction=speaker_instruction,
-            memory_section=memory_section,
-        )
+    registry = get_prompt_registry()
+    prompt_text = await registry.get_prompt(
+        "conversation.detailed_summary",
+        speaker_instruction=speaker_instruction,
+        memory_section=memory_section,
+    )
 
-        prompt = f"""{prompt_text}
+    prompt = f"""{prompt_text}
 
 TRANSCRIPT:
 "{conversation_text}"
 """
 
-        summary = await async_generate(prompt, operation="detailed_summary")
-        return (
-            summary.strip().strip('"').strip("'")
-            or "No meaningful content to summarize"
-        )
-
-    except Exception as e:
-        logger.warning(f"Failed to generate detailed summary: {e}")
-        # Fallback to returning cleaned transcript
-        lines = conversation_text.split("\n")
-        cleaned = "\n".join(line.strip() for line in lines if line.strip())
-        return (
-            cleaned[:2000] + "..."
-            if len(cleaned) > 2000
-            else cleaned or "No meaningful content to summarize"
-        )
+    summary = await async_generate(prompt, operation="detailed_summary")
+    return summary.strip().strip('"').strip("'") or "No meaningful content to summarize"
 
 
 # ============================================================================

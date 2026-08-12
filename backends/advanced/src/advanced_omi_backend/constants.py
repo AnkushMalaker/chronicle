@@ -4,6 +4,10 @@ OMI_SAMPLE_RATE = 16_000  # Hz
 OMI_CHANNELS = 1
 OMI_SAMPLE_WIDTH = 2  # bytes (16‑bit)
 
+# A missing generated title must remain visibly machine-detectable. Never replace it
+# with transcript text or a plausible label such as "Recording"/"Conversation".
+TITLE_NOT_GENERATED = "[title not generated]"
+
 # Reserved diarization label for segments triaged as background/noise (TV, media,
 # ambient) rather than a real person. Used by the Data Audit speaker-triage flow:
 # applying it sets the segment's speaker to this label AND reclassifies it to a

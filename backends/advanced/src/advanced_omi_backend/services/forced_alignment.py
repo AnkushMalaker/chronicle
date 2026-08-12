@@ -109,3 +109,30 @@ async def align_audio_words(
         f"({data.get('aligned_segments')}/{data.get('total_segments')} segments aligned)"
     )
     return words
+
+
+def estimate_words_from_segment_timing(segments: List[Dict]) -> List[Dict]:
+    """Create monotonic word clocks when the neural aligner cannot align text.
+
+    Segment timestamps remain authoritative; this only distributes their words
+    uniformly inside each segment so Pyannote speaker turns can receive the existing
+    transcript text.  It is deliberately a last resort after forced alignment.
+    """
+    words: List[Dict] = []
+    for segment in segments:
+        start = float(segment.get("start", 0.0))
+        end = float(segment.get("end", start))
+        tokens = str(segment.get("text", "")).split()
+        if not tokens or end <= start:
+            continue
+        step = (end - start) / len(tokens)
+        for index, token in enumerate(tokens):
+            words.append(
+                {
+                    "word": token,
+                    "start": start + index * step,
+                    "end": start + (index + 1) * step,
+                    "confidence": 0.0,
+                }
+            )
+    return words

@@ -11,11 +11,7 @@ from zoneinfo import ZoneInfo
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from advanced_omi_backend.controllers.queue_controller import (
-    JOB_RESULT_TTL,
-    default_queue,
-    post_conv_enqueue_kwargs,
-)
+from advanced_omi_backend.controllers.queue_controller import enqueue_summary_job_bundle
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.timeline import (
     TimelineAnalysisRun,
@@ -31,7 +27,7 @@ from advanced_omi_backend.observability.tracing import (
     set_span_attributes,
     set_span_usage,
 )
-from advanced_omi_backend.workers.conversation_jobs import generate_title_summary_job
+from advanced_omi_backend.services.observability import record_event_sync
 
 from .codex_executor import TimelineQuotaDeferred
 from .contracts import TimelineAgentResult, TimelineEvidenceManifest
@@ -183,9 +179,11 @@ def _existing_payload(episodes: list[TimelineEpisode]) -> list[dict[str, Any]]:
 
 async def _active_episodes(run: TimelineAnalysisRun) -> list[TimelineEpisode]:
     day = await TimelineDay.find_one(
-        TimelineDay.user_id == run.user_id,
-        TimelineDay.local_date == run.local_date,
-        TimelineDay.timezone == run.timezone,
+        {
+            "user_id": run.user_id,
+            "local_date": run.local_date,
+            "timezone": run.timezone,
+        }
     )
     if day is None or not day.active_run_id:
         return []
@@ -300,6 +298,97 @@ async def _analyze_with_escalation(
 
 class TimelineEmptyGeneration(RuntimeError):
     """An empty result would have blanked a day that already had episodes."""
+
+
+class TimelineCoverageRegression(RuntimeError):
+    """A newer generation leaves materially more captured time unexplained."""
+
+
+_COVERAGE_REGRESSION_TOLERANCE = timedelta(minutes=5)
+_COVERAGE_REGRESSION_FRACTION = 0.10
+
+
+def _merged_interval_seconds(intervals: list[tuple[datetime, datetime]]) -> float:
+    merged: list[tuple[datetime, datetime]] = []
+    for low, high in sorted(intervals):
+        if high <= low:
+            high = low + timedelta(seconds=1)
+        if merged and low <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], high))
+        else:
+            merged.append((low, high))
+    return sum((high - low).total_seconds() for low, high in merged)
+
+
+def _stored_interval(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+async def _guard_coverage_regression(
+    run: TimelineAnalysisRun,
+    manifest: TimelineEvidenceManifest,
+    result: TimelineAgentResult,
+) -> None:
+    """Keep a partial model response from replacing a more complete active day.
+
+    Validation materializes omitted captured time as ``cause=unexplained`` so no
+    evidence disappears internally. Publication must still reject a generation that
+    makes that deficiency materially worse. This caught a real 2026-08-09 regression:
+    a four-episode generation covered the full captured day, then a short model response
+    published two episodes and silently relegated the final 5h20m to unexplained time.
+    """
+
+    day = await TimelineDay.find_one(
+        {
+            "user_id": run.user_id,
+            "local_date": run.local_date,
+            "timezone": run.timezone,
+        }
+    )
+    if day is None or not day.active_run_id:
+        return
+    prior_evidence = int((day.coverage or {}).get("evidence_count") or 0)
+    if len(manifest.evidence) < prior_evidence:
+        return  # source deletion can honestly reduce coverage
+
+    new_intervals = [
+        (interval.started_at, interval.ended_at)
+        for interval in result.unassigned_intervals
+        if interval.cause == "unexplained"
+    ]
+    prior_intervals = [
+        (_stored_interval(item["started_at"]), _stored_interval(item["ended_at"]))
+        for item in (day.coverage or {}).get("unassigned_intervals", [])
+        if item.get("cause") == "unexplained"
+        and item.get("started_at")
+        and item.get("ended_at")
+    ]
+    captured_intervals = [
+        (
+            max(item.started_at, manifest.started_at),
+            min(item.ended_at or item.started_at, manifest.ended_at),
+        )
+        for item in manifest.evidence
+        if item.kind != "capture_gap"
+    ]
+    new_seconds = _merged_interval_seconds(new_intervals)
+    prior_seconds = _merged_interval_seconds(prior_intervals)
+    captured_seconds = _merged_interval_seconds(captured_intervals)
+    added_seconds = new_seconds - prior_seconds
+    if (
+        added_seconds > _COVERAGE_REGRESSION_TOLERANCE.total_seconds()
+        and captured_seconds > 0
+        and new_seconds / captured_seconds > _COVERAGE_REGRESSION_FRACTION
+    ):
+        raise TimelineCoverageRegression(
+            "analysis would increase unexplained captured time from "
+            f"{prior_seconds / 60:.1f} to {new_seconds / 60:.1f} minutes across "
+            f"{len(manifest.evidence)} evidence items; keeping the previous generation"
+        )
 
 
 async def _guard_empty_generation(
@@ -452,16 +541,10 @@ async def _promote_conversational_recordings(
         },
     )
     for conversation_id in promoted:
-        default_queue.enqueue(
-            generate_title_summary_job,
+        enqueue_summary_job_bundle(
             conversation_id,
-            job_timeout=300,
-            result_ttl=JOB_RESULT_TTL,
-            job_id=f"title_summary_{conversation_id[:12]}",
-            description=f"Title/summary for promoted recording {conversation_id[:8]}",
-            **post_conv_enqueue_kwargs(
-                "title_summary", {"conversation_id": conversation_id}
-            ),
+            include_memory_context=False,
+            meta={"conversation_id": conversation_id, "trigger": "timeline_promotion"},
         )
     logger.info(
         "🗣️ Promoted %d capture-evidence recording(s) to conversations: %s",
@@ -531,6 +614,7 @@ async def _publish(
         documents.append(document)
     carried = _carry_forward(run, pinned or [], manifest)
     await _guard_empty_generation(run, manifest, len(documents) + len(carried))
+    await _guard_coverage_regression(run, manifest, result)
     if documents or carried:
         await TimelineEpisode.insert_many(documents + carried)
         # Promotion is one-way and idempotent: it only ever moves a recording out of
@@ -582,6 +666,12 @@ async def _publish(
                 "active_run_created_at": run.created_at,
                 "evidence_revision": manifest.evidence_revision,
                 "coverage": coverage,
+                # The Daily note describes a specific generation. A newer active run
+                # invalidates that latch; the settled-day pass will reconcile it.
+                "memory_state": "",
+                "memory_claimed_at": None,
+                "memory_error": None,
+                "memory_attempts": 0,
                 "revised_at": utcnow(),
             },
         },
@@ -635,7 +725,7 @@ async def _process_run(run: TimelineAnalysisRun) -> None:
                 "chronicle.timeline.executor": run.executor,
                 "chronicle.timeline.prompt_version": run.prompt_version,
                 "gen_ai.request.model": str(
-                    (settings.get("codex") or {}).get("model") or ""
+                    (settings.get(run.executor) or {}).get("model") or ""
                 ),
                 "chronicle.timeline.evidence_count": len(manifest.evidence),
                 "chronicle.timeline.window_count": len(manifest.windows),
@@ -648,7 +738,9 @@ async def _process_run(run: TimelineAnalysisRun) -> None:
                 workspace,
                 existing,
                 pinned,
-                configured_effort=(settings.get("codex") or {}).get("reasoning_effort"),
+                configured_effort=(settings.get(run.executor) or {}).get(
+                    "reasoning_effort"
+                ),
                 span=span,
             )
             set_span_usage(span, result.usage)
@@ -678,8 +770,23 @@ async def _run_claimed(run: TimelineAnalysisRun) -> dict[str, int]:
 
     settings = settings_dict()
     retry_hours = int((settings.get("codex") or {}).get("retry_hours", 6))
+    incident_key = f"timeline.analysis:{run.user_id}:{run.local_date}"
     try:
         await _process_run(run)
+        record_event_sync(
+            severity="info",
+            category="pipeline",
+            source="timeline.analysis",
+            title=f"Timeline analysis recovered for {run.local_date}",
+            user_id=run.user_id,
+            metadata={
+                "run_id": run.run_id,
+                "local_date": str(run.local_date),
+                "timezone": run.timezone,
+            },
+            incident_key=incident_key,
+            resolves_incident=True,
+        )
         return {"processed": 1, "failed": 0, "deferred": 0}
     except TimelineQuotaDeferred as error:
         run.state = "quota_deferred"
@@ -693,6 +800,26 @@ async def _run_claimed(run: TimelineAnalysisRun) -> dict[str, int]:
         run.error = f"{type(error).__name__}: {error}"[:4000]
         run.completed_at = utcnow()
         await run.save()
+        logger.warning(
+            "Timeline analysis failed for %s (run=%s): %s",
+            run.local_date,
+            run.run_id,
+            run.error,
+        )
+        record_event_sync(
+            severity="error",
+            category="pipeline",
+            source="timeline.analysis",
+            title=f"Timeline analysis failed for {run.local_date}",
+            detail=run.error,
+            user_id=run.user_id,
+            metadata={
+                "run_id": run.run_id,
+                "local_date": str(run.local_date),
+                "timezone": run.timezone,
+            },
+            incident_key=incident_key,
+        )
         return {"processed": 0, "failed": 1, "deferred": 0}
 
 
