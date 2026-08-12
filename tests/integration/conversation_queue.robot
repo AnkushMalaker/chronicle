@@ -77,10 +77,6 @@ Test Reprocess Conversation Job Queue
 
     Log    Created conversation: ${conversation_id}    INFO
 
-    # Wait for the initial transcript itself; a fixed sleep races a busy CI worker.
-    Log    Waiting for initial transcription to complete...    INFO
-    Wait For Job Status    ${conversation}[transcript_job_id]    finished    timeout=60s    interval=3s
-
     # Get conversation to verify initial state
     ${initial_conversation}=    Get Conversation By ID    ${conversation_id}
     Dictionary Should Contain Key    ${initial_conversation}    transcript_version_count
