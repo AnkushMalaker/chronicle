@@ -58,7 +58,7 @@ def main():
         buf = io.BytesIO()
         sf.write(buf, clip, SR, format="WAV", subtype="PCM_16")
         buf.seek(0)
-        sid = f"user_{USER}_{meeting}_{spk}"
+        sid = f"{meeting}_{spk}"
         r = requests.post(
             f"{SVC}/enroll/upload",
             files={"file": ("enroll.wav", buf, "audio/wav")},

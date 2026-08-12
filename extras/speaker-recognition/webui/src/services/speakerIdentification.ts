@@ -24,7 +24,7 @@ export interface SpeakerSegment {
 
 export interface ProcessingOptions {
   mode: ProcessingMode
-  userId?: number
+  userId?: string
   confidenceThreshold?: number
   minDuration?: number
   minSpeakers?: number

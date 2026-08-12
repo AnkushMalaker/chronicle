@@ -18,7 +18,7 @@ import { useDeepgramSession } from './useDeepgramSession'
 
 export interface UseDeepgramIntegrationOptions {
   apiKey?: string
-  userId?: number
+  userId?: string
   confidenceThreshold?: number
   enableSpeakerIdentification?: boolean
   utteranceEndMs?: number

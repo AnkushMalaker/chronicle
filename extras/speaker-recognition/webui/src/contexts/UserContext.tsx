@@ -2,7 +2,7 @@ import { createContext, useContext, useState, useEffect, ReactNode } from 'react
 import { apiService } from '../services/api'
 
 interface User {
-  id: number
+  id: string
   username: string
   created_at: string
 }
@@ -11,10 +11,11 @@ interface UserContextType {
   user: User | null
   users: User[]
   isLoading: boolean
-  selectUser: (username: string) => Promise<void>
-  createUser: (username: string) => Promise<void>
+  selectUser: (userId: string) => void
   refreshUsers: () => Promise<void>
 }
+
+const SELECTED_USER_KEY = 'selectedUserId'
 
 const UserContext = createContext<UserContextType | undefined>(undefined)
 
@@ -32,27 +33,16 @@ export function UserProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  const selectUser = async (username: string) => {
-    try {
-      const selectedUser = await apiService.getOrCreateUser(username)
-      setUser(selectedUser)
-      localStorage.setItem('selectedUser', JSON.stringify(selectedUser))
-    } catch (error) {
-      console.error('Failed to select user:', error)
-      throw error
+  // Tenants are Chronicle user ids; this service cannot mint one, so the
+  // selector only picks among tenants that already have speaker data.
+  const selectUser = (userId: string) => {
+    const selected = users.find(u => u.id === userId)
+    if (!selected) {
+      console.error(`No such tenant: ${userId}`)
+      return
     }
-  }
-
-  const createUser = async (username: string) => {
-    try {
-      const newUser = await apiService.getOrCreateUser(username)
-      await refreshUsers()
-      setUser(newUser)
-      localStorage.setItem('selectedUser', JSON.stringify(newUser))
-    } catch (error) {
-      console.error('Failed to create user:', error)
-      throw error
-    }
+    setUser(selected)
+    localStorage.setItem(SELECTED_USER_KEY, selected.id)
   }
 
   useEffect(() => {
@@ -62,19 +52,15 @@ export function UserProvider({ children }: { children: ReactNode }) {
         const userList = await apiService.getUsers()
         setUsers(userList)
 
-        const savedUser = localStorage.getItem('selectedUser')
-        if (savedUser) {
-          const parsedUser = JSON.parse(savedUser)
-          const canonicalUser = userList.find(u => u.username === parsedUser.username)
-          if (canonicalUser) {
-            setUser(canonicalUser)
-            localStorage.setItem('selectedUser', JSON.stringify(canonicalUser))
-          } else {
-            localStorage.removeItem('selectedUser')
-          }
+        const savedId = localStorage.getItem(SELECTED_USER_KEY)
+        const saved = savedId ? userList.find(u => u.id === savedId) : undefined
+        if (saved) {
+          setUser(saved)
         } else {
-          if (userList.length === 0) {
-            await createUser('admin')
+          localStorage.removeItem(SELECTED_USER_KEY)
+          if (userList.length === 1) {
+            setUser(userList[0])
+            localStorage.setItem(SELECTED_USER_KEY, userList[0].id)
           }
         }
       } catch (error) {
@@ -93,7 +79,6 @@ export function UserProvider({ children }: { children: ReactNode }) {
       users,
       isLoading,
       selectUser,
-      createUser,
       refreshUsers
     }}>
       {children}

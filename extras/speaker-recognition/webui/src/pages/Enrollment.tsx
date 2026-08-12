@@ -10,6 +10,7 @@ import {
   formatDuration,
   convertBlobToWav
 } from '../utils/audioUtils'
+import { newSpeakerId } from '../utils/common'
 import { apiService } from '../services/api'
 import FileUploader from '../components/FileUploader'
 
@@ -423,8 +424,7 @@ export default function Enrollment() {
     try {
       const formData = new FormData()
 
-      // Generate unique speaker ID with user prefix (treating user as a "folder")
-      const speakerId = `user_${user.id}_${currentSession.speakerName.replace(/\s+/g, '_').toLowerCase()}_${Date.now()}`
+      const speakerId = newSpeakerId()
 
       // BatchEnrollRequest expects exactly these field names
       formData.append('speaker_name', currentSession.speakerName)

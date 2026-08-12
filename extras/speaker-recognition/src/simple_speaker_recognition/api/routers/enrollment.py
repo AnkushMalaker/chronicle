@@ -12,7 +12,7 @@ import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from simple_speaker_recognition.api.core.utils import (
     get_data_directory,
-    owner_of_speaker,
+    require_speaker_owner,
     secure_temp_file,
 )
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
@@ -538,11 +538,11 @@ async def enroll_append(
         ..., description="Multiple audio files to append to existing speaker"
     ),
     speaker_id: str = Form(..., description="Existing speaker identifier"),
+    user_id: str = Form(..., description="Chronicle user id owning this speaker"),
     db: UnifiedSpeakerDB = Depends(get_db),
 ):
     """Append audio segments to an existing speaker, computing weighted average embedding."""
-    # The speaker must already exist, so its recorded owner is authoritative.
-    user_id = owner_of_speaker(speaker_id)
+    require_speaker_owner(speaker_id, user_id)
     log.info(
         f"Appending to speaker: {speaker_id} (User: {user_id}) with {len(files)} files"
     )

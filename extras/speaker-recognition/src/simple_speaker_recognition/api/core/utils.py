@@ -106,18 +106,9 @@ def secure_temp_file(suffix: str = ".wav") -> tempfile._TemporaryFileWrapper:
 
 
 def owner_of_speaker(speaker_id: str) -> str:
-    """Return the tenant that owns ``speaker_id``, from the speaker's own record.
+    """Return the tenant that owns ``speaker_id``, read from ``speakers.user_id``.
 
-    ``speakers.user_id`` is the ownership record, so it is the only thing consulted.
-    This used to parse the tenant out of the id — ``int(speaker_id.split("_")[1])`` —
-    which the audit flags as inferring a tenant from a SpeakerId: the
-    ``user_{user_id}_speaker_{...}`` shape is a naming convention, not a fact, and it
-    is wrong for a speaker that was imported or created by a client that names ids
-    differently. It also stopped parsing entirely once a tenant became a Chronicle
-    ObjectId rather than an integer.
-
-    Only for speakers that already exist. Enrolment creates one, so it takes an
-    explicit ``user_id`` instead of leaving the service to guess.
+    A speaker id is opaque. Nothing about the tenant is inferred from its text.
     """
 
     # Imported here rather than at module scope: database.queries imports the API
@@ -133,6 +124,24 @@ def owner_of_speaker(speaker_id: str) -> str:
         return str(speaker.user_id)
     finally:
         db.close()
+
+
+def require_speaker_owner(speaker_id: str, user_id: str) -> str:
+    """Return ``user_id`` if it owns ``speaker_id``, else 404.
+
+    Scopes a request to the tenant the caller says it is acting for, so a client
+    holding a stale or wrong tenant cannot reach another tenant's speaker. The
+    service has no caller authentication, so this bounds mistakes, not attackers.
+    A mismatch is 404 rather than 403 to avoid confirming the speaker exists.
+    """
+
+    owner = owner_of_speaker(speaker_id)
+    if owner != user_id:
+        log.warning(
+            "Tenant %s requested speaker %s owned by %s", user_id, speaker_id, owner
+        )
+        raise HTTPException(404, f"Speaker not found: {speaker_id}")
+    return owner
 
 
 def validate_confidence(confidence: Any, context: str = "") -> float:

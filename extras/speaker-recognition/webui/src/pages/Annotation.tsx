@@ -12,6 +12,7 @@ import {
   extractAudioSegment,
   AudioSegment
 } from '../utils/audioUtils'
+import { newSpeakerId } from '../utils/common'
 import { databaseService } from '../services/database'
 import { apiService, type Annotation } from '../services/api'
 import { speakerIdentificationService } from '../services/speakerIdentification'
@@ -660,18 +661,17 @@ export default function Annotation() {
 
       // Create FormData for enrollment
       const formData = new FormData()
-      const newSpeakerId = speakerId || `user_${user.id}_${speakerLabel.replace(/\s+/g, '_')}_${Date.now()}`
+      const targetSpeakerId = speakerId || newSpeakerId()
 
-      formData.append('speaker_id', newSpeakerId)
+      formData.append('speaker_id', targetSpeakerId)
       formData.append('speaker_name', speakerLabel)
-      // /enroll/batch requires this; /enroll/append ignores it.
       formData.append('user_id', String(user.id))
 
       audioBlobs.forEach((blob, index) => {
         formData.append('files', blob, `segment_${String(index + 1).padStart(3, '0')}.wav`)
       })
 
-      console.log(`Enrolling speaker with ID: ${newSpeakerId}`)
+      console.log(`Enrolling speaker with ID: ${targetSpeakerId}`)
 
       // Submit enrollment - use append endpoint if speaker exists, batch if new
       const endpoint = speakerId ? '/enroll/append' : '/enroll/batch'

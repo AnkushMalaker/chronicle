@@ -123,3 +123,11 @@ export function safeParseNumber(value: string | number, defaultValue: number = 0
   const parsed = parseFloat(value)
   return isNaN(parsed) ? defaultValue : parsed
 }
+
+/**
+ * Generates an opaque speaker id. The owning tenant is the `user_id` field on
+ * the speaker record, never part of the id.
+ */
+export function newSpeakerId(): string {
+  return `speaker_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`
+}

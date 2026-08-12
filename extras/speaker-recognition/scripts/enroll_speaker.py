@@ -288,10 +288,14 @@ def list_speakers(service_url: str = SPEAKER_SERVICE_URL) -> bool:
         return False
 
 
-def delete_speaker(speaker_id: str, service_url: str = SPEAKER_SERVICE_URL) -> bool:
+def delete_speaker(
+    speaker_id: str, user_id: str, service_url: str = SPEAKER_SERVICE_URL
+) -> bool:
     """Delete an enrolled speaker."""
     try:
-        response = requests.delete(f"{service_url}/speakers/{speaker_id}")
+        response = requests.delete(
+            f"{service_url}/speakers/{speaker_id}", params={"user_id": user_id}
+        )
         if response.status_code == 200:
             logger.info(f"✅ Successfully deleted speaker: {speaker_id}")
             return True
@@ -328,7 +332,8 @@ def main():
     # Speaker info arguments
     parser.add_argument("--id", help="Speaker ID (required for enrollment)")
     parser.add_argument(
-        "--user-id", help="Chronicle user id owning the speaker (required to enroll)"
+        "--user-id",
+        help="Chronicle user id owning the speaker (required to enroll or delete)",
     )
     parser.add_argument("--name", help="Speaker display name (required for enrollment)")
 
@@ -357,7 +362,10 @@ def main():
         return 0 if list_speakers(service_url) else 1
 
     elif args.delete:
-        return 0 if delete_speaker(args.delete, service_url) else 1
+        if not args.user_id:
+            logger.error("❌ --user-id is required to delete a speaker")
+            return 1
+        return 0 if delete_speaker(args.delete, args.user_id, service_url) else 1
 
     else:
         # Enrollment actions require ID and name

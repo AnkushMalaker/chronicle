@@ -53,21 +53,16 @@ export default function Speakers() {
 
     setIsLoading(true)
     try {
-      const speakersResponse = await apiService.get('/speakers')
+      const speakersResponse = await apiService.get('/speakers', {
+        params: { user_id: user.id }
+      })
 
-      // Backend returns { speakers: [...] }, extract the speakers array
-      const allSpeakers = speakersResponse.data.speakers || []
-
-      // Filter speakers by user - treat users as "folders" by using speaker ID prefixes
-      const userPrefix = `user_${user.id}_`
-      const userSpeakers = allSpeakers.filter((speaker: any) => {
-        // Filter speakers that belong to this user based on ID prefix
-        return speaker.id?.startsWith(userPrefix)
-      }).map((speaker: any) => ({
+      // Backend returns { speakers: [...] } already scoped to user_id.
+      const userSpeakers = (speakersResponse.data.speakers || []).map((speaker: any) => ({
         // Map backend speaker data to frontend format
         id: speaker.id,
         name: speaker.name,
-        user_id: user.id.toString(),
+        user_id: speaker.user_id,
         created_at: speaker.created_at || null,
         updated_at: speaker.updated_at || null,
         audio_sample_count: speaker.audio_sample_count || 0,
@@ -145,15 +140,11 @@ export default function Speakers() {
   const deleteSpeaker = useCallback(async (speakerId: string) => {
     if (!user) return
 
-    // Ensure user can only delete their own speakers
-    const userPrefix = `user_${user.id}_`
-    if (!speakerId.startsWith(userPrefix)) {
-      alert('You can only delete your own speakers.')
-      return
-    }
-
     try {
-      await apiService.delete(`/speakers/${speakerId}`)
+      // The service scopes the delete to user_id and 404s on a mismatch.
+      await apiService.delete(`/speakers/${speakerId}`, {
+        params: { user_id: user.id }
+      })
       setSpeakers(prev => prev.filter(s => s.id !== speakerId))
       setShowDeleteConfirm(null)
       loadSpeakers() // Reload to update stats

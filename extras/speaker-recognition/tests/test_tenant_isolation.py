@@ -179,3 +179,52 @@ def test_the_owning_tenant_comes_from_the_record_not_the_id(tmp_path, monkeypatc
     with pytest.raises(HTTPException) as caught:
         utils.owner_of_speaker(f"user_{ALICE}_speaker_neverenrolled")
     assert caught.value.status_code == 404
+
+
+@pytest.fixture
+def owned_speaker(tmp_path, monkeypatch):
+    """One speaker owned by ALICE, with an id whose prefix names tenant "1"."""
+
+    engine = create_engine(f"sqlite:///{tmp_path/'scoped.db'}")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(database, "get_db_session", factory, raising=False)
+
+    session = factory()
+    UserQueries.get_or_create_user(session, ALICE)
+    UserQueries.get_or_create_user(session, BOB)
+    session.add(Speaker(id="user_1_legacy", name="Alice's", user_id=ALICE))
+    session.commit()
+    return "user_1_legacy"
+
+
+def test_the_owning_tenant_may_reach_its_speaker(owned_speaker):
+    assert utils.require_speaker_owner(owned_speaker, ALICE) == ALICE
+
+
+def test_another_tenant_cannot_reach_it_despite_the_id_prefix(owned_speaker):
+    """Bob is refused even though the id claims tenant "1", not ALICE.
+
+    The prefix is not consulted either way: a request is scoped by the tenant the
+    caller declares, checked against the record.
+    """
+
+    with pytest.raises(HTTPException) as caught:
+        utils.require_speaker_owner(owned_speaker, BOB)
+
+    # 404 rather than 403: a refusal must not confirm the speaker exists.
+    assert caught.value.status_code == 404
+
+
+def test_a_tenant_matching_the_id_prefix_is_still_refused(owned_speaker):
+    """Reading the tenant out of the id would have let "1" through here."""
+
+    with pytest.raises(HTTPException) as caught:
+        utils.require_speaker_owner(owned_speaker, "1")
+    assert caught.value.status_code == 404
+
+
+def test_an_unknown_speaker_is_refused_for_every_tenant(owned_speaker):
+    with pytest.raises(HTTPException) as caught:
+        utils.require_speaker_owner("no-such-speaker", ALICE)
+    assert caught.value.status_code == 404

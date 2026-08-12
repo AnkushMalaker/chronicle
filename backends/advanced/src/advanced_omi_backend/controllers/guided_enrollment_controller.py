@@ -690,7 +690,7 @@ async def decide_clips(user: User, speaker_name: str, decisions: List[dict]):
                     raise ValueError(f"No enrolled speaker named '{enrollment_target}'")
                 wav = await reconstruct_audio_segment(conversation_id, start, end)
                 result = await speaker_client.append_to_speaker(
-                    target_gallery["speaker_id"], wav
+                    target_gallery["speaker_id"], wav, user_id=str(user.user_id)
                 )
                 if result.get("error"):
                     enroll_error = result["error"]
@@ -954,7 +954,7 @@ async def reset_speaker_state(
         gallery = await _gallery_stats(speaker_client, speaker_name, str(user.user_id))
         if gallery:
             result = await speaker_client.delete_speaker(
-                gallery["speaker_id"], delete_audio=True
+                gallery["speaker_id"], user_id=str(user.user_id), delete_audio=True
             )
             if result.get("error"):
                 return JSONResponse(

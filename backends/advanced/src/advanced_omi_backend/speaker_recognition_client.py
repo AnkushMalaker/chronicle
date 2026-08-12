@@ -1511,8 +1511,8 @@ class SpeakerRecognitionClient:
             return {"error": "speaker_recognition_disabled"}
 
         try:
-            # Generate speaker ID: user_{user_id}_speaker_{random_hex}
-            speaker_id = f"user_{user_id}_speaker_{uuid.uuid4().hex[:12]}"
+            # Opaque: the tenant is the `user_id` field, not part of the id.
+            speaker_id = f"speaker_{uuid.uuid4().hex[:12]}"
 
             logger.info(
                 f"🎤 Enrolling new speaker '{speaker_name}' with ID: {speaker_id}"
@@ -1558,13 +1558,16 @@ class SpeakerRecognitionClient:
             logger.error(f"🎤 ❌ Error enrolling speaker: {e}")
             return {"error": "unknown_error", "message": str(e)}
 
-    async def append_to_speaker(self, speaker_id: str, audio_data: bytes) -> Dict:
+    async def append_to_speaker(
+        self, speaker_id: str, audio_data: bytes, user_id: str
+    ) -> Dict:
         """
         Append audio to existing speaker's embedding (fine-tuning).
 
         Args:
             speaker_id: ID of existing speaker
             audio_data: WAV audio bytes
+            user_id: Tenant the speaker must belong to
 
         Returns:
             Response dict from append endpoint
@@ -1572,6 +1575,8 @@ class SpeakerRecognitionClient:
         if not self.enabled:
             logger.warning("🎤 Speaker recognition disabled, cannot append to speaker")
             return {"error": "speaker_recognition_disabled"}
+        if not user_id:
+            raise ValueError("user_id is required to append to a speaker")
 
         try:
             logger.info(f"🎤 Appending audio to speaker: {speaker_id}")
@@ -1585,6 +1590,7 @@ class SpeakerRecognitionClient:
                     content_type="audio/wav",
                 )
                 form_data.add_field("speaker_id", speaker_id)
+                form_data.add_field("user_id", user_id)
 
                 async with session.post(
                     f"{self.service_url}/enroll/append",
@@ -1731,15 +1737,22 @@ class SpeakerRecognitionClient:
             logger.error(f"🎤 Failed to delete enrollment segment: {e}")
             return {"error": "connection_failed", "message": str(e)}
 
-    async def delete_speaker(self, speaker_id: str, delete_audio: bool = True) -> Dict:
+    async def delete_speaker(
+        self, speaker_id: str, user_id: str, delete_audio: bool = True
+    ) -> Dict:
         """Delete an enrolled speaker (and, by default, their enrollment audio)."""
         if not self.enabled:
             return {"error": "speaker_recognition_disabled"}
+        if not user_id:
+            raise ValueError("user_id is required to delete a speaker")
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.delete(
                     f"{self.service_url}/speakers/{speaker_id}",
-                    params={"delete_audio": "true" if delete_audio else "false"},
+                    params={
+                        "user_id": user_id,
+                        "delete_audio": "true" if delete_audio else "false",
+                    },
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
                     if response.status != 200:

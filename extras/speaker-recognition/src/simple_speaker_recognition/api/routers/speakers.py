@@ -10,7 +10,7 @@ from typing import Optional
 import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-from simple_speaker_recognition.api.core.utils import owner_of_speaker
+from simple_speaker_recognition.api.core.utils import require_speaker_owner
 from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.database import get_db_session
@@ -198,28 +198,12 @@ async def get_speakers_analysis(
 
 @router.get("/speakers/{speaker_id}/audio")
 async def get_speaker_audio_files(
-    speaker_id: str, db: UnifiedSpeakerDB = Depends(get_db)
+    speaker_id: str,
+    user_id: str = Query(..., description="Chronicle user id owning this speaker"),
+    db: UnifiedSpeakerDB = Depends(get_db),
 ):
     """Get list of saved audio files for a speaker."""
-    # Extract user_id from speaker_id for authorization
-    user_id = owner_of_speaker(speaker_id)
-
-    # Check if speaker exists
-    db_session = get_db_session()
-    try:
-        speaker = (
-            db_session.query(Speaker)
-            .filter(Speaker.id == speaker_id, Speaker.user_id == user_id)
-            .first()
-        )
-
-        if not speaker:
-            raise HTTPException(
-                404, f"Speaker {speaker_id} not found for user {user_id}"
-            )
-
-    finally:
-        db_session.close()
+    require_speaker_owner(speaker_id, user_id)
 
     # Check if manifest file exists
     auth = get_auth()
@@ -257,28 +241,13 @@ async def get_speaker_audio_files(
 
 @router.get("/speakers/{speaker_id}/audio/{filename}")
 async def download_speaker_audio_file(
-    speaker_id: str, filename: str, db: UnifiedSpeakerDB = Depends(get_db)
+    speaker_id: str,
+    filename: str,
+    user_id: str = Query(..., description="Chronicle user id owning this speaker"),
+    db: UnifiedSpeakerDB = Depends(get_db),
 ):
     """Download a specific audio file for a speaker."""
-    # Extract user_id from speaker_id for authorization
-    user_id = owner_of_speaker(speaker_id)
-
-    # Check if speaker exists
-    db_session = get_db_session()
-    try:
-        speaker = (
-            db_session.query(Speaker)
-            .filter(Speaker.id == speaker_id, Speaker.user_id == user_id)
-            .first()
-        )
-
-        if not speaker:
-            raise HTTPException(
-                404, f"Speaker {speaker_id} not found for user {user_id}"
-            )
-
-    finally:
-        db_session.close()
+    require_speaker_owner(speaker_id, user_id)
 
     # Construct file path (security: only allow files within speaker's directory)
     auth = get_auth()
@@ -328,12 +297,14 @@ async def reset_speakers(
 
 @router.delete("/speakers/{speaker_id}")
 async def delete_speaker(
-    speaker_id: str, delete_audio: bool = False, db: UnifiedSpeakerDB = Depends(get_db)
+    speaker_id: str,
+    user_id: str = Query(..., description="Chronicle user id owning this speaker"),
+    delete_audio: bool = False,
+    db: UnifiedSpeakerDB = Depends(get_db),
 ):
     """Delete a speaker and optionally delete associated audio files."""
     try:
-        # Extract user_id from speaker_id for authorization
-        user_id = owner_of_speaker(speaker_id)
+        require_speaker_owner(speaker_id, user_id)
 
         # Delete audio files if requested
         audio_deleted = False

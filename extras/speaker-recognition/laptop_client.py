@@ -182,9 +182,11 @@ class SpeakerClient:
         result = await self._request("GET", "/speakers")
         return result.get("speakers", [])
 
-    async def remove_speaker(self, speaker_id: str):
+    async def remove_speaker(self, speaker_id: str, user_id: str):
         """Remove an enrolled speaker."""
-        return await self._request("DELETE", f"/speakers/{speaker_id}")
+        return await self._request(
+            "DELETE", f"/speakers/{speaker_id}", params={"user_id": user_id}
+        )
 
 
 async def record_audio(duration: float, sample_rate: int = 16000) -> str:
@@ -418,7 +420,7 @@ async def cmd_remove(args):
             await client.health_check()
 
             # Remove speaker
-            result = await client.remove_speaker(args.speaker_id)
+            result = await client.remove_speaker(args.speaker_id, args.user_id)
 
             if result.get("deleted"):
                 logger.info(f"✅ Successfully removed speaker: {args.speaker_id}")
@@ -583,6 +585,9 @@ def main():
     remove_parser = subparsers.add_parser("remove", help="Remove an enrolled speaker")
     remove_parser.add_argument(
         "--speaker-id", required=True, help="Speaker ID to remove"
+    )
+    remove_parser.add_argument(
+        "--user-id", required=True, help="Chronicle user id owning the speaker"
     )
 
     # Diarize command

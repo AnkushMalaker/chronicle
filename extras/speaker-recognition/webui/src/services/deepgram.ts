@@ -22,7 +22,7 @@ export interface DeepgramTranscriptionOptions {
   smartFormat?: boolean
   punctuate?: boolean
   enhanceSpeakers?: boolean
-  userId?: number
+  userId?: string
   speakerConfidenceThreshold?: number
   mode?: 'standard' | 'hybrid' | 'live'
   minDuration?: number

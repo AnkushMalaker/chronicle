@@ -48,7 +48,7 @@ export interface SpeakerWebSocketEvent {
 
 export interface SpeakerWebSocketOptions {
   // Enhancement parameters (not sent to Deepgram)
-  userId?: number
+  userId?: string
   confidenceThreshold?: number
   deepgramApiKey?: string
 

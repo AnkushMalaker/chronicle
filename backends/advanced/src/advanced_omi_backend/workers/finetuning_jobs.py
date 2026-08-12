@@ -150,7 +150,9 @@ async def run_speaker_finetuning_job() -> dict:
 
             if existing_speaker:
                 result = await speaker_client.append_to_speaker(
-                    speaker_id=existing_speaker["id"], audio_data=wav_bytes
+                    speaker_id=existing_speaker["id"],
+                    audio_data=wav_bytes,
+                    user_id=conversation.user_id,
                 )
                 if "error" in result:
                     failed += 1

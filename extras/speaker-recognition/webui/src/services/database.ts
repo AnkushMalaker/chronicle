@@ -1,11 +1,11 @@
 import { Annotation } from './api'
 
 class DatabaseService {
-  private getStorageKey(userId: number): string {
+  private getStorageKey(userId: string): string {
     return `annotations_user_${userId}`
   }
 
-  private getHashStorageKey(hash: string, userId: number): string {
+  private getHashStorageKey(hash: string, userId: string): string {
     return `annotations_${hash}_user_${userId}`
   }
 
@@ -14,7 +14,7 @@ class DatabaseService {
     fileHash: string,
     fileName: string,
     annotations: Annotation[],
-    userId: number
+    userId: string
   ): Promise<void> {
     try {
       const storageKey = this.getHashStorageKey(fileHash, userId)
@@ -54,7 +54,7 @@ class DatabaseService {
   }
 
   // Load annotations by file hash
-  async loadAnnotations(fileHash: string, userId: number): Promise<Annotation[] | null> {
+  async loadAnnotations(fileHash: string, userId: string): Promise<Annotation[] | null> {
     try {
       const storageKey = this.getHashStorageKey(fileHash, userId)
       const data = localStorage.getItem(storageKey)
@@ -72,13 +72,13 @@ class DatabaseService {
   }
 
   // Check if annotations exist for a file hash
-  async hasAnnotations(fileHash: string, userId: number): Promise<boolean> {
+  async hasAnnotations(fileHash: string, userId: string): Promise<boolean> {
     const storageKey = this.getHashStorageKey(fileHash, userId)
     return localStorage.getItem(storageKey) !== null
   }
 
   // Get annotation metadata for a file
-  async getAnnotationMetadata(fileHash: string, userId: number): Promise<any> {
+  async getAnnotationMetadata(fileHash: string, userId: string): Promise<any> {
     try {
       const storageKey = this.getHashStorageKey(fileHash, userId)
       const data = localStorage.getItem(storageKey)
@@ -100,7 +100,7 @@ class DatabaseService {
   }
 
   // List all annotation files for a user
-  async getUserAnnotationFiles(userId: number): Promise<any[]> {
+  async getUserAnnotationFiles(userId: string): Promise<any[]> {
     try {
       const userKey = this.getStorageKey(userId)
       const data = localStorage.getItem(userKey)
@@ -112,7 +112,7 @@ class DatabaseService {
   }
 
   // Delete annotations for a file
-  async deleteAnnotations(fileHash: string, userId: number): Promise<void> {
+  async deleteAnnotations(fileHash: string, userId: string): Promise<void> {
     try {
       const storageKey = this.getHashStorageKey(fileHash, userId)
       localStorage.removeItem(storageKey)
@@ -129,7 +129,7 @@ class DatabaseService {
   }
 
   // Clear all annotations for a user
-  async clearUserAnnotations(userId: number): Promise<void> {
+  async clearUserAnnotations(userId: string): Promise<void> {
     try {
       const files = await this.getUserAnnotationFiles(userId)
       for (const file of files) {

@@ -6,7 +6,7 @@ const api = axios.create({
 })
 
 export interface User {
-  id: number
+  id: string
   username: string
   created_at: string
 }
@@ -14,7 +14,7 @@ export interface User {
 export interface Speaker {
   id: string
   name: string
-  user_id: number
+  user_id: string
   created_at: string
   updated_at: string
 }
@@ -32,7 +32,7 @@ export interface Annotation {
   label: 'CORRECT' | 'INCORRECT' | 'UNCERTAIN'
   confidence?: number
   transcription?: string
-  user_id: number
+  user_id: string
   notes?: string
 }
 
@@ -78,19 +78,14 @@ class ApiService {
     return response.data
   }
 
-  async getOrCreateUser(username: string): Promise<User> {
-    const response = await api.post('/users', { username })
-    return response.data
-  }
-
   // Speaker management
-  async getSpeakers(): Promise<Speaker[]> {
-    const response = await api.get('/speakers')
+  async getSpeakers(userId: string): Promise<Speaker[]> {
+    const response = await api.get('/speakers', { params: { user_id: userId } })
     return response.data
   }
 
-  async deleteSpeaker(speakerId: string): Promise<void> {
-    await api.delete(`/speakers/${speakerId}`)
+  async deleteSpeaker(speakerId: string, userId: string): Promise<void> {
+    await api.delete(`/speakers/${speakerId}`, { params: { user_id: userId } })
   }
 
   // Enrollment

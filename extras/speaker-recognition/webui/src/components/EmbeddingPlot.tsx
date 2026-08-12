@@ -71,9 +71,9 @@ interface AnnotationSegment {
 
 interface EmbeddingPlotProps {
   dataSource:
-    | { type: 'speakers'; userId?: number }
+    | { type: 'speakers'; userId?: string }
     | { type: 'segments'; segments: AnnotationSegment[]; audioFile: File }
-    | { type: 'combined'; segments: AnnotationSegment[]; audioFile: File; userId?: number; expectedSpeakers?: number }
+    | { type: 'combined'; segments: AnnotationSegment[]; audioFile: File; userId?: string; expectedSpeakers?: number }
   compact?: boolean
   title?: string
   autoAnalyze?: boolean

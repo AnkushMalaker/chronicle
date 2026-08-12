@@ -454,7 +454,9 @@ async def enroll_selected_clips(
             )
             if existing:
                 result = await speaker_client.append_to_speaker(
-                    speaker_id=existing["id"], audio_data=wav_bytes
+                    speaker_id=existing["id"],
+                    audio_data=wav_bytes,
+                    user_id=str(current_user.user_id),
                 )
                 if "error" in result:
                     failed += 1
