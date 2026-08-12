@@ -110,8 +110,8 @@ Conversation Complete Should Trigger Event
     ${events}=    Get Plugin Events By Type    conversation.complete
     Should Not Be Empty    ${events}
 
-    # Verify end_reason metadata in plugin event
-    Verify Event Metadata    conversation.complete    end_reason    file_upload    ${conversation_id}
+    # File upload explains why processing ran; it is not a recording end reason.
+    Verify Event Metadata    conversation.complete    trigger    file_upload    ${conversation_id}
 
 Memory Processing Should Trigger Event
     [Documentation]    Verify memory.processed event after memory extraction
