@@ -6,6 +6,9 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from advanced_omi_backend.services.forced_alignment import (
+    estimate_words_from_segment_timing,
+)
 from advanced_omi_backend.services.transcript_integrity import (
     TranscriptTimingError,
     validate_and_normalize_transcript_timing,
@@ -519,6 +522,17 @@ def test_full_diarization_requires_continuous_audio_coverage():
         [(2.0, 20.0)],
         duration=20.0,
     )
+
+
+def test_segment_clock_word_estimates_preserve_text_and_bounds():
+    words = estimate_words_from_segment_timing(
+        [{"start": 10.0, "end": 14.0, "text": "one two"}]
+    )
+
+    assert words == [
+        {"word": "one", "start": 10.0, "end": 12.0, "confidence": 0.0},
+        {"word": "two", "start": 12.0, "end": 14.0, "confidence": 0.0},
+    ]
 
 
 def test_speaker_job_recovers_spoken_text_mislabeled_as_event():

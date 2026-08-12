@@ -1,10 +1,12 @@
 """Provider-owned recovery and lossless source guarantees."""
 
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 from advanced_omi_backend.services.memory.agent.memory_agent import MemoryAgentResult
+from advanced_omi_backend.services.memory.base import DayWriteOutcome
 from advanced_omi_backend.services.memory.conversation_note import (
     write_source_fallback_conversation_note,
 )
@@ -218,14 +220,14 @@ async def test_day_write_fails_when_no_backend_completes(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "_recovery_agent_class", lambda: FailingAgent)
     monkeypatch.setattr(service.vault, "user_root", lambda _uid: tmp_path / "user-one")
 
-    success, touched = await service._add_day_memory_agent(
+    outcome, touched = await service._add_day_memory_agent(
         "A day digest long enough to clear the minimum-length guard.",
         local_date,
         "user-one",
         source_date="2026-08-05T00:00:00+05:30",
     )
 
-    assert success is False
+    assert outcome is DayWriteOutcome.FAILED
     assert touched == []
     # The earlier run's note is left alone; failure means unwritten, not clobbered.
     assert day_note.read_text(encoding="utf-8") == "# Written by an earlier run\n"
@@ -273,14 +275,14 @@ async def test_day_write_fails_when_only_other_notes_were_touched(
     monkeypatch.setattr(service, "_recovery_agent_class", lambda: None)
     monkeypatch.setattr(service.vault, "user_root", lambda _uid: root)
 
-    success, touched = await service._add_day_memory_agent(
+    outcome, touched = await service._add_day_memory_agent(
         "A day digest long enough to clear the minimum-length guard.",
         local_date,
         "user-one",
         source_date="2026-08-06T00:00:00+05:30",
     )
 
-    assert success is False
+    assert outcome is DayWriteOutcome.FAILED
     # The People edit is still reported, so the audit ledger keeps what did happen.
     assert "People/Vatsal.md" in touched
 
@@ -336,16 +338,221 @@ async def test_day_write_treats_a_deliberate_no_op_as_done_without_recovery(
     monkeypatch.setattr(service, "_recovery_agent_class", lambda: Recovery)
     monkeypatch.setattr(service.vault, "user_root", lambda _uid: root)
 
-    success, touched = await service._add_day_memory_agent(
+    outcome, touched = await service._add_day_memory_agent(
         "A day digest long enough to clear the minimum-length guard.",
         local_date,
         "user-one",
         source_date="2026-08-06T00:00:00+05:30",
     )
 
-    assert success is True
+    assert outcome is DayWriteOutcome.COMPLETE
     assert touched == []
     assert recovery_calls == []
+
+
+@pytest.mark.asyncio
+async def test_day_write_surfaces_nonfatal_agent_diagnostics(
+    tmp_path, monkeypatch, caplog
+):
+    """A completed mutation must not hide the agent errors behind a numeric count."""
+
+    service = MemoryService(
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend=None,
+            review_writes=False,
+        )
+    )
+    local_date = "2026-08-06"
+    root = tmp_path / "user-one"
+    day_rel = f"Daily/{local_date}.md"
+
+    class WritesWithRecoveredDiagnostic:
+        def __init__(self, _root):
+            pass
+
+        async def run(self, *_args, **_kwargs):
+            note = root / day_rel
+            note.parent.mkdir(parents=True, exist_ok=True)
+            note.write_text(
+                f"# {local_date}\n\n## Episodes\n\n- Recovered write.\n",
+                encoding="utf-8",
+            )
+            return MemoryAgentResult(
+                conversation_id=local_date,
+                rounds=3,
+                touched=[day_rel],
+                summary="Recorded the day after a retry.",
+                errors=["recovered after synthetic Pi retry"],
+                verified=True,
+            )
+
+    monkeypatch.setattr(
+        service, "_write_agent_class", lambda: WritesWithRecoveredDiagnostic
+    )
+    monkeypatch.setattr(service, "_recovery_agent_class", lambda: None)
+    monkeypatch.setattr(service.vault, "user_root", lambda _uid: root)
+    caplog.set_level(logging.WARNING, logger="memory_service")
+
+    outcome, touched = await service._add_day_memory_agent(
+        "A day digest long enough to clear the minimum-length guard.",
+        local_date,
+        "user-one",
+        source_date="2026-08-06T00:00:00+05:30",
+    )
+
+    assert outcome is DayWriteOutcome.COMPLETE
+    assert touched == [day_rel]
+    assert "recovered after synthetic Pi retry" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_day_write_reconciles_stale_episode_ranges_before_reporting_success(
+    tmp_path, monkeypatch
+):
+    """Appending a new episode is not enough when an older run had wrong bounds.
+
+    The episode index is a source-backed contract, not a judgement call, so it is
+    reconciled deterministically from the digest rather than by asking the model to
+    repair itself. What matters is that a run which wrote a stale bound cannot report
+    success while the note still carries it — not how many agent rounds that took.
+    Asserting a second guidance round here would pin the old mechanism and would make
+    the cheaper deterministic fix look like a regression.
+    """
+
+    service = MemoryService(
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend=None,
+            review_writes=False,
+        )
+    )
+    local_date = "2026-08-10"
+    root = tmp_path / "user-one"
+    day_rel = f"Daily/{local_date}.md"
+    rounds_run = []
+    digest = """Local day 2026-08-10 (Etc/UTC), 2 episode(s).
+
+### 06:10–06:52 · meeting · highlight
+title: ADS Weekly Planning Sync
+
+### 21:46–22:09 · application_state · background
+title: Late Zed review
+"""
+
+    class WritesAStaleBound:
+        def __init__(self, _root):
+            pass
+
+        async def run(self, *_args, guidance="", **_kwargs):
+            rounds_run.append(guidance)
+            note = root / day_rel
+            note.parent.mkdir(parents=True, exist_ok=True)
+            # Wrong end bound on the first episode: the shape an earlier run leaves
+            # behind when it appends a new episode and keeps every stale range.
+            note.write_text(
+                f"# {local_date}\n\n## Episodes\n\n"
+                + "".join(
+                    f"- {value} · episode — summary\n"
+                    for value in ("06:10–06:10", "21:46–22:09")
+                ),
+                encoding="utf-8",
+            )
+            return MemoryAgentResult(
+                conversation_id=local_date,
+                rounds=3,
+                touched=[day_rel],
+                summary="Recorded the day.",
+                verified=True,
+            )
+
+    monkeypatch.setattr(service, "_write_agent_class", lambda: WritesAStaleBound)
+    monkeypatch.setattr(service, "_recovery_agent_class", lambda: None)
+    monkeypatch.setattr(service.vault, "user_root", lambda _uid: root)
+
+    outcome, touched = await service._add_day_memory_agent(
+        digest,
+        local_date,
+        "user-one",
+        source_date="2026-08-10T00:00:00+00:00",
+    )
+
+    written = (root / day_rel).read_text(encoding="utf-8")
+    assert outcome is DayWriteOutcome.COMPLETE
+    assert touched == [day_rel]
+    # The index mirrors the digest exactly: the stale bound is gone, both source
+    # ranges are present, and they are in chronological order.
+    assert "06:10–06:52" in written
+    assert "06:10–06:10" not in written
+    assert written.index("06:10–06:52") < written.index("21:46–22:09")
+    # Reconciliation is deterministic, so it costs no extra agent round.
+    assert rounds_run == [""]
+
+
+@pytest.mark.asyncio
+async def test_partial_day_write_logs_limit_cause_and_work_done(
+    tmp_path, monkeypatch, caplog
+):
+    """A preserved partial write must report why it did not latch as complete.
+
+    The run wrote a structurally valid day note and then hit its round limit, so it is
+    neither complete nor failed: reporting it complete hides that it may never have
+    reached its People/Topic edits, and reporting it failed spends the retry budget
+    re-reaching the same limit before settling the day as ``skipped``.
+    """
+
+    service = MemoryService(
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend=None,
+            review_writes=False,
+        )
+    )
+    local_date = "2026-08-07"
+    root = tmp_path / "user-one"
+    day_rel = f"Daily/{local_date}.md"
+
+    class StopsAtRoundLimit:
+        def __init__(self, _root):
+            pass
+
+        async def run(self, *_args, **_kwargs):
+            note = root / day_rel
+            note.parent.mkdir(parents=True, exist_ok=True)
+            note.write_text(
+                f"# {local_date}\n\n## Episodes\n\n- Partial write.\n",
+                encoding="utf-8",
+            )
+            return MemoryAgentResult(
+                conversation_id=local_date,
+                rounds=32,
+                touched=[day_rel],
+                summary="Stopped at the configured limit.",
+                tool_calls=35,
+                errors=["Pi tool-round limit exceeded (32)"],
+                truncated=True,
+            )
+
+    monkeypatch.setattr(service, "_write_agent_class", lambda: StopsAtRoundLimit)
+    monkeypatch.setattr(service, "_recovery_agent_class", lambda: None)
+    monkeypatch.setattr(service.vault, "user_root", lambda _uid: root)
+    caplog.set_level(logging.ERROR, logger="memory_service")
+
+    outcome, touched = await service._add_day_memory_agent(
+        "A day digest long enough to clear the minimum-length guard.",
+        local_date,
+        "user-one",
+        source_date="2026-08-07T00:00:00+05:30",
+    )
+
+    assert outcome is DayWriteOutcome.PARTIAL
+    assert touched == [day_rel]
+    # The partial mutations are kept, not discarded.
+    assert (root / day_rel).read_text(encoding="utf-8").strip()
+    # And the cause is reported at ERROR, with the work actually done, so a day that
+    # keeps landing here is visible rather than quietly half-recorded.
+    assert "rounds=32 tools=35" in caplog.text
+    assert "Pi tool-round limit exceeded (32)" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -404,7 +611,7 @@ async def test_narrating_the_next_step_is_not_a_deliberate_no_op(tmp_path, monke
     monkeypatch.setattr(service, "_recovery_agent_class", lambda: Recovery)
     monkeypatch.setattr(service.vault, "user_root", lambda _uid: root)
 
-    success, touched = await service._add_day_memory_agent(
+    outcome, touched = await service._add_day_memory_agent(
         "A day digest long enough to clear the minimum-length guard.",
         local_date,
         "user-one",
@@ -412,7 +619,7 @@ async def test_narrating_the_next_step_is_not_a_deliberate_no_op(tmp_path, monke
     )
 
     assert recovery_calls == [1]
-    assert success is True
+    assert outcome is DayWriteOutcome.COMPLETE
     assert f"Daily/{local_date}.md" in touched
 
 
@@ -481,7 +688,7 @@ async def test_a_reviewer_finding_sends_the_write_back_for_repair(
         fake_review,
     )
 
-    success, touched = await service._add_day_memory_agent(
+    outcome, touched = await service._add_day_memory_agent(
         "A day digest long enough to clear the minimum-length guard.",
         local_date,
         "user-one",
@@ -490,7 +697,7 @@ async def test_a_reviewer_finding_sends_the_write_back_for_repair(
 
     # The day was written, so the run succeeds — a redundancy is a blemish on a real
     # record, not a reason to throw the day away and retry it until it is skipped.
-    assert success is True
+    assert outcome is DayWriteOutcome.COMPLETE
     assert day_rel in touched
     # But it went back for repair, and the instruction names the remedy: a write agent
     # told to record things does not read "fix this" as "delete this".

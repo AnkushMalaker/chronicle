@@ -16,6 +16,7 @@ from fastapi import UploadFile
 from fastapi.responses import JSONResponse
 from rq import Retry
 
+from advanced_omi_backend.client_manager import generate_client_id
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     start_post_conversation_jobs,
@@ -36,13 +37,6 @@ from advanced_omi_backend.workers.transcription_jobs import transcribe_full_audi
 
 logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
-
-
-def generate_client_id(user: User, device_name: str) -> str:
-    """Generate client ID for uploaded files."""
-    logger.debug(f"Generating client ID - user.id={user.id}, type={type(user.id)}")
-    user_id_suffix = str(user.id)[-6:]
-    return f"{user_id_suffix}-{device_name}"
 
 
 async def upload_and_process_audio_files(

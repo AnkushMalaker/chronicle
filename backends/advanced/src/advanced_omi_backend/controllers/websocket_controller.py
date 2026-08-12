@@ -30,6 +30,7 @@ from advanced_omi_backend.constants import (
     OMI_CHANNELS,
     OMI_SAMPLE_RATE,
     OMI_SAMPLE_WIDTH,
+    TITLE_NOT_GENERATED,
 )
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
@@ -64,7 +65,7 @@ from advanced_omi_backend.services.device_audio import (
 )
 from advanced_omi_backend.services.observability import record_event_sync
 from advanced_omi_backend.services.plugin_service import get_plugin_router
-from advanced_omi_backend.services.sse_publisher import publish_sse_event
+from advanced_omi_backend.services.sse_publisher import publish_sse_event_async
 from advanced_omi_backend.services.transcription import is_transcription_available
 from advanced_omi_backend.services.wakeword.followup import handle_dial_followup
 from advanced_omi_backend.users import register_client_to_user, touch_client_last_seen
@@ -483,7 +484,7 @@ async def cleanup_client_state(client_id: str):
                 await store.mark_complete(session_id, "websocket_disconnect")
 
             if view.user_id:
-                publish_sse_event(
+                await publish_sse_event_async(
                     view.user_id,
                     "session.ended",
                     {
@@ -723,9 +724,13 @@ async def _initialize_streaming_session(
             f"Could not assign durable audio owner for {client_state.stream_session_id}"
         )
 
-    # Enqueue streaming jobs (speech detection + audio persistence)
-    job_ids = start_streaming_jobs(
-        session_id=session_id, user_id=user_id, client_id=client_id
+    # Enqueue streaming jobs (speech detection + audio persistence). RQ's client is
+    # synchronous, so every enqueue and liveness check is a blocking Redis round-trip.
+    job_ids = await asyncio.to_thread(
+        start_streaming_jobs,
+        session_id=session_id,
+        user_id=user_id,
+        client_id=client_id,
     )
 
     # Store job IDs in Redis session (not in ClientState)
@@ -736,7 +741,7 @@ async def _initialize_streaming_session(
     )
 
     # Notify frontend that a new streaming session has started
-    publish_sse_event(
+    await publish_sse_event_async(
         user_id,
         "session.started",
         {
@@ -795,7 +800,7 @@ async def _finalize_streaming_session(
     # Producer completion is distinct from persistence completion: FINISHED means no
     # more XADDs are legal, while Redis group lag/pending remains the deletion gate.
     await audio_stream_producer.store.mark_complete(session_id, "user_stopped")
-    publish_sse_event(
+    await publish_sse_event_async(
         user_id,
         "session.ended",
         {
@@ -970,7 +975,11 @@ async def _handle_streaming_mode_audio(
             raise RuntimeError(
                 "Streaming session initialization did not produce a session id"
             )
-        ensure_audio_persistence(session_id, user_id, client_id)
+        # Once per second per streaming client, and several synchronous Redis
+        # round-trips deep. A reconnect inside it blocks on getaddrinfo.
+        await asyncio.to_thread(
+            ensure_audio_persistence, session_id, user_id, client_id
+        )
         client_state.last_persistence_healthcheck = now
 
     # Publish to Redis Stream
@@ -1438,7 +1447,7 @@ async def _process_rolling_batch(
             client_state,
             user_id=user_id,
             client_id=client_id,
-            title=f"Recording Part {batch_number}",
+            title=TITLE_NOT_GENERATED,
             trigger=f"rolling_batch_{batch_number}",
             job_id_prefix=f"transcribe_rolling_{batch_number}",
         )
@@ -1463,7 +1472,7 @@ async def _process_batch_audio_complete(
             client_state,
             user_id=user_id,
             client_id=client_id,
-            title="Batch Recording",
+            title=TITLE_NOT_GENERATED,
             trigger="batch",
             job_id_prefix="transcribe",
             enqueue_post_jobs=True,
@@ -1642,21 +1651,25 @@ async def handle_omi_websocket(
 
             elif header["type"] == "audio-chunk" and payload:
                 chunk_data = header.get("data", {})
-                durable_session_id = chunk_data.get("durable_session_id")
-                durable_sequence = chunk_data.get("durable_sequence")
+                # The mobile spool's own file identity, NOT this connection's
+                # SessionId. It was sent as ``durable_session_id`` and acknowledged as
+                # ``session_id``, so a spool-segment id and the backend audio session
+                # shared a name while meaning different things.
+                spool_segment_id = chunk_data.get("spool_segment_id")
+                spool_sequence = chunk_data.get("spool_sequence")
                 receipt_key = None
-                if durable_session_id is not None and durable_sequence is not None:
+                if spool_segment_id is not None and spool_sequence is not None:
                     receipt_key = (
                         f"mobile-audio-receipt:{user.user_id}:{client_id}:"
-                        f"{durable_session_id}"
+                        f"{spool_segment_id}"
                     )
                     prior = await audio_stream_producer.redis_client.get(receipt_key)
-                    if prior is not None and int(prior) >= int(durable_sequence):
+                    if prior is not None and int(prior) >= int(spool_sequence):
                         await ws.send_json(
                             {
                                 "type": "audio-ack",
-                                "session_id": durable_session_id,
-                                "sequence": int(durable_sequence),
+                                "spool_segment_id": spool_segment_id,
+                                "sequence": int(spool_sequence),
                             }
                         )
                         continue
@@ -1692,13 +1705,13 @@ async def handle_omi_websocket(
                         sample_width=OMI_SAMPLE_WIDTH,
                     )
                     await audio_stream_producer.redis_client.set(
-                        receipt_key, int(durable_sequence), ex=7 * 24 * 60 * 60
+                        receipt_key, int(spool_sequence), ex=7 * 24 * 60 * 60
                     )
                     await ws.send_json(
                         {
                             "type": "audio-ack",
-                            "session_id": durable_session_id,
-                            "sequence": int(durable_sequence),
+                            "spool_segment_id": spool_segment_id,
+                            "sequence": int(spool_sequence),
                         }
                     )
 

@@ -143,10 +143,9 @@ async def run_speaker_finetuning_job() -> dict:
                 await _record_failure(annotation, "No audio for segment")
                 continue
 
-            # Intentional: only single admin user (user_id=1) is supported currently
             existing_speaker = await speaker_client.get_speaker_by_name(
                 speaker_name=annotation.corrected_speaker,
-                user_id=1,
+                user_id=conversation.user_id,
             )
 
             if existing_speaker:
@@ -167,7 +166,7 @@ async def run_speaker_finetuning_job() -> dict:
                 result = await speaker_client.enroll_new_speaker(
                     speaker_name=annotation.corrected_speaker,
                     audio_data=wav_bytes,
-                    user_id=1,
+                    user_id=conversation.user_id,
                 )
                 if "error" in result:
                     failed += 1

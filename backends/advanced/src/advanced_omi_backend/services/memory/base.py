@@ -12,14 +12,42 @@ All concrete implementations should inherit from these base classes.
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 __all__ = [
+    "DayWriteOutcome",
     "MemoryEntry",
     "MemoryServiceBase",
     "LLMProviderBase",
     "VaultSearchUnavailable",
 ]
+
+
+class DayWriteOutcome(str, Enum):
+    """How a settled-day vault write ended.
+
+    Three outcomes rather than two, because a truncated or stalled agent run that
+    still produced a structurally valid day note is neither complete nor failed, and
+    a boolean forces it to be mislabelled either way:
+
+    - reported complete, it hides that the run may have stopped before making any of
+      its durable People/Topic edits. Deterministic verification proves the day note's
+      shape and that its episode index mirrors the digest; it cannot prove the run
+      finished the work it was asked to do.
+    - reported failed, it spends the whole retry budget re-reaching the same
+      truncation — truncation is usually a property of the model and its round limit,
+      not of the day — and then settles the day as ``skipped``, which means "there was
+      no analysis to record at all".
+
+    ``PARTIAL`` is terminal: the audited partial mutations are kept, the day is not
+    re-attempted, and publishing a newer analysis generation clears the latch so the
+    day is written properly once the underlying limit is addressed.
+    """
+
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    FAILED = "failed"
 
 
 class VaultSearchUnavailable(RuntimeError):
@@ -148,7 +176,7 @@ class MemoryServiceBase(ABC):
         user_id: str,
         *,
         source_date: Optional[str] = None,
-    ) -> Tuple[bool, List[str]]:
+    ) -> Tuple["DayWriteOutcome", List[str]]:
         """Record one settled local day of timeline episodes.
 
         The day, not the recordings under it, is the memory unit for capture evidence:
@@ -156,14 +184,14 @@ class MemoryServiceBase(ABC):
         several recordings while an episode already carries the right bounds.
 
         Args:
-            day_digest: Rendered episodes for the day, with transcripts for the
-                conversational ones
+            day_digest: Rendered bounded episode summaries for the day. Raw transcripts
+                are intentionally excluded.
             local_date: The user-local date being recorded, ISO ``YYYY-MM-DD``
             user_id: User identifier
             source_date: Trusted timestamp for the day's record
 
         Returns:
-            Tuple of (success: bool, touched_note_paths: List[str])
+            Tuple of (outcome: DayWriteOutcome, touched_note_paths: List[str])
         """
         pass
 

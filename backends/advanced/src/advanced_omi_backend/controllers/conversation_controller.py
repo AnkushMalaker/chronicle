@@ -21,7 +21,7 @@ from advanced_omi_backend.config_loader import get_service_config
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     conversation_edit_chain_in_flight,
-    default_queue,
+    enqueue_summary_job_bundle,
     memory_queue,
     post_conv_enqueue_kwargs,
     start_post_conversation_jobs,
@@ -45,7 +45,6 @@ from advanced_omi_backend.services.memory.audit import (
 )
 from advanced_omi_backend.services.plugin_service import get_plugin_router
 from advanced_omi_backend.users import User
-from advanced_omi_backend.workers.conversation_jobs import generate_title_summary_job
 from advanced_omi_backend.workers.memory_jobs import (
     enqueue_memory_processing,
     process_memory_job,
@@ -979,9 +978,12 @@ def _enqueue_transcript_reprocessing(
     user_id: str,
     source: str,
     job_id_prefix: str,
-    end_reason: str,
+    trigger: str,
 ) -> tuple:
     """Enqueue transcribe job + post-conversation chain.
+
+    ``end_reason`` is deliberately not passed: the conversation already ended for a
+    real reason, and re-transcribing it does not change how the recording ended.
 
     Returns (version_id, transcript_job, post_jobs dict).
     """
@@ -1004,7 +1006,7 @@ def _enqueue_transcript_reprocessing(
         user_id=user_id,
         transcript_version_id=version_id,
         depends_on_job=transcript_job,
-        end_reason=end_reason,
+        trigger=trigger,
         memory_cause=MemoryCause.TRANSCRIPT_REPROCESS,
     )
 
@@ -1051,9 +1053,9 @@ def _enqueue_speaker_reprocessing_chain(
     source_version_id: str,
     diarization_source: str | None = None,
 ) -> dict:
-    """Enqueue speaker -> memory -> title_summary chain.
+    """Enqueue speaker -> memory -> ordered summary bundle.
 
-    Returns dict with keys: speaker, memory, title_summary (job IDs).
+    Returns speaker, memory, title, short-summary, and detailed-summary job IDs.
     """
     speaker_job = transcription_queue.enqueue(
         recognise_speakers_job,
@@ -1103,27 +1105,22 @@ def _enqueue_speaker_reprocessing_chain(
         f"Chained memory job {memory_job.id} after speaker job {speaker_job.id}"
     )
 
-    title_summary_job = default_queue.enqueue(
-        generate_title_summary_job,
+    summary_jobs = enqueue_summary_job_bundle(
         conversation_id,
-        job_timeout=300,
-        result_ttl=JOB_RESULT_TTL,
-        job_id=f"title_summary_{conversation_id[:12]}",
-        description=f"Regenerate title/summary for {conversation_id[:8]}",
-        **post_conv_enqueue_kwargs(
-            "title_summary",
-            {"conversation_id": conversation_id},
-            depends_on=memory_job,
-        ),
+        depends_on=memory_job,
+        meta={"conversation_id": conversation_id, "trigger": "speaker_reprocess"},
     )
     logger.info(
-        f"Chained title/summary job {title_summary_job.id} after memory job {memory_job.id}"
+        f"Chained summary bundle {[job.id for job in summary_jobs.values()]} "
+        f"after memory job {memory_job.id}"
     )
 
     return {
         "speaker": speaker_job.id,
         "memory": memory_job.id,
-        "title_summary": title_summary_job.id,
+        "title": summary_jobs["title"].id,
+        "short_summary": summary_jobs["short_summary"].id,
+        "detailed_summary": summary_jobs["detailed_summary"].id,
     }
 
 
@@ -1224,7 +1221,7 @@ async def reprocess_orphan(conversation_id: str, user: User):
             user_id=str(user.user_id),
             source="reprocess_orphan",
             job_id_prefix="orphan_transcribe",
-            end_reason="reprocess_orphan",
+            trigger=Conversation.ProcessingTrigger.REPROCESS_ORPHAN.value,
         )
 
         logger.info(
@@ -1236,7 +1233,9 @@ async def reprocess_orphan(conversation_id: str, user: User):
             content={
                 "message": f"Orphan reprocessing started for conversation {conversation_id}",
                 "job_id": transcript_job.id,
-                "title_summary_job_id": post_jobs.get("title_summary"),
+                "title_job_id": post_jobs.get("title"),
+                "short_summary_job_id": post_jobs.get("short_summary"),
+                "detailed_summary_job_id": post_jobs.get("detailed_summary"),
                 "version_id": version_id,
                 "status": "queued",
             }
@@ -1281,7 +1280,7 @@ async def reprocess_transcript(conversation_id: str, user: User):
             user_id=str(user.user_id),
             source="reprocess",
             job_id_prefix="reprocess",
-            end_reason="reprocess_transcript",
+            trigger=Conversation.ProcessingTrigger.REPROCESS_TRANSCRIPT.value,
         )
 
         logger.info(
@@ -1293,7 +1292,9 @@ async def reprocess_transcript(conversation_id: str, user: User):
             content={
                 "message": f"Transcript reprocessing started for conversation {conversation_id}",
                 "job_id": transcript_job.id,
-                "title_summary_job_id": post_jobs.get("title_summary"),
+                "title_job_id": post_jobs.get("title"),
+                "short_summary_job_id": post_jobs.get("short_summary"),
+                "detailed_summary_job_id": post_jobs.get("detailed_summary"),
                 "version_id": version_id,
                 "status": "queued",
             }
@@ -1519,7 +1520,9 @@ async def reprocess_speakers(
                 "message": "Speaker reprocessing started",
                 "job_id": job_ids["speaker"],
                 "memory_job_id": job_ids["memory"],
-                "title_summary_job_id": job_ids["title_summary"],
+                "title_job_id": job_ids["title"],
+                "short_summary_job_id": job_ids["short_summary"],
+                "detailed_summary_job_id": job_ids["detailed_summary"],
                 "version_id": new_version_id,
                 "source_version_id": source_version_id,
                 "diarization_source": diarization_source,

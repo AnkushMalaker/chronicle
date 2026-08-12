@@ -93,7 +93,7 @@ class DiarizeAndIdentifyRequest(BaseModel):
     identify_only_enrolled: bool = Field(
         default=False, description="Only return segments for enrolled speakers"
     )
-    user_id: Optional[int] = Field(
+    user_id: Optional[str] = Field(
         default=None,
         description="User ID to scope speaker identification to user's enrolled speakers",
     )
@@ -274,7 +274,7 @@ class DeepgramTranscriptionRequest(BaseModel):
     enhance_speakers: Optional[bool] = Field(
         default=True, description="Enable speaker identification enhancement"
     )
-    user_id: Optional[int] = Field(
+    user_id: Optional[str] = Field(
         default=None, description="User ID for speaker identification"
     )
     speaker_confidence_threshold: Optional[float] = Field(

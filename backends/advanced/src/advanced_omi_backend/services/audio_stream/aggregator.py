@@ -49,6 +49,11 @@ class TranscriptionResultsAggregator:
                     "text": fields[b"text"].decode(),
                     "confidence": float(fields[b"confidence"].decode()),
                     "provider": fields[b"provider"].decode(),
+                    # Mode and model travel beside the provider rather than being
+                    # collapsed into it. Both are optional so a batch producer that
+                    # writes neither still decodes.
+                    "mode": fields.get(b"mode", b"").decode() or None,
+                    "model": fields.get(b"model", b"").decode() or None,
                     "chunk_id": fields.get(
                         b"chunk_id", b"unknown"
                     ).decode(),  # Handle missing chunk_id gracefully
@@ -109,6 +114,8 @@ class TranscriptionResultsAggregator:
                 "chunk_count": 0,
                 "total_confidence": 0.0,
                 "provider": None,
+                "mode": None,
+                "model": None,
             }
 
         # Combine ALL final results for cumulative speech detection
@@ -118,6 +125,8 @@ class TranscriptionResultsAggregator:
         all_segments = []
         total_confidence = 0.0
         provider = None
+        mode = None
+        model = None
 
         for result in results:
             # Accumulate text
@@ -138,9 +147,14 @@ class TranscriptionResultsAggregator:
             # Sum confidence for averaging
             total_confidence += result.get("confidence", 0.0)
 
-            # Get provider from first result
+            # Provenance comes from the first result that carries it. Provider,
+            # mode, and model are separate facts and are kept separate.
             if provider is None:
                 provider = result.get("provider")
+            if mode is None:
+                mode = result.get("mode")
+            if model is None:
+                model = result.get("model")
 
         # Calculate average confidence
         avg_confidence = total_confidence / len(results) if results else 0.0
@@ -155,6 +169,8 @@ class TranscriptionResultsAggregator:
             "chunk_count": len(results),
             "total_confidence": avg_confidence,
             "provider": provider,
+            "mode": mode,
+            "model": model,
         }
 
         logger.info(

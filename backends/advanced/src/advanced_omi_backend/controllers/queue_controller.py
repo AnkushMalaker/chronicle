@@ -28,6 +28,7 @@ from advanced_omi_backend.heartbeat import (
     evaluate_fleet_health,
     is_rq_worker_fresh,
 )
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.redis_factory import create_sync_redis
 from advanced_omi_backend.services.audio_stream.durability import (
     AUDIO_PERSISTENCE_GROUP,
@@ -148,9 +149,16 @@ TRANSCRIPTION_QUEUE = "transcription"
 MEMORY_QUEUE = "memory"
 AUDIO_QUEUE = "audio"
 DEFAULT_QUEUE = "default"
+SUMMARY_QUEUE = "summary"
 
 # Centralized list of all queue names
-QUEUE_NAMES = [DEFAULT_QUEUE, TRANSCRIPTION_QUEUE, MEMORY_QUEUE, AUDIO_QUEUE]
+QUEUE_NAMES = [
+    DEFAULT_QUEUE,
+    TRANSCRIPTION_QUEUE,
+    MEMORY_QUEUE,
+    SUMMARY_QUEUE,
+    AUDIO_QUEUE,
+]
 
 # Job retention configuration
 JOB_RESULT_TTL = int(os.getenv("RQ_RESULT_TTL", 86400))  # 24 hour default
@@ -164,6 +172,78 @@ audio_queue = Queue(
     AUDIO_QUEUE, connection=redis_conn, default_timeout=86400
 )  # 24 hours for all-day sessions
 default_queue = Queue(DEFAULT_QUEUE, connection=redis_conn, default_timeout=300)
+summary_queue = Queue(SUMMARY_QUEUE, connection=redis_conn, default_timeout=300)
+
+TITLE_JOB_TIMEOUT_SECONDS = 30
+SHORT_SUMMARY_JOB_TIMEOUT_SECONDS = 60
+DETAILED_SUMMARY_JOB_TIMEOUT_SECONDS = 300
+
+
+def enqueue_summary_job_bundle(
+    conversation_id: str,
+    *,
+    depends_on=None,
+    meta: Optional[dict] = None,
+    include_memory_context: bool = True,
+) -> Dict[str, Job]:
+    """Enqueue title, short summary, and detailed summary as one ordered bundle.
+
+    Each output has its own worker execution and timeout. Failure-tolerant
+    dependencies ensure every stage gets an attempt even when an earlier stage
+    exhausts its retries. Ordering also prevents three whole-document saves from
+    racing with one another.
+
+    RQ starts each timeout only after a worker dequeues and begins that specific job;
+    time spent queued or deferred behind the preceding bundle stage is not charged.
+    """
+    # Lazy import avoids the workers package's queue-controller import cycle.
+    from advanced_omi_backend.workers.conversation_jobs import (
+        generate_detailed_summary_job,
+        generate_short_summary_job,
+        generate_title_job,
+    )
+
+    suffix = conversation_id[:12]
+    bundle_meta = {
+        **(meta or {}),
+        "conversation_id": conversation_id,
+        "summary_bundle_id": f"summary_bundle_{suffix}",
+    }
+    title_job = summary_queue.enqueue(
+        generate_title_job,
+        conversation_id,
+        job_timeout=TITLE_JOB_TIMEOUT_SECONDS,
+        result_ttl=JOB_RESULT_TTL,
+        job_id=f"title_{suffix}",
+        description=f"Generate title for conversation {conversation_id[:8]}",
+        **post_conv_enqueue_kwargs("title", bundle_meta, depends_on=depends_on),
+    )
+    short_summary_job = summary_queue.enqueue(
+        generate_short_summary_job,
+        conversation_id,
+        job_timeout=SHORT_SUMMARY_JOB_TIMEOUT_SECONDS,
+        result_ttl=JOB_RESULT_TTL,
+        job_id=f"short_summary_{suffix}",
+        description=f"Generate short summary for conversation {conversation_id[:8]}",
+        **post_conv_enqueue_kwargs("short_summary", bundle_meta, depends_on=title_job),
+    )
+    detailed_summary_job = summary_queue.enqueue(
+        generate_detailed_summary_job,
+        conversation_id,
+        include_memory_context=include_memory_context,
+        job_timeout=DETAILED_SUMMARY_JOB_TIMEOUT_SECONDS,
+        result_ttl=JOB_RESULT_TTL,
+        job_id=f"detailed_summary_{suffix}",
+        description=f"Generate detailed summary for conversation {conversation_id[:8]}",
+        **post_conv_enqueue_kwargs(
+            "detailed_summary", bundle_meta, depends_on=short_summary_job
+        ),
+    )
+    return {
+        "title": title_job,
+        "short_summary": short_summary_job,
+        "detailed_summary": detailed_summary_job,
+    }
 
 
 def get_queue(queue_name: str = DEFAULT_QUEUE) -> Queue:
@@ -172,6 +252,7 @@ def get_queue(queue_name: str = DEFAULT_QUEUE) -> Queue:
         TRANSCRIPTION_QUEUE: transcription_queue,
         MEMORY_QUEUE: memory_queue,
         AUDIO_QUEUE: audio_queue,
+        SUMMARY_QUEUE: summary_queue,
         DEFAULT_QUEUE: default_queue,
     }
     return queues.get(queue_name, default_queue)
@@ -732,7 +813,7 @@ def start_streaming_jobs(
 def _clear_post_conversation_chain(conversation_id: str) -> list:
     """Delete any existing post-conversation chain jobs for a conversation.
 
-    The post-conversation jobs (speaker → memory → title/summary → event) use
+    The post-conversation jobs (speaker → memory → summary bundle → event) use
     deterministic job_ids keyed on the conversation. When the chain is
     re-triggered (e.g. a transcript reprocess) while a previous chain is still
     ``deferred``, re-enqueuing the same job_id with a *new* ``depends_on`` makes
@@ -751,7 +832,9 @@ def _clear_post_conversation_chain(conversation_id: str) -> list:
     job_ids = [
         f"speaker_{suffix}",
         f"memory_{suffix}",
-        f"title_summary_{suffix}",
+        f"title_{suffix}",
+        f"short_summary_{suffix}",
+        f"detailed_summary_{suffix}",
         f"event_complete_{suffix}",
     ]
     cleared = []
@@ -796,7 +879,7 @@ def conversation_edit_chain_in_flight(conversation_id: str) -> Optional[str]:
     Several endpoints edit a conversation by creating a new transcript version and
     enqueuing follow-up work under deterministic job_ids keyed on the conversation:
 
-    - ``reprocess_speakers`` → reprocess_speaker → memory → title_summary
+    - ``reprocess_speakers`` → reprocess_speaker → memory → summary bundle
     - annotation apply (``/diarization/{id}/apply``, ``/{id}/apply``) → memory
 
     Firing any of these again while a previous one is still running spawns overlapping
@@ -809,7 +892,9 @@ def conversation_edit_chain_in_flight(conversation_id: str) -> Optional[str]:
     job_ids = [
         f"reprocess_speaker_{suffix}",
         f"memory_{suffix}",
-        f"title_summary_{suffix}",
+        f"title_{suffix}",
+        f"short_summary_{suffix}",
+        f"detailed_summary_{suffix}",
     ]
     for job_id in job_ids:
         try:
@@ -827,7 +912,8 @@ def start_post_conversation_jobs(
     transcript_version_id: Optional[str] = None,
     depends_on_job=None,
     client_id: Optional[str] = None,
-    end_reason: str = "file_upload",
+    end_reason: Optional[str] = None,
+    trigger: str = Conversation.ProcessingTrigger.FILE_UPLOAD.value,
     skip_speaker_recognition: bool = False,
     skip_memory_extraction: bool = False,
     skip_title_summary: bool = False,
@@ -840,7 +926,7 @@ def start_post_conversation_jobs(
     This creates the standard processing chain after a conversation is created:
     1. Speaker recognition job - Identifies speakers in audio segments
     2. Memory extraction job - Extracts memories from conversation
-    3. Title/summary generation job - Generates title and summary
+    3. Summary bundle - Generates title, short summary, and detailed summary
     4. Event dispatch job - Triggers conversation.complete plugins
 
     Note: Batch transcription removed - streaming conversations use streaming transcript.
@@ -852,7 +938,11 @@ def start_post_conversation_jobs(
         transcript_version_id: Transcript version ID (auto-generated if None)
         depends_on_job: Optional job dependency for first job (e.g., transcription for file uploads)
         client_id: Client ID for UI tracking
-        end_reason: Reason conversation ended (e.g., 'file_upload', 'websocket_disconnect', 'user_stopped')
+        end_reason: Why the recording ended, a ``Conversation.EndReason`` value, or
+            None to leave the stored reason alone. A reprocess passes None: the
+            conversation already ended for a real reason and re-running the pipeline
+            does not change it.
+        trigger: Why the pipeline is running, a ``Conversation.ProcessingTrigger``
         skip_speaker_recognition: Skip the speaker step even when enabled — used
             by split/merge, whose transcripts already carry speaker labels
         skip_memory_extraction: Skip memory extraction even when globally enabled —
@@ -865,13 +955,12 @@ def start_post_conversation_jobs(
     chain omits it never settles.
 
     Returns:
-        Dict with job IDs for speaker_recognition, memory, title_summary, event_dispatch
+        Dict with job IDs for speaker_recognition, memory, each summary stage, and event_dispatch
     """
     # Lazy import: circular dependency with the `workers` package (its __init__
     # imports back from this module).
     from advanced_omi_backend.workers.conversation_jobs import (
         dispatch_conversation_complete_event_job,
-        generate_title_summary_job,
     )
     from advanced_omi_backend.workers.memory_jobs import process_memory_job
     from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
@@ -993,36 +1082,25 @@ def start_post_conversation_jobs(
             f"⏭️  Memory extraction disabled, skipping memory job for conversation {conversation_id[:8]}"
         )
 
-    # Step 3: Title/summary generation job
-    # Depends on memory job to avoid race condition (both jobs save the conversation document)
-    # and to ensure fresh memories are available for context-enriched summaries
-    title_dependency = memory_job if memory_job else speaker_dependency
-    title_job_id = f"title_summary_{conversation_id[:12]}"
-    title_summary_job = None
+    # Step 3: Ordered title/summary bundle. It follows memory both to avoid
+    # whole-document save races and to make fresh memory available to the detailed
+    # summary. Each output owns its own timeout and retry lifecycle.
+    summary_dependency = memory_job if memory_job else speaker_dependency
+    summary_jobs = None
     if skip_title_summary:
         logger.info(
             f"⏭️  Title/summary skipped by caller for conversation {conversation_id[:8]}"
         )
     else:
-        logger.info(
-            f"🔍 DEBUG: Creating title/summary job with job_id={title_job_id}, conversation_id={conversation_id[:12]}"
-        )
-
-        title_summary_job = default_queue.enqueue(
-            generate_title_summary_job,
+        summary_jobs = enqueue_summary_job_bundle(
             conversation_id,
-            job_timeout=300,  # 5 minutes
-            result_ttl=JOB_RESULT_TTL,
-            job_id=title_job_id,
-            description=f"Generate title and summary for conversation {conversation_id[:8]}",
-            **post_conv_enqueue_kwargs(
-                "title_summary", job_meta, depends_on=title_dependency
-            ),
+            depends_on=summary_dependency,
+            meta=job_meta,
         )
         upstream = memory_job or speaker_job or depends_on_job
         logger.info(
-            f"📥 RQ: Enqueued title/summary job {title_summary_job.id}, "
-            f"meta={title_summary_job.meta} "
+            f"📥 RQ: Enqueued summary bundle "
+            f"{[job.id for job in summary_jobs.values()]} "
             + (
                 f"(depends on {upstream.id})"
                 if upstream
@@ -1043,7 +1121,11 @@ def start_post_conversation_jobs(
     # both — continuous capture does. It then settled the conversation as
     # failed/"transcription" in ~100ms, while the transcription it was meant to wait
     # for was still tens of seconds from writing its version.
-    terminal_job = title_summary_job or memory_job or speaker_job or depends_on_job
+    terminal_job = (
+        summary_jobs["detailed_summary"]
+        if summary_jobs
+        else memory_job or speaker_job or depends_on_job
+    )
     event_dependencies = [terminal_job] if terminal_job else []
 
     # Enqueue event dispatch job (may have no dependencies if all jobs were skipped)
@@ -1052,11 +1134,12 @@ def start_post_conversation_jobs(
         conversation_id,
         client_id or "",
         user_id,
-        end_reason,  # Use the end_reason parameter (defaults to 'file_upload' for backward compatibility)
+        end_reason,
+        trigger,
         job_timeout=120,  # 2 minutes
         result_ttl=JOB_RESULT_TTL,
         job_id=event_job_id,
-        description=f"Dispatch conversation complete event ({end_reason}) for {conversation_id[:8]}",
+        description=f"Dispatch conversation complete event ({trigger}) for {conversation_id[:8]}",
         # Wait for whichever upstream jobs were enqueued; allow_failure so this
         # finalizer still runs (and reconciles status) even if one failed.
         **post_conv_enqueue_kwargs(
@@ -1087,7 +1170,9 @@ def start_post_conversation_jobs(
                 for j in [
                     "speaker_recognition" if speaker_job else None,
                     "memory_extraction" if memory_job else None,
-                    "title_summary" if title_summary_job else None,
+                    "title" if summary_jobs else None,
+                    "short_summary" if summary_jobs else None,
+                    "detailed_summary" if summary_jobs else None,
                     "event_dispatch",
                 ]
                 if j
@@ -1098,7 +1183,11 @@ def start_post_conversation_jobs(
     return {
         "speaker_recognition": speaker_job.id if speaker_job else None,
         "memory": memory_job.id if memory_job else None,
-        "title_summary": title_summary_job.id if title_summary_job else None,
+        "title": summary_jobs["title"].id if summary_jobs else None,
+        "short_summary": summary_jobs["short_summary"].id if summary_jobs else None,
+        "detailed_summary": (
+            summary_jobs["detailed_summary"].id if summary_jobs else None
+        ),
         "event_dispatch": event_dispatch_job.id,
     }
 

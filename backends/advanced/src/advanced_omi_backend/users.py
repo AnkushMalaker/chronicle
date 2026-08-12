@@ -6,6 +6,7 @@ New code should import from advanced_omi_backend.models.user instead.
 """
 
 from advanced_omi_backend.models.user import (
+    RegisteredClient,
     User,
     UserCreate,
     UserRead,
@@ -20,6 +21,7 @@ from advanced_omi_backend.models.user import (
 )
 
 __all__ = [
+    "RegisteredClient",
     "User",
     "UserCreate",
     "UserRead",

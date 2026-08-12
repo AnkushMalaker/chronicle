@@ -222,7 +222,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   }, [setStateSafe]);
 
   const sendDurablePacket = useCallback((packet: SpoolPacket) => {
-    pendingPacketsRef.current.set(`${packet.sessionId}:${packet.sequence}`, packet);
+    pendingPacketsRef.current.set(`${packet.segmentId}:${packet.sequence}`, packet);
     outboundChainRef.current = outboundChainRef.current.then(async () => {
       if (websocketRef.current?.readyState !== WebSocket.OPEN) return;
       await sendWyomingEvent(
@@ -230,8 +230,8 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           type: 'audio-chunk',
           data: {
             ...AUDIO_FORMAT,
-            durable_session_id: packet.sessionId,
-            durable_sequence: packet.sequence,
+            spool_segment_id: packet.segmentId,
+            spool_sequence: packet.sequence,
             captured_at_ms: packet.capturedAtMs,
           },
         },
@@ -426,7 +426,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
               return;
             }
             if (msg.type === 'audio-ack') {
-              const key = `${msg.session_id}:${msg.sequence}`;
+              const key = `${msg.spool_segment_id}:${msg.sequence}`;
               const packet = pendingPacketsRef.current.get(key);
               if (packet) {
                 pendingPacketsRef.current.delete(key);

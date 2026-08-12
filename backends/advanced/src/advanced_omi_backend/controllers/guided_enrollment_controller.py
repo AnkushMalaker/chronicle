@@ -135,9 +135,9 @@ def _overlaps_other_speaker(seg: dict, segments: list) -> bool:
 
 
 async def _gallery_stats(
-    speaker_client: SpeakerRecognitionClient, speaker_name: str
+    speaker_client: SpeakerRecognitionClient, speaker_name: str, user_id: str
 ) -> Optional[dict]:
-    speaker = await speaker_client.get_speaker_by_name(speaker_name)
+    speaker = await speaker_client.get_speaker_by_name(speaker_name, user_id=user_id)
     if not speaker:
         return None
     return {
@@ -149,9 +149,9 @@ async def _gallery_stats(
 
 
 async def _gallery_health(
-    speaker_client: SpeakerRecognitionClient, speaker_id: str
+    speaker_client: SpeakerRecognitionClient, speaker_id: str, user_id: str
 ) -> Optional[dict]:
-    report = await speaker_client.get_enrollment_health(user_id=1)
+    report = await speaker_client.get_enrollment_health(user_id=user_id)
     if report.get("error"):
         logger.warning("Guided enrollment health audit failed: %s", report)
         return None
@@ -370,7 +370,7 @@ async def suggest_clips(
         return JSONResponse(
             status_code=503, content={"error": "Speaker recognition is not enabled"}
         )
-    gallery = await _gallery_stats(speaker_client, speaker_name)
+    gallery = await _gallery_stats(speaker_client, speaker_name, str(user.user_id))
     if not gallery:
         return JSONResponse(
             status_code=404,
@@ -463,7 +463,7 @@ async def enqueue_corpus_discovery(
 ):
     """Index all corpus speech once, then score it against one live gallery."""
     client = SpeakerRecognitionClient()
-    gallery = await _gallery_stats(client, speaker_name)
+    gallery = await _gallery_stats(client, speaker_name, str(user.user_id))
     if not gallery:
         return JSONResponse(
             status_code=404,
@@ -529,7 +529,7 @@ async def mine_uploaded_files(user: User, speaker_name: str, files: list):
         return JSONResponse(
             status_code=503, content={"error": "Speaker recognition is not enabled"}
         )
-    gallery = await _gallery_stats(client, speaker_name)
+    gallery = await _gallery_stats(client, speaker_name, str(user.user_id))
     if not gallery:
         return JSONResponse(
             status_code=404,
@@ -578,7 +578,7 @@ async def enqueue_local_mining(user: User, speaker_name: str, paths: List[str]):
     from advanced_omi_backend.workers.speaker_mining_jobs import mine_local_corpus_job
 
     client = SpeakerRecognitionClient()
-    gallery = await _gallery_stats(client, speaker_name)
+    gallery = await _gallery_stats(client, speaker_name, str(user.user_id))
     if not gallery:
         return JSONResponse(
             status_code=404,
@@ -606,7 +606,7 @@ async def enqueue_local_mining(user: User, speaker_name: str, paths: List[str]):
 
 async def corpus_discovery_state(user: User, speaker_name: str):
     client = SpeakerRecognitionClient()
-    gallery = await _gallery_stats(client, speaker_name)
+    gallery = await _gallery_stats(client, speaker_name, str(user.user_id))
     if not gallery:
         return JSONResponse(
             status_code=404,
@@ -633,13 +633,15 @@ async def decide_clips(user: User, speaker_name: str, decisions: List[dict]):
         return JSONResponse(
             status_code=503, content={"error": "Speaker recognition is not enabled"}
         )
-    gallery = await _gallery_stats(speaker_client, speaker_name)
+    gallery = await _gallery_stats(speaker_client, speaker_name, str(user.user_id))
     if not gallery:
         return JSONResponse(
             status_code=404,
             content={"error": f"No enrolled speaker named '{speaker_name}'"},
         )
-    health_before = await _gallery_health(speaker_client, gallery["speaker_id"])
+    health_before = await _gallery_health(
+        speaker_client, gallery["speaker_id"], str(user.user_id)
+    )
 
     reviews = _reviews_collection()
     enrolled, reassigned, rejected, skipped, bad_clips, multiple_speakers, errors = (
@@ -681,7 +683,9 @@ async def decide_clips(user: User, speaker_name: str, decisions: List[dict]):
         )
         if enrollment_target:
             try:
-                target_gallery = await _gallery_stats(speaker_client, enrollment_target)
+                target_gallery = await _gallery_stats(
+                    speaker_client, enrollment_target, str(user.user_id)
+                )
                 if not target_gallery:
                     raise ValueError(f"No enrolled speaker named '{enrollment_target}'")
                 wav = await reconstruct_audio_segment(conversation_id, start, end)
@@ -733,8 +737,12 @@ async def decide_clips(user: User, speaker_name: str, decisions: List[dict]):
             upsert=True,
         )
 
-    speaker_after = await _gallery_stats(speaker_client, speaker_name)
-    health_after = await _gallery_health(speaker_client, gallery["speaker_id"])
+    speaker_after = await _gallery_stats(
+        speaker_client, speaker_name, str(user.user_id)
+    )
+    health_after = await _gallery_health(
+        speaker_client, gallery["speaker_id"], str(user.user_id)
+    )
     accepted_novelties = [
         1.0 - decision["scores"]["max_clip_sim"]
         for decision in decisions
@@ -811,13 +819,13 @@ async def gallery_clips(user: User, speaker_name: str):
         return JSONResponse(
             status_code=503, content={"error": "Speaker recognition is not enabled"}
         )
-    gallery = await _gallery_stats(speaker_client, speaker_name)
+    gallery = await _gallery_stats(speaker_client, speaker_name, str(user.user_id))
     if not gallery:
         return JSONResponse(
             status_code=404,
             content={"error": f"No enrolled speaker named '{speaker_name}'"},
         )
-    report = await speaker_client.get_enrollment_health(user_id=1)
+    report = await speaker_client.get_enrollment_health(user_id=str(user.user_id))
     if report.get("error"):
         return JSONResponse(
             status_code=503,
@@ -854,13 +862,13 @@ async def delete_gallery_clip(
         return JSONResponse(
             status_code=503, content={"error": "Speaker recognition is not enabled"}
         )
-    gallery = await _gallery_stats(speaker_client, speaker_name)
+    gallery = await _gallery_stats(speaker_client, speaker_name, str(user.user_id))
     if not gallery:
         return JSONResponse(
             status_code=404,
             content={"error": f"No enrolled speaker named '{speaker_name}'"},
         )
-    report = await speaker_client.get_enrollment_health(user_id=1)
+    report = await speaker_client.get_enrollment_health(user_id=str(user.user_id))
     speaker = next(
         (
             item
@@ -887,8 +895,12 @@ async def delete_gallery_clip(
     )
     return {
         **result,
-        "speaker": await _gallery_stats(speaker_client, speaker_name),
-        "health": await _gallery_health(speaker_client, gallery["speaker_id"]),
+        "speaker": await _gallery_stats(
+            speaker_client, speaker_name, str(user.user_id)
+        ),
+        "health": await _gallery_health(
+            speaker_client, gallery["speaker_id"], str(user.user_id)
+        ),
     }
 
 
@@ -939,7 +951,7 @@ async def reset_speaker_state(
                     "deleted": deleted,
                 },
             )
-        gallery = await _gallery_stats(speaker_client, speaker_name)
+        gallery = await _gallery_stats(speaker_client, speaker_name, str(user.user_id))
         if gallery:
             result = await speaker_client.delete_speaker(
                 gallery["speaker_id"], delete_audio=True
@@ -1017,8 +1029,10 @@ async def reconstructed_baseline(user: User):
         return {"cutoff": None, "speakers": [], "status": "no_guided_reviews"}
 
     client = SpeakerRecognitionClient()
-    baseline = await client.get_enrollment_health(user_id=1, before=cutoff)
-    current = await client.get_enrollment_health(user_id=1)
+    baseline = await client.get_enrollment_health(
+        user_id=str(user.user_id), before=cutoff
+    )
+    current = await client.get_enrollment_health(user_id=str(user.user_id))
     if baseline.get("error") or current.get("error"):
         return JSONResponse(
             status_code=503,

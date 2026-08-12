@@ -454,9 +454,47 @@ async def get_client_manager_dependency() -> ClientManager:
     return client_manager
 
 
+def user_id_prefix(user: "User") -> str:
+    """The user-scoping prefix of every client id: last 6 of the ObjectId.
+
+    The single place this slice is taken. Constructing it inline is how the upload
+    path grew a second, differently-normalizing ``generate_client_id`` that gave the
+    same physical device a different identity than the WebSocket path did.
+    """
+    return str(user.id)[-6:]
+
+
+def owns_client_id(user: "User", client_id: str) -> bool:
+    """Whether ``client_id`` belongs to ``user`` by its prefix.
+
+    Prefix ownership is a *weak* check — it is derived from a 6-character slice, so it
+    is only safe where the caller has already established the user. Use the registry
+    (``User.has_client`` / ``get_user_by_client_id``) when the answer must be
+    authoritative.
+    """
+    return (client_id or "").startswith(user_id_prefix(user))
+
+
+def synthetic_client_id(user: "User", purpose: str) -> str:
+    """A client id for server-generated work that has no device behind it.
+
+    Kept apart from ``generate_client_id`` rather than folded into it: that function
+    sanitizes and truncates *user-supplied* device names to 10 characters, which would
+    silently rewrite a server-controlled label (``annotation-import`` →
+    ``annotation``) and split existing data across two ids. ``purpose`` is a literal in
+    Chronicle's own source, so it needs neither sanitizing nor bounding.
+    """
+    return f"{user_id_prefix(user)}-{purpose}"
+
+
 def generate_client_id(user: "User", device_name: Optional[str] = None) -> str:
     """
     Generate a STABLE client_id in the format: user_id_suffix-device_suffix
+
+    The one constructor for a *device's* identity, on every ingress path. The upload
+    controller used to have its own copy that interpolated the raw device name, so
+    ``MyPhone!`` became ``abc123-MyPhone!`` on upload and ``abc123-myphone`` over the
+    WebSocket — one physical device, two identities, two registry entries.
 
     The client_id is deterministic for a given (user, device_name): the same device
     reconnecting always maps to the same id. This is the device's stable identity —
@@ -478,8 +516,7 @@ def generate_client_id(user: "User", device_name: Optional[str] = None) -> str:
         client_id as user_id_suffix-device_suffix (or user_id_suffix-<uuid> when no
         device name is supplied).
     """
-    # Use last 6 characters of MongoDB ObjectId as user identifier
-    user_id_suffix = str(user.id)[-6:]
+    user_id_suffix = user_id_prefix(user)
 
     if device_name:
         # Sanitize device name: lowercase, alphanumeric + hyphens only, max 10 chars

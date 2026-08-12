@@ -3,7 +3,12 @@ from types import SimpleNamespace
 
 from fastapi.encoders import jsonable_encoder
 
-from advanced_omi_backend.models.timeline import TimelineEvidenceRef
+from advanced_omi_backend.models.timeline import (
+    TimelineAudioRange,
+    TimelineEvidenceRef,
+    clip_audio_ranges,
+    merge_audio_ranges,
+)
 from advanced_omi_backend.routers.modules.timeline_routes import (
     _episode_payload,
     _refs_overlapping,
@@ -185,3 +190,109 @@ def test_split_repartitions_evidence_and_shares_only_spanning_refs():
     assert tail == {"spanning", "late", "point-late"}
     # Nothing is lost across the cut.
     assert head | tail == {"early", "spanning", "late", "point-late"}
+
+
+# --- audio claims: splitting and merging an episode must move its audio with it ---
+
+EPOCH = datetime(2026, 8, 6, 9, 0, tzinfo=timezone.utc)
+
+
+def _range(range_id: str, chunk_ids: list[str], start_min: int, end_min: int):
+    return TimelineAudioRange(
+        range_id=range_id,
+        chunk_ids=chunk_ids,
+        started_at=EPOCH + timedelta(minutes=start_min),
+        ended_at=EPOCH + timedelta(minutes=end_min),
+        source_stream="screenpipe:output",
+    )
+
+
+def _spans(*, minute_of: dict[str, int], duration: float = 10.0):
+    return {
+        chunk_id: (EPOCH + timedelta(minutes=minute), duration)
+        for chunk_id, minute in minute_of.items()
+    }
+
+
+def test_splitting_an_episode_cuts_its_audio_claim_instead_of_copying_it():
+    """Both halves used to claim — and play — the whole original recording."""
+
+    ranges = [_range("r1", ["c0", "c30", "c50"], 0, 60)]
+    spans = _spans(minute_of={"c0": 0, "c30": 30, "c50": 50})
+    cut = EPOCH + timedelta(minutes=40)
+
+    head = clip_audio_ranges(ranges, EPOCH, cut, spans, keep_unplaceable=True)
+    tail = clip_audio_ranges(
+        ranges, cut, EPOCH + timedelta(minutes=60), spans, keep_unplaceable=False
+    )
+
+    assert [item.chunk_ids for item in head] == [["c0", "c30"]]
+    assert [item.chunk_ids for item in tail] == [["c50"]]
+    # Bounds are clipped to each half, so neither claims past the cut.
+    assert head[0].ended_at == cut
+    assert tail[0].started_at == cut
+    # No chunk is claimed by both halves — that was the defect.
+    assert set(head[0].chunk_ids).isdisjoint(tail[0].chunk_ids)
+
+
+def test_a_range_entirely_on_one_side_of_the_cut_does_not_survive_on_the_other():
+    ranges = [_range("early", ["c0"], 0, 10), _range("late", ["c50"], 50, 60)]
+    spans = _spans(minute_of={"c0": 0, "c50": 50})
+    cut = EPOCH + timedelta(minutes=40)
+
+    head = clip_audio_ranges(ranges, EPOCH, cut, spans, keep_unplaceable=True)
+    tail = clip_audio_ranges(
+        ranges, cut, EPOCH + timedelta(minutes=60), spans, keep_unplaceable=False
+    )
+
+    assert [item.range_id for item in head] == ["early"]
+    assert [item.range_id for item in tail] == ["late"]
+
+
+def test_a_chunk_with_no_capture_time_stays_with_the_head_rather_than_both():
+    """3% of this deployment's chunks predate ``captured_at`` and cannot be placed.
+
+    Dropping one loses a reference a later backfill could resolve; keeping it on both
+    sides is the double-claim the split fix exists to remove. It stays with the head.
+    """
+
+    ranges = [_range("r1", ["c0", "unanchored"], 0, 60)]
+    spans = _spans(minute_of={"c0": 0})  # "unanchored" deliberately absent
+    cut = EPOCH + timedelta(minutes=40)
+
+    head = clip_audio_ranges(ranges, EPOCH, cut, spans, keep_unplaceable=True)
+    tail = clip_audio_ranges(
+        ranges, cut, EPOCH + timedelta(minutes=60), spans, keep_unplaceable=False
+    )
+
+    assert head[0].chunk_ids == ["c0", "unanchored"]
+    assert tail == []
+
+
+def test_merging_episodes_unions_their_audio_claims():
+    """A merged episode used to keep only the survivor's audio."""
+
+    survivor = [_range("r1", ["c0"], 0, 20)]
+    absorbed_one = [_range("r2", ["c30"], 30, 40)]
+    absorbed_two = [_range("r3", ["c50"], 50, 60)]
+
+    merged = merge_audio_ranges([survivor, absorbed_one, absorbed_two])
+
+    assert [item.range_id for item in merged] == ["r1", "r2", "r3"]
+    assert [item.chunk_ids for item in merged] == [["c0"], ["c30"], ["c50"]]
+
+
+def test_merging_deduplicates_a_range_two_episodes_both_cite():
+    shared = _range("shared", ["c0"], 0, 20)
+
+    merged = merge_audio_ranges([[shared], [shared, _range("other", ["c30"], 30, 40)]])
+
+    assert [item.range_id for item in merged] == ["shared", "other"]
+
+
+def test_merged_claims_come_back_in_wall_clock_order():
+    merged = merge_audio_ranges(
+        [[_range("late", ["c50"], 50, 60)], [_range("early", ["c0"], 0, 10)]]
+    )
+
+    assert [item.range_id for item in merged] == ["early", "late"]

@@ -46,7 +46,7 @@ def _norm(v: np.ndarray) -> np.ndarray:
     return v / n if n > 0 else v
 
 
-def _load_segments(session, user_id: Optional[int], before: Optional[datetime] = None):
+def _load_segments(session, user_id: Optional[str], before: Optional[datetime] = None):
     """Return [(SpeakerAudioSegment, Speaker, unit_vec)] with valid embeddings."""
     q = session.query(SpeakerAudioSegment, Speaker).join(
         Speaker, SpeakerAudioSegment.speaker_id == Speaker.id
@@ -71,7 +71,7 @@ def _load_segments(session, user_id: Optional[int], before: Optional[datetime] =
 
 
 def compute_audit(
-    session, user_id: Optional[int] = None, before: Optional[datetime] = None
+    session, user_id: Optional[str] = None, before: Optional[datetime] = None
 ) -> dict:
     """Build the enrollment-health report for a user (or all users)."""
     rows = _load_segments(session, user_id, before)
@@ -216,7 +216,7 @@ def compute_audit(
     }
 
 
-def _speakers_without_segments(session, user_id: Optional[int], have: set) -> list:
+def _speakers_without_segments(session, user_id: Optional[str], have: set) -> list:
     """Speakers that have a centroid but no per-clip segments (can't be audited yet)."""
     q = session.query(Speaker)
     if user_id is not None:
@@ -243,7 +243,23 @@ def recompute_speaker_centroid(session, db, speaker_id: str) -> None:
 
     embs = []
     dur = 0.0
+    seen_audio_paths: set[str] = set()
     for s in segs:
+        # Historical imports could create more than one row for the same stored WAV.
+        # Counting those rows independently overweights one clip in the centroid and
+        # inflates the public enrollment sample count/duration. New enrollments are
+        # content-hash deduplicated, but keep this invariant at the scoring boundary
+        # so an old or manually edited database cannot corrupt identification again.
+        if s.audio_file_path in seen_audio_paths:
+            log.error(
+                "Ignoring duplicate enrollment audio path while rebuilding %s: "
+                "segment_id=%s path=%s",
+                speaker_id,
+                s.id,
+                s.audio_file_path,
+            )
+            continue
+        seen_audio_paths.add(s.audio_file_path)
         if not s.embedding:
             continue
         try:

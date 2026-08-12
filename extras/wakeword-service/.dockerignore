@@ -2,6 +2,7 @@
 !app.py
 !consumer.py
 !detector.py
+!identities.py
 !hubert_detector.py
 !samples.py
 !verifier.py

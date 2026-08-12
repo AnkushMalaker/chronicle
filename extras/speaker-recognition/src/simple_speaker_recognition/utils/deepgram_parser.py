@@ -178,7 +178,7 @@ class DeepgramParser:
         return sorted(list(speakers))
 
     def convert_to_annotation_format(
-        self, parsed_data: Dict[str, Any], audio_file_path: str, user_id: int
+        self, parsed_data: Dict[str, Any], audio_file_path: str, user_id: str
     ) -> List[Dict[str, Any]]:
         """Convert parsed Deepgram data to annotation format.
 

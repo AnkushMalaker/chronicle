@@ -113,7 +113,7 @@ class UnifiedSpeakerDB:
         speaker_id: str,
         name: str,
         embedding: np.ndarray,
-        user_id: int,
+        user_id: str,
         sample_count: int = 1,
         total_duration: float = 0.0,
     ) -> bool:
@@ -190,7 +190,7 @@ class UnifiedSpeakerDB:
             finally:
                 db.close()
 
-    async def delete_speaker(self, speaker_id: str, user_id: int) -> None:
+    async def delete_speaker(self, speaker_id: str, user_id: str) -> None:
         """Delete a speaker from the database."""
         async with self._lock:
             db = get_db_session()
@@ -220,7 +220,7 @@ class UnifiedSpeakerDB:
             finally:
                 db.close()
 
-    async def reset_user(self, user_id: int) -> None:
+    async def reset_user(self, user_id: str) -> None:
         """Clear all speakers for a specific user."""
         async with self._lock:
             db = get_db_session()
@@ -242,7 +242,7 @@ class UnifiedSpeakerDB:
                 db.close()
 
     async def _rank_candidates(
-        self, embedding: np.ndarray, user_id: Optional[int] = None
+        self, embedding: np.ndarray, user_id: Optional[str] = None
     ) -> List[Dict]:
         """Return gallery candidates for an embedding, sorted by descending similarity.
 
@@ -254,7 +254,7 @@ class UnifiedSpeakerDB:
     async def _rank_candidates_batch(
         self,
         embeddings: List[np.ndarray] | np.ndarray,
-        user_id: Optional[int] = None,
+        user_id: Optional[str] = None,
     ) -> List[List[Dict]]:
         """Rank gallery candidates for many embeddings with one FAISS and SQL query."""
         matrix = np.asarray(embeddings, dtype=np.float32)
@@ -331,7 +331,7 @@ class UnifiedSpeakerDB:
     async def identify(
         self,
         embedding: np.ndarray,
-        user_id: Optional[int] = None,
+        user_id: Optional[str] = None,
         similarity_threshold: Optional[float] = None,
     ) -> Tuple[bool, Optional[Dict], float]:
         """Identify speaker from embedding using FAISS search (best match only)."""
@@ -345,7 +345,7 @@ class UnifiedSpeakerDB:
     async def identify_with_candidates(
         self,
         embedding: np.ndarray,
-        user_id: Optional[int] = None,
+        user_id: Optional[str] = None,
         similarity_threshold: Optional[float] = None,
     ) -> Tuple[bool, Optional[Dict], float, List[Dict]]:
         """Like :meth:`identify` but also returns the ranked candidate list.
@@ -364,7 +364,7 @@ class UnifiedSpeakerDB:
     async def identify_batch_with_candidates(
         self,
         embeddings: List[np.ndarray] | np.ndarray,
-        user_id: Optional[int] = None,
+        user_id: Optional[str] = None,
         similarity_threshold: Optional[float] = None,
     ) -> List[Tuple[bool, Optional[Dict], float, List[Dict]]]:
         """Identify an ordered embedding batch using one gallery lookup."""
@@ -399,7 +399,7 @@ class UnifiedSpeakerDB:
         return results
 
     async def verify(
-        self, speaker_id: str, embedding: np.ndarray, user_id: int
+        self, speaker_id: str, embedding: np.ndarray, user_id: str
     ) -> float:
         """Verify speaker identity against stored embedding."""
         db = get_db_session()
@@ -427,7 +427,7 @@ class UnifiedSpeakerDB:
         finally:
             db.close()
 
-    def get_speakers_for_user(self, user_id: int) -> List[Dict]:
+    def get_speakers_for_user(self, user_id: str) -> List[Dict]:
         """Get all speakers for a specific user."""
         db = get_db_session()
         try:
@@ -453,7 +453,7 @@ class UnifiedSpeakerDB:
         finally:
             db.close()
 
-    def get_speakers_with_embeddings(self, user_id: int) -> Dict[str, Dict]:
+    def get_speakers_with_embeddings(self, user_id: str) -> Dict[str, Dict]:
         """Get all speakers with their embeddings for a specific user."""
         db = get_db_session()
         try:

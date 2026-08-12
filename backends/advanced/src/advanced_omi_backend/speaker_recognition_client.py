@@ -230,18 +230,24 @@ class SpeakerRecognitionClient:
         Returns:
             Calculated timeout in seconds
         """
-        BASE_TIMEOUT = 30.0  # Minimum timeout for short files
+        BASE_TIMEOUT = 30.0  # Fallback for unknown-duration files
+        MIN_KNOWN_DURATION_TIMEOUT = 900.0
         TIMEOUT_MULTIPLIER = (
             8.0  # Processing speed ratio (e.g., 1 min audio = 8 min timeout)
         )
-        MAX_TIMEOUT = 600.0  # 10 minute cap for very long files
+        # Long recordings are processed as bounded 20-minute neural passes, but one
+        # HTTP request remains open across every pass.  A ten-hour corpus recording
+        # takes longer than the former ten-minute ceiling even though no individual
+        # inference is unbounded.  Keep a finite request-level ceiling with enough
+        # room for the chunk sequence to finish.
+        MAX_TIMEOUT = 3600.0  # 1 hour cap for very long, chunked requests
 
         if audio_duration is None or audio_duration <= 0:
             logger.warning("Audio duration unknown or invalid, using base timeout")
             return BASE_TIMEOUT
 
         calculated_timeout = audio_duration * TIMEOUT_MULTIPLIER + BASE_TIMEOUT
-        timeout = min(MAX_TIMEOUT, calculated_timeout)
+        timeout = min(MAX_TIMEOUT, max(MIN_KNOWN_DURATION_TIMEOUT, calculated_timeout))
 
         logger.info(
             f"🕐 Calculated timeout: audio_duration={audio_duration:.1f}s → "
@@ -255,6 +261,7 @@ class SpeakerRecognitionClient:
         backend_token: str,
         transcript_data: Dict,
         user_id: Optional[str] = None,
+        audio_ranges: Optional[list[tuple[float, float]]] = None,
     ) -> Dict:
         """
         Perform diarization, speaker identification, and word-to-speaker matching.
@@ -274,7 +281,11 @@ class SpeakerRecognitionClient:
         # Use mock client if configured
         if hasattr(self, "_mock_client"):
             return await self._mock_client.diarize_identify_match(
-                conversation_id, backend_token, transcript_data, user_id
+                conversation_id,
+                backend_token,
+                transcript_data,
+                user_id,
+                audio_ranges=audio_ranges,
             )
 
         if not self.enabled:
@@ -309,9 +320,14 @@ class SpeakerRecognitionClient:
 
                 # Send existing transcript for diarization and speaker matching
                 form_data.add_field("transcript_data", json.dumps(transcript_data))
-                form_data.add_field(
-                    "user_id", "1"
-                )  # TODO: Implement proper user mapping
+                if audio_ranges:
+                    form_data.add_field("audio_ranges", json.dumps(audio_ranges))
+                if user_id is None:
+                    raise ValueError(
+                        "diarize_identify_match requires a Chronicle user_id: it "
+                        "selects which speaker gallery is searched"
+                    )
+                form_data.add_field("user_id", user_id)
                 form_data.add_field(
                     "similarity_threshold",
                     str(config.get("similarity_threshold", 0.45)),
@@ -436,10 +452,8 @@ class SpeakerRecognitionClient:
                     filename="segment.wav",
                     content_type="audio/wav",
                 )
-                # TODO: Implement proper user mapping between MongoDB ObjectIds and speaker service integer IDs
-                # Speaker service expects integer user_id, not MongoDB ObjectId strings
                 if user_id is not None:
-                    form_data.add_field("user_id", "1")
+                    form_data.add_field("user_id", user_id)
                 if similarity_threshold is not None:
                     form_data.add_field(
                         "similarity_threshold", str(similarity_threshold)
@@ -528,7 +542,7 @@ class SpeakerRecognitionClient:
                 )
                 form_data.add_field("segment_ids", segment_id)
             if user_id is not None:
-                form_data.add_field("user_id", "1")
+                form_data.add_field("user_id", user_id)
             if similarity_threshold is not None:
                 form_data.add_field("similarity_threshold", str(similarity_threshold))
             form_data.add_field("include_embeddings", str(include_embeddings).lower())
@@ -1133,16 +1147,19 @@ class SpeakerRecognitionClient:
                     )
 
                 form_data.add_field("identify_only_enrolled", "false")
-                # TODO: Implement proper user mapping between MongoDB ObjectIds and speaker service integer IDs
-                # For now, hardcode to admin user (ID=1) since speaker service expects integer user_id
-                form_data.add_field("user_id", "1")
+                if user_id is None:
+                    raise ValueError(
+                        "diarize_and_identify requires a Chronicle user_id: it "
+                        "selects which speaker gallery is searched"
+                    )
+                form_data.add_field("user_id", user_id)
 
                 endpoint_url = f"{self.service_url}/diarize-and-identify"
                 logger.info(f"🎤 [DIARIZE] Calling speaker service: {endpoint_url}")
                 logger.info(
                     f"🎤 [DIARIZE] Parameters: min_duration={min_duration}, "
                     f"similarity_threshold={similarity_threshold}, collar={collar}, "
-                    f"min_duration_off={min_duration_off}, user_id=1"
+                    f"min_duration_off={min_duration_off}, user_id={user_id}"
                 )
 
                 # Make the request
@@ -1423,7 +1440,7 @@ class SpeakerRecognitionClient:
             return {"speakers": []}
 
     async def get_speaker_by_name(
-        self, speaker_name: str, user_id: int = 1
+        self, speaker_name: str, user_id: str
     ) -> Optional[Dict]:
         """
         Look up enrolled speaker by name.
@@ -1476,7 +1493,7 @@ class SpeakerRecognitionClient:
             return None
 
     async def enroll_new_speaker(
-        self, speaker_name: str, audio_data: bytes, user_id: int = 1
+        self, speaker_name: str, audio_data: bytes, user_id: str
     ) -> Dict:
         """
         Enroll a new speaker with audio data.
@@ -1641,7 +1658,7 @@ class SpeakerRecognitionClient:
             return {"error": "connection_failed", "message": str(e)}
 
     async def get_enrollment_health(
-        self, user_id: int = 1, before: Optional[datetime] = None
+        self, user_id: str, before: Optional[datetime] = None
     ) -> Dict:
         """Return per-clip gallery cohesion and contamination metrics."""
         if not self.enabled:
@@ -1809,7 +1826,7 @@ class SpeakerRecognitionClient:
     async def reidentify_clusters(
         self,
         clusters: Dict[str, list],
-        user_id: int = 1,
+        user_id: str,
         similarity_threshold: Optional[float] = None,
         identify_margin: Optional[float] = None,
         exclusive: Optional[bool] = None,

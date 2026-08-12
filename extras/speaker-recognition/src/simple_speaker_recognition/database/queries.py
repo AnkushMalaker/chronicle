@@ -35,7 +35,7 @@ class UserQueries:
         return db.query(User).all()
 
     @staticmethod
-    def get_user_stats(db: Session, user_id: int) -> Dict[str, Any]:
+    def get_user_stats(db: Session, user_id: str) -> Dict[str, Any]:
         """Get user statistics."""
         speaker_count = (
             db.query(func.count(Speaker.id)).filter(Speaker.user_id == user_id).scalar()
@@ -53,7 +53,7 @@ class SpeakerQueries:
     """Speaker-related database queries."""
 
     @staticmethod
-    def get_speakers_for_user(db: Session, user_id: int) -> List[Speaker]:
+    def get_speakers_for_user(db: Session, user_id: str) -> List[Speaker]:
         """Get all speakers for a user."""
         return (
             db.query(Speaker)
@@ -72,7 +72,7 @@ class SpeakerQueries:
         db: Session,
         speaker_id: str,
         name: str,
-        user_id: int,
+        user_id: str,
         notes: Optional[str] = None,
     ) -> Speaker:
         """Create new speaker."""
@@ -173,7 +173,7 @@ class AnnotationQueries:
         audio_file_path: str,
         start_time: float,
         end_time: float,
-        user_id: int,
+        user_id: str,
         speaker_id: Optional[str] = None,
         speaker_label: Optional[str] = None,
         label: str = "UNCERTAIN",
@@ -199,7 +199,7 @@ class AnnotationQueries:
 
     @staticmethod
     def get_annotations_for_audio(
-        db: Session, audio_file_path: str, user_id: int
+        db: Session, audio_file_path: str, user_id: str
     ) -> List[Annotation]:
         """Get all annotations for an audio file."""
         return (
@@ -220,7 +220,7 @@ class AnnotationQueries:
         return db.query(Annotation).filter(Annotation.speaker_id == speaker_id).all()
 
     @staticmethod
-    def get_user_annotation_stats(db: Session, user_id: int) -> Dict[str, Any]:
+    def get_user_annotation_stats(db: Session, user_id: str) -> Dict[str, Any]:
         """Get annotation statistics for a user."""
         total = (
             db.query(func.count(Annotation.id))
@@ -306,7 +306,7 @@ class ExportQueries:
     @staticmethod
     def create_export_record(
         db: Session,
-        user_id: int,
+        user_id: str,
         export_type: str,
         format_type: str,
         file_path: str,
@@ -328,7 +328,7 @@ class ExportQueries:
         return export
 
     @staticmethod
-    def get_user_exports(db: Session, user_id: int) -> List[ExportHistory]:
+    def get_user_exports(db: Session, user_id: str) -> List[ExportHistory]:
         """Get export history for a user."""
         return (
             db.query(ExportHistory)

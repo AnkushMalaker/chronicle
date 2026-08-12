@@ -189,7 +189,7 @@ async def process_with_pyannote_diarization(
     audio_data: bytes,
     deepgram_response: Dict[str, Any],
     diarization_params: Dict[str, Any],
-    user_id: Optional[int],
+    user_id: Optional[str],
     confidence_threshold: float,
 ) -> Dict[str, Any]:
     """Process audio using Pyannote diarization + speaker identification."""
@@ -289,7 +289,7 @@ async def process_with_pyannote_diarization(
 async def enhance_deepgram_response_with_speaker_id(
     audio_data: bytes,
     deepgram_response: Dict[str, Any],
-    user_id: Optional[int],
+    user_id: Optional[str],
     confidence_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
 ) -> Dict[str, Any]:
     """Extract speaker segments and identify speakers from Deepgram response."""
@@ -587,7 +587,7 @@ async def deepgram_compatible_transcription(
     enhance_speakers: bool = Query(
         default=True, description="Enable speaker identification enhancement"
     ),
-    user_id: Optional[int] = Query(
+    user_id: Optional[str] = Query(
         default=None, description="User ID for speaker identification"
     ),
     speaker_confidence_threshold: float = Query(

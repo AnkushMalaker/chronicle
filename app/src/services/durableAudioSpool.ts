@@ -8,7 +8,13 @@ const ACK_PREFIX = 'chronicle.audioSpool.ack.';
 
 export interface SpoolPacket {
   fileName: string;
-  sessionId: string;
+  /**
+   * Identity of the spool *file* this packet was written to, not the backend audio
+   * session. It was called `sessionId` and sent as `durable_session_id`, which the
+   * backend echoed back as `session_id` — three names for a spool segment, all of
+   * them colliding with the real WebSocket SessionId that means something else.
+   */
+  segmentId: string;
   sequence: number;
   capturedAtMs: number;
   payload: Uint8Array;
@@ -17,12 +23,12 @@ export interface SpoolPacket {
 interface ActiveSegment {
   file: File;
   handle: FileHandle;
-  sessionId: string;
+  segmentId: string;
   startedAtMs: number;
   nextSequence: number;
 }
 
-const makeSessionId = (): string =>
+const makeSegmentId = (): string =>
   `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 
 /**
@@ -50,13 +56,13 @@ class DurableAudioSpool {
 
   private startSegment(capturedAtMs: number): ActiveSegment {
     this.ensureDirectory();
-    const sessionId = makeSessionId();
-    const file = new File(this.directory, `${sessionId}.spool`);
+    const segmentId = makeSegmentId();
+    const file = new File(this.directory, `${segmentId}.spool`);
     file.create({ overwrite: false, intermediates: true });
     const active = {
       file,
       handle: file.open(),
-      sessionId,
+      segmentId,
       startedAtMs: capturedAtMs,
       nextSequence: 0,
     };
@@ -82,7 +88,7 @@ class DurableAudioSpool {
 
     return {
       fileName: segment.file.name,
-      sessionId: segment.sessionId,
+      segmentId: segment.segmentId,
       sequence,
       capturedAtMs,
       payload,
@@ -97,7 +103,7 @@ class DurableAudioSpool {
       .filter((entry): entry is File => entry instanceof File && entry.name.endsWith('.spool'));
 
     for (const file of files) {
-      const sessionId = file.name.slice(0, -'.spool'.length);
+      const segmentId = file.name.slice(0, -'.spool'.length);
       const acknowledged = Number(await AsyncStorage.getItem(`${ACK_PREFIX}${file.name}`) ?? '-1');
       const bytes = file.bytesSync();
       let offset = 0;
@@ -113,7 +119,7 @@ class DurableAudioSpool {
         if (sequence > acknowledged) {
           packets.push({
             fileName: file.name,
-            sessionId,
+            segmentId,
             sequence,
             capturedAtMs,
             payload: bytes.slice(offset + HEADER_BYTES, end),

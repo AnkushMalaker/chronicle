@@ -414,7 +414,7 @@ class DeepgramWebSocketProxy:
 @router.websocket("/ws/streaming-with-scd")
 async def websocket_streaming_with_scd(
     websocket: WebSocket,
-    user_id: Optional[int] = Query(
+    user_id: Optional[str] = Query(
         default=None, description="User ID for speaker identification"
     ),
     confidence_threshold: float = Query(
@@ -751,7 +751,7 @@ async def get_streaming_info():
 @router.websocket("/v1/ws_listen")
 async def deepgram_proxy_websocket(
     websocket: WebSocket,
-    user_id: Optional[int] = Query(
+    user_id: Optional[str] = Query(
         default=None, description="User ID for speaker identification (enhancement)"
     ),
     confidence_threshold: float = Query(

@@ -20,7 +20,6 @@ from zoneinfo import ZoneInfo
 
 from pymongo import ReturnDocument
 
-from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.timeline import TimelineDay, TimelineEpisode, utcnow
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services.memory import get_memory_service
@@ -29,9 +28,8 @@ from advanced_omi_backend.services.memory.audit import (
     UpdateStrategy,
     memory_provenance,
 )
-from advanced_omi_backend.workers.memory_jobs import build_memory_transcript
+from advanced_omi_backend.services.memory.base import DayWriteOutcome
 
-from .episode_notes import write_episode_notes
 from .executor import settings_dict
 from .timezone import canonical_timezone
 
@@ -48,6 +46,11 @@ _DEFAULT_MAX_ATTEMPTS = 3
 _DEFAULT_MAX_DIGEST_CHARS = 60000
 
 _SALIENCE_RANK = {"background": 0, "routine": 1, "notable": 2, "highlight": 3}
+
+# A day in one of these states is done with; the settled-day scan must not pick it up
+# again. Named once because a scan that forgets a member silently re-runs the agent
+# over days it already settled.
+_TERMINAL_MEMORY_STATES = ("written", "partial", "skipped", "no_changes")
 
 
 def memory_settings() -> dict[str, Any]:
@@ -81,13 +84,13 @@ def _clock(episode: TimelineEpisode, zone: ZoneInfo) -> str:
 def render_episode(
     episode: TimelineEpisode,
     zone: ZoneInfo,
-    transcripts: dict[str, str],
 ) -> str:
     """Render one episode for the write agent.
 
     Assertions keep their ``role`` and ``confidence`` because those are what stop media
     dialogue, application output, and assistant text from being recorded as facts about
-    the user. Transcripts are attached only for conversational episodes.
+    the user. Raw evidence is deliberately excluded: the vault receives the timeline's
+    bounded interpretation, while transcripts remain in MongoDB as source evidence.
     """
 
     lines = [
@@ -110,19 +113,6 @@ def render_episode(
             f"{assertion.claim}"
             for assertion in episode.assertions
         )
-    if episode.conversational:
-        cited = [
-            transcripts[conversation_id]
-            for conversation_id in sorted(_cited_conversation_ids(episode))
-            if transcripts.get(conversation_id)
-        ]
-        if cited:
-            lines.append("transcript (speaker-labelled):")
-            lines.extend(cited)
-        else:
-            lines.append(
-                "transcript: unavailable — record only what the assertions support"
-            )
     return "\n".join(lines)
 
 
@@ -135,43 +125,17 @@ def _cited_conversation_ids(episode: TimelineEpisode) -> set[str]:
     return cited
 
 
-async def _episode_transcripts(episodes: list[TimelineEpisode]) -> dict[str, str]:
-    """Speaker-labelled transcripts for every conversational episode's recordings."""
-
-    wanted: set[str] = set()
-    for episode in episodes:
-        if episode.conversational:
-            wanted |= _cited_conversation_ids(episode)
-    if not wanted:
-        return {}
-    conversations = await Conversation.find(
-        {"conversation_id": {"$in": sorted(wanted)}}
-    ).to_list()
-    transcripts: dict[str, str] = {}
-    for conversation in conversations:
-        # Reused from the conversation memory path so provider window-overlap trimming
-        # and the raw-transcript fallback behave identically here.
-        text, _ = build_memory_transcript(
-            conversation.segments, conversation.transcript
-        )
-        if text.strip():
-            transcripts[conversation.conversation_id] = text.strip()
-    return transcripts
-
-
 def build_day_digest(
     episodes: list[TimelineEpisode],
     local_date: date,
     timezone_name: str,
-    transcripts: dict[str, str],
     max_chars: int | None = None,
 ) -> tuple[str, list[str]]:
     """Render a day of episodes within a character budget.
 
-    Transcripts are trimmed first, then — only if the summaries alone still overflow —
-    episodes are shed lowest-salience-first. Conversational episodes are never shed;
-    they carry the day's actual speech. Returns the digest and what was given up, so a
-    silently shortened day cannot read to the caller as a complete one.
+    Episodes are shed lowest-salience-first when summaries overflow. Conversational
+    episodes are never shed. Raw evidence is never part of this digest: it remains in
+    the corpus and timeline records instead of being copied into the memory vault.
     """
 
     budget = (
@@ -182,8 +146,7 @@ def build_day_digest(
     zone = ZoneInfo(timezone_name)
     ordered = sorted(episodes, key=lambda item: (item.started_at, item.ended_at))
     rendered = {
-        episode.episode_id: render_episode(episode, zone, transcripts)
-        for episode in ordered
+        episode.episode_id: render_episode(episode, zone) for episode in ordered
     }
 
     header = (
@@ -197,43 +160,8 @@ def build_day_digest(
 
     dropped: list[str] = []
 
-    # Trim transcripts before dropping episodes. An episode summary costs a few hundred
-    # characters and a transcript tens of thousands, so shedding episodes to make room
-    # for transcripts discards most of the day to save almost nothing — one measured day
-    # dropped 9 of 13 episodes and then had to trim the transcripts anyway, leaving the
-    # agent summarising "all four episodes" of a thirteen-episode day. Losing the tail of
-    # a conversation is recoverable; losing the fact that an episode happened is not.
-    bare = {
-        episode.episode_id: render_episode(episode, zone, {}) for episode in ordered
-    }
-
-    def overhead() -> int:
-        return len(header) + sum(len(bare[episode_id]) + 2 for episode_id in keep)
-
-    cited = [
-        conversation_id
-        for episode in ordered
-        for conversation_id in sorted(_cited_conversation_ids(episode))
-        if transcripts.get(conversation_id)
-    ]
-    if cited and total() > budget:
-        share = max(0, budget - overhead()) // len(cited)
-        trimmed = dict(transcripts)
-        for conversation_id in cited:
-            text = transcripts[conversation_id]
-            if len(text) > share:
-                trimmed[conversation_id] = (
-                    text[:share].rstrip() + "\n[transcript trimmed to fit]"
-                )
-        for episode in ordered:
-            rendered[episode.episode_id] = render_episode(episode, zone, trimmed)
-        dropped.append(
-            f"transcripts trimmed to {share} chars across {len(cited)} recording(s)"
-        )
-
-    # Only the summaries themselves are left. If they still overflow, shed the
-    # lowest-salience non-conversational episodes; conversational ones carry the day's
-    # actual speech and are never dropped.
+    # Shed only low-salience non-conversational summaries. Conversations remain
+    # represented by their bounded episode summary, never by copied dialogue.
     droppable = sorted(
         (episode for episode in ordered if not episode.conversational),
         key=lambda item: (
@@ -279,6 +207,9 @@ def _claim_query(
         "user_id": day.user_id,
         "local_date": datetime.combine(day.local_date, datetime.min.time()),
         "timezone": day.timezone,
+        # A caller holding a stale day object must not claim the newly published run
+        # under the old run id.
+        "active_run_id": day.active_run_id,
         # $not/$gte, not $lt: a day analysed before this field existed has no
         # memory_attempts at all, and $lt never matches a missing field.
         "memory_attempts": {"$not": {"$gte": max_attempts}},
@@ -313,7 +244,7 @@ async def _settled_days(user: User, timezone_name: str) -> list[TimelineDay]:
                 "$lt": datetime.combine(today, datetime.min.time()),
             },
             "active_run_id": {"$nin": [None, ""]},
-            "memory_state": {"$nin": ["written", "skipped", "no_changes"]},
+            "memory_state": {"$nin": list(_TERMINAL_MEMORY_STATES)},
             "memory_attempts": {"$not": {"$gte": max_attempts}},
         }
     ).to_list()
@@ -338,28 +269,11 @@ async def _settled_days(user: User, timezone_name: str) -> list[TimelineDay]:
     )
 
 
-def _write_episode_notes(
-    memory_service: Any,
-    day: TimelineDay,
-    episodes: list[TimelineEpisode],
-    transcripts: dict[str, str],
-) -> list[str]:
-    """Record each decided bound, tolerating a provider that has no vault."""
-
-    vault = getattr(memory_service, "vault", None)
-    if vault is None:
-        return []
-    return write_episode_notes(
-        vault.user_root(day.user_id),
-        episodes,
-        day.timezone,
-        transcripts,
-        day_note_name=day.local_date.isoformat(),
-    )
-
-
 async def _write_day(day: TimelineDay) -> str:
-    """Write one claimed day. Returns ``written``, ``skipped``, or ``failed``."""
+    """Write one claimed day.
+
+    Returns ``written``, ``no_changes``, ``partial``, ``skipped``, or ``failed``.
+    """
 
     episodes = await TimelineEpisode.find(
         TimelineEpisode.run_id == day.active_run_id,
@@ -373,10 +287,7 @@ async def _write_day(day: TimelineDay) -> str:
         )
         return "skipped"
 
-    transcripts = await _episode_transcripts(episodes)
-    digest, dropped = build_day_digest(
-        episodes, day.local_date, day.timezone, transcripts
-    )
+    digest, dropped = build_day_digest(episodes, day.local_date, day.timezone)
     if dropped:
         logger.warning(
             "🗓️ Day %s digest exceeded its budget; dropped %d low-salience "
@@ -387,12 +298,8 @@ async def _write_day(day: TimelineDay) -> str:
         )
 
     memory_service = get_memory_service()
-    # Written before the agent runs, and kept even if it fails: the record of what
-    # happened in a decided bound must not depend on a model completing. It is also the
-    # only place a long transcript survives whole, since the digest above trims them.
-    episode_notes = _write_episode_notes(memory_service, day, episodes, transcripts)
     with memory_provenance(MemoryCause.DAY_EPISODES.value, UpdateStrategy.FULL.value):
-        success, touched = await memory_service.add_day_memory(
+        outcome, touched = await memory_service.add_day_memory(
             digest,
             day.local_date.isoformat(),
             day.user_id,
@@ -400,40 +307,53 @@ async def _write_day(day: TimelineDay) -> str:
                 day.local_date, datetime.min.time(), tzinfo=ZoneInfo(day.timezone)
             ).isoformat(),
         )
-    if not success:
+    if outcome is DayWriteOutcome.FAILED:
         return "failed"
 
-    async def record_paths(paths: list[str]) -> None:
+    async def record_paths(paths: list[str], state: str = "written") -> None:
         await TimelineEpisode.get_pymongo_collection().update_many(
             {"episode_id": {"$in": [episode.episode_id for episode in episodes]}},
-            {"$set": {"memory_state": "written", "vault_paths": paths}},
+            {"$set": {"memory_state": state, "vault_paths": paths}},
         )
 
-    if not touched:
-        # The agent completed and chose to record nothing. Terminal, not a failure:
-        # retrying only re-reaches the same judgement, and the day's legacy note
-        # already carries the content it declined to duplicate.
-        logger.info(
-            "🗓️ Day %s for user %s needed no vault change (%d episode(s), "
-            "%d episode note(s))",
+    if outcome is DayWriteOutcome.PARTIAL:
+        # Terminal, and deliberately not `written`: the audited mutations are kept, but
+        # the run was cut off and may never have reached its People/Topic edits. Not
+        # retried either — truncation is a property of the model's round limit, not of
+        # this day, so the next two attempts would reach the same place and then settle
+        # it as `skipped`, which claims there was nothing to record.
+        paths = list(dict.fromkeys(touched))
+        await record_paths(paths, state="partial")
+        logger.error(
+            "🗓️ Day %s for user %s recorded only partially: %d episode(s), "
+            "%d note(s) touched — not retrying, republish the day to rewrite it",
             day.local_date,
             day.user_id,
             len(episodes),
-            len(episode_notes),
+            len(paths),
         )
-        await record_paths(episode_notes)
+        return "partial"
+
+    if not touched:
+        # The agent completed and chose to record nothing. Terminal, not a failure:
+        # retrying only re-reaches the same judgement.
+        logger.info(
+            "🗓️ Day %s for user %s needed no vault change (%d episode(s))",
+            day.local_date,
+            day.user_id,
+            len(episodes),
+        )
+        await record_paths([])
         return "no_changes"
 
-    paths = list(dict.fromkeys([*episode_notes, *touched]))
+    paths = list(dict.fromkeys(touched))
     await record_paths(paths)
     logger.info(
-        "🗓️ Recorded day %s for user %s: %d episode(s), %d note(s) touched "
-        "(%d episode record note(s))",
+        "🗓️ Recorded day %s for user %s: %d episode(s), %d note(s) touched",
         day.local_date,
         day.user_id,
         len(episodes),
         len(paths),
-        len(episode_notes),
     )
     return "written"
 
@@ -444,7 +364,9 @@ async def write_day_memory(day: TimelineDay) -> str:
     The claim is what makes this safe to call directly — a rebuild replaying a range of
     days and the cron scanning settled days can both reach the same day, and only one of
     them may spend an agent run on it. Returns the outcome, or ``"busy"`` when another
-    holder has it.
+    holder has it. Returns ``"superseded"`` when a newer analysis publishes while the
+    agent is writing; that newer generation remains explicitly unwritten for the next
+    settled-day pass.
     """
 
     max_attempts = _setting("max_attempts", _DEFAULT_MAX_ATTEMPTS)
@@ -484,7 +406,12 @@ async def write_day_memory(day: TimelineDay) -> str:
         # `skipped` with the diagnostic rather than retrying forever.
         exhausted = attempts >= max_attempts
         await collection.update_one(
-            {"_id": claimed["_id"]},
+            {
+                "_id": claimed["_id"],
+                "active_run_id": claimed.get("memory_run_id"),
+                "memory_run_id": claimed.get("memory_run_id"),
+                "memory_state": "claimed",
+            },
             {
                 "$set": {
                     "memory_state": "skipped" if exhausted else "",
@@ -500,8 +427,13 @@ async def write_day_memory(day: TimelineDay) -> str:
                 max_attempts,
             )
     else:
-        await collection.update_one(
-            {"_id": claimed["_id"]},
+        settled = await collection.update_one(
+            {
+                "_id": claimed["_id"],
+                "active_run_id": claimed.get("memory_run_id"),
+                "memory_run_id": claimed.get("memory_run_id"),
+                "memory_state": "claimed",
+            },
             {
                 "$set": {
                     "memory_state": outcome,
@@ -510,6 +442,13 @@ async def write_day_memory(day: TimelineDay) -> str:
                 }
             },
         )
+        if settled.modified_count != 1:
+            logger.warning(
+                "🗓️ Day %s changed active run while memory was being written; "
+                "leaving the newer generation unwritten for reconciliation",
+                day.local_date,
+            )
+            return "superseded"
     return outcome
 
 
@@ -522,6 +461,7 @@ async def process_episode_memory() -> dict[str, int]:
         "no_changes": 0,
         "skipped": 0,
         "failed": 0,
+        "superseded": 0,
     }
     max_days = _setting("max_days_per_run", _DEFAULT_MAX_DAYS_PER_RUN)
 

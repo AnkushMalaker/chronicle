@@ -21,7 +21,12 @@ from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
 from ..audit import record_vault_change
-from ..base import MemoryEntry, MemoryServiceBase, VaultSearchUnavailable
+from ..base import (
+    DayWriteOutcome,
+    MemoryEntry,
+    MemoryServiceBase,
+    VaultSearchUnavailable,
+)
 from ..config import MemoryConfig
 from ..conversation_note import (
     ConversationNoteError,
@@ -37,15 +42,107 @@ from ..telemetry import (
 )
 from ..vault_manager import ConvDocVaultManager
 from ..vault_scaffold import is_scaffold_note, seed_vault_scaffold
-from ..vault_verify import render_findings, verify_vault_changes
+from ..vault_verify import (
+    render_findings,
+    verify_day_episode_ranges,
+    verify_vault_changes,
+)
 
 memory_logger = logging.getLogger("memory_service")
+
+_DAY_DIGEST_EPISODE_HEADING_RE = re.compile(
+    r"^###\s+(\d{2}:\d{2}–\d{2}:\d{2})\s+·\s+(.+?)\s+·\s+(.+?)\s*$",
+    re.MULTILINE,
+)
+_H2_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 
 
 def _safe_exception_diagnostic(exc: BaseException) -> str:
     """Return a useful diagnostic without persisting arbitrary provider text."""
 
     return type(exc).__name__
+
+
+def _line_value(block: str, key: str) -> str:
+    prefix = f"{key}:"
+    for line in block.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix) :].strip()
+    return ""
+
+
+def _render_day_episode_index(day_digest: str) -> str:
+    """Render the trusted Daily ``## Episodes`` index from a day digest.
+
+    The memory agent is useful for semantic People/Topic deltas, but this section is a
+    mechanical mirror of the active timeline run. Keeping it deterministic prevents a
+    good day write from failing because the model omitted or partially rewrote episode
+    ranges.
+    """
+
+    matches = list(_DAY_DIGEST_EPISODE_HEADING_RE.finditer(day_digest or ""))
+    bullets: list[str] = []
+    for index, match in enumerate(matches):
+        block_start = match.end()
+        block_end = (
+            matches[index + 1].start() if index + 1 < len(matches) else len(day_digest)
+        )
+        block = day_digest[block_start:block_end]
+        clock, kind, salience = (part.strip() for part in match.groups())
+        title = _line_value(block, "title")
+        summary = _line_value(block, "summary")
+        text = f"- {clock} · {kind} · {salience}"
+        if title:
+            text += f" — {title}"
+        if summary:
+            text += f": {summary}"
+        bullets.append(text)
+    return "\n".join(bullets)
+
+
+def _replace_h2_section(note: str, heading: str, body: str) -> str:
+    section = f"## {heading}\n\n{body.rstrip()}\n"
+    match = next(
+        (
+            candidate
+            for candidate in _H2_SECTION_RE.finditer(note)
+            if candidate.group(1).strip().lower() == heading.lower()
+        ),
+        None,
+    )
+    if match is None:
+        prefix = note.rstrip()
+        return f"{prefix}\n\n{section}" if prefix else section
+
+    next_heading = _H2_SECTION_RE.search(note, match.end())
+    section_end = next_heading.start() if next_heading else len(note)
+    before = note[: match.start()].rstrip()
+    after = note[section_end:].lstrip("\n")
+    pieces = []
+    if before:
+        pieces.append(before)
+    pieces.append(section.rstrip())
+    if after:
+        pieces.append(after.rstrip())
+    return "\n\n".join(pieces) + "\n"
+
+
+def _ensure_day_episode_index(
+    note_path: Path, local_date: str, day_digest: str
+) -> bool:
+    body = _render_day_episode_index(day_digest)
+    if not body:
+        return False
+    try:
+        note = note_path.read_text(encoding="utf-8")
+    except OSError:
+        note = f"# {local_date}\n"
+    updated = _replace_h2_section(note, "Episodes", body)
+    if updated == note:
+        return False
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(updated, encoding="utf-8")
+    return True
 
 
 def _repair_guidance(findings: List[Any]) -> str:
@@ -60,8 +157,15 @@ def _repair_guidance(findings: List[Any]) -> str:
 
     rules = {getattr(f, "rule", "") for f in findings}
     lines = ["REPAIR ONLY. Fix exactly these problems and nothing else."]
-    if "record_missing" not in rules:
+    if not rules.intersection({"record_missing", "episode_ranges"}):
         lines.append("The day is already recorded; do not add new content.")
+    if "episode_ranges" in rules:
+        lines.append(
+            "An `episode_ranges` finding is fixed by REPLACING only the Daily note's "
+            "`## Episodes` section with exactly one chronological bullet per supplied "
+            "episode. Begin every bullet with its source range verbatim; remove stale "
+            "and duplicate bullets, and preserve all other sections."
+        )
     if "redundant" in rules:
         lines.append(
             "A `redundant` finding is fixed by DELETING the line it names — the fact is "
@@ -412,7 +516,7 @@ class MemoryService(MemoryServiceBase):
         user_id: str,
         *,
         source_date: Optional[str] = None,
-    ) -> Tuple[bool, List[str]]:
+    ) -> Tuple[DayWriteOutcome, List[str]]:
         """Record one settled local day of timeline episodes into the vault.
 
         The conversation path (``add_memory``) is the wrong unit for capture evidence:
@@ -454,7 +558,7 @@ class MemoryService(MemoryServiceBase):
                 },
             )
             await self._ensure_initialized()
-            success, touched = await self._add_day_memory_agent(
+            outcome, touched = await self._add_day_memory_agent(
                 day_digest,
                 local_date,
                 user_id,
@@ -463,15 +567,16 @@ class MemoryService(MemoryServiceBase):
             set_safe_span_attributes(
                 span,
                 {
-                    "chronicle.memory.success": success,
+                    "chronicle.memory.outcome": outcome.value,
+                    "chronicle.memory.success": outcome is DayWriteOutcome.COMPLETE,
                     "chronicle.memory.touched_count": len(touched),
                 },
             )
             set_observation_io(
                 span,
-                output={"success": success, "touched_count": len(touched)},
+                output={"outcome": outcome.value, "touched_count": len(touched)},
             )
-            return success, touched
+            return outcome, touched
 
     async def _add_day_memory_agent(
         self,
@@ -480,7 +585,7 @@ class MemoryService(MemoryServiceBase):
         user_id: str,
         *,
         source_date: Optional[str] = None,
-    ) -> Tuple[bool, List[str]]:
+    ) -> Tuple[DayWriteOutcome, List[str]]:
         """Write path for a settled day, with one recovery attempt.
 
         Deliberately simpler than ``_run_agent_with_note_guarantee``: that guarantee is
@@ -505,7 +610,7 @@ class MemoryService(MemoryServiceBase):
 
         if not day_digest or len(day_digest.strip()) < 10:
             memory_logger.info("Skipping empty day digest for %s", local_date)
-            return True, []
+            return DayWriteOutcome.COMPLETE, []
 
         t0 = time.perf_counter()
         trusted_date = source_date or datetime.now(timezone.utc).isoformat()
@@ -513,6 +618,9 @@ class MemoryService(MemoryServiceBase):
         seed_vault_scaffold(user_root)  # idempotent: .base + hub notes
         existing_before = self._vault_note_set(user_root)
         day_rel = day_note_path(local_date)
+
+        def day_range_findings():
+            return verify_day_episode_ranges(user_root / day_rel, day_digest)
 
         def day_note_written(agent_result) -> bool:
             """Did *this run* record the day note — not merely: does the file exist.
@@ -612,12 +720,18 @@ class MemoryService(MemoryServiceBase):
                 else ()
             )
 
+        if result is not None and _ensure_day_episode_index(
+            user_root / day_rel, local_date, day_digest
+        ):
+            result.touched = list(dict.fromkeys([*result.touched, day_rel]))
+
         findings = verify_vault_changes(
             user_root,
             existing_before,
             required=_required(),
             forbidden_folders=forbidden_folders("day"),
         )
+        findings.extend(day_range_findings())
         # Structural checks pass on a well-formed duplicate. A second, read-only agent
         # reads what was added against the notes around it and reports what the vault
         # already knew — the one failure a rule cannot decide.
@@ -656,12 +770,15 @@ class MemoryService(MemoryServiceBase):
                     result.touched = list(
                         dict.fromkeys([*result.touched, *repair.touched])
                     )
+            if _ensure_day_episode_index(user_root / day_rel, local_date, day_digest):
+                result.touched = list(dict.fromkeys([*result.touched, day_rel]))
             findings = verify_vault_changes(
                 user_root,
                 existing_before,
                 required=_required(),
                 forbidden_folders=forbidden_folders("day"),
             )
+            findings.extend(day_range_findings())
             # Re-review too: the repair edited notes, and only a second read can say
             # whether it removed the duplication or reworded it.
             findings.extend(
@@ -693,6 +810,16 @@ class MemoryService(MemoryServiceBase):
             existing_before,
             removed=result.removed if result else None,
         )
+        unresolved_ranges = [
+            finding for finding in findings if finding.rule == "episode_ranges"
+        ]
+        if unresolved_ranges:
+            memory_logger.error(
+                "❌ add_day_memory %s: active episode ranges were not reconciled: %s",
+                local_date,
+                "; ".join(finding.detail for finding in unresolved_ranges),
+            )
+            return DayWriteOutcome.FAILED, touched
         if result is None:
             # Every backend raised. The note-exists check below cannot catch this: a
             # Daily note for this date may already exist from an earlier write, so its
@@ -703,7 +830,7 @@ class MemoryService(MemoryServiceBase):
                 local_date,
                 time.perf_counter() - t0,
             )
-            return False, touched
+            return DayWriteOutcome.FAILED, touched
         if deliberate_no_op(result):
             memory_logger.info(
                 "🗓️ add_day_memory %s: agent recorded nothing — it judged the day "
@@ -712,7 +839,7 @@ class MemoryService(MemoryServiceBase):
                 time.perf_counter() - t0,
                 (result.summary or "").strip()[:300],
             )
-            return True, []
+            return DayWriteOutcome.COMPLETE, []
         if not day_note_written(result):
             memory_logger.error(
                 "❌ add_day_memory %s: the day note %s was not written this run "
@@ -722,15 +849,47 @@ class MemoryService(MemoryServiceBase):
                 len(touched),
                 time.perf_counter() - t0,
             )
-            return False, touched
+            return DayWriteOutcome.FAILED, touched
         if result is not None and (result.truncated or result.stalled):
+            diagnostics = "; ".join(result.errors) or "no diagnostic reported"
+            if day_note_written(result) and not findings:
+                # Structurally clean, but the run was cut off: it may have stopped
+                # before any of its durable People/Topic edits, and nothing here can
+                # tell. Neither complete nor failed — see ``DayWriteOutcome.PARTIAL``.
+                memory_logger.error(
+                    "⚠️ add_day_memory %s recorded a partial day: the agent was "
+                    "truncated/stalled but deterministic vault verification is clean "
+                    "(rounds=%d tools=%d; %.2fs): %s",
+                    local_date,
+                    result.rounds,
+                    result.tool_calls,
+                    time.perf_counter() - t0,
+                    diagnostics,
+                )
+                return DayWriteOutcome.PARTIAL, touched
             memory_logger.error(
                 "❌ add_day_memory %s: partial mutations preserved, but no agent "
-                "completed deliberately (%.2fs)",
+                "completed deliberately (rounds=%d tools=%d; %.2fs): %s",
                 local_date,
+                result.rounds,
+                result.tool_calls,
                 time.perf_counter() - t0,
+                diagnostics,
             )
-            return False, touched
+            return DayWriteOutcome.FAILED, touched
+        if result.errors:
+            # The required day note and its audited mutations completed, so these are
+            # non-fatal diagnostics rather than a reason to discard a real write. They
+            # still belong at warning level with their cause: an ``errors=1`` success
+            # line cannot distinguish recovered Pi transport noise from a compromised
+            # tool call and therefore looks falsely healthy on the System Errors page.
+            memory_logger.warning(
+                "⚠️ add_day_memory %s completed with %d non-fatal agent "
+                "diagnostic(s): %s",
+                local_date,
+                len(result.errors),
+                "; ".join(result.errors),
+            )
         memory_logger.info(
             "✅ add_day_memory %s: touched=%d rounds=%d tools=%d errors=%d (%.2fs)",
             local_date,
@@ -740,7 +899,7 @@ class MemoryService(MemoryServiceBase):
             len(result.errors) if result else 0,
             time.perf_counter() - t0,
         )
-        return True, touched
+        return DayWriteOutcome.COMPLETE, touched
 
     async def _run_agent_with_note_guarantee(
         self,

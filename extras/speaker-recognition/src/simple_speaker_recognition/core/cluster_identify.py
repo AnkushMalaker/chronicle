@@ -18,7 +18,7 @@ log = logging.getLogger("speaker_service")
 async def assign_clusters_to_speakers(
     db,
     label_centroids: Dict[str, np.ndarray],
-    user_id: int,
+    user_id: str,
     similarity_threshold: float,
     identify_margin: float = 0.1,
     exclusive: bool = True,

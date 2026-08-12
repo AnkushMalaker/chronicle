@@ -6,8 +6,11 @@ from types import SimpleNamespace
 import pytest
 
 from advanced_omi_backend.models.timeline import TimelineAssertion, TimelineEvidenceRef
+from advanced_omi_backend.services.memory.base import DayWriteOutcome
 from advanced_omi_backend.services.timeline import discovery
+from advanced_omi_backend.services.timeline import memory as memory_module
 from advanced_omi_backend.services.timeline.memory import (
+    _TERMINAL_MEMORY_STATES,
     _cited_conversation_ids,
     _claim_query,
     build_day_digest,
@@ -81,17 +84,16 @@ def test_cited_ids_union_agent_named_and_assembly_recorded():
     assert _cited_conversation_ids(episode) == {"agent-named", "assembly-recorded"}
 
 
-def test_digest_includes_transcripts_only_for_conversational_episodes():
-    episodes = [
-        make_episode("e1", hour=9, conversational=True, evidence_conversation_id="c1"),
-        make_episode("e2", hour=11, evidence_conversation_id="c2"),
-    ]
-    transcripts = {"c1": "daksh: morning standup", "c2": "should not appear"}
+def test_digest_never_copies_raw_transcript_evidence_into_the_vault_prompt():
+    episode = make_episode(
+        "e1", hour=9, conversational=True, evidence_conversation_id="c1"
+    )
+    episode.evidence_refs[0].excerpt = "RAW TRANSCRIPT MUST STAY OUT OF THE VAULT"
 
-    digest, dropped = build_day_digest(episodes, DAY, ZONE, transcripts)
+    digest, dropped = build_day_digest([episode], DAY, ZONE)
 
-    assert "daksh: morning standup" in digest
-    assert "should not appear" not in digest
+    assert "RAW TRANSCRIPT" not in digest
+    assert "transcript" not in digest.lower()
     assert dropped == []
 
 
@@ -102,7 +104,7 @@ def test_digest_reads_a_naive_mongo_timestamp_as_utc_not_host_local():
     episode.started_at = episode.started_at.replace(tzinfo=None)
     episode.ended_at = episode.ended_at.replace(tzinfo=None)
 
-    digest, _ = build_day_digest([episode], DAY, ZONE, {})
+    digest, _ = build_day_digest([episode], DAY, ZONE)
 
     # 09:00 UTC is 14:30 in Asia/Kolkata regardless of where the backend runs.
     assert "14:30–15:00" in digest
@@ -122,7 +124,7 @@ def test_digest_records_assertion_role_and_confidence():
         ],
     )
 
-    digest, _ = build_day_digest([episode], DAY, ZONE, {})
+    digest, _ = build_day_digest([episode], DAY, ZONE)
 
     # Role and confidence are what stop media dialogue being recorded as user fact.
     assert "media_content" in digest
@@ -148,7 +150,7 @@ def test_digest_sheds_lowest_salience_first_and_never_the_conversation():
     ]
 
     # Room for the conversation plus one more.
-    digest, dropped = build_day_digest(episodes, DAY, ZONE, {}, max_chars=1400)
+    digest, dropped = build_day_digest(episodes, DAY, ZONE, max_chars=1400)
 
     # Background is shed before highlight, and a conversation is never droppable.
     assert dropped == ["Idle music"]
@@ -172,7 +174,7 @@ def test_digest_header_states_the_count_it_actually_carries():
         for index in range(4)
     ]
 
-    digest, dropped = build_day_digest(episodes, DAY, ZONE, {}, max_chars=2_000)
+    digest, dropped = build_day_digest(episodes, DAY, ZONE, max_chars=2_000)
 
     header = digest.splitlines()[0]
     included = sum(1 for line in digest.splitlines() if line.startswith("### "))
@@ -190,19 +192,22 @@ def test_digest_reports_every_dropped_episode_rather_than_truncating_silently():
         for index in range(4)
     ]
 
-    _, dropped = build_day_digest(episodes, DAY, ZONE, {}, max_chars=200)
+    _, dropped = build_day_digest(episodes, DAY, ZONE, max_chars=200)
 
     assert len(dropped) == 4
 
 
 def test_claim_query_excludes_terminal_states_and_exhausted_attempts():
-    day = SimpleNamespace(user_id="user-one", local_date=DAY, timezone=ZONE)
+    day = SimpleNamespace(
+        user_id="user-one", local_date=DAY, timezone=ZONE, active_run_id="run-one"
+    )
 
     query = _claim_query(day, claim_timeout_minutes=120, max_attempts=3)
 
     # $not/$gte rather than $lt, so a day analysed before memory_attempts existed —
     # which has no such field — is still claimable. $lt never matches a missing field.
     assert query["memory_attempts"] == {"$not": {"$gte": 3}}
+    assert query["active_run_id"] == "run-one"
     states = query["$or"]
     # Only an unwritten day, or one whose claim has aged out, is claimable. "written"
     # and "skipped" must never match: the vault already holds the day, and rewriting
@@ -217,7 +222,7 @@ async def test_promotion_only_touches_cited_capture_evidence(monkeypatch):
     """A conversational episode un-fences its recordings; other episodes do not."""
 
     updated: dict = {}
-    enqueued: list[str] = []
+    enqueued: list[tuple[str, dict]] = []
 
     class FakeCursor:
         def __init__(self, documents):
@@ -257,9 +262,9 @@ async def test_promotion_only_touches_cited_capture_evidence(monkeypatch):
     # tests/test_recording_refs.py.
     monkeypatch.setattr(discovery, "resolve_live_recordings", _identity)
     monkeypatch.setattr(
-        discovery.default_queue,
-        "enqueue",
-        lambda _job, conversation_id, **_kwargs: enqueued.append(conversation_id),
+        discovery,
+        "enqueue_summary_job_bundle",
+        lambda conversation_id, **kwargs: enqueued.append((conversation_id, kwargs)),
     )
 
     promoted = await discovery._promote_conversational_recordings(
@@ -283,8 +288,19 @@ async def test_promotion_only_touches_cited_capture_evidence(monkeypatch):
         "memory_excluded": False,
         "memory_exclusion_reason": None,
     }
-    # Title/summary only — memory comes from the settled-day pass, not this chain.
-    assert enqueued == ["screenpipe-meeting"]
+    # The complete summary bundle runs, but memory comes from the settled-day pass.
+    assert enqueued == [
+        (
+            "screenpipe-meeting",
+            {
+                "include_memory_context": False,
+                "meta": {
+                    "conversation_id": "screenpipe-meeting",
+                    "trigger": "timeline_promotion",
+                },
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -302,14 +318,7 @@ async def test_promotion_is_a_noop_without_a_conversational_episode(monkeypatch)
     )
 
 
-def test_digest_trims_transcripts_before_it_drops_any_episode():
-    """Transcript bulk must never cost the day its other episodes.
-
-    A summary is a few hundred characters and a transcript tens of thousands, so
-    shedding episodes to make room for transcripts throws away most of the day to save
-    almost nothing. One measured day dropped 9 of its 13 episodes and then had to trim
-    the transcripts anyway, leaving the agent to summarise "all four episodes".
-    """
+def test_digest_keeps_all_episode_summaries_when_they_fit():
 
     episodes = [
         make_episode(
@@ -330,24 +339,17 @@ def test_digest_trims_transcripts_before_it_drops_any_episode():
         ),
     ]
 
-    digest, dropped = build_day_digest(
-        episodes, DAY, ZONE, {"c1": "a" * 40_000}, max_chars=5_000
-    )
+    digest, dropped = build_day_digest(episodes, DAY, ZONE, max_chars=5_000)
 
     assert len(digest) <= 5_000
-    assert all("trimmed" in item for item in dropped)
+    assert dropped == []
     assert "Standup" in digest
     for index in range(6):
         assert f"Background {index}" in digest
 
 
-def test_digest_trims_transcripts_when_conversational_episodes_exceed_budget():
-    """The budget must hold even when every episode is undroppable.
-
-    Conversational episodes are never dropped, so a day whose transcripts alone exceed
-    the budget used to ship at whatever size it happened to be — which is how a digest
-    reached the write agent at twice the model's context.
-    """
+def test_digest_drops_no_conversational_episode_when_summaries_exceed_budget():
+    """Conversation summaries stay; raw transcripts never enter this budget."""
 
     episodes = [
         make_episode(
@@ -356,6 +358,7 @@ def test_digest_trims_transcripts_when_conversational_episodes_exceed_budget():
             conversational=True,
             title="Standup",
             evidence_conversation_id="c1",
+            summary="a" * 4_000,
         ),
         make_episode(
             "e2",
@@ -363,19 +366,104 @@ def test_digest_trims_transcripts_when_conversational_episodes_exceed_budget():
             conversational=True,
             title="One-on-one",
             evidence_conversation_id="c2",
+            summary="b" * 4_000,
         ),
     ]
-    transcripts = {"c1": "a" * 40_000, "c2": "b" * 40_000}
+    digest, dropped = build_day_digest(episodes, DAY, ZONE, max_chars=5_000)
 
-    digest, dropped = build_day_digest(
-        episodes, DAY, ZONE, transcripts, max_chars=5_000
-    )
-
-    assert len(digest) <= 5_000
-    assert any("trimmed" in item for item in dropped)
-    # Both conversations survive as content; only their tails are cut.
+    assert dropped == []
     assert "Standup" in digest and "One-on-one" in digest
 
 
 async def _identity(conversation_ids):
     return set(conversation_ids)
+
+
+def test_partial_is_terminal_so_a_truncated_day_is_not_re_attempted():
+    """A truncated write must be neither retried nor reported as written.
+
+    ``partial`` exists because a boolean forced a cut-off run to be mislabelled: as
+    ``written`` it claims People/Topic edits the run may never have reached, and as a
+    failure it burns two more agent runs re-reaching the same round limit before
+    settling as ``skipped`` — which says there was nothing to record.
+
+    Both selectors have to agree it is terminal. The settled-day scan is what would
+    re-pick it on the next tick, and it is a separate expression from ``_claim_query``,
+    so it is the one that silently regresses.
+    """
+
+    assert "partial" in _TERMINAL_MEMORY_STATES
+    assert set(_TERMINAL_MEMORY_STATES) == {
+        "written",
+        "partial",
+        "skipped",
+        "no_changes",
+    }
+
+    day = SimpleNamespace(
+        user_id="user-one", local_date=DAY, timezone=ZONE, active_run_id="run-one"
+    )
+    query = _claim_query(day, claim_timeout_minutes=120, max_attempts=3)
+    # _claim_query admits only an unset or aged-out claim, so "partial" cannot match
+    # either arm.
+    claimable = query["$or"]
+    assert claimable[0]["memory_state"] == {"$in": ["", None]}
+    assert claimable[1]["memory_state"] == "claimed"
+
+
+@pytest.mark.asyncio
+async def test_write_day_records_a_truncated_run_as_partial(monkeypatch):
+    """The real entry point maps the provider's outcome, not a re-derived guess."""
+
+    episode = make_episode("episode-one", hour=9)
+    recorded: dict = {}
+
+    class FakeCollection:
+        async def update_many(self, _query, update):
+            recorded.update(update["$set"])
+
+    class FakeEpisodeCursor:
+        async def to_list(self):
+            return [episode]
+
+    # Stand in for the Beanie Document entirely: building the real query touches
+    # TimelineEpisode.run_id as a class attribute, which raises without an
+    # initialized collection.
+    class FakeEpisodeModel:
+        run_id = "run_id"
+        user_id = "user_id"
+
+        @staticmethod
+        def find(*_args, **_kwargs):
+            return FakeEpisodeCursor()
+
+        @staticmethod
+        def get_pymongo_collection():
+            return FakeCollection()
+
+    monkeypatch.setattr(memory_module, "TimelineEpisode", FakeEpisodeModel)
+    monkeypatch.setattr(
+        memory_module,
+        "get_memory_service",
+        lambda: SimpleNamespace(
+            add_day_memory=_returns((DayWriteOutcome.PARTIAL, ["Daily/2026-08-06.md"]))
+        ),
+    )
+
+    day = SimpleNamespace(
+        user_id="user-one", local_date=DAY, timezone=ZONE, active_run_id="run-one"
+    )
+    outcome = await memory_module._write_day(day)
+
+    assert outcome == "partial"
+    # The episodes carry the same honest label, so provenance does not claim a
+    # complete write either.
+    assert recorded["memory_state"] == "partial"
+    assert recorded["vault_paths"] == ["Daily/2026-08-06.md"]
+
+
+def _returns(value):
+    async def _call(*_args, **_kwargs):
+        return value
+
+    return _call

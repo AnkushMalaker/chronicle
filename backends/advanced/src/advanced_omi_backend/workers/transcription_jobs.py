@@ -25,6 +25,7 @@ from advanced_omi_backend.config import (
     get_streaming_fallback_timeout,
     require_speech_for_transcription,
 )
+from advanced_omi_backend.constants import TITLE_NOT_GENERATED
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     enqueue_speech_detection,
@@ -644,7 +645,7 @@ async def process_transcription_result(
         # Cancel dependent jobs
         current_job = get_current_job()
         if current_job:
-            # Include event_complete: it depends on memory/title_summary, and
+            # Include event_complete: it depends on the memory/summary bundle, and
             # cancelling those (enqueue_dependents=False) would otherwise strand the
             # finalizer in the deferred registry forever. mark_conversation_deleted
             # already settled the status, so the finalizer is redundant here.
@@ -652,7 +653,9 @@ async def process_transcription_result(
                 f"crop_{conversation_id[:12]}",
                 f"speaker_{conversation_id[:12]}",
                 f"memory_{conversation_id[:12]}",
-                f"title_summary_{conversation_id[:12]}",
+                f"title_{conversation_id[:12]}",
+                f"short_summary_{conversation_id[:12]}",
+                f"detailed_summary_{conversation_id[:12]}",
                 f"event_complete_{conversation_id[:12]}",
             ]
             cancelled_jobs = []
@@ -792,7 +795,7 @@ async def process_transcription_result(
         new_version.diarization_source = diarization_source
 
     if not transcript_text or len(transcript_text.strip()) == 0:
-        conversation.title = "Empty Conversation"
+        conversation.title = TITLE_NOT_GENERATED
         conversation.summary = "No speech detected"
 
     await conversation.save()
@@ -1025,7 +1028,7 @@ async def create_audio_only_conversation(
         placeholder_conversation.processing_status = (
             Conversation.ConversationStatus.ACTIVE.value
         )
-        placeholder_conversation.title = "Audio Recording (Batch Transcription...)"
+        placeholder_conversation.title = TITLE_NOT_GENERATED
         placeholder_conversation.summary = (
             "Processing audio with offline transcription..."
         )
@@ -1223,7 +1226,8 @@ async def transcription_fallback_check_job(
         transcript_version_id=version_id,
         depends_on_job=None,
         client_id=client_id,
-        end_reason="websocket_disconnect",
+        end_reason=Conversation.EndReason.WEBSOCKET_DISCONNECT.value,
+        trigger=Conversation.ProcessingTrigger.LIVE_SESSION.value,
     )
 
     logger.info(

@@ -44,6 +44,10 @@ IDENTIFY_BATCH_MAX_BYTES = int(
     os.getenv("IDENTIFY_BATCH_MAX_BYTES", str(32 * 1024 * 1024))
 )
 IDENTIFY_BATCH_MAX_SECONDS = float(os.getenv("IDENTIFY_BATCH_MAX_SECONDS", "240"))
+# The neural pipeline is independently bounded by ``max_diarize_duration`` (20
+# minutes by default).  This is only a finite cap on the complete recording that
+# may contain many such passes; Chronicle's current corpus includes a 10-hour item.
+MAX_AUDIO_DURATION_SECONDS = 12 * 60 * 60
 _batch_inference_lock = asyncio.Lock()
 
 
@@ -109,7 +113,7 @@ async def diarize_and_identify(
     identify_only_enrolled: bool = Query(
         default=False, description="Only return segments for enrolled speakers"
     ),
-    user_id: Optional[int] = Query(
+    user_id: Optional[str] = Query(
         default=None,
         description="User ID to scope speaker identification to user's enrolled speakers",
     ),
@@ -385,7 +389,7 @@ async def diarize_identify_match(
     transcript_data: str = Form(
         ..., description="JSON string with transcript words and text"
     ),
-    user_id: Optional[int] = Form(
+    user_id: Optional[str] = Form(
         default=None, description="User ID for speaker identification"
     ),
     conversation_id: Optional[str] = Form(
@@ -393,6 +397,10 @@ async def diarize_identify_match(
     ),
     backend_token: Optional[str] = Form(
         default=None, description="JWT token for backend API authentication"
+    ),
+    audio_ranges: Optional[str] = Form(
+        default=None,
+        description="JSON chunk-coverage ranges used to preserve gaps as silence",
     ),
     min_duration: float = Form(
         default=0.5, description="Minimum segment duration in seconds"
@@ -450,8 +458,9 @@ async def diarize_identify_match(
         "text": "full transcript text"
     }
 
-    Maximum audio duration: 2 hours (7200 seconds)
-    Files longer than max_diarize_duration (default 60s) are automatically chunked
+    Maximum complete recording duration: 12 hours. Neural diarization remains
+    independently bounded and chunked by ``max_diarize_duration``.
+    Files longer than max_diarize_duration (default 20 minutes) are automatically chunked
     """
     log.info(f"Processing diarize-identify-match request")
     log.info(f"Mode: {'conversation' if conversation_id else 'file upload'}")
@@ -488,6 +497,27 @@ async def diarize_identify_match(
             },
         ) from e
 
+    timeline_ranges: Optional[list[tuple[float, float]]] = None
+    if audio_ranges:
+        try:
+            parsed_ranges = json.loads(audio_ranges)
+            if not isinstance(parsed_ranges, list):
+                raise ValueError("audio_ranges must be a list")
+            timeline_ranges = []
+            for item in parsed_ranges:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    raise ValueError("each audio range must contain start and end")
+                timeline_ranges.append((float(item[0]), float(item[1])))
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise HTTPException(
+                400,
+                detail={
+                    "error": "validation_error",
+                    "message": f"Invalid audio_ranges: {error}",
+                    "field": "audio_ranges",
+                },
+            ) from error
+
     if not words:
         error_msg = f"No words found in transcript_data (transcript keys: {list(transcript.keys())}, words type: {type(words)})"
         log.error(f"❌ VALIDATION ERROR: {error_msg}")
@@ -518,10 +548,8 @@ async def diarize_identify_match(
     # time, so importing it at module level here would create a circular import.
     from simple_speaker_recognition.api.service import auth as settings
 
-    max_diarize_duration = settings.max_diarize_duration  # Default 60 seconds
+    max_diarize_duration = settings.max_diarize_duration  # Default 20 minutes
     diarize_chunk_overlap = settings.diarize_chunk_overlap  # Default 5 seconds
-    MAX_AUDIO_DURATION = 7200  # 2 hours hard limit
-
     # Mode 1: Conversation mode - fetch audio from backend
     if conversation_id:
         backend_client = BackendClient(settings.backend_api_url)
@@ -538,20 +566,33 @@ async def diarize_identify_match(
                 f"Conversation {conversation_id[:12]}: duration={total_duration:.1f}s"
             )
 
-            # Validate: 2 hour maximum
-            if total_duration > MAX_AUDIO_DURATION:
+            # Validate the complete request independently of the bounded neural pass.
+            if total_duration > MAX_AUDIO_DURATION_SECONDS:
                 raise HTTPException(
                     400,
-                    f"Audio duration {total_duration:.1f}s exceeds maximum allowed duration of {MAX_AUDIO_DURATION}s (2 hours)",
+                    f"Audio duration {total_duration:.1f}s exceeds maximum allowed "
+                    f"duration of {MAX_AUDIO_DURATION_SECONDS}s (12 hours)",
                 )
 
             # Fetch full audio from backend
             log.info(
                 f"Fetching audio from backend for conversation {conversation_id[:12]}"
             )
-            wav_bytes = await backend_client.get_audio_segment(
-                conversation_id, backend_token, start=0.0, duration=total_duration
-            )
+            if timeline_ranges:
+                log.info(
+                    "Reconstructing %d audio coverage ranges on the original clock",
+                    len(timeline_ranges),
+                )
+                wav_bytes = await backend_client.get_audio_timeline(
+                    conversation_id,
+                    backend_token,
+                    total_duration=total_duration,
+                    audio_ranges=timeline_ranges,
+                )
+            else:
+                wav_bytes = await backend_client.get_audio_segment(
+                    conversation_id, backend_token, start=0.0, duration=total_duration
+                )
 
             # Write to temp file
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
@@ -573,12 +614,13 @@ async def diarize_identify_match(
 
         log.info(f"Uploaded file: {file.filename}, duration={total_duration:.1f}s")
 
-        # Validate: 2 hour maximum
-        if total_duration > MAX_AUDIO_DURATION:
+        # Validate the complete request independently of the bounded neural pass.
+        if total_duration > MAX_AUDIO_DURATION_SECONDS:
             tmp_path.unlink(missing_ok=True)
             raise HTTPException(
                 400,
-                f"Audio duration {total_duration:.1f}s exceeds maximum allowed duration of {MAX_AUDIO_DURATION}s (2 hours)",
+                f"Audio duration {total_duration:.1f}s exceeds maximum allowed "
+                f"duration of {MAX_AUDIO_DURATION_SECONDS}s (12 hours)",
             )
 
     try:
@@ -727,7 +769,7 @@ class ReidentifyClustersRequest(BaseModel):
     """Replay cluster→speaker assignment against the current gallery (no audio)."""
 
     clusters: Dict[str, List[float]]
-    user_id: int
+    user_id: str
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD
     identify_margin: float = 0.1
     exclusive: bool = True
@@ -852,7 +894,7 @@ async def plain_diarize_and_identify(
     identify_only_enrolled: bool = Form(
         default=False, description="Only return segments for enrolled speakers"
     ),
-    user_id: Optional[int] = Form(
+    user_id: Optional[str] = Form(
         default=None,
         description="User ID to scope speaker identification to user's enrolled speakers",
     ),
@@ -904,7 +946,7 @@ async def identify(
         default=None,
         description="Override default similarity threshold for identification",
     ),
-    user_id: Optional[int] = Form(
+    user_id: Optional[str] = Form(
         default=None,
         description="User ID to scope speaker identification to user's enrolled speakers",
     ),
@@ -1031,7 +1073,7 @@ async def identify_batch(
         default=None,
         description="Request-wide similarity threshold override",
     ),
-    user_id: Optional[int] = Form(
+    user_id: Optional[str] = Form(
         default=None,
         description="User whose enrolled speakers may be matched",
     ),
@@ -1303,7 +1345,7 @@ async def analyze_segments_with_enrolled_speakers(
     expected_speakers: int = Form(
         default=2, description="Expected number of speakers in audio"
     ),
-    user_id: Optional[int] = Form(
+    user_id: Optional[str] = Form(
         default=None, description="User ID to get enrolled speakers"
     ),
     method: str = Form(default="umap", description="Dimensionality reduction method"),

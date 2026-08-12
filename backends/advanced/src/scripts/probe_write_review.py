@@ -40,10 +40,7 @@ from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services.memory.agent.review_agent import review_vault_write
 from advanced_omi_backend.services.memory.config import build_memory_config_from_env
 from advanced_omi_backend.services.memory.providers.chronicle import MemoryService
-from advanced_omi_backend.services.timeline.memory import (
-    _episode_transcripts,
-    build_day_digest,
-)
+from advanced_omi_backend.services.timeline.memory import build_day_digest
 from scripts.evaluate_day_memory import _load_day
 
 logger = logging.getLogger("probe")
@@ -123,10 +120,7 @@ async def main() -> None:
 
     local_date = date.fromisoformat(args.date)
     day, episodes = await _load_day(user_id, local_date, args.timezone)
-    transcripts = await _episode_transcripts(episodes)
-    digest, _dropped = build_day_digest(
-        episodes, day.local_date, day.timezone, transcripts
-    )
+    digest, _dropped = build_day_digest(episodes, day.local_date, day.timezone)
 
     vault_source = service.vault.user_root(user_id)
     args.workdir.mkdir(parents=True, exist_ok=True)

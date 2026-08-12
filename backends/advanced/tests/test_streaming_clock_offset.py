@@ -80,6 +80,11 @@ class FakeStreamingProvider:
     mirroring real streaming providers (Pulse, Deepgram)."""
 
     capabilities: set = set()
+    # ``name`` and ``mode`` are abstract on BaseTranscriptionProvider and are what
+    # transcript provenance is written from. A double that omits them lets the
+    # consumer record a provider it never had.
+    name: str = "fake-streaming-provider"
+    mode: str = "streaming"
 
     def __init__(self):
         self.clock = 0.0
@@ -296,3 +301,30 @@ async def test_speaker_identification_uses_session_metadata_user_id(consumer):
     assert confidence == pytest.approx(0.9)
     assert seen["user_id"] == "user-1"
     assert seen["audio_wav_bytes"].startswith(b"RIFF")
+
+
+@pytest.mark.asyncio
+async def test_stored_results_record_the_provider_not_the_processing_mode(consumer):
+    """``streaming`` is how a transcript was produced, not who produced it.
+
+    The consumer used to write ``provider=b"streaming"``; the aggregator read that
+    field as the provider and conversation persistence stored it as the transcript
+    version's provider *and* its model, so which service actually transcribed the
+    audio was unrecoverable afterwards.
+    """
+
+    c, provider, redis = consumer
+    session_id = "a421c9-havpe-provenance"
+
+    await c.start_session_stream(session_id, sample_rate=SAMPLE_RATE)
+    await c.process_audio_chunk(session_id, b"\x00" * BYTES_PER_SECOND, "chunk-0")
+
+    entries = await redis.xrange(f"transcription:results:{session_id}")
+    assert entries, "expected a stored final result"
+    fields = entries[-1][1]
+
+    assert fields[b"provider"].decode() == "fake-streaming-provider"
+    assert fields[b"mode"].decode() == "streaming"
+    # The mode must not be able to masquerade as the provider again.
+    assert fields[b"provider"] != b"streaming"
+    assert b"model" in fields

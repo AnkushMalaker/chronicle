@@ -26,9 +26,6 @@ from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segme
 
 logger = logging.getLogger(__name__)
 
-# Single-admin assumption, mirroring speaker_recognition_client.
-SPEAKER_USER_ID = 1
-
 # compute_cluster_centroids failure reasons that no retry can fix; the backfill
 # marks these on the version so the drift report stops offering a pointless backfill.
 TERMINAL_CENTROID_FAILURES = {"no_audio", "degenerate_audio"}
@@ -228,7 +225,8 @@ async def find_drift_conversations(
         # fake drift (e.g. an intact 0.61 ankush match dropped for a 0.52 runner-up).
         resp = await client.reidentify_clusters(
             person_centroids,
-            user_id=SPEAKER_USER_ID,
+            # The gallery searched is the conversation's own owner's.
+            user_id=conv.user_id,
             similarity_threshold=threshold,
             identify_margin=0.0,
             exclusive=False,

@@ -500,7 +500,7 @@ async def _finalize(children: Sequence[tuple]) -> None:
             conversation.user_id,
             transcript_version_id=version.version_id,
             client_id=conversation.client_id,
-            end_reason="rebound",
+            trigger=Conversation.ProcessingTrigger.REBOUND.value,
             skip_speaker_recognition=True,
         )
 

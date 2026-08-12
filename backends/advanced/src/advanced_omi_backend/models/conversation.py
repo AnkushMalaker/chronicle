@@ -28,7 +28,15 @@ class Conversation(Document):
         FAILED = "failed"  # One or more jobs failed
 
     class EndReason(str, Enum):
-        """Reason for conversation ending."""
+        """Why the recorded conversation ended.
+
+        Strictly about the recording's own ending. Why the *pipeline* is running over
+        it — an upload, a reprocess, a re-bound — is a separate question answered by
+        ``ProcessingTrigger``. Mixing the two meant reprocessing invented a new end
+        reason for a conversation that had already ended for a real reason, and the
+        invented values were not members here, so they were silently stored as
+        ``UNKNOWN`` while the emitted event still reported the raw string.
+        """
 
         USER_STOPPED = "user_stopped"  # User manually stopped recording
         INACTIVITY_TIMEOUT = (
@@ -45,6 +53,21 @@ class Conversation(Document):
         SPLIT = "split"  # Created by splitting a longer conversation
         MERGE = "merge"  # Created by merging adjacent conversations
         UNKNOWN = "unknown"  # Unknown or legacy reason
+
+    class ProcessingTrigger(str, Enum):
+        """Why the post-conversation pipeline is running over a conversation.
+
+        Orthogonal to ``EndReason``: a reprocess of a conversation that ended on
+        ``websocket_disconnect`` is still a ``websocket_disconnect`` recording. An
+        uploaded file never ended for an operational reason at all, so its
+        ``end_reason`` stays unset rather than borrowing this vocabulary.
+        """
+
+        LIVE_SESSION = "live_session"  # A live capture session just closed
+        FILE_UPLOAD = "file_upload"  # Audio arrived as an uploaded file
+        REPROCESS_ORPHAN = "reprocess_orphan"  # Re-run over audio with no transcript
+        REPROCESS_TRANSCRIPT = "reprocess_transcript"  # Operator asked for a re-run
+        REBOUND = "rebound"  # Recording bounds were recomputed and re-split
 
     # Nested Models
     class Word(BaseModel):
@@ -73,8 +96,8 @@ class Conversation(Document):
         end: float = Field(description="End time in seconds")
         text: str = Field(description="Transcript text for this segment")
         speaker: str = Field(description="Speaker identifier")
-        segment_type: str = Field(
-            default="speech",
+        segment_type: "Conversation.SegmentType" = Field(
+            default_factory=lambda: Conversation.SegmentType.SPEECH,
             description="Type: speech, event (non-speech from ASR), or note (user-inserted)",
         )
         identified_as: Optional[str] = Field(
@@ -159,10 +182,25 @@ class Conversation(Document):
                     speech += count
             return speech / self.frame_count
 
+    class DerivedOperation(str, Enum):
+        """Operation that produced a derived conversation.
+
+        Every operation that moves audio into a new conversation belongs here.
+        ``silence_trim`` was missing while ``maybe_trim_silence`` passed it, so the
+        remnant's lineage record raised at construction and trimming crashed outright.
+        """
+
+        SPLIT = "split"
+        MERGE = "merge"
+        SILENCE_TRIM = "silence_trim"
+        REBOUND = "rebound"
+
     class DerivedFrom(BaseModel):
         """Lineage record for conversations produced by split/merge operations."""
 
-        operation: str = Field(description="'split' or 'merge'")
+        operation: "Conversation.DerivedOperation" = Field(
+            description="Operation that produced this conversation"
+        )
         source_conversation_ids: List[str] = Field(
             description="Conversations this one was derived from"
         )
@@ -484,10 +522,15 @@ class Conversation(Document):
         av = self.active_transcript
         return bool(av and (av.transcript or "").strip())
 
-    def apply_status(
-        self, *, settled: bool, failure_stage: str = "transcription"
-    ) -> bool:
-        """Derive and set processing_status from facts. The SINGLE owner of the field.
+    @classmethod
+    def derive_status(
+        cls,
+        *,
+        has_transcript: bool,
+        settled: bool,
+        failure_stage: str = "transcription",
+    ) -> tuple[str, Optional[str]]:
+        """Decide ``(processing_status, failure_stage)`` from facts. The SINGLE owner.
 
         The transcript is the conversation's core deliverable, so its presence is the
         source of truth for success — independent of which jobs ran or what order they
@@ -500,19 +543,29 @@ class Conversation(Document):
 
         ``settled`` means the caller knows the pipeline has reached a terminal point
         (the finalizer job, a fallback dead-end, or the reconciler's staleness check),
-        so "no transcript" is final rather than "not yet". Returns True if anything
-        changed.
+        so "no transcript" is final rather than "not yet".
+
+        Split out from :meth:`apply_status` so a caller that cannot afford to load the
+        document — the reconciler scans every conversation, and their transcripts are
+        by far the largest field — can decide from a projection without a second copy
+        of these rules existing anywhere.
         """
+        if has_transcript:
+            return cls.ConversationStatus.COMPLETED.value, None
+        if settled:
+            return cls.ConversationStatus.FAILED.value, failure_stage
+        return cls.ConversationStatus.ACTIVE.value, None
+
+    def apply_status(
+        self, *, settled: bool, failure_stage: str = "transcription"
+    ) -> bool:
+        """Set processing_status from facts. Returns True if anything changed."""
         prev = (self.processing_status, self.failure_stage)
-        if self.has_meaningful_transcript:
-            self.processing_status = self.ConversationStatus.COMPLETED.value
-            self.failure_stage = None
-        elif settled:
-            self.processing_status = self.ConversationStatus.FAILED.value
-            self.failure_stage = failure_stage
-        else:
-            self.processing_status = self.ConversationStatus.ACTIVE.value
-            self.failure_stage = None
+        self.processing_status, self.failure_stage = self.derive_status(
+            has_transcript=self.has_meaningful_transcript,
+            settled=settled,
+            failure_stage=failure_stage,
+        )
         return (self.processing_status, self.failure_stage) != prev
 
     class Settings:

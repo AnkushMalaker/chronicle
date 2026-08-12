@@ -37,6 +37,24 @@ router = APIRouter(prefix="/finetuning", tags=["finetuning"])
 _SEGMENT_START_TOLERANCE = 0.25
 
 
+async def _existing_conversation_ids(conversation_ids: set[str]) -> set[str]:
+    """Which of these conversations still exist. Ids only — never the documents.
+
+    Orphan detection needs nothing but the ids, and a Conversation carries its whole
+    transcript. Loading these as models pulled **71.7 MB into roughly 354,000 Word and
+    SpeakerSegment instances** on a single status call here, for 31 ids. Allocation on
+    that scale reliably triggers a generation-2 collection, which holds the GIL, and
+    the event loop was measured stalling ~3 s on it.
+    """
+    if not conversation_ids:
+        return set()
+    return set(
+        await Conversation.get_pymongo_collection().distinct(
+            "conversation_id", {"conversation_id": {"$in": list(conversation_ids)}}
+        )
+    )
+
+
 def _resolve_annotated_segment(segments, segment_index, segment_start_time):
     """Find the segment an annotation refers to.
 
@@ -432,7 +450,7 @@ async def enroll_selected_clips(
                 continue
 
             existing = await speaker_client.get_speaker_by_name(
-                speaker_name=clip.speaker, user_id=1
+                speaker_name=clip.speaker, user_id=str(current_user.user_id)
             )
             if existing:
                 result = await speaker_client.append_to_speaker(
@@ -450,7 +468,9 @@ async def enroll_selected_clips(
                     appended += 1
             else:
                 result = await speaker_client.enroll_new_speaker(
-                    speaker_name=clip.speaker, audio_data=wav_bytes, user_id=1
+                    speaker_name=clip.speaker,
+                    audio_data=wav_bytes,
+                    user_id=str(current_user.user_id),
                 )
                 if "error" in result:
                     failed += 1
@@ -591,12 +611,7 @@ async def get_finetuning_status(
                 if a.conversation_id:
                     all_conv_ids.add(a.conversation_id)
 
-        existing_conv_ids: set[str] = set()
-        if all_conv_ids:
-            existing_convs = await Conversation.find(
-                {"conversation_id": {"$in": list(all_conv_ids)}},
-            ).to_list()
-            existing_conv_ids = {c.conversation_id for c in existing_convs}
+        existing_conv_ids = await _existing_conversation_ids(all_conv_ids)
 
         orphaned_conv_ids = all_conv_ids - existing_conv_ids
 
@@ -781,10 +796,7 @@ async def delete_orphaned_annotations(
         return JSONResponse(content={"deleted_count": 0, "by_type": {}})
 
     # Batch-check which conversations still exist
-    existing_convs = await Conversation.find(
-        {"conversation_id": {"$in": list(all_conv_ids)}},
-    ).to_list()
-    existing_conv_ids = {c.conversation_id for c in existing_convs}
+    existing_conv_ids = await _existing_conversation_ids(all_conv_ids)
     orphaned_conv_ids = all_conv_ids - existing_conv_ids
 
     if not orphaned_conv_ids:

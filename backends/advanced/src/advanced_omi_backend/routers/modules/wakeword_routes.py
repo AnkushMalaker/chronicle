@@ -23,6 +23,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from advanced_omi_backend.auth import current_active_user, current_superuser
+from advanced_omi_backend.client_manager import owns_client_id, user_id_prefix
 from advanced_omi_backend.redis_factory import create_async_redis
 from advanced_omi_backend.services.plugin_service import get_plugin_router
 from advanced_omi_backend.services.wakeword.executor import open_followup_window
@@ -46,13 +47,8 @@ def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(base_url=WAKEWORD_SERVICE_URL, timeout=15.0)
 
 
-def _suffix(user: User) -> str:
-    """Client-id prefix that scopes a user's streams/clips (last 6 of ObjectId)."""
-    return user.user_id[-6:]
-
-
 def _owns(user: User, client_id: str) -> bool:
-    return user.is_superuser or (client_id or "").startswith(_suffix(user))
+    return user.is_superuser or owns_client_id(user, client_id)
 
 
 def _service_manager_ready() -> bool:
@@ -236,7 +232,7 @@ async def simulate_dial(
             router_obj,
             user_id=current_user.user_id,
             session_id=session_id,
-            client_id=f"sim-{_suffix(current_user)}",
+            client_id=f"sim-{user_id_prefix(current_user)}",
             direction=req.direction,
         )
     finally:

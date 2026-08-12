@@ -14,6 +14,8 @@ from advanced_omi_backend.models.timeline import (
     TimelineAnalysisRun,
     TimelineDay,
     TimelineEpisode,
+    clip_audio_ranges,
+    merge_audio_ranges,
     utcnow,
 )
 from advanced_omi_backend.models.user import User
@@ -307,6 +309,29 @@ def _confirm(episode: TimelineEpisode, fields) -> None:
     episode.revised_at = utcnow()
 
 
+async def _chunk_spans(episode: TimelineEpisode) -> dict:
+    """``chunk_id -> (captured_at, duration)`` for everything the episode claims.
+
+    Read once per operation so ``clip_audio_ranges`` stays pure. A chunk missing from
+    the result (deleted, or never anchored with ``captured_at``) is deliberately absent
+    rather than defaulted: the caller decides what an unplaceable chunk means.
+    """
+
+    chunk_ids = [
+        chunk_id for item in episode.audio_ranges for chunk_id in item.chunk_ids
+    ]
+    if not chunk_ids:
+        return {}
+    chunks = await AudioChunkDocument.find(
+        {"_id": {"$in": [ObjectId(item) for item in chunk_ids]}}
+    ).to_list()
+    return {
+        str(chunk.id): (chunk.captured_at, chunk.duration)
+        for chunk in chunks
+        if chunk.captured_at is not None
+    }
+
+
 def _refs_overlapping(episode: TimelineEpisode, start: datetime, end: datetime) -> list:
     """Evidence refs touching [start, end). A ref spanning the cut belongs to both sides."""
 
@@ -343,6 +368,9 @@ async def split_timeline_episode(
             status_code=422, detail="Split point must fall strictly inside the episode"
         )
 
+    spans = await _chunk_spans(episode)
+    episode_start, episode_end = _at(episode.started_at), _at(episode.ended_at)
+
     tail = episode.model_copy(deep=True)
     tail.id = None
     tail.episode_id = str(uuid.uuid4())
@@ -350,9 +378,19 @@ async def split_timeline_episode(
     # original's confirmed history.
     tail.episode_key = str(uuid.uuid4())
     tail.started_at = at
-    tail.evidence_refs = _refs_overlapping(episode, at, _at(episode.ended_at))
+    tail.evidence_refs = _refs_overlapping(episode, at, episode_end)
+    # The audio claim is cut with the episode. The deep copy above handed the tail
+    # every original range, so without this both halves claim — and play — the whole
+    # original recording. Chunks that cannot be placed stay with the head.
+    tail.audio_ranges = clip_audio_ranges(
+        episode.audio_ranges, at, episode_end, spans, keep_unplaceable=False
+    )
+    head_ranges = clip_audio_ranges(
+        episode.audio_ranges, episode_start, at, spans, keep_unplaceable=True
+    )
     episode.ended_at = at
-    episode.evidence_refs = _refs_overlapping(episode, _at(episode.started_at), at)
+    episode.evidence_refs = _refs_overlapping(episode, episode_start, at)
+    episode.audio_ranges = head_ranges
 
     for part in (episode, tail):
         known = {ref.evidence_id for ref in part.evidence_refs}
@@ -395,6 +433,12 @@ async def merge_timeline_episodes(
     survivor, absorbed = episodes[0], episodes[1:]
 
     survivor.ended_at = max(_at(episode.ended_at) for episode in episodes)
+    # The survivor now spans every absorbed episode, so it has to claim their audio
+    # too. Without this it kept only its own ranges and the rest were deleted with
+    # their documents, leaving a merged episode able to play a fraction of itself.
+    survivor.audio_ranges = merge_audio_ranges(
+        episode.audio_ranges for episode in episodes
+    )
     seen = {ref.evidence_id for ref in survivor.evidence_refs}
     for episode in absorbed:
         for ref in episode.evidence_refs:

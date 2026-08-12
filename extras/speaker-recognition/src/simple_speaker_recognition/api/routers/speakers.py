@@ -45,7 +45,7 @@ def get_auth():
 
 @router.get("/speakers")
 async def list_speakers(
-    user_id: Optional[int] = None, db: UnifiedSpeakerDB = Depends(get_db)
+    user_id: Optional[str] = None, db: UnifiedSpeakerDB = Depends(get_db)
 ):
     """List all enrolled speakers, optionally filtered by user."""
     db_session = get_db_session()
@@ -83,7 +83,7 @@ async def list_speakers(
 
 @router.get("/speakers/analysis")
 async def get_speakers_analysis(
-    user_id: Optional[int] = Query(
+    user_id: Optional[str] = Query(
         default=None, description="User ID to filter speakers"
     ),
     method: str = Query(
@@ -309,7 +309,7 @@ async def download_speaker_audio_file(
 
 @router.post("/speakers/reset")
 async def reset_speakers(
-    user_id: Optional[int] = None, db: UnifiedSpeakerDB = Depends(get_db)
+    user_id: Optional[str] = None, db: UnifiedSpeakerDB = Depends(get_db)
 ):
     """Reset all speakers (optionally for a specific user)."""
     if user_id is not None:
@@ -367,7 +367,7 @@ async def delete_speaker(
 
 @router.get("/speakers/export")
 async def export_speakers(
-    user_id: Optional[int] = Query(
+    user_id: Optional[str] = Query(
         None, description="Export speakers for specific user (admin can export all)"
     ),
     db: UnifiedSpeakerDB = Depends(get_db),

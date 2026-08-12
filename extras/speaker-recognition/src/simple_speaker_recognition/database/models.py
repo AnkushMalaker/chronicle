@@ -19,11 +19,19 @@ from . import Base
 
 
 class User(Base):
-    """User model for multi-user support."""
+    """One tenant of the speaker gallery, identified by its Chronicle user id.
+
+    The id is Chronicle's own ``user_id`` (a MongoDB ObjectId string), not a local
+    autoincrementing integer. The service previously minted its own integer identity,
+    which Chronicle could not supply — so ``speaker_recognition_client`` hardcoded
+    ``user_id="1"`` on every call and every Chronicle user landed in one shared
+    gallery. One opaque identity across both services removes the mapping that was
+    never built, and with it the chance of getting the mapping wrong.
+    """
 
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(String(64), primary_key=True)
     username = Column(String(100), unique=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -46,7 +54,7 @@ class Speaker(Base):
 
     id = Column(String(100), primary_key=True)  # User-defined speaker ID
     name = Column(String(200), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user_id = Column(String(64), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     embedding_version = Column(Integer, default=1)
@@ -180,7 +188,7 @@ class Annotation(Base):
     label = Column(String(20), nullable=False)  # 'CORRECT', 'INCORRECT', 'UNCERTAIN'
     confidence = Column(Float)  # Model confidence in the annotation (0.0 to 1.0)
     transcription = Column(Text)  # Text content of the segment
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user_id = Column(String(64), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     notes = Column(Text)  # Optional annotation notes
 
@@ -222,7 +230,7 @@ class ExportHistory(Base):
     __tablename__ = "export_history"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user_id = Column(String(64), ForeignKey("users.id"), nullable=False)
     export_type = Column(
         String(50), nullable=False
     )  # 'single_speaker', 'bulk', 'annotations'

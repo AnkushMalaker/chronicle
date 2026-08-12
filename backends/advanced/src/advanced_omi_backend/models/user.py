@@ -7,9 +7,28 @@ from typing import Optional
 from beanie import Document, PydanticObjectId
 from fastapi_users.db import BeanieBaseUser, BeanieUserDatabase
 from fastapi_users.schemas import BaseUser, BaseUserCreate, BaseUserUpdate
-from pydantic import ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 logger = logging.getLogger(__name__)
+
+
+class RegisteredClient(BaseModel):
+    """One audio device remembered for a user.
+
+    Stored as a list rather than a ``{client_id: {...}}`` mapping so that
+    ``registered_clients.client_id`` resolves: MongoDB matches a dotted path across
+    the elements of an array, but not across arbitrary object keys. As a mapping the
+    inverse lookup silently matched nothing, so a disconnect never stamped
+    ``last_seen`` and an admin could not act on another user's device.
+    """
+
+    client_id: str
+    device_name: Optional[str] = None
+    # User-editable display label; defaults to the device name and is never
+    # overwritten by a reconnect.
+    name: str
+    first_seen: datetime
+    last_seen: datetime
 
 
 class UserCreate(BaseUserCreate):
@@ -29,7 +48,7 @@ class UserRead(BaseUser[PydanticObjectId]):
     assistant_name: Optional[str] = None
     notification_email: Optional[EmailStr] = None
     timezone: Optional[str] = None
-    registered_clients: dict[str, dict] = Field(default_factory=dict)
+    registered_clients: list[RegisteredClient] = Field(default_factory=list)
     primary_speakers: list[dict] = Field(default_factory=list)
     wakeword_gate_enabled: bool = False
     wakeword_allowed_speakers: list[dict] = Field(default_factory=list)
@@ -87,7 +106,7 @@ class User(BeanieBaseUser, Document):
     # Last browser-confirmed IANA timezone used for current-day timeline analysis.
     timezone: Optional[str] = None
     # Client tracking for audio devices
-    registered_clients: dict[str, dict] = Field(default_factory=dict)
+    registered_clients: list[RegisteredClient] = Field(default_factory=list)
     # Speaker processing filter configuration
     primary_speakers: list[dict] = Field(default_factory=list)
     # Wake-word speaker gate: when enabled, an acoustic wake word only dispatches a
@@ -117,46 +136,66 @@ class User(BeanieBaseUser, Document):
         Liveness is not stored: whether a device is connected right now is derived from
         the in-memory ClientState, not a persisted flag.
         """
-        existing = self.registered_clients.get(client_id)
+        existing = self.find_client(client_id)
         if existing:
-            existing["last_seen"] = datetime.now(UTC)
+            existing.last_seen = datetime.now(UTC)
             if device_name:
-                existing["device_name"] = device_name
-            # Backfill a friendly name for devices registered before naming existed.
-            existing.setdefault("name", device_name or client_id)
+                existing.device_name = device_name
             return
 
-        self.registered_clients[client_id] = {
-            "client_id": client_id,
-            "device_name": device_name,
-            "name": device_name or client_id,  # editable display label
-            "first_seen": datetime.now(UTC),
-            "last_seen": datetime.now(UTC),
-        }
+        now = datetime.now(UTC)
+        self.registered_clients.append(
+            RegisteredClient(
+                client_id=client_id,
+                device_name=device_name,
+                name=device_name or client_id,
+                first_seen=now,
+                last_seen=now,
+            )
+        )
+
+    def find_client(self, client_id: str) -> Optional[RegisteredClient]:
+        """Return this user's registration for ``client_id``, or None."""
+        for device in self.registered_clients:
+            if device.client_id == client_id:
+                return device
+        return None
+
+    def has_client(self, client_id: str) -> bool:
+        """True when ``client_id`` is registered to this user."""
+        return self.find_client(client_id) is not None
 
     def touch_client(self, client_id: str) -> bool:
         """Stamp a device's last_seen (e.g. on disconnect). Returns False if unknown."""
-        device = self.registered_clients.get(client_id)
+        device = self.find_client(client_id)
         if device is None:
             return False
-        device["last_seen"] = datetime.now(UTC)
+        device.last_seen = datetime.now(UTC)
         return True
 
     def set_client_name(self, client_id: str, name: str) -> bool:
         """Set a device's friendly display name. Returns False if unknown."""
-        device = self.registered_clients.get(client_id)
+        device = self.find_client(client_id)
         if device is None:
             return False
-        device["name"] = name
+        device.name = name
         return True
 
     def forget_client(self, client_id: str) -> bool:
         """Remove a device from the registry. Returns False if unknown."""
-        return self.registered_clients.pop(client_id, None) is not None
+        remaining = [
+            device
+            for device in self.registered_clients
+            if device.client_id != client_id
+        ]
+        if len(remaining) == len(self.registered_clients):
+            return False
+        self.registered_clients = remaining
+        return True
 
     def get_client_ids(self) -> list[str]:
         """Get all client IDs registered to this user."""
-        return list(self.registered_clients.keys())
+        return [device.client_id for device in self.registered_clients]
 
 
 # Rebuild Pydantic model to ensure inherited fields are properly accessible
@@ -179,7 +218,12 @@ async def get_user_by_id(user_id: str) -> Optional[User]:
 
 
 async def get_user_by_client_id(client_id: str) -> Optional[User]:
-    """Find the user that owns a specific client_id."""
+    """Find the user that owns a specific client_id.
+
+    ``registered_clients`` is a list, so this dotted path matches an element's
+    ``client_id``. It silently matched nothing while the field was a mapping keyed
+    by client id, because a dotted path does not wildcard over object keys.
+    """
     return await User.find_one({"registered_clients.client_id": client_id})
 
 

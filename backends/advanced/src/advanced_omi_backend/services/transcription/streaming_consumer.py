@@ -836,11 +836,17 @@ class StreamingTranscriptionConsumer:
             words = result.get("words") or []
             segments = result.get("segments", [])
 
-            # Prepare result entry
+            # Provider identity and processing mode are different facts. This used to
+            # write provider=b"streaming" — a mode — which the aggregator read as the
+            # provider and conversation persistence then stored as both the transcript
+            # version's provider AND its model, permanently losing which service
+            # actually produced the transcript.
             entry = {
                 b"text": result.get("text", "").encode(),
                 b"chunk_id": (chunk_id or f"final_{int(time.time() * 1000)}").encode(),
-                b"provider": b"streaming",
+                b"provider": self.provider.name.encode(),
+                b"mode": self.provider.mode.encode(),
+                b"model": self._model_identity().encode(),
                 b"confidence": str(result.get("confidence", 0.0)).encode(),
                 b"processing_time": b"0.0",
                 b"timestamp": str(time.time()).encode(),
@@ -863,6 +869,23 @@ class StreamingTranscriptionConsumer:
             logger.error(
                 f"Error storing final result for {session_id}: {e}", exc_info=True
             )
+
+    def _model_identity(self) -> str:
+        """The upstream model that produced the transcript, for provenance.
+
+        Falls back to the registry entry's own name when a provider declares no
+        upstream model name, so this is never empty and never silently becomes the
+        provider id.
+        """
+
+        model = getattr(self.provider, "model", None)
+        if model is None:
+            return self.provider.name
+        return (
+            getattr(model, "model_name", "")
+            or getattr(model, "name", "")
+            or (self.provider.name)
+        )
 
     async def _resolve_session_identity(
         self, session_id: str

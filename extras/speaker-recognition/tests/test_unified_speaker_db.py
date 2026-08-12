@@ -9,6 +9,11 @@ from simple_speaker_recognition.database.models import Speaker, User
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+# The tenant is Chronicle's own user id (a MongoDB ObjectId string), not a local
+# integer. The service used to mint integer ids Chronicle could not supply, which is
+# why its client hardcoded user_id="1" and put every Chronicle user in one gallery.
+CHRONICLE_USER = "69b80e5894aa9ec334a421c9"
+
 
 def test_identification_survives_an_embeddingless_speaker(tmp_path, monkeypatch):
     engine = create_engine("sqlite:///:memory:")
@@ -16,25 +21,25 @@ def test_identification_survives_an_embeddingless_speaker(tmp_path, monkeypatch)
     session_factory = sessionmaker(bind=engine)
 
     with session_factory() as session:
-        session.add(User(id=1, username="owner"))
+        session.add(User(id=CHRONICLE_USER, username="owner"))
         session.add_all(
             [
                 Speaker(
                     id="speaker-before",
                     name="Before",
-                    user_id=1,
+                    user_id=CHRONICLE_USER,
                     embedding_data=json.dumps([1.0, 0.0]),
                 ),
                 Speaker(
                     id="speaker-without-embedding",
                     name="Not enrolled",
-                    user_id=1,
+                    user_id=CHRONICLE_USER,
                     embedding_data=None,
                 ),
                 Speaker(
                     id="speaker-after",
                     name="After",
-                    user_id=1,
+                    user_id=CHRONICLE_USER,
                     embedding_data=json.dumps([0.0, 1.0]),
                 ),
             ]
@@ -45,11 +50,15 @@ def test_identification_survives_an_embeddingless_speaker(tmp_path, monkeypatch)
     database = UnifiedSpeakerDB(emb_dim=2, base_dir=tmp_path, similarity_thr=0.5)
 
     found, speaker, confidence, candidates = asyncio.run(
-        database.identify_with_candidates(np.array([0.0, 1.0]), user_id=1)
+        database.identify_with_candidates(np.array([0.0, 1.0]), user_id=CHRONICLE_USER)
     )
 
     assert found is True
-    assert speaker == {"id": "speaker-after", "name": "After", "user_id": 1}
+    assert speaker == {
+        "id": "speaker-after",
+        "name": "After",
+        "user_id": CHRONICLE_USER,
+    }
     assert confidence == 1.0
     assert candidates[0]["id"] == "speaker-after"
 
@@ -62,12 +71,12 @@ def test_identification_uses_per_call_threshold_without_mutating_default(
     session_factory = sessionmaker(bind=engine)
 
     with session_factory() as session:
-        session.add(User(id=1, username="owner"))
+        session.add(User(id=CHRONICLE_USER, username="owner"))
         session.add(
             Speaker(
                 id="speaker",
                 name="Speaker",
-                user_id=1,
+                user_id=CHRONICLE_USER,
                 embedding_data=json.dumps([1.0, 0.0]),
             )
         )
@@ -81,10 +90,10 @@ def test_identification_uses_per_call_threshold_without_mutating_default(
     async def identify_concurrently():
         return await asyncio.gather(
             database.identify_with_candidates(
-                query, user_id=1, similarity_threshold=0.75
+                query, user_id=CHRONICLE_USER, similarity_threshold=0.75
             ),
             database.identify_with_candidates(
-                query, user_id=1, similarity_threshold=0.85
+                query, user_id=CHRONICLE_USER, similarity_threshold=0.85
             ),
         )
 
@@ -104,19 +113,19 @@ def test_batch_identification_preserves_order_and_unknown_results(
     session_factory = sessionmaker(bind=engine)
 
     with session_factory() as session:
-        session.add(User(id=1, username="owner"))
+        session.add(User(id=CHRONICLE_USER, username="owner"))
         session.add_all(
             [
                 Speaker(
                     id="speaker-x",
                     name="Speaker X",
-                    user_id=1,
+                    user_id=CHRONICLE_USER,
                     embedding_data=json.dumps([1.0, 0.0]),
                 ),
                 Speaker(
                     id="speaker-y",
                     name="Speaker Y",
-                    user_id=1,
+                    user_id=CHRONICLE_USER,
                     embedding_data=json.dumps([0.0, 1.0]),
                 ),
             ]
@@ -130,7 +139,7 @@ def test_batch_identification_preserves_order_and_unknown_results(
     results = asyncio.run(
         database.identify_batch_with_candidates(
             embeddings,
-            user_id=1,
+            user_id=CHRONICLE_USER,
             similarity_threshold=0.8,
         )
     )

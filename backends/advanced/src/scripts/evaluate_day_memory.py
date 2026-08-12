@@ -45,13 +45,11 @@ from advanced_omi_backend.models.timeline import (
 )
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services.memory.agent.memory_agent import day_note_path
+from advanced_omi_backend.services.memory.base import DayWriteOutcome
 from advanced_omi_backend.services.memory.config import build_memory_config_from_env
 from advanced_omi_backend.services.memory.providers.chronicle import MemoryService
 from advanced_omi_backend.services.memory.vault_verify import verify_vault_changes
-from advanced_omi_backend.services.timeline.memory import (
-    _episode_transcripts,
-    build_day_digest,
-)
+from advanced_omi_backend.services.timeline.memory import build_day_digest
 
 logger = logging.getLogger("evaluate_day_memory")
 
@@ -186,7 +184,7 @@ async def _trial(
 
     started = time.perf_counter()
     try:
-        success, touched = await service.add_day_memory(
+        write_outcome, touched = await service.add_day_memory(
             digest,
             day.local_date.isoformat(),
             day.user_id,
@@ -196,7 +194,7 @@ async def _trial(
         )
     except Exception as exc:  # noqa: BLE001 - a crashed trial is a data point
         logger.exception("trial %d raised", trial)
-        success, touched = False, []
+        write_outcome, touched = DayWriteOutcome.FAILED, []
         capture.results.append(None)
         _ = exc
     finally:
@@ -207,12 +205,14 @@ async def _trial(
     findings = verify_vault_changes(root, before_snapshot)
     summary = (getattr(result, "summary", "") or "").strip()
     wrote_day = day_rel in (touched or [])
-    if success and wrote_day:
-        outcome = "written"
-    elif success:
-        outcome = "no_changes"
-    else:
+    if write_outcome is DayWriteOutcome.FAILED:
         outcome = "failed"
+    elif write_outcome is DayWriteOutcome.PARTIAL:
+        outcome = "partial"
+    elif wrote_day:
+        outcome = "written"
+    else:
+        outcome = "no_changes"
 
     stem = f"{day.local_date.isoformat()}-{label}-t{trial:02d}"
     diff_path = artifacts / f"diff-{stem}.md"
@@ -340,10 +340,7 @@ async def main() -> None:
     for raw in args.dates:
         local_date = date.fromisoformat(raw)
         day, episodes = await _load_day(user_id, local_date, args.timezone)
-        transcripts = await _episode_transcripts(episodes)
-        digest, dropped = build_day_digest(
-            episodes, day.local_date, day.timezone, transcripts
-        )
+        digest, dropped = build_day_digest(episodes, day.local_date, day.timezone)
         digest_path = args.workdir / f"digest-{raw}.md"
         digest_path.write_text(digest, encoding="utf-8")
         logger.info(

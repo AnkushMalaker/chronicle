@@ -248,6 +248,16 @@ def _strip_empty_notes(user_id: str) -> list[str]:
     return removed
 
 
+def _require_complete(remaining: list[dict]) -> None:
+    """Never let the unattended wrapper report a partial rebuild as healthy."""
+    if not remaining:
+        return
+    dates = ", ".join(row["local_date"].isoformat() for row in remaining)
+    raise RuntimeError(
+        f"day rebuild incomplete after repair budget: {len(remaining)} day(s): {dates}"
+    )
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--user-id", required=True)
@@ -349,12 +359,14 @@ async def main() -> None:
             len(removed),
             ", ".join(removed) or "none",
         )
+        remaining = await _unwritten_days(database, args.user_id, expected_days)
+        _require_complete(remaining)
 
         states = {
             state: await database["timeline_days"].count_documents(
                 {"user_id": args.user_id, "memory_state": state}
             )
-            for state in ("written", "no_changes", "skipped")
+            for state in ("written", "no_changes", "partial", "skipped")
         }
         total = await database["timeline_days"].count_documents(
             {"user_id": args.user_id}
@@ -362,13 +374,14 @@ async def main() -> None:
         notes = len(list((VAULT_ROOT / args.user_id).rglob("*.md")))
         progress.complete_validation(
             f"{states['written']} written, {states['no_changes']} no-change, "
-            f"{states['skipped']} skipped; {notes} notes"
+            f"{states['partial']} partial, {states['skipped']} skipped; {notes} notes"
         )
         log.info(
-            "FINAL written=%d no_changes=%d skipped=%d/%d timeline_days, "
+            "FINAL written=%d no_changes=%d partial=%d skipped=%d/%d timeline_days, "
             "vault notes=%d",
             states["written"],
             states["no_changes"],
+            states["partial"],
             states["skipped"],
             total,
             notes,

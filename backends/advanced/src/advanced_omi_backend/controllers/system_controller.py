@@ -179,6 +179,20 @@ def _is_self_hosted_model(model) -> bool:
     return host.endswith(".ts.net") or "." not in host
 
 
+def _reload_config_capturing_warnings() -> list[str]:
+    """Force a config reload; return the warning messages it raised.
+
+    Runs off the event loop: ``force_reload=True`` re-reads and re-parses both YAML
+    files and deep-merges them, which is over a second of pure CPU here. The warning
+    capture has to travel with it — ``catch_warnings`` mutates process-global state,
+    so the load must happen in the same thread that installed the filter.
+    """
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        load_config(force_reload=True)
+        return [str(w.message) for w in captured]
+
+
 async def get_config_diagnostics():
     """
     Get comprehensive configuration diagnostics.
@@ -196,26 +210,22 @@ async def get_config_diagnostics():
 
     # Test OmegaConf configuration loading
     try:
-        # Capture warnings during config load
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            config = load_config(force_reload=True)
+        config_warnings = await asyncio.to_thread(_reload_config_capturing_warnings)
 
-            # Check for OmegaConf warnings
-            for warning in w:
-                warning_msg = str(warning.message)
-                if "some elements are missing" in warning_msg.lower():
-                    # Extract the variable name from warning
-                    if "variable '" in warning_msg.lower():
-                        var_name = warning_msg.split("'")[1]
-                        diagnostics["warnings"].append(
-                            {
-                                "component": "OmegaConf",
-                                "severity": "warning",
-                                "message": f"Environment variable '{var_name}' not set (using empty default)",
-                                "resolution": f"Set {var_name} in .env file if needed",
-                            }
-                        )
+        # Check for OmegaConf warnings
+        for warning_msg in config_warnings:
+            if "some elements are missing" in warning_msg.lower():
+                # Extract the variable name from warning
+                if "variable '" in warning_msg.lower():
+                    var_name = warning_msg.split("'")[1]
+                    diagnostics["warnings"].append(
+                        {
+                            "component": "OmegaConf",
+                            "severity": "warning",
+                            "message": f"Environment variable '{var_name}' not set (using empty default)",
+                            "resolution": f"Set {var_name} in .env file if needed",
+                        }
+                    )
 
         diagnostics["components"]["omegaconf"] = {
             "status": "healthy",
@@ -971,8 +981,7 @@ async def get_enrolled_speakers(user: User):
                 "status": "success",
             }
 
-        # Get enrolled speakers - using hardcoded user_id=1 for now (as noted in speaker_recognition_client.py)
-        speakers = await speaker_client.get_enrolled_speakers(user_id="1")
+        speakers = await speaker_client.get_enrolled_speakers(user_id=str(user.user_id))
 
         return {
             "speakers": speakers.get("speakers", []) if speakers else [],

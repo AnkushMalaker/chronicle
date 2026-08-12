@@ -14,6 +14,7 @@ from advanced_omi_backend.client_manager import (
 )
 from advanced_omi_backend.config import WS_IDLE_TIMEOUT_SECS
 from advanced_omi_backend.users import (
+    RegisteredClient,
     User,
     forget_client_for_user,
     get_user_by_client_id,
@@ -23,29 +24,30 @@ from advanced_omi_backend.users import (
 logger = logging.getLogger(__name__)
 
 
-def _device_view(entry: dict, client_manager: ClientManager, now: float) -> dict:
+def _device_view(
+    entry: RegisteredClient, client_manager: ClientManager, now: float
+) -> dict:
     """Shape one registry device joined with its live connection state.
 
     `connected` and `last_seen` come from the in-memory ClientState when the device is
     live (authoritative), falling back to the persisted registry timestamp when offline.
     """
-    client_id = entry["client_id"]
+    client_id = entry.client_id
     state = client_manager.get_client(client_id)
     if state is not None:
         last_seen = max(0.0, now - state.last_activity)
         connected = last_seen < WS_IDLE_TIMEOUT_SECS
         has_active = bool(state.stream_session_id) or state.batch_started
     else:
-        last = entry.get("last_seen")
-        last_seen = max(0.0, now - last.timestamp()) if last is not None else None
+        last_seen = max(0.0, now - entry.last_seen.timestamp())
         connected = False
         has_active = False
     return {
         "client_id": client_id,
-        "device_name": entry.get("device_name"),
-        "name": entry.get("name") or entry.get("device_name") or client_id,
+        "device_name": entry.device_name,
+        "name": entry.name or entry.device_name or client_id,
         "connected": connected,
-        "last_seen": round(last_seen, 1) if last_seen is not None else None,
+        "last_seen": round(last_seen, 1),
         "has_active_conversation": has_active,
     }
 
@@ -61,7 +63,7 @@ async def list_devices(user: User, client_manager: ClientManager) -> dict:
     devices = []
     for u in users:
         owner_email = u.email
-        for entry in u.registered_clients.values():
+        for entry in u.registered_clients:
             view = _device_view(entry, client_manager, now)
             view["user_email"] = owner_email
             devices.append(view)
@@ -77,7 +79,7 @@ async def rename_device(user: User, client_id: str, name: str):
             status_code=400, content={"error": "name must not be empty"}
         )
 
-    owner = user if client_id in user.registered_clients else None
+    owner = user if user.has_client(client_id) else None
     if owner is None and user.is_superuser:
         owner = await get_user_by_client_id(client_id)
     if owner is None:
@@ -91,7 +93,7 @@ async def rename_device(user: User, client_id: str, name: str):
 async def forget_device(user: User, client_id: str, client_manager: ClientManager):
     """Remove a device from the registry. A currently-connected device is also evicted
     so it doesn't immediately re-appear from its live ClientState."""
-    owner = user if client_id in user.registered_clients else None
+    owner = user if user.has_client(client_id) else None
     if owner is None and user.is_superuser:
         owner = await get_user_by_client_id(client_id)
     if owner is None:

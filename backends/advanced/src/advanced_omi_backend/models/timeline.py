@@ -1,7 +1,8 @@
 """Durable evidence and revisioned semantic timeline models."""
 
 import uuid
-from datetime import date, datetime, timezone
+from collections.abc import Iterable, Mapping, Sequence
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal, Optional
 
 from beanie import Document
@@ -77,6 +78,100 @@ class TimelineAudioRange(BaseModel):
         if self.ended_at <= self.started_at:
             raise ValueError("timeline audio range must have positive duration")
         return self
+
+
+def _utc(value: datetime) -> datetime:
+    """Mongo hands back naive datetimes; compare everything in UTC."""
+
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def clip_audio_ranges(
+    ranges: Sequence[TimelineAudioRange],
+    start: datetime,
+    end: datetime,
+    chunk_spans: Mapping[str, Optional[tuple[datetime, float]]],
+    *,
+    keep_unplaceable: bool,
+) -> list[TimelineAudioRange]:
+    """The audio claim of ``ranges`` restricted to ``[start, end)``.
+
+    An episode's ranges are its claim over real audio, so cutting the episode has to
+    cut the claim too. Splitting used to deep-copy every range onto both halves, which
+    made each half claim the whole original recording — both sides played the same
+    audio, and each reported the other's recordings as its own.
+
+    ``chunk_spans`` maps a chunk id to its ``(captured_at, duration)``; the caller
+    supplies it so this stays a pure function. A chunk whose span is unknown — 3% of
+    this deployment's chunks predate ``captured_at`` — cannot be placed on either side
+    of the cut, so ``keep_unplaceable`` decides where it goes. Callers give it to the
+    surviving head only: dropping it would lose a reference that a later
+    ``captured_at`` backfill could still resolve, and putting it on both sides would
+    reinstate exactly the double-claim being fixed.
+    """
+
+    start, end = _utc(start), _utc(end)
+    clipped: list[TimelineAudioRange] = []
+
+    for audio_range in ranges:
+        range_start = max(_utc(audio_range.started_at), start)
+        range_end = min(_utc(audio_range.ended_at), end)
+        if range_end <= range_start:
+            continue
+
+        chunk_ids = []
+        for chunk_id in audio_range.chunk_ids:
+            span = chunk_spans.get(chunk_id)
+            if span is None:
+                if keep_unplaceable:
+                    chunk_ids.append(chunk_id)
+                continue
+            captured_at, duration = span
+            captured_at = _utc(captured_at)
+            if (
+                captured_at < range_end
+                and captured_at + timedelta(seconds=duration) > range_start
+            ):
+                chunk_ids.append(chunk_id)
+
+        # ``chunk_ids`` is min_length=1: a window covering none of this range's audio
+        # is not a claim at all, so the range is dropped rather than emptied.
+        if not chunk_ids:
+            continue
+
+        clipped.append(
+            audio_range.model_copy(
+                update={
+                    "chunk_ids": chunk_ids,
+                    "started_at": range_start,
+                    "ended_at": range_end,
+                }
+            )
+        )
+
+    return clipped
+
+
+def merge_audio_ranges(
+    groups: Iterable[Sequence[TimelineAudioRange]],
+) -> list[TimelineAudioRange]:
+    """The union of several episodes' audio claims, in wall-clock order.
+
+    Merging used to union evidence, entities and conversation ids while leaving
+    ``audio_ranges`` untouched, so the survivor kept only its own audio and every
+    absorbed episode's went to the grave with its document — a merged episode covering
+    three recordings could play one.
+
+    Ranges are identified by ``range_id`` and are immutable, so a union deduplicated on
+    that id needs no interval arithmetic: two episodes citing the same range cite the
+    same audio.
+    """
+
+    merged: dict[str, TimelineAudioRange] = {}
+    for group in groups:
+        for audio_range in group:
+            merged.setdefault(audio_range.range_id, audio_range)
+    return sorted(merged.values(), key=lambda item: _utc(item.started_at))
 
 
 class AudioEvidenceSpan(Document):
@@ -260,7 +355,7 @@ class TimelineEpisode(Document):
     # Per-episode record of the settled-day vault write, for resumability within a day
     # and for showing provenance. The authoritative latch is ``TimelineDay.memory_state``
     # — episode rows are per-run and do not survive regeneration.
-    memory_state: Literal["", "written", "skipped"] = ""
+    memory_state: Literal["", "written", "partial", "skipped"] = ""
     vault_paths: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utcnow)
     revised_at: datetime = Field(default_factory=utcnow)
@@ -293,15 +388,22 @@ class TimelineDay(Document):
     active_run_created_at: Optional[datetime] = None
     evidence_revision: Optional[str] = None
     coverage: dict[str, Any] = Field(default_factory=dict)
-    # Authoritative latch for the settled-day vault write. Memory is written once per
-    # (user, local_date): a later re-analysis changes ``active_run_id`` but must not
-    # re-trigger a write, because the vault already holds the day and regeneration is
-    # non-deterministic. ``claimed`` is held only while the agent runs.
+    # Authoritative latch for the settled-day vault write. It is valid only while
+    # ``memory_run_id == active_run_id``. Publishing a newer generation clears the
+    # latch so the canonical Daily episode index cannot silently retain stale bounds.
+    # ``claimed`` is held only while the agent runs.
     # ``no_changes`` is terminal like ``written``: the agent read the day and judged it
     # already recorded. Distinct from ``written`` so a day the vault never gained
     # anything from is visible, and from ``skipped`` which means there was no analysis
     # to record at all.
-    memory_state: Literal["", "claimed", "written", "skipped", "no_changes"] = ""
+    # ``partial`` is terminal too: the agent was truncated or stalled after producing a
+    # structurally valid day note, so audited mutations are kept but the run may never
+    # have reached its People/Topic edits. It is not retried, because truncation
+    # belongs to the model's round limit rather than to this day — republishing the
+    # day's analysis clears the latch and writes it properly.
+    memory_state: Literal[
+        "", "claimed", "written", "partial", "skipped", "no_changes"
+    ] = ""
     memory_run_id: Optional[str] = None
     memory_claimed_at: Optional[datetime] = None
     memory_written_at: Optional[datetime] = None

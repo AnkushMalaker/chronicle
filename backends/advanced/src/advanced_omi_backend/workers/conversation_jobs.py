@@ -21,6 +21,7 @@ from rq.job import Job
 
 from advanced_omi_backend.config import get_live_segmentation, silence_trim_settings
 from advanced_omi_backend.config_loader import get_backend_config
+from advanced_omi_backend.constants import TITLE_NOT_GENERATED
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     enqueue_speech_detection,
@@ -73,8 +74,9 @@ from advanced_omi_backend.utils.audio_trim import (
 from advanced_omi_backend.utils.conversation_utils import (
     analyze_speech,
     extract_speakers_from_segments,
+    generate_conversation_title,
     generate_detailed_summary,
-    generate_title_and_summary,
+    generate_short_summary,
     is_meaningful_speech,
     mark_conversation_deleted,
     track_speech_activity,
@@ -772,7 +774,7 @@ async def _initialize_conversation(
             f"Assigned conversation {conversation_id} disappeared during initialization"
         )
     conversation_created = assignment.created
-    conversation.title = "Recording..."
+    conversation.title = TITLE_NOT_GENERATED
     conversation.summary = "Transcribing audio..."
     await conversation.save()
 
@@ -786,7 +788,7 @@ async def _initialize_conversation(
             {
                 "conversation_id": conversation_id,
                 "client_id": client_id,
-                "title": "Recording...",
+                "title": TITLE_NOT_GENERATED,
             },
         )
 
@@ -1501,8 +1503,12 @@ async def _save_streaming_transcript(
         else:
             segments = []
 
-    # Determine provider from streaming results
-    provider = final_transcript.get("provider", "deepgram")
+    # Provenance as reported by the producer. No "deepgram" default: guessing a
+    # provider is worse than recording that it is unknown, because the guess is
+    # indistinguishable from a real Deepgram transcript afterwards.
+    provider = final_transcript.get("provider") or "unknown"
+    mode = final_transcript.get("mode") or "streaming"
+    model = final_transcript.get("model") or provider
 
     # Diarization source reflects real provider diarization, not the fallback segment
     diarization_source = "provider" if provider_diarized else None
@@ -1514,10 +1520,11 @@ async def _save_streaming_transcript(
         words=words,  # Store at version level
         segments=segments,  # Provider segments or empty (filled by speaker service later)
         provider=provider,
-        model=provider,  # Provider name as model
+        model=model,
         processing_time_seconds=None,  # Not applicable for streaming
         metadata={
             "source": "streaming",
+            "mode": mode,
             "chunk_count": final_transcript.get("chunk_count", 0),
             "word_count": len(words),
             "provider_capabilities": {"diarization": provider_diarized},
@@ -1609,12 +1616,15 @@ async def _enqueue_post_processing(
             depends_on_job=batch_job,
             client_id=client_id,
             end_reason=end_reason,
+            trigger=Conversation.ProcessingTrigger.LIVE_SESSION.value,
         )
 
         logger.info(
             f"📥 Pipeline: batch_retranscribe({batch_job.id}) → "
             f"speaker({job_ids['speaker_recognition']}) → "
-            f"[memory({job_ids['memory']}) + title({job_ids['title_summary']})] → "
+            f"memory({job_ids['memory']}) → summary_bundle("
+            f"{job_ids['title']}, {job_ids['short_summary']}, "
+            f"{job_ids['detailed_summary']}) → "
             f"event({job_ids['event_dispatch']})"
         )
     else:
@@ -1626,11 +1636,14 @@ async def _enqueue_post_processing(
             depends_on_job=None,  # No dependency - streaming already succeeded
             client_id=client_id,  # Pass client_id for UI tracking
             end_reason=end_reason,  # Pass the determined end_reason (websocket_disconnect, inactivity_timeout, etc.)
+            trigger=Conversation.ProcessingTrigger.LIVE_SESSION.value,
         )
 
         logger.info(
             f"📥 Pipeline: speaker({job_ids['speaker_recognition']}) → "
-            f"[memory({job_ids['memory']}) + title({job_ids['title_summary']})] → "
+            f"memory({job_ids['memory']}) → summary_bundle("
+            f"{job_ids['title']}, {job_ids['short_summary']}, "
+            f"{job_ids['detailed_summary']}) → "
             f"event({job_ids['event_dispatch']})"
         )
 
@@ -1924,81 +1937,176 @@ async def open_conversation_job(
                 logger.error(f"❌ Emergency cleanup also failed: {cleanup_error}")
 
 
-@async_job(redis=True, beanie=True)
-@traced_job("title_summary", pipeline_stage="title_summary", gen_ai_operation="chat")
-async def generate_title_summary_job(
-    conversation_id: str, *, redis_client=None
-) -> Dict[str, Any]:
-    """
-    Generate title, short summary, and detailed summary for a conversation using LLM.
-
-    This job runs independently of transcription and memory jobs to ensure
-    conversations always get meaningful titles and summaries, even if other
-    processing steps fail.
-
-    Uses the utility functions from conversation_utils for consistent title/summary generation.
-
-    Args:
-        conversation_id: Conversation ID
-        redis_client: Redis client (injected by decorator)
-
-    Returns:
-        Dict with generated title, summary, and detailed_summary
-    """
-    set_otel_session(conversation_id)
-    logger.info(
-        f"📝 Starting title/summary generation for conversation {conversation_id}"
-    )
-
-    start_time = time.time()
-
-    # Get the conversation
+async def _get_summary_job_input(
+    conversation_id: str, stage: str
+) -> tuple[Optional[Conversation], str, list, Optional[Dict[str, Any]]]:
+    """Load one summary-stage input and apply common skip/error rules."""
     conversation = await Conversation.find_one(
         Conversation.conversation_id == conversation_id
     )
     if not conversation:
         logger.error(f"Conversation {conversation_id} not found")
-        return {"success": False, "error": "Conversation not found"}
-
+        return None, "", [], {"success": False, "error": "Conversation not found"}
     if conversation.memory_excluded:
         logger.info(
-            f"Skipping title/summary generation for memory-excluded conversation {conversation_id[:8]}"
+            f"Skipping {stage} generation for memory-excluded conversation "
+            f"{conversation_id[:8]}"
         )
-        return {
-            "success": True,
-            "skipped": True,
-            "reason": "memory_excluded",
-            "conversation_id": conversation_id,
-        }
+        return (
+            conversation,
+            "",
+            [],
+            {
+                "success": True,
+                "skipped": True,
+                "reason": "memory_excluded",
+                "conversation_id": conversation_id,
+            },
+        )
 
-    set_span_attrs(user_id=str(conversation.user_id))
-
-    # Get transcript and segments (properties return data from active transcript version)
     transcript_text = conversation.transcript or ""
     segments = conversation.segments or []
-
-    if not transcript_text and (not segments or len(segments) == 0):
+    if not transcript_text and not segments:
         logger.warning(
-            f"⚠️ No transcript or segments available for conversation {conversation_id}"
+            f"No transcript or segments available for {stage} generation on "
+            f"conversation {conversation_id}"
         )
-        return {
-            "success": False,
-            "error": "No transcript or segments available",
-            "conversation_id": conversation_id,
-        }
+        return (
+            conversation,
+            transcript_text,
+            segments,
+            {
+                "success": False,
+                "error": "No transcript or segments available",
+                "conversation_id": conversation_id,
+            },
+        )
 
+    set_otel_session(conversation_id)
+    set_span_attrs(user_id=str(conversation.user_id))
     set_trace_io(input={"transcript": transcript_text})
+    return conversation, transcript_text, segments, None
 
-    # Generate title, short summary, and detailed summary using unified utilities
-    try:
-        logger.info(
-            f"🤖 Generating title/summary/detailed_summary using LLM for conversation {conversation_id}"
+
+def _publish_summary_update(conversation: Conversation) -> None:
+    publish_sse_event(
+        str(conversation.user_id),
+        "conversation.updated",
+        {
+            "conversation_id": conversation.conversation_id,
+            "title": conversation.title,
+            "summary": conversation.summary,
+        },
+    )
+
+
+@async_job(redis=True, beanie=True)
+@traced_job("title", pipeline_stage="title", gen_ai_operation="chat")
+async def generate_title_job(
+    conversation_id: str, *, redis_client=None
+) -> Dict[str, Any]:
+    """Generate and persist only the conversation title."""
+    started_at = time.time()
+    conversation, transcript_text, segments, early_result = (
+        await _get_summary_job_input(conversation_id, "title")
+    )
+    if early_result is not None:
+        return early_result
+    assert conversation is not None
+
+    title = await generate_conversation_title(
+        transcript_text,
+        segments=segments,
+        user_id=conversation.user_id,
+    )
+    if title == TITLE_NOT_GENERATED or not title.strip():
+        raise RuntimeError(
+            f"Title generation returned the missing-title placeholder for {conversation_id}"
         )
+    conversation.title = title
+    await conversation.save()
+    _publish_summary_update(conversation)
+    processing_time = time.time() - started_at
+    update_job_meta(
+        conversation_id=conversation_id,
+        title=title,
+        segment_count=len(segments),
+        processing_time=processing_time,
+    )
+    result = {
+        "success": True,
+        "conversation_id": conversation_id,
+        "title": title,
+        "processing_time_seconds": processing_time,
+    }
+    set_trace_io(output=result)
+    logger.info(f"Generated title for {conversation_id} in {processing_time:.2f}s")
+    return result
 
-        # Fetch memory context for richer detailed summaries
-        # Use the entire transcript as the search query for best semantic matching
-        # so all key topics/entities in the conversation can find relevant memories
-        memory_context = None
+
+@async_job(redis=True, beanie=True)
+@traced_job("short_summary", pipeline_stage="short_summary", gen_ai_operation="chat")
+async def generate_short_summary_job(
+    conversation_id: str, *, redis_client=None
+) -> Dict[str, Any]:
+    """Generate and persist only the short conversation summary."""
+    started_at = time.time()
+    conversation, transcript_text, segments, early_result = (
+        await _get_summary_job_input(conversation_id, "short summary")
+    )
+    if early_result is not None:
+        return early_result
+    assert conversation is not None
+
+    summary = await generate_short_summary(
+        transcript_text,
+        segments=segments,
+        user_id=conversation.user_id,
+    )
+    conversation.summary = summary
+    await conversation.save()
+    _publish_summary_update(conversation)
+    processing_time = time.time() - started_at
+    update_job_meta(
+        conversation_id=conversation_id,
+        summary=summary,
+        segment_count=len(segments),
+        processing_time=processing_time,
+    )
+    result = {
+        "success": True,
+        "conversation_id": conversation_id,
+        "summary": summary,
+        "processing_time_seconds": processing_time,
+    }
+    set_trace_io(output=result)
+    logger.info(
+        f"Generated short summary for {conversation_id} in {processing_time:.2f}s"
+    )
+    return result
+
+
+@async_job(redis=True, beanie=True)
+@traced_job(
+    "detailed_summary", pipeline_stage="detailed_summary", gen_ai_operation="chat"
+)
+async def generate_detailed_summary_job(
+    conversation_id: str,
+    *,
+    include_memory_context: bool = True,
+    redis_client=None,
+) -> Dict[str, Any]:
+    """Generate and persist only the detailed conversation summary."""
+    started_at = time.time()
+    conversation, transcript_text, segments, early_result = (
+        await _get_summary_job_input(conversation_id, "detailed summary")
+    )
+    if early_result is not None:
+        return early_result
+    assert conversation is not None
+
+    memory_context = None
+    if include_memory_context:
         try:
             memory_service = get_memory_service()
             memories = await memory_service.search_memories(
@@ -2006,109 +2114,39 @@ async def generate_title_summary_job(
             )
             if memories:
                 memory_context = "\n".join(m.content for m in memories if m.content)
-                logger.info(
-                    f"📚 Retrieved {len(memories)} memories as context for detailed summary"
-                )
-            else:
-                logger.info(f"📚 No memories found for context enrichment")
         except Exception as mem_error:
             logger.warning(
-                f"⚠️ Could not fetch memory context (continuing without): {mem_error}"
+                f"Could not fetch detailed-summary memory context (continuing without): "
+                f"{mem_error}"
             )
+    else:
+        logger.info("Skipping vault retrieval for bulk timeline promotion")
 
-        # Generate title+summary (one call) and detailed summary in parallel
-        (title, short_summary), detailed_summary = await asyncio.gather(
-            generate_title_and_summary(
-                transcript_text,
-                segments=segments,
-                user_id=conversation.user_id,
-            ),
-            generate_detailed_summary(
-                transcript_text,
-                segments=segments,
-                memory_context=memory_context,
-            ),
-        )
-
-        conversation.title = title
-        conversation.summary = short_summary
-        conversation.detailed_summary = detailed_summary
-
-        logger.info(f"✅ Generated title: '{conversation.title}'")
-        logger.info(f"✅ Generated summary: '{conversation.summary}'")
-        logger.info(
-            f"✅ Generated detailed summary: {len(conversation.detailed_summary)} chars"
-        )
-
-        # Status is owned by the finalizer (dispatch_conversation_complete_event_job),
-        # not stamped here. A transcript exists, so it will reconcile to "completed".
-
-    except Exception as gen_error:
-        logger.error(f"❌ Title/summary generation failed: {gen_error}")
-
-        # A title/summary failure is NOT a transcription failure — the transcript
-        # exists and is usable. Do not downgrade the status (the old code mislabeled
-        # this as transcription_failed). Record the soft failure stage for visibility
-        # and leave the terminal status to the finalizer (which will mark completed).
-        conversation.failure_stage = "summarization"
-        if not conversation.title or conversation.title in (
-            "Recording...",
-            "Reprocessing...",
-        ):
-            conversation.title = "Audio Recording"
-        await conversation.save()
-        logger.warning(
-            f"⚠️ Title/summary generation failed for {conversation_id}; transcript is "
-            f"intact, leaving status to finalizer (failure_stage=summarization)."
-        )
-
-        return {
-            "success": False,
-            "error": str(gen_error),
-            "conversation_id": conversation_id,
-            "processing_time_seconds": time.time() - start_time,
-        }
-
-    # Save the updated conversation
-    await conversation.save()
-
-    processing_time = time.time() - start_time
-
-    publish_sse_event(
-        str(conversation.user_id),
-        "conversation.updated",
-        {
-            "conversation_id": conversation_id,
-            "title": conversation.title,
-            "summary": conversation.summary,
-        },
+    detailed_summary = await generate_detailed_summary(
+        transcript_text,
+        segments=segments,
+        memory_context=memory_context,
     )
-
-    # Update job metadata
+    conversation.detailed_summary = detailed_summary
+    await conversation.save()
+    _publish_summary_update(conversation)
+    processing_time = time.time() - started_at
     update_job_meta(
         conversation_id=conversation_id,
-        title=conversation.title,
-        summary=conversation.summary,
-        detailed_summary_length=(
-            len(conversation.detailed_summary) if conversation.detailed_summary else 0
-        ),
+        detailed_summary_length=len(detailed_summary),
         segment_count=len(segments),
         processing_time=processing_time,
     )
-
-    logger.info(
-        f"✅ Title/summary generation completed for {conversation_id} in {processing_time:.2f}s"
-    )
-
     result = {
         "success": True,
         "conversation_id": conversation_id,
-        "title": conversation.title,
-        "summary": conversation.summary,
-        "detailed_summary": conversation.detailed_summary,
+        "detailed_summary": detailed_summary,
         "processing_time_seconds": processing_time,
     }
     set_trace_io(output=result)
+    logger.info(
+        f"Generated detailed summary for {conversation_id} in {processing_time:.2f}s"
+    )
     return result
 
 
@@ -2118,6 +2156,7 @@ async def dispatch_conversation_complete_event_job(
     client_id: str,
     user_id: str,
     end_reason: Optional[str] = None,
+    trigger: str = Conversation.ProcessingTrigger.FILE_UPLOAD.value,
     *,
     redis_client=None,
 ) -> Dict[str, Any]:
@@ -2132,8 +2171,11 @@ async def dispatch_conversation_complete_event_job(
         conversation_id: Conversation ID
         client_id: Client ID
         user_id: User ID
-        end_reason: Reason the conversation ended (e.g., 'file_upload', 'websocket_disconnect', 'user_stopped')
-                   Defaults to 'file_upload' for backward compatibility
+        end_reason: Why the *recording* ended — a ``Conversation.EndReason`` value, or
+            None when nothing ended now. A reprocess passes None so the original
+            reason survives, and an upload passes None because a file never ended for
+            an operational reason.
+        trigger: Why the *pipeline* is running — a ``Conversation.ProcessingTrigger``
         redis_client: Redis client (injected by decorator)
 
     Returns:
@@ -2164,7 +2206,15 @@ async def dispatch_conversation_complete_event_job(
         try:
             conversation.end_reason = Conversation.EndReason(end_reason)
         except ValueError:
-            logger.warning(f"⚠️ Invalid end_reason '{end_reason}', using UNKNOWN")
+            # No longer reachable from a processing trigger — those travel in
+            # ``trigger`` now. A value landing here is a caller passing something that
+            # is not an EndReason at all, which UNKNOWN would quietly absorb.
+            logger.error(
+                "⚠️ %s is not a Conversation.EndReason (conversation %s); "
+                "storing UNKNOWN",
+                end_reason,
+                conversation_id,
+            )
             conversation.end_reason = Conversation.EndReason.UNKNOWN
         needs_save = True
 
@@ -2199,8 +2249,13 @@ async def dispatch_conversation_complete_event_job(
             exc,
         )
 
+    # The conversation's own reason, which a reprocess leaves untouched — not the
+    # trigger that started this run.
+    settled_end_reason = (
+        conversation.end_reason.value if conversation.end_reason else None
+    )
+
     if conversation.memory_excluded:
-        actual_end_reason = end_reason or "file_upload"
         logger.info(
             f"Skipping conversation.complete plugins for memory-excluded conversation {conversation_id[:8]}"
         )
@@ -2209,7 +2264,8 @@ async def dispatch_conversation_complete_event_job(
             "conversation.completed",
             {
                 "conversation_id": conversation_id,
-                "end_reason": actual_end_reason,
+                "end_reason": settled_end_reason,
+                "trigger": trigger,
             },
         )
         return {
@@ -2225,7 +2281,6 @@ async def dispatch_conversation_complete_event_job(
     user_email = user.email if user else ""
 
     # Prepare plugin event data (same format as open_conversation_job)
-    actual_end_reason = end_reason or "file_upload"
     try:
         plugin_results = await dispatch_plugin_event(
             event=PluginEvent.CONVERSATION_COMPLETE,
@@ -2239,8 +2294,11 @@ async def dispatch_conversation_complete_event_job(
                 "duration": 0,  # Duration not tracked for file uploads
                 "conversation_id": conversation_id,
             },
-            metadata={"end_reason": actual_end_reason},
-            description=f"conversation={conversation_id[:12]}, end_reason={actual_end_reason}",
+            metadata={"end_reason": settled_end_reason, "trigger": trigger},
+            description=(
+                f"conversation={conversation_id[:12]}, "
+                f"end_reason={settled_end_reason}, trigger={trigger}"
+            ),
             require_router=True,
         )
 
@@ -2254,7 +2312,8 @@ async def dispatch_conversation_complete_event_job(
             "conversation.completed",
             {
                 "conversation_id": conversation_id,
-                "end_reason": actual_end_reason,
+                "end_reason": settled_end_reason,
+                "trigger": trigger,
             },
         )
 

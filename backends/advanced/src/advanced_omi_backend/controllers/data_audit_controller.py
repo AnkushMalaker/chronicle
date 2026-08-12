@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi.responses import FileResponse, JSONResponse
 
+from advanced_omi_backend.client_manager import synthetic_client_id
 from advanced_omi_backend.config import get_diarization_settings
 from advanced_omi_backend.constants import is_non_enrollable_speaker
 from advanced_omi_backend.controllers.conversation_controller import (
@@ -1219,7 +1220,7 @@ async def identify_segment_clip(
     # caller surfaces the cosine (color-coded) so a weak match reads as weak;
     # `found` reflects whether it would clear the real operating threshold.
     suggest = await speaker_client.identify_segment(
-        wav_bytes, user_id="1", similarity_threshold=0.0
+        wav_bytes, user_id=str(user.user_id), similarity_threshold=0.0
     )
     confidence = suggest.get("confidence")
     threshold = get_diarization_settings().get("similarity_threshold", 0.5)
@@ -2224,7 +2225,7 @@ async def import_annotation_dataset(user: User, archive_bytes: bytes):
     except AnnotationDatasetError as exc:
         return JSONResponse(status_code=422, content={"error": str(exc)})
 
-    client_id = f"{str(user.id)[-6:]}-annotation-import"
+    client_id = synthetic_client_id(user, "annotation-import")
     results = []
     for clip in dataset.clips:
         external_source_id = f"{dataset.dataset_id}:{clip.clip_id}"

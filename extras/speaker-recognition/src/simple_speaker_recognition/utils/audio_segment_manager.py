@@ -21,23 +21,23 @@ class AudioSegmentManager:
         self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
 
-    def _get_user_path(self, user_id: int) -> Path:
+    def _get_user_path(self, user_id: str) -> Path:
         """Get path for user's audio segments."""
         user_path = self.base_path / str(user_id)
         user_path.mkdir(parents=True, exist_ok=True)
         return user_path
 
-    def _get_speaker_path(self, user_id: int, speaker_id: str) -> Path:
+    def _get_speaker_path(self, user_id: str, speaker_id: str) -> Path:
         """Get path for speaker's audio segments."""
         speaker_path = self._get_user_path(user_id) / speaker_id
         speaker_path.mkdir(parents=True, exist_ok=True)
         return speaker_path
 
-    def _get_manifest_path(self, user_id: int, speaker_id: str) -> Path:
+    def _get_manifest_path(self, user_id: str, speaker_id: str) -> Path:
         """Get path to speaker's manifest file."""
         return self._get_speaker_path(user_id, speaker_id) / "manifest.json"
 
-    def _load_manifest(self, user_id: int, speaker_id: str) -> Dict[str, Any]:
+    def _load_manifest(self, user_id: str, speaker_id: str) -> Dict[str, Any]:
         """Load speaker's manifest file."""
         manifest_path = self._get_manifest_path(user_id, speaker_id)
 
@@ -51,7 +51,7 @@ class AudioSegmentManager:
         else:
             return self._create_empty_manifest(speaker_id)
 
-    def _save_manifest(self, user_id: int, speaker_id: str, manifest: Dict[str, Any]):
+    def _save_manifest(self, user_id: str, speaker_id: str, manifest: Dict[str, Any]):
         """Save speaker's manifest file."""
         manifest_path = self._get_manifest_path(user_id, speaker_id)
 
@@ -83,7 +83,7 @@ class AudioSegmentManager:
 
     def save_speaker_segment(
         self,
-        user_id: int,
+        user_id: str,
         speaker_id: str,
         audio_data: np.ndarray,
         sample_rate: int,
@@ -148,7 +148,7 @@ class AudioSegmentManager:
 
         return str(segment_path)
 
-    def load_speaker_segments(self, user_id: int, speaker_id: str) -> Dict[str, Any]:
+    def load_speaker_segments(self, user_id: str, speaker_id: str) -> Dict[str, Any]:
         """Load all segments for a speaker.
 
         Returns:
@@ -158,7 +158,7 @@ class AudioSegmentManager:
         return manifest
 
     def load_segment_audio(
-        self, user_id: int, speaker_id: str, segment_id: str
+        self, user_id: str, speaker_id: str, segment_id: str
     ) -> tuple[np.ndarray, int]:
         """Load audio data for a specific segment.
 
@@ -177,7 +177,7 @@ class AudioSegmentManager:
         return audio_data, sample_rate
 
     def update_segment_embedding(
-        self, user_id: int, speaker_id: str, segment_id: str, embedding: np.ndarray
+        self, user_id: str, speaker_id: str, segment_id: str, embedding: np.ndarray
     ):
         """Update embedding for a specific segment."""
         manifest = self._load_manifest(user_id, speaker_id)
@@ -194,7 +194,7 @@ class AudioSegmentManager:
         # Save updated manifest
         self._save_manifest(user_id, speaker_id, manifest)
 
-    def delete_segment(self, user_id: int, speaker_id: str, segment_id: str):
+    def delete_segment(self, user_id: str, speaker_id: str, segment_id: str):
         """Delete a specific segment."""
         manifest = self._load_manifest(user_id, speaker_id)
         speaker_path = self._get_speaker_path(user_id, speaker_id)
@@ -218,7 +218,7 @@ class AudioSegmentManager:
         # Save updated manifest
         self._save_manifest(user_id, speaker_id, manifest)
 
-    def delete_speaker_segments(self, user_id: int, speaker_id: str):
+    def delete_speaker_segments(self, user_id: str, speaker_id: str):
         """Delete all segments for a speaker."""
         speaker_path = self._get_speaker_path(user_id, speaker_id)
 
@@ -227,7 +227,7 @@ class AudioSegmentManager:
             logger.info(f"Deleted all segments for speaker {speaker_id}")
 
     def export_speaker_segments(
-        self, user_id: int, speaker_id: str, output_dir: str, format: str = "segments"
+        self, user_id: str, speaker_id: str, output_dir: str, format: str = "segments"
     ) -> Dict[str, Any]:
         """Export speaker segments.
 
@@ -311,7 +311,7 @@ class AudioSegmentManager:
         return export_info
 
     def get_all_segment_embeddings(
-        self, user_id: int, speaker_id: str
+        self, user_id: str, speaker_id: str
     ) -> List[Dict[str, Any]]:
         """Get all segment embeddings for a speaker.
 

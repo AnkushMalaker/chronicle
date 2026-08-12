@@ -33,7 +33,7 @@ def audio_content_hash(audio_data: bytes) -> str:
     return hashlib.sha256(audio_data).hexdigest()
 
 
-def existing_enrollment_hashes(user_id: int, speaker_id: str) -> set[str]:
+def existing_enrollment_hashes(user_id: str, speaker_id: str) -> set[str]:
     """Hash the audio already enrolled for one speaker.
 
     Enrollment galleries are small, so reading the files here keeps deduplication
@@ -82,7 +82,7 @@ def get_auth():
 
 
 def check_duplicate_speaker_name(
-    user_id: int, speaker_name: str, exclude_speaker_id: Optional[str] = None
+    user_id: str, speaker_name: str, exclude_speaker_id: Optional[str] = None
 ) -> bool:
     """Check if a speaker name already exists for the given user.
 
@@ -162,7 +162,7 @@ def save_segment_record(
 
 
 def save_enrollment_audio(
-    user_id: int,
+    user_id: str,
     speaker_id: str,
     audio_data: bytes,
     filename: str,
@@ -204,7 +204,7 @@ def save_enrollment_audio(
 
 
 def save_enrollment_manifest(
-    user_id: int, speaker_id: str, audio_files: List[dict]
+    user_id: str, speaker_id: str, audio_files: List[dict]
 ) -> Path:
     """Save or update enrollment manifest file.
 

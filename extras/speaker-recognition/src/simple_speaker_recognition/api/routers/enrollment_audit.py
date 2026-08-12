@@ -103,7 +103,7 @@ def _remove_manifest_audio_path(audio_file_path: str) -> None:
 
 @router.get("/enrollment/health")
 async def enrollment_health(
-    user_id: Optional[int] = Query(
+    user_id: Optional[str] = Query(
         None, description="Scope audit to a user's speakers"
     ),
     before: Optional[datetime] = Query(
@@ -132,7 +132,7 @@ def _backfill_job_response(job: ProcessingJob) -> dict:
     }
 
 
-async def _run_segment_backfill(job_id: int, user_id: int) -> None:
+async def _run_segment_backfill(job_id: int, user_id: str) -> None:
     """Populate missing per-clip embeddings using the service's loaded GPU model."""
     # Lazy: service.py includes this router, so a top-level import is circular.
     from .. import service
@@ -221,7 +221,7 @@ async def _run_segment_backfill(job_id: int, user_id: int) -> None:
 
 
 @router.post("/enrollment/segments/backfill", status_code=202)
-async def start_segment_backfill(user_id: int = Query(...)):
+async def start_segment_backfill(user_id: str = Query(...)):
     """Start or attach to the idempotent per-clip embedding backfill."""
     session = get_db_session()
     try:
@@ -255,7 +255,7 @@ async def start_segment_backfill(user_id: int = Query(...)):
 
 
 @router.get("/enrollment/segments/backfill")
-async def get_segment_backfill(user_id: int = Query(...)):
+async def get_segment_backfill(user_id: str = Query(...)):
     """Return the latest backfill job so refreshed pages reattach to it."""
     session = get_db_session()
     try:
