@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
+
 from simple_speaker_recognition.api.core.utils import (
     safe_format_confidence,
     secure_temp_file,

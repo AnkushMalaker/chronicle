@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple, cast
 
 import faiss
 import numpy as np
+
 from simple_speaker_recognition.database import get_db_session
 from simple_speaker_recognition.database.models import Speaker, User
 from simple_speaker_recognition.database.queries import UserQueries
@@ -34,7 +35,7 @@ class UnifiedSpeakerDB:
         self.index: faiss.IndexFlatIP = faiss.IndexFlatIP(emb_dim)
 
         # Mapping from FAISS index position to (user_id, speaker_id)
-        self.faiss_to_speaker: Dict[int, Tuple[int, str]] = {}
+        self.faiss_to_speaker: Dict[int, Tuple[str, str]] = {}
 
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self._load_state()
@@ -77,7 +78,7 @@ class UnifiedSpeakerDB:
                         vector_index = len(vectors)
                         vectors.append(embedding)
                         self.faiss_to_speaker[vector_index] = (
-                            cast(int, speaker.user_id),
+                            cast(str, speaker.user_id),
                             cast(str, speaker.id),
                         )
                     except (json.JSONDecodeError, ValueError) as e:
@@ -140,7 +141,7 @@ class UnifiedSpeakerDB:
                     existing_speaker.audio_sample_count = sample_count  # type: ignore[assignment]
                     existing_speaker.total_audio_duration = total_duration  # type: ignore[assignment]
                     log.info(
-                        "Updated existing speaker: %s (user: %d) with %d samples",
+                        "Updated existing speaker: %s (user: %s) with %d samples",
                         speaker_id,
                         user_id,
                         sample_count,
@@ -151,6 +152,9 @@ class UnifiedSpeakerDB:
                     self._rebuild_faiss_mapping()
                     self._save_faiss_index()
                 else:
+                    # The tenant is a Chronicle user id, so nothing seeds it ahead of
+                    # time; its row is created here, on that user's first enrolment.
+                    UserQueries.get_or_create_user(db, user_id)
                     # Create new speaker
                     new_speaker = Speaker(
                         id=speaker_id,
@@ -163,7 +167,7 @@ class UnifiedSpeakerDB:
                     db.add(new_speaker)
                     db.commit()
                     log.info(
-                        "Added new speaker: %s (user: %d) with %d samples",
+                        "Added new speaker: %s (user: %s) with %d samples",
                         speaker_id,
                         user_id,
                         sample_count,
@@ -211,7 +215,7 @@ class UnifiedSpeakerDB:
                 self._rebuild_faiss_mapping()
                 self._save_faiss_index()
 
-                log.info("Deleted speaker: %s (user: %d)", speaker_id, user_id)
+                log.info("Deleted speaker: %s (user: %s)", speaker_id, user_id)
 
             except Exception as e:
                 db.rollback()
@@ -232,11 +236,11 @@ class UnifiedSpeakerDB:
                 self._rebuild_faiss_mapping()
                 self._save_faiss_index()
 
-                log.info("Reset all speakers for user: %d", user_id)
+                log.info("Reset all speakers for user: %s", user_id)
 
             except Exception as e:
                 db.rollback()
-                log.error("Error resetting speakers for user %d: %s", user_id, e)
+                log.error("Error resetting speakers for user %s: %s", user_id, e)
                 raise
             finally:
                 db.close()
@@ -291,7 +295,7 @@ class UnifiedSpeakerDB:
                 else []
             )
             metadata = {
-                (cast(int, speaker.user_id), cast(str, speaker.id)): speaker
+                (cast(str, speaker.user_id), cast(str, speaker.id)): speaker
                 for speaker in speakers
             }
             ranked_rows: List[List[Dict]] = []
@@ -436,7 +440,7 @@ class UnifiedSpeakerDB:
                 {
                     "id": cast(str, speaker.id),
                     "name": cast(str, speaker.name),
-                    "user_id": cast(int, speaker.user_id),
+                    "user_id": cast(str, speaker.user_id),
                     "created_at": speaker.created_at,
                     "updated_at": speaker.updated_at,
                     "audio_sample_count": cast(
@@ -484,11 +488,17 @@ class UnifiedSpeakerDB:
         finally:
             db.close()
 
-    def ensure_admin_user(self) -> int:
-        """Ensure admin user exists and return user ID."""
+    def ensure_user(self, user_id: str) -> str:
+        """Ensure a tenant row exists for ``user_id``, and return it.
+
+        Replaces the old ``ensure_admin_user`` startup seed. A tenant is Chronicle's
+        user id now, so the service cannot invent one before a caller names it: it is
+        created the first time that user enrols. Seeding at startup also inserted a
+        row with no primary key once the column stopped autoincrementing, which
+        crashed the service before it could serve health.
+        """
         db = get_db_session()
         try:
-            admin_user = UserQueries.get_or_create_user(db, "admin")
-            return cast(int, admin_user.id)
+            return cast(str, UserQueries.get_or_create_user(db, user_id).id)
         finally:
             db.close()

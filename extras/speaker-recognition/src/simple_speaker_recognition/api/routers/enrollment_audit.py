@@ -19,6 +19,7 @@ import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+
 from simple_speaker_recognition.api.core.utils import secure_temp_file
 from simple_speaker_recognition.core.enrollment_audit import (
     compute_audit,

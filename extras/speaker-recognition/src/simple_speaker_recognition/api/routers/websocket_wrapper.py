@@ -24,6 +24,7 @@ from fastapi import (
 )
 from pyannote.audio import Model
 from pyannote.audio.pipelines import VoiceActivityDetection
+
 from simple_speaker_recognition.api.core.utils import (
     safe_format_confidence,
     validate_confidence,
@@ -804,14 +805,10 @@ async def deepgram_proxy_websocket(
     except (ValueError, TypeError):
         confidence_threshold = DEFAULT_SIMILARITY_THRESHOLD
 
-    # Parse user_id
-    if enhancement_params["user_id"]:
-        try:
-            user_id = int(enhancement_params["user_id"])
-        except (ValueError, TypeError):
-            user_id = None
-    else:
-        user_id = None
+    # The tenant is an opaque Chronicle id, so it is taken as given rather than
+    # coerced. int() here silently turned every ObjectId into "no user", which reads
+    # downstream as "search every gallery".
+    user_id = enhancement_params["user_id"] or None
 
     log.info(
         f"Enhancement params - user_id: {user_id}, confidence_threshold: {confidence_threshold}"

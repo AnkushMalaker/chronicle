@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
 from pydantic import Field
 from pydantic_settings import BaseSettings
+
 from simple_speaker_recognition.api.core.utils import get_data_directory
 from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 from simple_speaker_recognition.core.audio_backend import AudioBackend
@@ -105,7 +106,7 @@ class Settings(BaseSettings):
     # Backend API configuration for chunked processing
     # Loaded from root config.yml speaker_recognition section, can be overridden by env vars
     max_diarize_duration: int = Field(
-        default=60,
+        default=1200,
         description="Maximum audio duration (seconds) for single PyAnnote call",
     )
     diarize_chunk_overlap: float = Field(
@@ -132,7 +133,9 @@ class Settings(BaseSettings):
             "max_diarize_duration" not in kwargs
             and "MAX_DIARIZE_DURATION" not in os.environ
         ):
-            kwargs["max_diarize_duration"] = root_config.get("max_diarize_duration", 60)
+            kwargs["max_diarize_duration"] = root_config.get(
+                "max_diarize_duration", 1200
+            )
 
         if (
             "diarize_chunk_overlap" not in kwargs
@@ -278,9 +281,8 @@ async def lifespan(app: FastAPI):
     auth.enrollment_audio_dir.mkdir(parents=True, exist_ok=True)
     log.info("Enrollment audio directory ready: %s", auth.enrollment_audio_dir)
 
-    # Ensure admin user exists
-    admin_user_id = speaker_db.ensure_admin_user()
-    log.info("Admin user ready ✔ – user_id=%s", admin_user_id)
+    # No tenant is seeded here. A tenant is a Chronicle user id, which only a caller
+    # can supply, so rows are created on first enrolment instead.
 
     # Start the CUDA self-heal watchdog (no-op on CPU).
     watchdog_task = asyncio.create_task(_cuda_watchdog())

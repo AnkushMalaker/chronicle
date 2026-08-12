@@ -4,19 +4,25 @@ from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
+
 from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 
 
 class UserRequest(BaseModel):
-    """Request model for user creation."""
+    """Request model for user creation.
 
-    username: str
+    ``user_id`` is Chronicle's user id and is the tenant itself; the service cannot
+    mint one, so it is required rather than derived from the username.
+    """
+
+    user_id: str
+    username: Optional[str] = None
 
 
 class UserResponse(BaseModel):
     """Response model for user data."""
 
-    id: int
+    id: str
     username: str
     created_at: str
 

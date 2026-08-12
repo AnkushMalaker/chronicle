@@ -19,6 +19,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
+
 from simple_speaker_recognition.api.core.utils import (
     safe_format_confidence,
     validate_confidence,

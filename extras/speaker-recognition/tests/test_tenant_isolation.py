@@ -15,12 +15,14 @@ import json
 
 import numpy as np
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 from simple_speaker_recognition.core import unified_speaker_db
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.database import Base
 from simple_speaker_recognition.database.models import Speaker, User
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from simple_speaker_recognition.database.queries import UserQueries
 
 ALICE = "69b80e5894aa9ec334a421c9"
 BOB = "69b80e5894aa9ec334b53d70"
@@ -114,3 +116,39 @@ def test_both_tenants_can_be_identified_independently(two_tenant_db):
     assert alice_found and bob_found
     assert alice_speaker["id"] == "alice-speaker"
     assert bob_speaker["id"] == "bob-speaker"
+
+
+def test_a_tenant_row_can_be_created_on_a_cold_database(tmp_path):
+    """The service must survive a first start with an empty schema.
+
+    ``users.id`` stopped being an autoincrementing integer, so the old bootstrap —
+    ``User(username="admin")`` with no id — began inserting a NULL primary key. That
+    ran at startup, so the container crashed before serving ``/health`` and CI timed
+    out waiting for it. Nothing in a warm local database exercises this.
+    """
+
+    engine = create_engine(f"sqlite:///{tmp_path/'cold.db'}")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    created = UserQueries.get_or_create_user(session, ALICE)
+
+    assert created.id == ALICE
+    # Falls back to the id when no display name is offered, rather than NULL.
+    assert created.username == ALICE
+    # Idempotent: a second call returns the same row rather than colliding on the PK.
+    assert UserQueries.get_or_create_user(session, ALICE).id == ALICE
+    assert len(UserQueries.get_all_users(session)) == 1
+
+
+def test_two_tenants_coexist_on_a_cold_database(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path/'cold.db'}")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+
+    UserQueries.get_or_create_user(session, ALICE, "alice")
+    UserQueries.get_or_create_user(session, BOB, "bob")
+
+    assert sorted(u.id for u in UserQueries.get_all_users(session)) == sorted(
+        [ALICE, BOB]
+    )

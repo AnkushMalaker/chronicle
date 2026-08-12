@@ -10,6 +10,8 @@ from typing import List, Optional
 
 import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from sqlalchemy import func
+
 from simple_speaker_recognition.api.core.utils import (
     extract_user_id_from_speaker_id,
     get_data_directory,
@@ -19,7 +21,6 @@ from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB
 from simple_speaker_recognition.database import get_db_session
 from simple_speaker_recognition.database.models import Speaker, SpeakerAudioSegment
 from simple_speaker_recognition.utils.audio_processing import get_audio_info
-from sqlalchemy import func
 
 # These will be imported from the main service.py when we integrate
 # from ..service import get_db, audio_backend, auth

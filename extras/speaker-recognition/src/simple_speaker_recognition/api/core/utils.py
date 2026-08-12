@@ -105,24 +105,30 @@ def secure_temp_file(suffix: str = ".wav") -> tempfile._TemporaryFileWrapper:
     return tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
 
 
-def extract_user_id_from_speaker_id(speaker_id: str) -> int:
-    """Extract user_id from speaker_id format: user_{user_id}_..."""
-    if not speaker_id.startswith("user_"):
-        raise HTTPException(
-            400,
-            f"Invalid speaker_id format. Expected 'user_{{user_id}}_...', got: {speaker_id}",
-        )
+def extract_user_id_from_speaker_id(speaker_id: str) -> str:
+    """Return the tenant that owns ``speaker_id``, read from the speaker row.
 
+    Deliberately a lookup rather than a parse. The id is *conventionally*
+    ``user_{user_id}_speaker_{hex}``, but that convention is not the ownership
+    record — the ``speakers.user_id`` column is, and it stays right when a speaker is
+    imported, renamed, or created by a client that formats ids differently. The old
+    ``int(speaker_id.split("_")[1])`` also stopped working the moment a tenant became
+    a Chronicle ObjectId, which is not an integer.
+    """
+
+    # Imported here to avoid a circular import: database.queries imports the API
+    # models that this utils module is itself imported by.
+    from simple_speaker_recognition.database import get_db_session
+    from simple_speaker_recognition.database.models import Speaker
+
+    db = get_db_session()
     try:
-        parts = speaker_id.split("_")
-        if len(parts) < 2:
-            raise ValueError("Not enough parts")
-        user_id = int(parts[1])
-        return user_id
-    except (ValueError, IndexError):
-        raise HTTPException(
-            400, f"Invalid speaker_id format. Cannot extract user_id from: {speaker_id}"
-        )
+        speaker = db.query(Speaker).filter(Speaker.id == speaker_id).first()
+        if speaker is None:
+            raise HTTPException(404, f"Speaker not found: {speaker_id}")
+        return str(speaker.user_id)
+    finally:
+        db.close()
 
 
 def validate_confidence(confidence: Any, context: str = "") -> float:

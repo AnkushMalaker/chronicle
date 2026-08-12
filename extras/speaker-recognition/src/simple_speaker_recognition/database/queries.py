@@ -19,11 +19,20 @@ class UserQueries:
     """User-related database queries."""
 
     @staticmethod
-    def get_or_create_user(db: Session, username: str) -> User:
-        """Get existing user or create new one."""
-        user = db.query(User).filter(User.username == username).first()
+    def get_or_create_user(
+        db: Session, user_id: str, username: Optional[str] = None
+    ) -> User:
+        """Get the tenant with this id, creating it on first use.
+
+        Keyed on ``user_id`` rather than ``username`` because the id is Chronicle's
+        and is the only thing that scopes a gallery. The primary key is a string with
+        no server-side default, so a row can no longer be inserted without one — the
+        old ``User(username=...)`` relied on integer autoincrement and would now write
+        a NULL key.
+        """
+        user = db.query(User).filter(User.id == user_id).first()
         if not user:
-            user = User(username=username)
+            user = User(id=user_id, username=username or user_id)
             db.add(user)
             db.commit()
             db.refresh(user)
