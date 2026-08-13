@@ -1120,6 +1120,7 @@ export interface AuditListResponse {
   // Distinct speaker labels present in the scanned working set, so the
   // speaker filter offers only labels that exist in the current view.
   speakers: string[]
+  has_unknown_speakers: boolean
   // Annotation dataset IDs available to the dataset filter.
   datasets: string[]
 }
@@ -1140,6 +1141,31 @@ export interface AnnotationImportResponse {
     skipped: number
     failed: number
   }
+}
+
+export interface UnknownSpeakerSegment {
+  segment_index: number
+  start: number
+  end: number
+  duration: number
+  text: string
+}
+
+export interface UnknownSpeakerIdentity {
+  identity_key: string
+  conversation_id: string
+  conversation_title: string
+  conversation_date: string
+  local_label: string
+  segments: UnknownSpeakerSegment[]
+}
+
+export interface UnknownSpeakerCluster {
+  cluster_id: string
+  run_fingerprint: string
+  conversation_count: number
+  segment_count: number
+  members: UnknownSpeakerIdentity[]
 }
 
 export interface SpeakerConfidenceRow {
@@ -1851,6 +1877,31 @@ export const dataAuditApi = {
       '/api/data-audit/enrollment/guided/discover',
       { speaker_name: speakerName, batch_size: 5, include_deleted: includeDeleted }
     ),
+
+  discoverUnknownSpeakers: () =>
+    api.post<{ job_id: string; status: string; reused: boolean }>(
+      '/api/data-audit/enrollment/unknown/discover'
+    ),
+
+  getUnknownSpeakerClusters: () =>
+    api.get<{ clusters: UnknownSpeakerCluster[] }>(
+      '/api/data-audit/enrollment/unknown/clusters'
+    ),
+
+  decideUnknownSpeakerCluster: (
+    cluster: UnknownSpeakerCluster,
+    action: 'confirm' | 'dismiss',
+    speakerName: string | null,
+    acceptedIdentityKeys: string[],
+    enrollmentClips: Array<{ identity_key: string; segment_index: number }>
+  ) =>
+    api.post(`/api/data-audit/enrollment/unknown/clusters/${cluster.cluster_id}/decide`, {
+      run_fingerprint: cluster.run_fingerprint,
+      action,
+      speaker_name: speakerName,
+      accepted_identity_keys: acceptedIdentityKeys,
+      enrollment_clips: enrollmentClips,
+    }),
 
   // Upload an unlabelled audio corpus and mine it for one speaker: files become
   // annotation-only conversations; discovery is chained after transcription.

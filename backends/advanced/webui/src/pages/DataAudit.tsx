@@ -18,6 +18,7 @@ import SplitConversationModal from '../components/dataAudit/SplitConversationMod
 import MergePreviewModal from '../components/dataAudit/MergePreviewModal'
 import ExportModal from '../components/dataAudit/ExportModal'
 import GuidedEnrollment from '../components/dataAudit/GuidedEnrollment'
+import UnknownSpeakerDiscovery from '../components/dataAudit/UnknownSpeakerDiscovery'
 import SpeakerLabelReview from '../components/dataAudit/SpeakerLabelReview'
 import EnrollmentCandidates from '../components/finetuning/EnrollmentCandidates'
 import { Alert, Button, Label, Modal, Select, Tabs } from '../components/ui'
@@ -39,7 +40,7 @@ type ArchiveReason = 'near_silent' | 'bad_speaker' | 'manual_cleanup'
 // Persist filter inputs across navigation (e.g. opening a conversation detail
 // page and clicking back) so the user doesn't lose their filters.
 // v2: generic per-filter values keyed by AUDIT_FILTERS registry keys.
-const FILTERS_STORAGE_KEY = 'data_audit_filters_v2'
+const FILTERS_STORAGE_KEY = 'data_audit_filters_v3'
 const ARCHIVED_VIEW_STORAGE_KEY = 'data_audit_archived_view'
 const SELECTION_STORAGE_KEY = 'data_audit_selection'
 // Persist the in-flight analyze job id so navigating away (e.g. into a
@@ -450,6 +451,7 @@ export default function DataAudit() {
       {curationView === 'enroll' && (
         <div className="space-y-6">
           <SpeakerConfidencePanel />
+          <UnknownSpeakerDiscovery />
           <EnrollmentCandidates />
           <GuidedEnrollment />
           <DriftPanel />

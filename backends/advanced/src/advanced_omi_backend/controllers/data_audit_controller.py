@@ -21,7 +21,10 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from advanced_omi_backend.client_manager import synthetic_client_id
 from advanced_omi_backend.config import get_diarization_settings
-from advanced_omi_backend.constants import is_non_enrollable_speaker
+from advanced_omi_backend.constants import (
+    is_non_enrollable_speaker,
+    is_unknown_speaker_label,
+)
 from advanced_omi_backend.controllers.conversation_controller import (
     archive_conversation_audio,
 )
@@ -309,6 +312,20 @@ def _speakers_for_doc(doc: dict) -> List[str]:
     return sorted(speakers)
 
 
+def _speaker_facets_for_doc(doc: dict) -> tuple[List[str], bool]:
+    """Return global identities separately from conversation-local unknowns.
+
+    ``Unknown Speaker N`` is numbered independently inside each conversation.
+    It is a display description, not a corpus-wide identity, so it must never
+    enter a global list of named speakers.
+    """
+    labels = _speakers_for_doc(doc)
+    return (
+        [label for label in labels if not is_unknown_speaker_label(label)],
+        any(is_unknown_speaker_label(label) for label in labels),
+    )
+
+
 def _unknown_speech_count(doc: dict) -> int:
     """Speech segments in the audited version not matched to an enrolled speaker.
 
@@ -401,6 +418,7 @@ async def list_for_audit(
     created_before: Optional[datetime] = None,
     include_speakers: Optional[List[str]] = None,
     exclude_speakers: Optional[List[str]] = None,
+    unknown_speakers: Optional[str] = None,
     dataset_id: Optional[str] = None,
     exported: Optional[str] = None,
     archived_only: bool = False,
@@ -508,12 +526,15 @@ async def list_for_audit(
         # compound predicate), so the filter UI offers exactly the labels that
         # exist in this view — and isn't narrowed by its own selection.
         available_speakers: set = set()
+        has_unknown_speakers = False
 
         for doc in raw_docs:
             duration = doc.get("audio_total_duration") or 0.0
             va = doc.get("vad_analysis")
-            doc_speakers = _speakers_for_doc(doc)
+            all_doc_speakers = _speakers_for_doc(doc)
+            doc_speakers, doc_has_unknown = _speaker_facets_for_doc(doc)
             available_speakers.update(doc_speakers)
+            has_unknown_speakers = has_unknown_speakers or doc_has_unknown
             unknown_count = _unknown_speech_count(doc)
 
             speech_fraction = None
@@ -539,9 +560,15 @@ async def list_for_audit(
                         continue
                     if speech_fraction < min_speech_fraction:
                         continue
-                if include_set and not include_set.intersection(doc_speakers):
+                include_matches = bool(include_set.intersection(doc_speakers))
+                if (include_set or unknown_speakers == "include") and not (
+                    include_matches
+                    or (unknown_speakers == "include" and doc_has_unknown)
+                ):
                     continue
                 if exclude_set and exclude_set.intersection(doc_speakers):
+                    continue
+                if unknown_speakers == "exclude" and doc_has_unknown:
                     continue
                 # Opt-in: drop conversations with nothing left to triage (every
                 # speech segment already has an identified_as).
@@ -563,7 +590,7 @@ async def list_for_audit(
                     "client_id": doc.get("client_id"),
                     "created_at": created_at.isoformat() if created_at else None,
                     "duration_seconds": duration,
-                    "speakers": doc_speakers,
+                    "speakers": all_doc_speakers,
                     "unknown_speech_segments": unknown_count,
                     "marginal_identified_segments": _marginal_identified_count(
                         doc, similarity_threshold, marginal_margin
@@ -635,6 +662,7 @@ async def list_for_audit(
             "marginal_margin": marginal_margin,
             "unanalyzed_count": unanalyzed_count,
             "speakers": sorted(available_speakers),
+            "has_unknown_speakers": has_unknown_speakers,
             "datasets": available_datasets,
         }
 

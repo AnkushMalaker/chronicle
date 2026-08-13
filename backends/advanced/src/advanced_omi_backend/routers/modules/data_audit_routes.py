@@ -68,6 +68,19 @@ class MergeRequest(BaseModel):
     )
 
 
+class UnknownClusterClip(BaseModel):
+    identity_key: str
+    segment_index: int
+
+
+class UnknownClusterDecision(BaseModel):
+    run_fingerprint: str
+    action: Literal["confirm", "dismiss"]
+    speaker_name: Optional[str] = None
+    accepted_identity_keys: List[str] = Field(default_factory=list)
+    enrollment_clips: List[UnknownClusterClip] = Field(default_factory=list)
+
+
 class ScreenRequest(BaseModel):
     conversation_ids: List[str] = Field(..., min_length=1, max_length=200)
     policy: Optional[str] = Field(
@@ -177,6 +190,11 @@ async def list_conversations(
     exclude_speakers: Optional[str] = Query(
         None, description="Comma-separated speakers a conversation must contain none of"
     ),
+    unknown_speakers: Optional[Literal["include", "exclude"]] = Query(
+        None,
+        description="Include conversations containing any conversation-local unknown "
+        "speaker, or exclude every such conversation",
+    ),
     dataset_id: Optional[str] = Query(
         None,
         max_length=200,
@@ -220,6 +238,7 @@ async def list_conversations(
         created_before=created_before,
         include_speakers=_csv(include_speakers),
         exclude_speakers=_csv(exclude_speakers),
+        unknown_speakers=unknown_speakers,
         dataset_id=dataset_id,
         exported=exported,
         archived_only=archived_only,
@@ -443,6 +462,38 @@ async def guided_enrollment_discover(
     """Queue reusable corpus-speech indexing and selected-gallery matching."""
     return await guided_enrollment_controller.enqueue_corpus_discovery(
         current_user, body.speaker_name, body.include_deleted
+    )
+
+
+@router.post("/enrollment/unknown/discover")
+async def unknown_speaker_discover(
+    current_user: User = Depends(current_active_user),
+):
+    return await guided_enrollment_controller.enqueue_unknown_discovery(current_user)
+
+
+@router.get("/enrollment/unknown/clusters")
+async def unknown_speaker_clusters(
+    limit: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(current_active_user),
+):
+    return await guided_enrollment_controller.list_unknown_clusters(current_user, limit)
+
+
+@router.post("/enrollment/unknown/clusters/{cluster_id}/decide")
+async def unknown_speaker_cluster_decide(
+    cluster_id: str,
+    body: UnknownClusterDecision,
+    current_user: User = Depends(current_active_user),
+):
+    return await guided_enrollment_controller.decide_unknown_cluster(
+        current_user,
+        cluster_id,
+        body.run_fingerprint,
+        body.action,
+        body.speaker_name,
+        body.accepted_identity_keys,
+        [clip.model_dump() for clip in body.enrollment_clips],
     )
 
 

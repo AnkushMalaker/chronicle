@@ -228,8 +228,9 @@ const durationFilter: FilterDef<DurationValue> = {
 // ---------------------------------------------------------------------------
 
 type SpeakersValue = Record<string, SpeakerFilterState>
+export const UNKNOWN_SPEAKERS_FILTER_KEY = '__unknown_speakers__'
 
-const speakersFilter: FilterDef<SpeakersValue> = {
+export const speakersFilter: FilterDef<SpeakersValue> = {
   key: 'speakers',
   label: 'Speakers',
   icon: Users,
@@ -245,11 +246,12 @@ const speakersFilter: FilterDef<SpeakersValue> = {
   },
   toParams: (v) => ({
     include_speakers: Object.entries(v)
-      .filter(([, s]) => s === 'include')
+      .filter(([k, s]) => k !== UNKNOWN_SPEAKERS_FILTER_KEY && s === 'include')
       .map(([k]) => k),
     exclude_speakers: Object.entries(v)
-      .filter(([, s]) => s === 'exclude')
+      .filter(([k, s]) => k !== UNKNOWN_SPEAKERS_FILTER_KEY && s === 'exclude')
       .map(([k]) => k),
+    unknown_speakers: v[UNKNOWN_SPEAKERS_FILTER_KEY],
   }),
   Editor: ({ value, onChange, ctx }) => {
     const [query, setQuery] = useState('')
@@ -268,6 +270,10 @@ const speakersFilter: FilterDef<SpeakersValue> = {
     const visible = q
       ? ctx.speakers.filter((s) => s.toLowerCase().includes(q))
       : ctx.speakers
+    const choices = [
+      ...(q && !'unknown speakers'.includes(q) ? [] : [UNKNOWN_SPEAKERS_FILTER_KEY]),
+      ...visible,
+    ]
 
     return (
       <div className="space-y-2 w-72">
@@ -297,13 +303,14 @@ const speakersFilter: FilterDef<SpeakersValue> = {
           )}
         </div>
         <div className="flex flex-wrap gap-1.5 max-h-44 overflow-y-auto">
-          {visible.length === 0 && (
+          {choices.length === 0 && (
             <span className="text-xs text-gray-400">
               {q ? 'No speakers match.' : 'No speaker labels found.'}
             </span>
           )}
-          {visible.map((s) => {
+          {choices.map((s) => {
             const state = value[s]
+            const label = s === UNKNOWN_SPEAKERS_FILTER_KEY ? 'Unknown speakers' : s
             return (
               <button
                 key={s}
@@ -316,7 +323,7 @@ const speakersFilter: FilterDef<SpeakersValue> = {
                       : 'border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
                 }`}
               >
-                {s}
+                {label}
               </button>
             )
           })}

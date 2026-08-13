@@ -30,10 +30,12 @@ from rq.job import Job
 
 from advanced_omi_backend.config import get_diarization_settings
 from advanced_omi_backend.constants import is_non_enrollable_speaker
+from advanced_omi_backend.controllers import data_audit_controller
 from advanced_omi_backend.controllers.queue_controller import (
     JOB_RESULT_TTL,
     default_queue,
 )
+from advanced_omi_backend.models.annotation import Annotation, AnnotationType
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.users import User
@@ -43,6 +45,9 @@ from advanced_omi_backend.workers.speaker_benchmark_jobs import (
 )
 from advanced_omi_backend.workers.speaker_discovery_jobs import (
     discover_speaker_candidates_job,
+)
+from advanced_omi_backend.workers.unknown_speaker_jobs import (
+    discover_unknown_speakers_job,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +77,196 @@ def _discovery_collection():
 
 def _discovery_runs_collection():
     return Conversation.get_pymongo_collection().database["speaker_discovery_runs"]
+
+
+def _unknown_clusters_collection():
+    return Conversation.get_pymongo_collection().database["unknown_speaker_clusters"]
+
+
+def _unknown_runs_collection():
+    return Conversation.get_pymongo_collection().database["unknown_speaker_runs"]
+
+
+async def enqueue_unknown_discovery(user: User):
+    """Start or reattach to corpus-wide unknown-identity clustering."""
+    user_id = str(user.user_id)
+    existing = await _unknown_runs_collection().find_one({"requested_by": user_id})
+    status = _job_status(existing.get("job_id") if existing else None)
+    if status in {"queued", "started", "deferred", "scheduled"}:
+        return {"job_id": existing["job_id"], "status": status, "reused": True}
+    job = default_queue.enqueue(
+        discover_unknown_speakers_job,
+        requested_by=user_id,
+        job_timeout=14400,
+        result_ttl=JOB_RESULT_TTL,
+        description="Discover unknown speakers across corpus",
+    )
+    await _unknown_runs_collection().update_one(
+        {"requested_by": user_id},
+        {"$set": {"job_id": job.id, "queued_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
+    return {"job_id": job.id, "status": "queued", "reused": False}
+
+
+async def list_unknown_clusters(user: User, limit: int = 50):
+    cursor = (
+        _unknown_clusters_collection()
+        .find({"requested_by": str(user.user_id), "status": "pending"}, {"_id": 0})
+        .sort("segment_count", -1)
+        .limit(limit)
+    )
+    return {"clusters": await cursor.to_list(length=limit)}
+
+
+async def decide_unknown_cluster(
+    user: User,
+    cluster_id: str,
+    run_fingerprint: str,
+    action: str,
+    speaker_name: Optional[str],
+    accepted_identity_keys: list[str],
+    enrollment_clips: list[dict],
+):
+    """Relabel accepted members and enroll only explicitly selected clips."""
+    collection = _unknown_clusters_collection()
+    cluster = await collection.find_one(
+        {
+            "requested_by": str(user.user_id),
+            "cluster_id": cluster_id,
+            "run_fingerprint": run_fingerprint,
+            "status": "pending",
+        }
+    )
+    if not cluster:
+        return JSONResponse(status_code=409, content={"error": "Cluster is stale"})
+    if action == "dismiss":
+        await collection.update_one(
+            {"_id": cluster["_id"]},
+            {"$set": {"status": "dismissed", "decided_at": datetime.now(timezone.utc)}},
+        )
+        return {"status": "dismissed"}
+    if not speaker_name or is_non_enrollable_speaker(speaker_name):
+        return JSONResponse(
+            status_code=422, content={"error": "A real speaker name is required"}
+        )
+
+    accepted = {
+        member["identity_key"]: member
+        for member in cluster["members"]
+        if member["identity_key"] in set(accepted_identity_keys)
+    }
+    if not accepted:
+        return JSONResponse(
+            status_code=422, content={"error": "Select at least one identity"}
+        )
+    if not enrollment_clips:
+        return JSONResponse(
+            status_code=422, content={"error": "Select at least one enrollment clip"}
+        )
+
+    validated_segments = []
+    for member in accepted.values():
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == member["conversation_id"]
+        )
+        if not conversation or conversation.user_id != str(user.user_id):
+            return JSONResponse(
+                status_code=409,
+                content={"error": "Conversation is no longer available"},
+            )
+        segments = _active_segments(conversation.model_dump())
+        for ref in member["segments"]:
+            index = ref["segment_index"]
+            if (
+                index >= len(segments)
+                or abs(float(segments[index]["start"]) - ref["start"]) > 0.01
+                or not is_non_enrollable_speaker(
+                    segments[index].get("identified_as")
+                    or segments[index].get("speaker")
+                )
+                or (
+                    segments[index].get("identified_as")
+                    or segments[index].get("speaker")
+                )
+                != member["local_label"]
+            ):
+                return JSONResponse(
+                    status_code=409, content={"error": "Transcript changed since scan"}
+                )
+            validated_segments.append((member, ref, index, segments[index]))
+
+    annotations = 0
+    for member, ref, index, segment in validated_segments:
+        await Annotation(
+            annotation_type=AnnotationType.DIARIZATION,
+            user_id=str(user.user_id),
+            conversation_id=member["conversation_id"],
+            segment_index=index,
+            original_speaker=segment.get("speaker") or "",
+            corrected_speaker=speaker_name,
+            segment_start_time=ref["start"],
+            processed=False,
+        ).insert()
+        annotations += 1
+
+    client = SpeakerRecognitionClient()
+    existing_speaker = await client.get_speaker_by_name(
+        speaker_name, user_id=str(user.user_id)
+    )
+    enrolled = appended = 0
+    for clip in enrollment_clips:
+        member = accepted.get(clip.get("identity_key"))
+        if not member:
+            continue
+        ref = next(
+            (
+                segment
+                for segment in member["segments"]
+                if segment["segment_index"] == clip.get("segment_index")
+            ),
+            None,
+        )
+        if not ref or ref["duration"] < MIN_CLIP_SECONDS:
+            continue
+        wav = await reconstruct_audio_segment(
+            member["conversation_id"], ref["start"], ref["end"]
+        )
+        if existing_speaker:
+            result = await client.append_to_speaker(
+                existing_speaker["id"], wav, user_id=str(user.user_id)
+            )
+            if not result.get("error"):
+                appended += 1
+        else:
+            result = await client.enroll_new_speaker(
+                speaker_name, wav, user_id=str(user.user_id)
+            )
+            if not result.get("error"):
+                enrolled += 1
+                existing_speaker = await client.get_speaker_by_name(
+                    speaker_name, user_id=str(user.user_id)
+                )
+
+    await collection.update_one(
+        {"_id": cluster["_id"]},
+        {
+            "$set": {
+                "status": "confirmed",
+                "speaker_name": speaker_name,
+                "accepted_identity_keys": list(accepted),
+                "decided_at": datetime.now(timezone.utc),
+            }
+        },
+    )
+    apply_result = await data_audit_controller.apply_triage(user)
+    return {
+        "status": "confirmed",
+        "annotations_created": annotations,
+        "enrolled_new": enrolled,
+        "appended": appended,
+        "corrections_applied": getattr(apply_result, "body", apply_result),
+    }
 
 
 def _job_status(job_id: Optional[str]) -> Optional[str]:

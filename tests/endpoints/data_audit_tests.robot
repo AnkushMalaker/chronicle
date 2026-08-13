@@ -30,6 +30,7 @@ Data Audit List Returns Speech Metrics
     Dictionary Should Contain Key    ${body}    total
     Dictionary Should Contain Key    ${body}    speech_threshold
     Dictionary Should Contain Key    ${body}    scan_capped
+    Dictionary Should Contain Key    ${body}    has_unknown_speakers
 
 Silence Gaps On Unknown Conversation Returns Not Found
     [Documentation]    Gap detection on a nonexistent conversation is a 404
