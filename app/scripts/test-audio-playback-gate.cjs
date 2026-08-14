@@ -34,7 +34,7 @@ assert.equal(gate.shouldSuppressCapture(), false, 'capture starts unsuppressed')
 assert.equal(shouldForwardCapturedAudio(3_200, gate), true, 'live mic audio is forwarded');
 assert.equal(shouldForwardCapturedAudio(0, gate), false, 'empty audio is ignored');
 
-const finishFirst = gate.beginPlayback();
+const finishFirst = gate.beginPlayback(5_000);
 assert.equal(gate.shouldSuppressCapture(), true, 'capture is suppressed during playback');
 assert.equal(
   shouldForwardCapturedAudio(3_200, gate),
@@ -42,7 +42,7 @@ assert.equal(
   'speaker playback frames never reach the uplink'
 );
 
-const finishSecond = gate.beginPlayback();
+const finishSecond = gate.beginPlayback(5_000);
 finishFirst();
 assert.equal(
   gate.shouldSuppressCapture(),
@@ -62,9 +62,23 @@ assert.equal(gate.shouldSuppressCapture(), false, 'capture resumes when the tail
 finishSecond();
 assert.equal(gate.shouldSuppressCapture(), false, 'completion is idempotent');
 
-const finishThird = gate.beginPlayback();
-now += 10_000;
-assert.equal(gate.shouldSuppressCapture(), true, 'active playback never expires by wall clock');
+const finishThird = gate.beginPlayback(1_000);
+now += 999;
+assert.equal(gate.shouldSuppressCapture(), true, 'capture stays suppressed before the deadline');
+
+now += 1;
+assert.equal(gate.shouldSuppressCapture(), true, 'an expired playback retains its echo tail');
+
+now += 349;
+assert.equal(gate.shouldSuppressCapture(), true, 'capture remains suppressed inside expiry tail');
+
+now += 1;
+assert.equal(
+  gate.shouldSuppressCapture(),
+  false,
+  'a missing playback completion callback cannot strand capture indefinitely'
+);
 finishThird();
+assert.equal(gate.shouldSuppressCapture(), false, 'late completion after expiry stays idempotent');
 
 console.log('audio playback capture gate: ok');

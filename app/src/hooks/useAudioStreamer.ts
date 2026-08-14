@@ -526,8 +526,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
 
   const sendAudio = useCallback(async (audioBytes: Uint8Array, durable = true) => {
     // Keep capture and the socket running, but never uplink audio heard from our
-    // own speaker. Playback owns the gate and releases it on the real completion
-    // callback, avoiding the backend's necessarily approximate TTS mute timer.
+    // own speaker. Playback owns a duration-bounded gate: native completion releases
+    // it promptly, while the media duration prevents a missing callback from muting
+    // the user for the rest of the interaction.
     if (!shouldForwardCapturedAudio(audioBytes.length)) return;
 
     if (durable) {

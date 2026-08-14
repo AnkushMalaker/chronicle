@@ -9,6 +9,7 @@
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "test:audio-playback-gate": "node scripts/test-audio-playback-gate.cjs",
+    "test:audio-playback-lifecycle": "node scripts/test-audio-playback-lifecycle.cjs",
     "check:theme": "node scripts/check-theme-tokens.mjs"
   },
   "dependencies": {
