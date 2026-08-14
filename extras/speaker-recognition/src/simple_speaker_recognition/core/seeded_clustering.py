@@ -6,9 +6,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 from pyannote.core import Annotation, Segment
-from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 from sklearn.cluster import AgglomerativeClustering as SklearnAgglo
 from sklearn.metrics.pairwise import cosine_similarity
+
+from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 
 logger = logging.getLogger(__name__)
 

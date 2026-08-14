@@ -364,6 +364,9 @@ SPEAKER_SERVICE_HOST="0.0.0.0"          # Speaker service bind host
 SPEAKER_SERVICE_PORT="8085"             # Speaker service port (default: 8085)
 SPEAKER_SERVICE_URL="http://speaker-service:8085"  # URL for internal Docker communication
 SIMILARITY_THRESHOLD="0.15"             # Speaker similarity threshold (0.1-0.3 typical for ECAPA-TDNN)
+MAX_DIARIZE_DURATION="600"              # Neural window ceiling in seconds (10 minutes)
+DIARIZE_CONCURRENT_CHUNKS="2"           # Bounded parallel windows inside one request
+DIARIZE_CHUNK_OVERLAP="5.0"             # Future context at each window boundary
 
 # React Web UI Configuration
 REACT_UI_HOST="0.0.0.0"                # Web UI bind host
@@ -921,3 +924,27 @@ The advanced backend communicates with this service through the `client.py` modu
 - Audio files should be accessible from both services (use shared volumes)
 - Microphone recording dynamically detects browser sample rate (typically 44.1kHz or 48kHz) for optimal compatibility
 - Microphone recording requires `pyaudio` and proper audio device setup
+
+### Long-recording diarization
+
+The 10-minute setting is a compute ceiling, not a Conversation boundary. For a longer
+recording the service:
+
+1. reads consecutive 10-minute core windows with five seconds of future context;
+2. runs Community-1 neural segmentation on at most two independent windows at once;
+3. clips each result back to its non-overlapping core interval;
+4. embeds each window-local speaker and deterministically reconciles those labels into
+   recording-wide speakers; and
+5. merges adjacent same-speaker turns only after all windows are complete.
+
+Community-1's recording-wide clustering uses VBx rather than the old unbounded
+agglomerative path that motivated 60-second chunks. Each window still performs
+sliding-window neural segmentation, speaker embedding, VBx clustering, and diarization
+reconstruction. With a fixed window ceiling, total work is approximately linear in
+recording duration and peak memory is bounded by the number and size of concurrent
+windows rather than the full recording length. Separate API requests remain serialized.
+
+The default concurrency of two is deliberately conservative for a 12 GB GPU. Measure
+wall time, host peak and GPU peak on the deployment before raising it; higher concurrency
+multiplies the bounded window working set and is a new benchmark, not a harmless tuning
+change.

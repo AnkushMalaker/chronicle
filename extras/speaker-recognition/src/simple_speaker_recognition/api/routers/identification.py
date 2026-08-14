@@ -45,7 +45,7 @@ IDENTIFY_BATCH_MAX_BYTES = int(
     os.getenv("IDENTIFY_BATCH_MAX_BYTES", str(32 * 1024 * 1024))
 )
 IDENTIFY_BATCH_MAX_SECONDS = float(os.getenv("IDENTIFY_BATCH_MAX_SECONDS", "240"))
-# The neural pipeline is independently bounded by ``max_diarize_duration`` (20
+# The neural pipeline is independently bounded by ``max_diarize_duration`` (10
 # minutes by default).  This is only a finite cap on the complete recording that
 # may contain many such passes; Chronicle's current corpus includes a 10-hour item.
 MAX_AUDIO_DURATION_SECONDS = 12 * 60 * 60
@@ -105,7 +105,7 @@ async def diarize_and_identify(
         ..., description="Audio file for diarization and speaker identification"
     ),
     min_duration: Optional[float] = Query(
-        default=0.5, description="Minimum duration for speaker segments (seconds)"
+        default=0.0, description="Minimum duration for speaker segments (seconds)"
     ),
     similarity_threshold: Optional[float] = Query(
         default=None,
@@ -129,8 +129,8 @@ async def diarize_and_identify(
         description="Collar duration (seconds) around speaker boundaries to merge segments",
     ),
     min_duration_off: Optional[float] = Query(
-        default=1.5,
-        description="Minimum silence duration (seconds) before treating it as a segment boundary",
+        default=0.0,
+        description="Pyannote exclusive-timeline gap fill; must remain zero",
     ),
     db: UnifiedSpeakerDB = Depends(get_db),
 ):
@@ -404,7 +404,7 @@ async def diarize_identify_match(
         description="JSON chunk-coverage ranges used to preserve gaps as silence",
     ),
     min_duration: float = Form(
-        default=0.5, description="Minimum segment duration in seconds"
+        default=0.0, description="Minimum segment duration in seconds"
     ),
     similarity_threshold: float = Form(
         default=DEFAULT_SIMILARITY_THRESHOLD, description="Speaker similarity threshold"
@@ -420,8 +420,8 @@ async def diarize_identify_match(
         description="Collar duration (seconds) around speaker boundaries to merge segments",
     ),
     min_duration_off: float = Form(
-        default=1.5,
-        description="Minimum silence duration (seconds) before treating it as a segment boundary",
+        default=0.0,
+        description="Pyannote exclusive-timeline gap fill; must remain zero",
     ),
     reconciliation_threshold: float = Form(
         default=0.4,
@@ -461,7 +461,7 @@ async def diarize_identify_match(
 
     Maximum complete recording duration: 12 hours. Neural diarization remains
     independently bounded and chunked by ``max_diarize_duration``.
-    Files longer than max_diarize_duration (default 20 minutes) are automatically chunked
+    Files longer than max_diarize_duration (default 10 minutes) are automatically chunked
     """
     log.info(f"Processing diarize-identify-match request")
     log.info(f"Mode: {'conversation' if conversation_id else 'file upload'}")
@@ -549,8 +549,11 @@ async def diarize_identify_match(
     # time, so importing it at module level here would create a circular import.
     from simple_speaker_recognition.api.service import auth as settings
 
-    max_diarize_duration = settings.max_diarize_duration  # Default 20 minutes
+    max_diarize_duration = settings.max_diarize_duration  # Default 10 minutes
     diarize_chunk_overlap = settings.diarize_chunk_overlap  # Default 5 seconds
+    diarize_concurrent_chunks = (
+        settings.diarize_concurrent_chunks
+    )  # Conservative default: 2
     # Mode 1: Conversation mode - fetch audio from backend
     if conversation_id:
         backend_client = BackendClient(settings.backend_api_url)
@@ -642,6 +645,7 @@ async def diarize_identify_match(
             max_duration=max_diarize_duration,
             chunk_overlap=diarize_chunk_overlap,
             reconciliation_threshold=reconciliation_threshold,
+            max_concurrent_chunks=diarize_concurrent_chunks,
         )
 
         # Apply minimum duration filter
@@ -694,7 +698,9 @@ async def diarize_identify_match(
                 word_start = word.get("start", 0.0)
                 word_end = word.get("end", 0.0)
                 word_mid = (word_start + word_end) / 2
-                if start_time <= word_mid <= end_time:
+                # Exclusive turns are half-open intervals. Using <= at both ends can
+                # assign a boundary word to both adjacent speakers.
+                if start_time <= word_mid < end_time:
                     segment_words.append(word)  # Keep full word object with timestamps
 
             segment_text = " ".join(w.get("word", "") for w in segment_words).strip()
@@ -762,8 +768,15 @@ async def diarize_identify_match(
         return response
 
     finally:
-        # Clean up temporary file
-        tmp_path.unlink(missing_ok=True)
+        try:
+            # Identification may run an additional embedding pass after diarization.
+            # Return that unused workspace too, once this request's model work is done.
+            await audio_backend.async_release_cuda_cache(
+                "diarize-identify-match request"
+            )
+        finally:
+            # Clean up temporary file
+            tmp_path.unlink(missing_ok=True)
 
 
 class ReidentifyClustersRequest(BaseModel):
@@ -886,7 +899,7 @@ async def plain_diarize_and_identify(
         ..., description="Audio file for plain diarization and speaker identification"
     ),
     min_duration: Optional[float] = Form(
-        default=0.5, description="Minimum duration for speaker segments (seconds)"
+        default=0.0, description="Minimum duration for speaker segments (seconds)"
     ),
     similarity_threshold: Optional[float] = Form(
         default=None,
@@ -910,8 +923,8 @@ async def plain_diarize_and_identify(
         description="Collar duration (seconds) around speaker boundaries to merge segments",
     ),
     min_duration_off: Optional[float] = Form(
-        default=1.5,
-        description="Minimum silence duration (seconds) before treating it as a segment boundary",
+        default=0.0,
+        description="Pyannote exclusive-timeline gap fill; must remain zero",
     ),
     db: UnifiedSpeakerDB = Depends(get_db),
 ):

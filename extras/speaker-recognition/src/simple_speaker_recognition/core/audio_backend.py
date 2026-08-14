@@ -3,7 +3,9 @@
 import asyncio
 import io
 import logging
+import math
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -24,7 +26,15 @@ class AudioBackend:
 
     EMBEDDING_MODEL_ID = "pyannote/wespeaker-voxceleb-resnet34-LM"
 
-    def __init__(self, hf_token: str, device: torch.device):
+    def __init__(
+        self,
+        hf_token: str,
+        device: torch.device,
+        *,
+        max_diarization_workers: int = 2,
+    ):
+        if max_diarization_workers < 1:
+            raise ValueError("max_diarization_workers must be at least 1")
         self.device = device
         self.diar = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-community-1", token=hf_token
@@ -34,7 +44,12 @@ class AudioBackend:
         # Note: embedding model is fixed in pre-trained pipeline and cannot be changed at instantiation
         pipeline_params = {
             "segmentation": {
-                "min_duration_off": 1.5  # Fill gaps shorter than 1.5 seconds
+                # Community-1 applies this independently per speaker *after* capping
+                # the exclusive timeline to one active speaker. Any positive value can
+                # therefore bridge across another speaker and recreate overlap. Keep
+                # the neural timeline exact; Chronicle performs event-aware, same-
+                # speaker consolidation after transcript projection instead.
+                "min_duration_off": 0.0
             }
             # embedding_exclude_overlap is also fixed in the pre-trained pipeline
         }
@@ -45,6 +60,29 @@ class AudioBackend:
             self.EMBEDDING_MODEL_ID, device=device
         )
         self.loader = Audio(sample_rate=16_000, mono="downmix")
+        # Pyannote runs blocking GPU inference in an executor. Uvicorn can accept
+        # several requests concurrently, so serialize full diarization calls to keep
+        # their neural-segmentation allocations from stacking and exhausting VRAM.
+        self._diarization_lock = asyncio.Lock()
+        # PyTorch/ONNX create a native CPU worker team for each Python executor thread
+        # that first enters a model. The process-wide default executor grows with HTTP
+        # bursts and retained hundreds of those native workers during a corpus run.
+        # Reuse bounded model-specific executors so neural concurrency is intentional
+        # and candidate-embedding bursts cannot grow the process thread count.
+        self._diarization_executor = ThreadPoolExecutor(
+            max_workers=max_diarization_workers,
+            thread_name_prefix="speaker-diarization",
+        )
+        self._embedding_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="speaker-embedding",
+        )
+
+    def close(self) -> None:
+        """Release the bounded model executors during service shutdown."""
+
+        self._diarization_executor.shutdown(wait=False, cancel_futures=True)
+        self._embedding_executor.shutdown(wait=False, cancel_futures=True)
 
     # wespeaker's fbank front-end uses a 25 ms window (400 samples @ 16 kHz). A waveform
     # shorter than one window makes torchaudio.compliance.kaldi.fbank assert
@@ -168,9 +206,8 @@ class AudioBackend:
         max_batch_size: int = 32,
         max_padding_ratio: float = 1.25,
     ) -> np.ndarray:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None,
+        return await self._run_executor_job(
+            self._embedding_executor,
             lambda: self.embed_batch(
                 waves,
                 max_batch_size=max_batch_size,
@@ -179,8 +216,63 @@ class AudioBackend:
         )
 
     async def async_embed(self, wave: torch.Tensor) -> np.ndarray:
+        return await self._run_executor_job(self._embedding_executor, self.embed, wave)
+
+    @staticmethod
+    async def _run_executor_job(executor, function, *args):
+        """Wait for native model work to settle even if its caller is cancelled.
+
+        Cancelling the asyncio wrapper around ``run_in_executor`` cannot stop a Python
+        function that is already running in its worker thread. Shield the native job
+        and, on cancellation, wait for it before allowing request-level CUDA cleanup.
+        """
+
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self.embed, wave)
+        future = loop.run_in_executor(executor, function, *args)
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            logger.warning(
+                "Model coroutine cancelled; waiting for its native worker to settle"
+            )
+            try:
+                await asyncio.shield(future)
+            except Exception:
+                logger.exception(
+                    "Native model worker failed while its caller was cancelled"
+                )
+            raise
+
+    def release_cuda_cache(self, reason: str) -> None:
+        """Return unused request workspace to CUDA and log allocator state."""
+
+        if self.device.type != "cuda":
+            return
+
+        torch.cuda.synchronize(self.device)
+        allocated_before = torch.cuda.memory_allocated(self.device)
+        reserved_before = torch.cuda.memory_reserved(self.device)
+        torch.cuda.empty_cache()
+        allocated_after = torch.cuda.memory_allocated(self.device)
+        reserved_after = torch.cuda.memory_reserved(self.device)
+        mib = 1024 * 1024
+        logger.info(
+            "CUDA cleanup after %s: allocated %.1f -> %.1f MiB; "
+            "reserved %.1f -> %.1f MiB; returned %.1f MiB",
+            reason,
+            allocated_before / mib,
+            allocated_after / mib,
+            reserved_before / mib,
+            reserved_after / mib,
+            (reserved_before - reserved_after) / mib,
+        )
+
+    async def async_release_cuda_cache(self, reason: str) -> None:
+        """Run synchronized CUDA cleanup behind previously queued embedding work."""
+
+        await self._run_executor_job(
+            self._embedding_executor, self.release_cuda_cache, reason
+        )
 
     def diarize(
         self,
@@ -188,7 +280,7 @@ class AudioBackend:
         min_speakers: Optional[int] = None,
         max_speakers: Optional[int] = None,
         collar: float = 2.0,
-        min_duration_off: float = 1.5,
+        min_duration_off: float = 0.0,
     ) -> List[Dict]:
         """Perform speaker diarization on an audio file.
 
@@ -199,10 +291,20 @@ class AudioBackend:
             collar: Gap duration (seconds) to merge between speaker segments
             min_duration_off: Minimum silence duration (seconds) before treating as segment boundary
         """
-        # Dynamically update pipeline parameters if min_duration_off is different from default
-        if min_duration_off != 1.5:
-            pipeline_params = {"segmentation": {"min_duration_off": min_duration_off}}
-            self.diar.instantiate(pipeline_params)
+        file_duration = float(self.loader.get_duration(str(path)))
+
+        # A positive pyannote min_duration_off is not compatible with an exclusive
+        # transcript timeline: Community-1 fills each speaker independently and may
+        # bridge across another speaker. Reject it instead of pretending the request
+        # was honored; readable turn consolidation happens after transcript projection.
+        if min_duration_off:
+            raise ValueError(
+                "min_duration_off must be 0 for exclusive diarization; "
+                "consolidate same-speaker turns after transcript projection"
+            )
+        # Startup already instantiates this immutable setting. Do not mutate the
+        # shared pipeline here: long recordings deliberately run two windows through
+        # the same model concurrently.
 
         with torch.inference_mode():
             # Pass speaker count parameters to pyannote
@@ -213,32 +315,73 @@ class AudioBackend:
                 kwargs["max_speakers"] = max_speakers
 
             output = self.diar(str(path), **kwargs)
-            logger.info(f"Diarization output: {output}")
+            # DiarizeOutput includes the full speaker-embedding matrix in its repr.
+            # Logging that object produced multi-thousand-line records for every
+            # window without adding useful operational information.
+            logger.info("Diarization inference returned %s", type(output).__name__)
 
-            # In pyannote.audio 4.0+, the pipeline returns a DiarizeOutput object
-            # We need to access .speaker_diarization to get the Annotation object
-            if hasattr(output, "speaker_diarization"):
+            # Transcript words need exactly one speaker owner. Community-1 exposes an
+            # exclusive timeline for that purpose; using the overlapping annotation
+            # assigned the same word to multiple displayed turns. Do not run support()
+            # on the exclusive result: bridging a same-speaker gap can cross another
+            # speaker and recreate the overlap we deliberately removed.
+            exclusive = hasattr(output, "exclusive_speaker_diarization")
+            if exclusive:
+                diarization = output.exclusive_speaker_diarization
+                logger.info("Using exclusive_speaker_diarization from output")
+            elif hasattr(output, "speaker_diarization"):
                 diarization = output.speaker_diarization
-                logger.info(f"Using speaker_diarization from output (pyannote 4.0+)")
+                logger.info("Using speaker_diarization from output")
             else:
-                # Fallback for older versions (3.x) that return Annotation directly
                 diarization = output
-                logger.info(f"Using output directly as Annotation (pyannote 3.x)")
+                logger.info("Using output directly as Annotation")
 
-            # Apply PyAnnote's built-in gap filling using support() method with configurable collar
-            # This fills gaps shorter than collar seconds between segments from same speaker
-            diarization = diarization.support(collar=collar)
+            if not exclusive:
+                # Non-exclusive providers retain their existing same-speaker gap fill.
+                diarization = diarization.support(collar=collar)
 
         segments = []
+        clipped_segments = 0
         for turn, _, speaker in diarization.itertracks(yield_label=True):
+            # Pyannote's segmentation grid can extend its final frame slightly past
+            # the decoded WAV boundary (156 ms in a production repro). Audio claims
+            # are exact evidence bounds, so normalize this model-frame overhang at
+            # the producer rather than weakening downstream timestamp validation.
+            start = max(0.0, min(float(turn.start), file_duration))
+            end = max(start, min(float(turn.end), file_duration))
+            if end <= start:
+                clipped_segments += 1
+                continue
+            if start != float(turn.start) or end != float(turn.end):
+                clipped_segments += 1
             segments.append(
                 {
-                    "start": float(turn.start),
-                    "end": float(turn.end),
+                    "start": start,
+                    "end": end,
                     "speaker": str(speaker),
-                    "duration": float(turn.end - turn.start),
+                    "duration": end - start,
                 }
             )
+
+        if clipped_segments:
+            logger.info(
+                "Clipped %d diarization segment(s) to decoded duration %.3fs",
+                clipped_segments,
+                file_duration,
+            )
+
+        segments.sort(key=lambda item: (item["start"], item["end"], item["speaker"]))
+        if exclusive:
+            previous = None
+            for segment in segments:
+                if previous is not None and segment["start"] < previous["end"] - 1e-6:
+                    raise ValueError(
+                        "Pyannote exclusive diarization returned overlapping turns: "
+                        f"{previous['speaker']} {previous['start']:.3f}-"
+                        f"{previous['end']:.3f} and {segment['speaker']} "
+                        f"{segment['start']:.3f}-{segment['end']:.3f}"
+                    )
+                previous = segment
 
         return segments
 
@@ -248,21 +391,22 @@ class AudioBackend:
         min_speakers: Optional[int] = None,
         max_speakers: Optional[int] = None,
         collar: float = 2.0,
-        min_duration_off: float = 1.5,
-        max_duration: float = 60.0,
+        min_duration_off: float = 0.0,
+        max_duration: float = 600.0,
         chunk_overlap: float = 5.0,
         reconciliation_threshold: float = 0.4,
+        max_concurrent_chunks: int = 2,
     ) -> List[Dict]:
         """
-        Async wrapper for diarization with automatic chunking for large files.
+        Async wrapper for serialized diarization with bounded long-file chunking.
 
-        Chunking bounds the cost of pyannote's clustering stage, which runs on CPU
-        (scipy ``linkage``) and is O(N^2) in the number of sliding-window embeddings —
-        the thing that blows up time/memory on long audio. When a file is chunked,
-        each chunk's local ``SPEAKER_xx`` labels are arbitrary, so we DON'T merge by
-        label string. Instead we embed each (chunk, local-speaker), then run a second,
-        cheap global clustering over those centroids to map them to consistent global
-        speaker identities (a.k.a. "speaker linking" / two-pass diarization).
+        Community-1 uses neural segmentation followed by VBx clustering; the old
+        duration-driven scipy-linkage O(N^2) failure mode no longer applies. The
+        10-minute ceiling remains a practical upper bound on segmentation tensors and
+        recovery cost. For longer files, local speaker labels are linked across chunks
+        by clustering one centroid per (chunk, speaker). That reconciliation does use
+        an M-by-M distance matrix, but M is the small number of window-local speakers,
+        not the number of audio frames, samples, words, or diarization turns.
 
         Args:
             path: Path to the audio file
@@ -278,17 +422,49 @@ class AudioBackend:
         Returns:
             List of speaker segments (automatically merged if chunked)
         """
+        async with self._diarization_lock:
+            try:
+                return await self._async_diarize_locked(
+                    path,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                    collar=collar,
+                    min_duration_off=min_duration_off,
+                    max_duration=max_duration,
+                    chunk_overlap=chunk_overlap,
+                    reconciliation_threshold=reconciliation_threshold,
+                    max_concurrent_chunks=max_concurrent_chunks,
+                )
+            finally:
+                await self.async_release_cuda_cache("diarization request")
+
+    async def _async_diarize_locked(
+        self,
+        path: Path,
+        min_speakers: Optional[int] = None,
+        max_speakers: Optional[int] = None,
+        collar: float = 2.0,
+        min_duration_off: float = 0.0,
+        max_duration: float = 600.0,
+        chunk_overlap: float = 5.0,
+        reconciliation_threshold: float = 0.4,
+        max_concurrent_chunks: int = 2,
+    ) -> List[Dict]:
+        """Run one diarization request while the process-wide GPU lock is held."""
         # Get file duration
         file_duration = float(self.loader.get_duration(str(path)))
+        if max_duration <= 0:
+            raise ValueError("max_duration must be greater than zero")
+        if max_concurrent_chunks < 1:
+            raise ValueError("max_concurrent_chunks must be at least 1")
 
         # If file is short enough, process in one go
         if file_duration <= max_duration:
             logger.info(
                 f"Processing audio without chunking (duration={file_duration:.1f}s ≤ {max_duration}s)"
             )
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                None,
+            return await self._run_executor_job(
+                self._diarization_executor,
                 self.diarize,
                 path,
                 min_speakers,
@@ -302,7 +478,8 @@ class AudioBackend:
             f"Processing audio with chunking (duration={file_duration:.1f}s > {max_duration}s)"
         )
         logger.info(
-            f"Using {int(file_duration / max_duration) + 1} chunks with {chunk_overlap}s overlap"
+            f"Using {math.ceil(file_duration / max_duration)} chunks "
+            f"with {chunk_overlap}s overlap"
         )
 
         # Each segment carries a per-chunk-unique tag (f"{chunk}::{local_label}") so
@@ -311,11 +488,10 @@ class AudioBackend:
         all_segments = []
         centroids: Dict[str, np.ndarray] = {}
         tag_to_chunk: Dict[str, int] = {}
+        chunk_specs = []
         current_start = 0.0
-        chunk_num = 0
-
         while current_start < file_duration:
-            chunk_num += 1
+            chunk_num = len(chunk_specs) + 1
             chunk_duration = min(max_duration, file_duration - current_start)
 
             # Add overlap for continuity (except for last chunk)
@@ -325,69 +501,100 @@ class AudioBackend:
                 else chunk_duration
             )
 
-            logger.debug(
-                f"Processing chunk {chunk_num}: start={current_start:.1f}s, duration={chunk_duration:.1f}s"
+            chunk_specs.append(
+                (chunk_num, current_start, chunk_duration, fetch_duration)
             )
+            current_start += chunk_duration
 
-            # Load audio segment
-            chunk_audio = self.load_wave(
-                path, start=current_start, end=current_start + fetch_duration
-            )
+        semaphore = asyncio.Semaphore(max_concurrent_chunks)
+        chunk_failed = asyncio.Event()
 
-            # Write chunk to temp file for PyAnnote
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                # Extract tensor data and write as WAV
-                audio_tensor = chunk_audio.squeeze().cpu().numpy()
-                sf.write(tmp.name, audio_tensor, 16000)
-                chunk_path = Path(tmp.name)
-
-            try:
-                # Diarize this chunk (segments carry LOCAL, 0-based timestamps)
-                loop = asyncio.get_running_loop()
-                chunk_segments = await loop.run_in_executor(
-                    None,
-                    self.diarize,
-                    chunk_path,
-                    min_speakers,
-                    max_speakers,
-                    collar,
-                    min_duration_off,
+        async def process_chunk(spec):
+            chunk_num, chunk_start, chunk_duration, fetch_duration = spec
+            async with semaphore:
+                if chunk_failed.is_set():
+                    return None
+                logger.debug(
+                    "Processing chunk %d: start=%.1fs, duration=%.1fs",
+                    chunk_num,
+                    chunk_start,
+                    chunk_duration,
                 )
 
-                # Only keep segments that start before the overlap cutoff (local time)
-                chunk_segments = [
-                    seg for seg in chunk_segments if seg["start"] < chunk_duration
-                ]
-
-                # Embed each chunk-local speaker BEFORE the temp file is deleted, so we
-                # can later link them across chunks by voice rather than by label.
-                local_centroids = await self._embed_local_speakers(
-                    chunk_path, chunk_segments
+                chunk_audio = self.load_wave(
+                    path, start=chunk_start, end=chunk_start + fetch_duration
                 )
-                for local_label, centroid in local_centroids.items():
-                    tag = f"{chunk_num:03d}::{local_label}"
-                    centroids[tag] = centroid
-                    tag_to_chunk[tag] = chunk_num
 
-                # Tag segments and shift to absolute time
-                for seg in chunk_segments:
-                    tag = f"{chunk_num:03d}::{seg['speaker']}"
-                    all_segments.append(
-                        {
-                            "start": seg["start"] + current_start,
-                            "end": seg["end"] + current_start,
-                            "duration": seg["end"] - seg["start"],
-                            "speaker": tag,
-                        }
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    audio_tensor = chunk_audio.squeeze().cpu().numpy()
+                    sf.write(tmp.name, audio_tensor, 16000)
+                    chunk_path = Path(tmp.name)
+
+                try:
+                    chunk_segments = await self._diarize_window(
+                        chunk_path,
+                        min_speakers,
+                        max_speakers,
+                        collar,
+                        min_duration_off,
                     )
 
-                logger.debug(f"Chunk {chunk_num}: found {len(chunk_segments)} segments")
+                    # The extra audio is future context for neural segmentation, not a
+                    # second owner of the seam. Keep only this window's core interval;
+                    # otherwise a turn crossing the core boundary survives into the
+                    # context interval and is emitted again by the next window.
+                    chunk_segments = self._clip_segments_to_core(
+                        chunk_segments, chunk_duration
+                    )
 
-            finally:
-                chunk_path.unlink(missing_ok=True)
+                    # Embed each chunk-local speaker BEFORE the temp file is deleted, so we
+                    # can later link them across chunks by voice rather than by label.
+                    local_centroids = await self._embed_local_speakers(
+                        chunk_path, chunk_segments
+                    )
+                    return chunk_num, chunk_start, chunk_segments, local_centroids
+                except BaseException:
+                    # Stop queued windows after the first failure. Already-running
+                    # native workers cannot be cancelled, so gather them below before
+                    # request-level CUDA cleanup runs.
+                    chunk_failed.set()
+                    raise
+                finally:
+                    chunk_path.unlink(missing_ok=True)
 
-            # Move to next chunk
-            current_start += chunk_duration
+        logger.info(
+            "Running up to %d neural segmentation windows concurrently",
+            max_concurrent_chunks,
+        )
+        results = await asyncio.gather(
+            *(process_chunk(spec) for spec in chunk_specs),
+            return_exceptions=True,
+        )
+
+        failure = next(
+            (result for result in results if isinstance(result, BaseException)), None
+        )
+        if failure is not None:
+            raise failure
+
+        chunk_results = [result for result in results if result is not None]
+
+        for chunk_num, chunk_start, chunk_segments, local_centroids in chunk_results:
+            for local_label, centroid in local_centroids.items():
+                tag = f"{chunk_num:03d}::{local_label}"
+                centroids[tag] = centroid
+                tag_to_chunk[tag] = chunk_num
+            for seg in chunk_segments:
+                tag = f"{chunk_num:03d}::{seg['speaker']}"
+                all_segments.append(
+                    {
+                        "start": seg["start"] + chunk_start,
+                        "end": seg["end"] + chunk_start,
+                        "duration": seg["end"] - seg["start"],
+                        "speaker": tag,
+                    }
+                )
+            logger.debug("Chunk %d: found %d segments", chunk_num, len(chunk_segments))
 
         logger.info(
             f"Chunked diarization complete: {len(all_segments)} segments "
@@ -395,7 +602,8 @@ class AudioBackend:
         )
 
         # Map per-chunk tags -> globally-consistent SPEAKER_xx labels by clustering
-        # the chunk-local centroids (cheap: a few dozen vectors, no O(N^2) blowup).
+        # the chunk-local centroids. This is O(M^2) in a few dozen speaker centroids,
+        # not O(N^2) in the many audio frames that drove the historical OOM.
         tag_to_global = self._reconcile_chunk_speakers(
             centroids, tag_to_chunk, reconciliation_threshold, max_speakers
         )
@@ -413,6 +621,31 @@ class AudioBackend:
         logger.info(f"After merging: {len(merged)} final segments")
 
         return merged
+
+    async def _diarize_window(self, chunk_path: Path, *args) -> List[Dict]:
+        """Run one independent neural segmentation window off the event loop."""
+        return await self._run_executor_job(
+            self._diarization_executor, self.diarize, chunk_path, *args
+        )
+
+    @staticmethod
+    def _clip_segments_to_core(
+        segments: List[Dict], core_duration: float
+    ) -> List[Dict]:
+        """Give a chunk exclusive ownership of its non-overlap interval."""
+
+        clipped: List[Dict] = []
+        for segment in segments:
+            start = max(0.0, float(segment["start"]))
+            end = min(float(segment["end"]), float(core_duration))
+            if start >= core_duration or end <= start:
+                continue
+            owned = dict(segment)
+            owned["start"] = start
+            owned["end"] = end
+            owned["duration"] = end - start
+            clipped.append(owned)
+        return clipped
 
     async def _embed_local_speakers(
         self,
@@ -434,7 +667,6 @@ class AudioBackend:
         for seg in segments:
             by_label.setdefault(seg["speaker"], []).append(seg)
 
-        loop = asyncio.get_running_loop()
         centroids: Dict[str, np.ndarray] = {}
         for label, segs in by_label.items():
             segs_sorted = sorted(
@@ -451,9 +683,7 @@ class AudioBackend:
             for s in chosen:
                 wave = self.load_wave(chunk_path, s["start"], s["end"])
                 try:
-                    emb = np.asarray(
-                        await loop.run_in_executor(None, self.embed, wave)
-                    ).reshape(-1)
+                    emb = np.asarray(await self.async_embed(wave)).reshape(-1)
                 except ValueError as error:
                     logger.warning(
                         "Skipping unusable embedding for local speaker %s: %s",

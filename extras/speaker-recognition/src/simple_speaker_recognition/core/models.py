@@ -75,8 +75,8 @@ class DiarizeRequest(BaseModel):
         description="Collar duration (seconds) around speaker boundaries to merge segments",
     )
     min_duration_off: Optional[float] = Field(
-        default=1.5,
-        description="Minimum silence duration (seconds) before treating it as a segment boundary",
+        default=0.0,
+        description="Pyannote exclusive-timeline gap fill; must remain zero",
     )
 
 
@@ -84,7 +84,7 @@ class DiarizeAndIdentifyRequest(BaseModel):
     """Request model for combined diarization and identification."""
 
     min_duration: Optional[float] = Field(
-        default=0.5, description="Minimum duration for speaker segments (seconds)"
+        default=0.0, description="Minimum duration for speaker segments (seconds)"
     )
     min_speakers: Optional[int] = Field(
         default=None, description="Minimum number of speakers to detect"
@@ -108,8 +108,8 @@ class DiarizeAndIdentifyRequest(BaseModel):
         description="Collar duration (seconds) around speaker boundaries to merge segments",
     )
     min_duration_off: Optional[float] = Field(
-        default=1.5,
-        description="Minimum silence duration (seconds) before treating it as a segment boundary",
+        default=0.0,
+        description="Pyannote exclusive-timeline gap fill; must remain zero",
     )
 
 
@@ -329,8 +329,8 @@ class PyannoteDiarization(BaseModel):
         default=2.0, description="Collar duration (seconds) around speaker boundaries"
     )
     min_duration_off: float = Field(
-        default=1.5,
-        description="Minimum silence duration (seconds) before treating it as a segment boundary",
+        default=0.0,
+        description="Pyannote exclusive-timeline gap fill; must remain zero",
     )
 
 

@@ -1,7 +1,9 @@
 """Client for fetching audio from Chronicle backend."""
 
+import io
 import logging
 import time
+import wave
 from typing import Optional
 
 import httpx
@@ -26,11 +28,15 @@ class BackendClient:
         # Default timeout for metadata and other quick operations
         self.default_timeout = httpx.Timeout(timeout, read=timeout)
 
-        # Extended timeout for audio fetching (large files can take time)
-        # Connect: 10s, Read: 60s, Write: 30s, Pool: 10s
-        # TODO: Adjust read timeout based on actual measured decode times
+        # Extended timeout for audio fetching. A corpus request can span many
+        # independently bounded 10-minute neural passes; assembling a multi-hour WAV
+        # at the backend legitimately takes longer than the former 60-second read cap.
+        # A measured ten-hour capture took 527 seconds to reconstruct after the
+        # capture-claim cutover, so the advertised twelve-hour request bound needs more
+        # than ten minutes. Keep the transfer finite without making the independently
+        # bounded neural pass itself any larger.
         self.audio_timeout = httpx.Timeout(
-            connect=10.0, read=60.0, write=30.0, pool=10.0
+            connect=10.0, read=900.0, write=30.0, pool=10.0
         )
 
         # Use default timeout for the client (will override per-request)
@@ -121,6 +127,91 @@ class BackendClient:
         )
 
         return wav_bytes
+
+    async def get_audio_timeline(
+        self,
+        conversation_id: str,
+        token: str,
+        *,
+        total_duration: float,
+        audio_ranges: list[tuple[float, float]],
+    ) -> bytes:
+        """Rebuild a clock-faithful WAV, representing missing chunks as silence.
+
+        Chronicle refuses to reconstruct one range across a real chunk gap because
+        concatenating the available chunks would compress wall-clock time.  Pyannote
+        still needs one waveform whose sample positions line up with transcript word
+        timestamps, so fetch each continuous island and place it at its original
+        offset in a zero-filled timeline.
+        """
+        if total_duration <= 0:
+            raise ValueError("total_duration must be positive")
+
+        normalized: list[tuple[float, float]] = []
+        for raw_start, raw_end in sorted(audio_ranges):
+            start = max(0.0, float(raw_start))
+            end = min(float(total_duration), float(raw_end))
+            if end <= start:
+                continue
+            # Chunk bounds are normally exactly adjacent.  Merge overlaps and
+            # sub-millisecond rounding noise, but retain every material clock gap.
+            if normalized and start <= normalized[-1][1] + 0.001:
+                normalized[-1] = (normalized[-1][0], max(normalized[-1][1], end))
+            else:
+                normalized.append((start, end))
+        if not normalized:
+            raise ValueError("audio_ranges contain no usable audio")
+
+        clips: list[tuple[float, float, bytes, int, int, int]] = []
+        format_signature: tuple[int, int, int] | None = None
+        for start, end in normalized:
+            wav_bytes = await self.get_audio_segment(
+                conversation_id,
+                token,
+                start=start,
+                duration=end - start,
+            )
+            with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
+                signature = (
+                    wav_file.getnchannels(),
+                    wav_file.getsampwidth(),
+                    wav_file.getframerate(),
+                )
+                if format_signature is None:
+                    format_signature = signature
+                elif signature != format_signature:
+                    raise ValueError(
+                        "Audio format changes between reconstructed timeline islands"
+                    )
+                frames = wav_file.readframes(wav_file.getnframes())
+            clips.append((start, end, frames, *signature))
+
+        assert format_signature is not None
+        channels, sample_width, sample_rate = format_signature
+        frame_width = channels * sample_width
+        total_frames = round(float(total_duration) * sample_rate)
+        timeline = bytearray(total_frames * frame_width)
+
+        for start, end, frames, *_signature in clips:
+            start_frame = round(start * sample_rate)
+            expected_frames = max(0, round((end - start) * sample_rate))
+            available_frames = len(frames) // frame_width
+            copy_frames = min(
+                expected_frames, available_frames, total_frames - start_frame
+            )
+            if copy_frames <= 0:
+                continue
+            output_start = start_frame * frame_width
+            output_end = output_start + copy_frames * frame_width
+            timeline[output_start:output_end] = frames[: copy_frames * frame_width]
+
+        output = io.BytesIO()
+        with wave.open(output, "wb") as wav_file:
+            wav_file.setnchannels(channels)
+            wav_file.setsampwidth(sample_width)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(timeline)
+        return output.getvalue()
 
     async def close(self):
         """Close HTTP client and release resources."""

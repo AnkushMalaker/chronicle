@@ -10,6 +10,7 @@ from typing import Optional
 import numpy as np
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
+
 from simple_speaker_recognition.api.core.utils import require_speaker_owner
 from simple_speaker_recognition.constants import DEFAULT_SIMILARITY_THRESHOLD
 from simple_speaker_recognition.core.unified_speaker_db import UnifiedSpeakerDB

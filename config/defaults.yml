@@ -654,7 +654,9 @@ speaker_recognition:
   # Diarization chunking configuration (speaker service self-managed chunking)
   # Maximum audio duration (seconds) for single PyAnnote call
   # Files longer than this will be chunked automatically by the speaker service
-  max_diarize_duration: 60
+  max_diarize_duration: 600
+  # Maximum neural segmentation windows processed concurrently
+  diarize_concurrent_chunks: 2
   # Overlap (seconds) between chunks for speaker continuity
   diarize_chunk_overlap: 5.0
   # Backend API URL for fetching audio segments (used by speaker service)

@@ -106,8 +106,13 @@ class Settings(BaseSettings):
     # Backend API configuration for chunked processing
     # Loaded from root config.yml speaker_recognition section, can be overridden by env vars
     max_diarize_duration: int = Field(
-        default=1200,
+        default=600,
         description="Maximum audio duration (seconds) for single PyAnnote call",
+    )
+    diarize_concurrent_chunks: int = Field(
+        default=2,
+        ge=1,
+        description="Maximum neural segmentation windows processed concurrently",
     )
     diarize_chunk_overlap: float = Field(
         default=5.0, description="Overlap (seconds) between chunks for continuity"
@@ -134,7 +139,15 @@ class Settings(BaseSettings):
             and "MAX_DIARIZE_DURATION" not in os.environ
         ):
             kwargs["max_diarize_duration"] = root_config.get(
-                "max_diarize_duration", 1200
+                "max_diarize_duration", 600
+            )
+
+        if (
+            "diarize_concurrent_chunks" not in kwargs
+            and "DIARIZE_CONCURRENT_CHUNKS" not in os.environ
+        ):
+            kwargs["diarize_concurrent_chunks"] = root_config.get(
+                "diarize_concurrent_chunks", 2
             )
 
         if (
@@ -269,7 +282,17 @@ async def lifespan(app: FastAPI):
 
     log.info("Loading models...")
     assert hf_token is not None
-    audio_backend = AudioBackend(hf_token, device)
+    audio_backend = AudioBackend(
+        hf_token,
+        device,
+        max_diarization_workers=auth.diarize_concurrent_chunks,
+    )
+    log.info(
+        "Diarization runtime: %ds windows, %d concurrent, %.1fs overlap",
+        auth.max_diarize_duration,
+        auth.diarize_concurrent_chunks,
+        auth.diarize_chunk_overlap,
+    )
     speaker_db = UnifiedSpeakerDB(
         emb_dim=audio_backend.embedder.dimension,
         base_dir=auth.data_dir,
@@ -293,6 +316,7 @@ async def lifespan(app: FastAPI):
 
     # Shutdown: Clean up resources if needed
     watchdog_task.cancel()
+    audio_backend.close()
     log.info("Shutting down speaker recognition service")
 
 

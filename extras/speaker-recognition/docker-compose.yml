@@ -17,7 +17,7 @@ services:
     volumes:
       - ./src:/app/src
       - ./model_cache:/models
-      - ./debug:/app/debug
+      - ${SPEAKER_DEBUG_DATA_DIR:-./debug}:/app/debug
       - ./speaker_data:/app/data
       - ../../config:/app/config:ro
     environment:

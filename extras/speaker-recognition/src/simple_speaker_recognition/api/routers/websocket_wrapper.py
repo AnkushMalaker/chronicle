@@ -158,7 +158,7 @@ class SpeakerChangeDetector:
                     "onset": 0.5,  # Lower = more sensitive to speech start
                     "offset": 0.5,  # Lower = more sensitive to speech end
                     "min_duration_on": 0.1,  # Minimum speech duration
-                    "min_duration_off": 0.5,  # Minimum silence duration
+                    "min_duration_off": 0.0,  # Preserve an exclusive timeline
                 }
                 self.vad_pipeline.instantiate(hyperparameters)
             except Exception as e:

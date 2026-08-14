@@ -209,7 +209,7 @@ async def process_with_pyannote_diarization(
         min_speakers = diarization_params.get("min_speakers")
         max_speakers = diarization_params.get("max_speakers")
         collar = diarization_params.get("collar", 2.0)
-        min_duration_off = diarization_params.get("min_duration_off", 1.5)
+        min_duration_off = diarization_params.get("min_duration_off", 0.0)
 
         # Perform diarization with parameters
         segments = await audio_backend.async_diarize(
