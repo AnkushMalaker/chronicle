@@ -5,6 +5,7 @@ import notifee, { AndroidImportance } from '@notifee/react-native';
 import NetInfo from '@react-native-community/netinfo';
 import { refreshToken } from '../services/auth';
 import { playDownlinkAudio } from '../utils/audioPlayback';
+import { shouldForwardCapturedAudio } from '../utils/audioPlaybackGate';
 import { durableAudioSpool, SpoolPacket } from '../services/durableAudioSpool';
 import { useConnectionLog, ConnectionEventType, ConnectionEvent } from '../contexts/ConnectionLogContext';
 
@@ -524,7 +525,12 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   }, [attemptReconnect, attemptReLogin, drainDurableSpool, notifyInfo, sendWyomingEvent, setStateSafe, stopStreaming, logEvent]);
 
   const sendAudio = useCallback(async (audioBytes: Uint8Array, durable = true) => {
-    if (durable && audioBytes.length > 0) {
+    // Keep capture and the socket running, but never uplink audio heard from our
+    // own speaker. Playback owns the gate and releases it on the real completion
+    // callback, avoiding the backend's necessarily approximate TTS mute timer.
+    if (!shouldForwardCapturedAudio(audioBytes.length)) return;
+
+    if (durable) {
       const packet = durableAudioSpool.append(audioBytes);
       if (drainingSpoolRef.current) {
         deferredLivePacketsRef.current.push(packet);
@@ -533,7 +539,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
       }
       return;
     }
-    if (websocketRef.current && websocketRef.current.readyState === WebSocket.OPEN && audioBytes.length > 0) {
+    if (websocketRef.current && websocketRef.current.readyState === WebSocket.OPEN) {
       try {
         console.log(`[AudioStreamer] 📤 Sending audio chunk: ${audioBytes.length} bytes`);
         const audioChunkEvent: WyomingEvent = { type: 'audio-chunk', data: AUDIO_FORMAT };

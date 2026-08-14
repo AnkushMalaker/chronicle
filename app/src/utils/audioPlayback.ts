@@ -12,6 +12,7 @@
 
 import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from 'expo-audio';
 import { File, Paths } from 'expo-file-system';
+import { downlinkPlaybackCaptureGate } from './audioPlaybackGate';
 
 export interface PlayAudioData {
   /** Base64-encoded audio bytes (e.g. a synthesized TTS reply). */
@@ -42,6 +43,7 @@ async function ensureAudioMode(): Promise<void> {
 // Monotonic counter so concurrent/overlapping replies don't clobber each other's
 // temp files before playback finishes.
 let fileSeq = 0;
+const MAX_DOWNLINK_PLAYBACK_MS = 2 * 60 * 1000;
 
 /**
  * Play a backend `play-audio` downlink message through the phone speaker.
@@ -86,7 +88,19 @@ export async function playDownlinkAudio(data: PlayAudioData): Promise<void> {
     return;
   }
 
+  let cleanedUp = false;
+  let finishCaptureSuppression: (() => void) | null = null;
+  let playbackSafetyTimer: ReturnType<typeof setTimeout> | null = null;
+
   const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    if (playbackSafetyTimer) {
+      clearTimeout(playbackSafetyTimer);
+      playbackSafetyTimer = null;
+    }
+    finishCaptureSuppression?.();
+    finishCaptureSuppression = null;
     try {
       player.remove();
     } catch {}
@@ -107,6 +121,14 @@ export async function playDownlinkAudio(data: PlayAudioData): Promise<void> {
         cleanup();
       }
     });
+    finishCaptureSuppression = downlinkPlaybackCaptureGate.beginPlayback();
+    playbackSafetyTimer = setTimeout(() => {
+      console.warn('[AudioPlayback] Playback completion timed out; releasing capture gate');
+      try {
+        sub.remove();
+      } catch {}
+      cleanup();
+    }, MAX_DOWNLINK_PLAYBACK_MS);
     console.log(`[AudioPlayback] ▶️ Playing downlink audio (${format}) from ${source}`);
     player.play();
   } catch (e) {
