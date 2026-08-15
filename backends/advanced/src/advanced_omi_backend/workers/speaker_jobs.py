@@ -6,8 +6,10 @@ This module contains all jobs related to speaker identification and recognition.
 
 import asyncio
 import logging
+import math
 import time
 import traceback
+from bisect import bisect_right
 from typing import Any, Dict
 
 import numpy as np
@@ -27,13 +29,27 @@ from advanced_omi_backend.models.annotation import (
     AnnotationStatus,
     AnnotationType,
 )
+from advanced_omi_backend.models.audio_capture import ConversationTranscriptRevision
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
+from advanced_omi_backend.services.audio_claims import (
+    range_duration,
+    resolve_conversation_audio,
+)
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
 from advanced_omi_backend.services.forced_alignment import (
+    estimate_words_from_segment_timing,
     synthesize_words_via_alignment,
 )
 from advanced_omi_backend.services.observability import record_event_sync
+from advanced_omi_backend.services.processing_artifacts import (
+    persist_conversation_revision,
+    persist_diarization_artifact,
+    persist_timing_normalized_revision,
+    persist_word_timed_revision,
+    resolve_transcript_artifact_ids,
+)
+from advanced_omi_backend.services.timeline.dirty_ranges import note_conversation_dirty
 from advanced_omi_backend.services.transcript_integrity import (
     TranscriptTimingError,
     load_transcript_audio_ranges,
@@ -44,7 +60,9 @@ from advanced_omi_backend.speaker_recognition_client import (
     SpeakerRecognitionClient,
 )
 from advanced_omi_backend.users import get_user_by_id
-from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
+from advanced_omi_backend.utils.audio_chunk_utils import (
+    reconstruct_resolved_audio_ranges,
+)
 from advanced_omi_backend.utils.job_utils import update_job_meta
 from advanced_omi_backend.utils.segment_utils import classify_segment_text
 from advanced_omi_backend.workers import background_suppression
@@ -55,6 +73,8 @@ logger = logging.getLogger(__name__)
 PROPAGATION_MIN_VOTES = 2
 HUMAN_LABEL_START_TOLERANCE_SECONDS = 0.75
 AUDIO_CONTINUITY_TOLERANCE_SECONDS = 0.25
+BACKGROUND_AUDIO_BATCH_SIZE = 100
+SPEAKER_BOUNDARY_CLIP_TOLERANCE_SECONDS = 0.05
 
 
 def _audio_ranges_cover_continuously(
@@ -74,12 +94,369 @@ def _audio_ranges_cover_continuously(
     return covered_until + AUDIO_CONTINUITY_TOLERANCE_SECONDS >= duration
 
 
+def _normalize_speaker_segment_bounds(
+    segments: list[dict[str, Any]], *, duration: float
+) -> list[dict[str, Any]]:
+    """Clip model-frame rounding to the exact immutable audio-claim boundary."""
+
+    if duration <= 0 or not math.isfinite(duration):
+        raise SpeakerDataIntegrityError(
+            "Cannot normalize speaker turns without a positive audio duration"
+        )
+    normalized: list[dict[str, Any]] = []
+    for segment in segments:
+        start = float(segment.get("start", 0.0))
+        end = float(segment.get("end", start))
+        if not math.isfinite(start) or not math.isfinite(end) or end < start:
+            raise SpeakerDataIntegrityError(
+                f"Speaker service returned invalid turn bounds {start}-{end}"
+            )
+        if (
+            start < -SPEAKER_BOUNDARY_CLIP_TOLERANCE_SECONDS
+            or end > duration + SPEAKER_BOUNDARY_CLIP_TOLERANCE_SECONDS
+        ):
+            raise SpeakerDataIntegrityError(
+                f"Speaker service turn {start}-{end} lies outside {duration:.3f}s audio"
+            )
+        clipped_start = min(max(start, 0.0), duration)
+        clipped_end = min(max(end, 0.0), duration)
+        if clipped_end <= clipped_start:
+            raise SpeakerDataIntegrityError(
+                "Speaker service turn collapsed while clipping to the audio claim: "
+                f"{start}-{end} against {duration:.3f}s"
+            )
+        item = dict(segment)
+        item["start"] = clipped_start
+        item["end"] = clipped_end
+        if "duration" in item:
+            item["duration"] = clipped_end - clipped_start
+        normalized.append(item)
+    return normalized
+
+
+def _project_source_words_onto_speaker_turns(
+    segments: list[dict[str, Any]],
+    words: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Assign every immutable ASR word to exactly one neural speaker turn.
+
+    Pyannote intentionally leaves non-speech gaps. Provider-side midpoint matching can
+    consequently omit words near a neural boundary or duplicate them when timelines
+    overlap. The exclusive turns remain the speaker evidence; this projection rebuilds
+    their text from the immutable word clock and chooses one deterministic nearest turn
+    for each word. Returned provider text/word lists are never trusted as ownership.
+    """
+
+    ordered_segments = sorted(
+        (dict(segment) for segment in segments),
+        key=lambda segment: (
+            float(segment.get("start", 0.0)),
+            float(segment.get("end", 0.0)),
+            str(segment.get("speaker", "")),
+        ),
+    )
+    if words and not ordered_segments:
+        raise SpeakerDataIntegrityError(
+            "Cannot project timed transcript words without speaker turns"
+        )
+
+    segment_starts = [float(segment["start"]) for segment in ordered_segments]
+    previous_end = 0.0
+    for segment in ordered_segments:
+        start = float(segment["start"])
+        end = float(segment["end"])
+        if start < previous_end - 1e-6:
+            raise SpeakerDataIntegrityError(
+                "Cannot project words onto overlapping neural speaker turns"
+            )
+        previous_end = max(previous_end, end)
+
+    assigned: list[list[dict[str, Any]]] = [[] for _ in ordered_segments]
+    for word in words:
+        start = float(word.get("start", 0.0))
+        end = float(word.get("end", start))
+        text = str(word.get("word", ""))
+        if (
+            not text.strip()
+            or not math.isfinite(start)
+            or not math.isfinite(end)
+            or start < 0
+            or end < start
+        ):
+            raise SpeakerDataIntegrityError(
+                f"Cannot project invalid source word {text!r} at {start}-{end}"
+            )
+        midpoint = (start + end) / 2.0
+
+        # Exclusive turns are sorted, so ownership needs only the turn immediately
+        # before the word midpoint and the following turn. This is O(log T) per word,
+        # not a W-by-T scan on long recordings.
+        previous_index = bisect_right(segment_starts, midpoint) - 1
+        if previous_index < 0:
+            owner = 0
+        elif midpoint <= float(ordered_segments[previous_index]["end"]):
+            owner = previous_index
+        elif previous_index + 1 >= len(ordered_segments):
+            owner = previous_index
+        else:
+            next_index = previous_index + 1
+            previous_distance = midpoint - float(
+                ordered_segments[previous_index]["end"]
+            )
+            next_distance = float(ordered_segments[next_index]["start"]) - midpoint
+            owner = previous_index if previous_distance <= next_distance else next_index
+        assigned[owner].append(dict(word))
+
+    projected: list[dict[str, Any]] = []
+    for segment, segment_words in zip(ordered_segments, assigned, strict=True):
+        item = dict(segment)
+        item["words"] = segment_words
+        item["text"] = " ".join(
+            str(word["word"]).strip() for word in segment_words
+        ).strip()
+        projected.append(item)
+    return projected
+
+
+def _strip_reprojected_words_from_events(
+    segments: list[Conversation.SpeakerSegment],
+    projected_words: list[dict[str, Any]],
+) -> list[Conversation.SpeakerSegment]:
+    """Keep event boundaries without duplicating words owned by neural turns."""
+
+    projected_keys = {
+        (
+            float(word.get("start", 0.0)),
+            float(word.get("end", word.get("start", 0.0))),
+            str(word.get("word", "")),
+        )
+        for word in projected_words
+    }
+    stripped: list[Conversation.SpeakerSegment] = []
+    for segment in segments:
+        item = segment.model_copy(deep=True)
+        item.words = [
+            word
+            for word in item.words
+            if (float(word.start), float(word.end), str(word.word))
+            not in projected_keys
+        ]
+        stripped.append(item)
+    return stripped
+
+
 def _is_speech_segment(segment: Any) -> bool:
     """Recover ordinary speech when an imported provider mislabeled it as an event."""
     return (
         getattr(segment, "segment_type", "speech") == "speech"
         or classify_segment_text(getattr(segment, "text", "")) == "speech"
     )
+
+
+def _retained_non_speech_segments(segments: list[Any]) -> list[Any]:
+    """Keep meaningful events, not empty provider timing placeholders.
+
+    Raw audio remains durably claimed for every interval. A provider row with no text
+    and no words contributes no transcript evidence and must not be overlaid on the
+    exclusive speaker timeline. Named events and event rows carrying words remain
+    first-class boundaries for display consolidation.
+    """
+    return [
+        segment
+        for segment in segments
+        if not _is_speech_segment(segment)
+        and (
+            bool((getattr(segment, "text", "") or "").strip())
+            or bool(getattr(segment, "words", None))
+        )
+    ]
+
+
+def _word_timeline_fallback_segments(
+    words: list[dict[str, Any]],
+    *,
+    duration: float,
+    max_gap: float = 2.0,
+) -> list[dict[str, Any]]:
+    """Build provider-independent speech spans after an empty pyannote result.
+
+    Pyannote can occasionally return no neural speaker turns for a short clip even
+    though the immutable ASR evidence contains timed words. Reusing the provider's
+    utterance rows in that case preserves exactly the fragmentation this reprocessing
+    pass exists to replace. Instead, group the source words only by real silence gaps,
+    give every group one neutral label for downstream voice identification, and retain
+    every source word exactly once.
+    """
+
+    if duration <= 0:
+        raise SpeakerDataIntegrityError(
+            "Cannot construct word-timeline fallback without positive audio duration"
+        )
+    if max_gap < 0:
+        raise ValueError("max_gap must be non-negative")
+
+    normalized: list[dict[str, Any]] = []
+    for word in words:
+        text = str(word.get("word", ""))
+        start = float(word.get("start", 0.0))
+        end = float(word.get("end", start))
+        if not text.strip():
+            raise SpeakerDataIntegrityError(
+                "Cannot construct word-timeline fallback from an empty word"
+            )
+        if (
+            not math.isfinite(start)
+            or not math.isfinite(end)
+            or start < 0
+            or end < start
+        ):
+            raise SpeakerDataIntegrityError(
+                f"Cannot construct word-timeline fallback from invalid word bounds "
+                f"{start}-{end}"
+            )
+        if end > duration + 1e-3:
+            raise SpeakerDataIntegrityError(
+                f"Cannot construct word-timeline fallback: word ends at {end:.3f}s "
+                f"outside {duration:.3f}s audio"
+            )
+        normalized.append({**word, "start": start, "end": min(end, duration)})
+
+    normalized.sort(key=lambda item: (item["start"], item["end"]))
+    groups: list[list[dict[str, Any]]] = []
+    for word in normalized:
+        if groups and word["start"] - groups[-1][-1]["end"] <= max_gap:
+            groups[-1].append(word)
+        else:
+            groups.append([word])
+
+    segments: list[dict[str, Any]] = []
+    for group in groups:
+        start = float(group[0]["start"])
+        end = max(float(word["end"]) for word in group)
+        if end <= start:
+            end = min(duration, start + 1e-3)
+            if end <= start:
+                start = max(0.0, end - 1e-3)
+        segments.append(
+            {
+                "start": start,
+                "end": end,
+                "text": " ".join(str(word["word"]).strip() for word in group),
+                "speaker": "WORD_TIMELINE_FALLBACK",
+                "words": group,
+            }
+        )
+    return segments
+
+
+def _compose_exclusive_projection(
+    segments: list[Conversation.SpeakerSegment],
+    events: list[Conversation.SpeakerSegment],
+) -> list[Conversation.SpeakerSegment]:
+    """Overlay meaningful provider events without overlapping displayed speech.
+
+    A zero-duration event is a point boundary (not an audio interval), so split the
+    containing word-aligned speech turn around it. A positive-duration event only
+    occupies parts not already owned by speech; speech text wins when providers report
+    a concurrent sound tag. The raw provider revision and audio remain unchanged.
+    """
+
+    projected = [segment.model_copy(deep=True) for segment in segments]
+    retained: list[Conversation.SpeakerSegment] = []
+    tolerance = 1e-6
+
+    for event in sorted(events, key=lambda item: (item.start, item.end)):
+        event_start = float(event.start)
+        event_end = float(event.end)
+        if event_end < event_start - tolerance:
+            raise ValueError(
+                f"Non-speech event ends before it starts: {event_start}-{event_end}"
+            )
+
+        if event_end <= event_start + tolerance:
+            containing = [
+                segment
+                for segment in projected
+                if float(segment.start) + tolerance
+                < event_start
+                < float(segment.end) - tolerance
+            ]
+            if any(segment.segment_type != "speech" for segment in containing):
+                continue
+
+            split_projection: list[Conversation.SpeakerSegment] = []
+            marker_is_representable = True
+            for segment in projected:
+                if segment not in containing:
+                    split_projection.append(segment)
+                    continue
+                if not segment.words:
+                    marker_is_representable = False
+                    split_projection.append(segment)
+                    continue
+
+                left_words = [
+                    word
+                    for word in segment.words
+                    if (float(word.start) + float(word.end)) / 2 < event_start
+                ]
+                right_words = [
+                    word
+                    for word in segment.words
+                    if (float(word.start) + float(word.end)) / 2 >= event_start
+                ]
+                if left_words:
+                    left = segment.model_copy(deep=True)
+                    left.end = event_start
+                    left.words = left_words
+                    left.text = " ".join(word.word for word in left_words).strip()
+                    split_projection.append(left)
+                if right_words:
+                    right = segment.model_copy(deep=True)
+                    right.start = event_start
+                    right.words = right_words
+                    right.text = " ".join(word.word for word in right_words).strip()
+                    split_projection.append(right)
+
+            if marker_is_representable:
+                projected = split_projection
+                retained.append(event.model_copy(deep=True))
+            continue
+
+        uncovered = [(event_start, event_end)]
+        occupied = [
+            segment
+            for segment in projected + retained
+            if float(segment.end) > float(segment.start) + tolerance
+        ]
+        for segment in occupied:
+            occupied_start = float(segment.start)
+            occupied_end = float(segment.end)
+            next_uncovered: list[tuple[float, float]] = []
+            for start, end in uncovered:
+                if (
+                    occupied_end <= start + tolerance
+                    or occupied_start >= end - tolerance
+                ):
+                    next_uncovered.append((start, end))
+                    continue
+                if occupied_start > start + tolerance:
+                    next_uncovered.append((start, min(occupied_start, end)))
+                if occupied_end < end - tolerance:
+                    next_uncovered.append((max(occupied_end, start), end))
+            uncovered = next_uncovered
+            if not uncovered:
+                break
+
+        for start, end in uncovered:
+            if end <= start + tolerance:
+                continue
+            fragment = event.model_copy(deep=True)
+            fragment.start = start
+            fragment.end = end
+            retained.append(fragment)
+
+    return sorted(projected + retained, key=lambda item: (item.start, item.end))
 
 
 def _pool_returned_segment_embeddings(
@@ -107,6 +484,59 @@ def _pool_returned_segment_embeddings(
         if np.all(np.isfinite(centroid)) and norm > 0.0:
             pooled[label] = (centroid / norm).tolist()
     return pooled
+
+
+def _rekey_cluster_centroids(
+    raw_centroids: dict[str, list[float]],
+    segments: list[dict],
+    unknown_label_map: dict[str, str],
+) -> dict[str, list[float]]:
+    """Key raw neural-cluster centroids by their stable automatic identity.
+
+    Background suppression can relabel a few turns in an otherwise human-owned
+    neural cluster as ``Noise``/``Background Speech``. A last-write-wins mapping
+    therefore loses the person's centroid whenever a background turn happens to be
+    last. Prefer the cluster's sole person identity; use its deterministic unknown
+    label when it has no person identity; and omit genuinely mixed-person clusters
+    because one pooled vector cannot truthfully represent either person.
+    """
+
+    identities_by_cluster: dict[str, set[str]] = {}
+    for segment in segments:
+        cluster = segment.get("speaker")
+        identified = segment.get("identified_as")
+        if (
+            cluster
+            and identified
+            and identified not in (NOISE_LABEL, BACKGROUND_SPEECH_LABEL)
+        ):
+            identities_by_cluster.setdefault(cluster, set()).add(identified)
+
+    rekeyed: dict[str, list[float]] = {}
+    blocked_labels: set[str] = set()
+    for cluster, centroid in raw_centroids.items():
+        identities = identities_by_cluster.get(cluster, set())
+        if len(identities) > 1:
+            logger.warning(
+                "Not storing drift centroid for mixed-identity cluster %s: %s",
+                cluster,
+                sorted(identities),
+            )
+            continue
+        label = next(iter(identities), None) or unknown_label_map.get(cluster)
+        if not label or label in blocked_labels:
+            continue
+        if label in rekeyed:
+            # Exclusivity should prevent this. If it does happen, neither pooled
+            # centroid is a valid representative of the shared final label.
+            logger.warning(
+                "Not storing colliding drift centroids for final label %s", label
+            )
+            rekeyed.pop(label, None)
+            blocked_labels.add(label)
+            continue
+        rekeyed[label] = centroid
+    return rekeyed
 
 
 def _apply_human_speaker_overlays(segments: list, annotations: list) -> list[dict]:
@@ -155,6 +585,145 @@ def _apply_human_speaker_overlays(segments: list, annotations: list) -> list[dic
         segment.identified_as = None
         segment.confidence = 0.0
     return failures
+
+
+def _merge_adjacent_projected_speech(
+    segments: list[Conversation.SpeakerSegment], max_gap: float = 2.0
+) -> list[Conversation.SpeakerSegment]:
+    """Remove compute-window seams after empty diarization turns are filtered.
+
+    The speaker service merges adjacent turns before text alignment. A textless
+    overlapping turn can later be filtered out, making two pieces of the same final
+    speaker adjacent again—most visibly at a 20-minute ownership boundary. Merge that
+    pair using the same two-second collar, while an event or another speaker remains a
+    real boundary.
+    """
+
+    if not segments:
+        return []
+    ordered = sorted(segments, key=lambda segment: (segment.start, segment.end))
+    merged = [ordered[0].model_copy(deep=True)]
+    for segment in ordered[1:]:
+        current = merged[-1]
+        gap = float(segment.start) - float(current.end)
+        can_merge = (
+            current.segment_type == "speech"
+            and segment.segment_type == "speech"
+            and current.speaker == segment.speaker
+            and current.identified_as == segment.identified_as
+            and gap <= max_gap
+        )
+        if not can_merge:
+            merged.append(segment.model_copy(deep=True))
+            continue
+
+        current_duration = max(0.0, float(current.end) - float(current.start))
+        next_duration = max(0.0, float(segment.end) - float(segment.start))
+        confidences = [
+            (float(value), duration)
+            for value, duration in (
+                (current.confidence, current_duration),
+                (segment.confidence, next_duration),
+            )
+            if value is not None
+        ]
+        current.end = max(float(current.end), float(segment.end))
+        current.text = " ".join(
+            value for value in (current.text.strip(), segment.text.strip()) if value
+        )
+        current.words.extend(segment.words)
+        if confidences:
+            weight = sum(duration for _, duration in confidences)
+            current.confidence = (
+                sum(value * duration for value, duration in confidences) / weight
+                if weight > 0
+                else sum(value for value, _ in confidences) / len(confidences)
+            )
+    return merged
+
+
+async def _compact_embedded_speaker_history(
+    conversation: Conversation,
+    *,
+    keep_version_id: str,
+) -> int:
+    """Keep one speaker read model embedded after verifying history is archived.
+
+    Full immutable history belongs to ``conversation_transcript_revisions``. Repeatedly
+    embedding every word and turn eventually breaches MongoDB's 16 MB document limit
+    on long recordings. Verify each displaced speaker projection has a standalone
+    revision before removing only that denormalized copy.
+    """
+
+    versions_by_id = {
+        version.version_id: version for version in conversation.transcript_versions
+    }
+    keep = versions_by_id.get(keep_version_id)
+    if keep is None:
+        raise SpeakerDataIntegrityError(
+            f"Cannot compact speaker history: active version {keep_version_id} is missing"
+        )
+
+    # Older callers sometimes projected from the active speaker projection rather
+    # than its provider/annotation source. Collapse that chain before removing the
+    # intermediate embedded copies so the bounded read model never has a dangling
+    # source pointer.
+    source_id = (keep.metadata or {}).get("source_version_id")
+    visited: set[str] = set()
+    while source_id:
+        if source_id in visited:
+            raise SpeakerDataIntegrityError(
+                f"Cannot compact cyclic speaker source chain at {source_id}"
+            )
+        visited.add(source_id)
+        source = versions_by_id.get(source_id)
+        if source is None:
+            raise SpeakerDataIntegrityError(
+                "Cannot compact speaker history: source version "
+                f"{source_id} is missing"
+            )
+        if (source.metadata or {}).get("reprocessing_type") != "speaker_diarization":
+            break
+        source_id = (source.metadata or {}).get("source_version_id")
+    if source_id:
+        keep.metadata["source_version_id"] = source_id
+
+    displaced = [
+        version
+        for version in conversation.transcript_versions
+        if version.version_id != keep_version_id
+        and (version.metadata or {}).get("reprocessing_type") == "speaker_diarization"
+    ]
+    for version in displaced:
+        revision = await ConversationTranscriptRevision.find_one(
+            {
+                "$or": [
+                    {
+                        "retry_key": (
+                            f"speaker-projection:{conversation.conversation_id}:"
+                            f"{version.version_id}"
+                        )
+                    },
+                    {
+                        "conversation_id": conversation.conversation_id,
+                        "metadata.source_version_id": version.version_id,
+                    },
+                ]
+            }
+        )
+        if revision is None:
+            raise SpeakerDataIntegrityError(
+                "Cannot compact embedded speaker version "
+                f"{version.version_id}: standalone revision is missing"
+            )
+
+    displaced_ids = {version.version_id for version in displaced}
+    conversation.transcript_versions = [
+        version
+        for version in conversation.transcript_versions
+        if version.version_id not in displaced_ids
+    ]
+    return len(displaced)
 
 
 async def _human_speaker_annotations(conversation_id: str) -> list[Annotation]:
@@ -263,10 +832,7 @@ async def _apply_background_references(
     semaphore = asyncio.Semaphore(SPEAKER_IDENTIFY_CONCURRENCY)
     ledger_records: list[dict] = []
 
-    async def classify(segment: dict) -> None:
-        duration = float(segment.get("end", 0)) - float(segment.get("start", 0))
-        if duration < 1.0 or duration > 15.0:
-            return
+    async def classify(segment: dict, wav: bytes | None = None) -> None:
         async with semaphore:
             if segment.get("_evaluation_embedding"):
                 embedded = {
@@ -274,9 +840,8 @@ async def _apply_background_references(
                     "embedding_model": segment.get("_embedding_model"),
                 }
             else:
-                wav = await reconstruct_audio_segment(
-                    conversation_id, float(segment["start"]), float(segment["end"])
-                )
+                if wav is None:
+                    raise ValueError("background-reference segment has no audio")
                 embedded = await speaker_client.extract_speaker_embedding(wav)
             if embedded.get("error") or "embedding" not in embedded:
                 return
@@ -319,9 +884,58 @@ async def _apply_background_references(
                 segment["status"] = "background_reference"
                 segment["background_scores"] = scores
 
-    results = await asyncio.gather(
-        *(classify(segment) for segment in segments), return_exceptions=True
+    eligible = [
+        segment
+        for segment in segments
+        if 1.0 <= float(segment.get("end", 0)) - float(segment.get("start", 0)) <= 15.0
+    ]
+    cached = [segment for segment in eligible if segment.get("_evaluation_embedding")]
+    needs_audio = [
+        segment for segment in eligible if not segment.get("_evaluation_embedding")
+    ]
+    results = list(
+        await asyncio.gather(
+            *(classify(segment) for segment in cached), return_exceptions=True
+        )
     )
+    if needs_audio:
+        try:
+            resolved_audio = await resolve_conversation_audio(conversation_id)
+        except Exception as error:  # keep the suppression ledger explicitly incomplete
+            logger.warning(
+                "Background-reference audio claim failed for %s: %s",
+                conversation_id[:8],
+                error,
+            )
+            results.extend([error] * len(needs_audio))
+        else:
+            for offset in range(0, len(needs_audio), BACKGROUND_AUDIO_BATCH_SIZE):
+                batch = needs_audio[offset : offset + BACKGROUND_AUDIO_BATCH_SIZE]
+                ranges = [
+                    (float(segment["start"]), float(segment["end"]))
+                    for segment in batch
+                ]
+                try:
+                    wavs = await reconstruct_resolved_audio_ranges(
+                        resolved_audio,
+                        ranges,
+                        conversation_id=conversation_id,
+                    )
+                except Exception as error:  # one bad batch must not hide later verdicts
+                    logger.warning(
+                        "Background-reference audio batch failed for %s at %d: %s",
+                        conversation_id[:8],
+                        offset,
+                        error,
+                    )
+                    results.extend([error] * len(batch))
+                    continue
+                results.extend(
+                    await asyncio.gather(
+                        *(classify(segment, wav) for segment, wav in zip(batch, wavs)),
+                        return_exceptions=True,
+                    )
+                )
     failures = sum(isinstance(result, Exception) for result in results)
     if failures:
         logger.warning(
@@ -514,9 +1128,9 @@ async def recognise_speakers_job(
     2. If provider has word timestamps (e.g., Parakeet) → full pyannote diarization + identification
     3. If no word timestamps → cannot run diarization, keep existing segments
 
-    If pyannote re-diarization finds no speaker turns but the source already has
-    segments, it falls back to identifying those existing segments — so a diarization
-    miss still yields labels (identified names, or "Unknown Speaker 1..N").
+    If pyannote re-diarization finds no speaker turns despite timed ASR words, it builds
+    provider-independent spans from the word clock and identifies those — so a neural
+    miss does not restore fragmented provider utterance boundaries.
 
     Speaker identification always runs if enrolled speakers exist, mapping
     generic labels ("Speaker 0") to enrolled speaker names ("Alice").
@@ -609,27 +1223,25 @@ async def recognise_speakers_job(
     transcript_version = source_version
 
     # Reject stale split/trim clocks before constructing audio or touching the remote
-    # service. This makes a data-integrity incident explicit and keeps service-health
-    # reporting honest.
+    # service. Missing chunk coverage is allowed here: the speaker service receives the
+    # coverage ranges and pads real gaps with silence so the original transcript clock is
+    # preserved.
     preflight_segments = [
-        {
-            "start": segment.start,
-            "end": segment.end,
-            "text": segment.text,
-        }
+        segment.model_dump(mode="python")
         for segment in (transcript_version.segments or [])
     ]
     preflight_words = [
-        {"start": word.start, "end": word.end, "word": word.word}
-        for word in (transcript_version.words or [])
+        word.model_dump(mode="python") for word in (transcript_version.words or [])
     ]
     try:
         audio_ranges = await load_transcript_audio_ranges(conversation_id)
-        validate_and_normalize_transcript_timing(
-            preflight_segments,
-            preflight_words,
-            audio_duration=conversation.audio_total_duration or 0.0,
-            audio_ranges=audio_ranges,
+        normalized_segments, normalized_words = (
+            validate_and_normalize_transcript_timing(
+                preflight_segments,
+                preflight_words,
+                audio_duration=conversation.audio_total_duration or 0.0,
+                audio_ranges=audio_ranges,
+            )
         )
     except TranscriptTimingError as error:
         reason = f"{error.code}: {error}"
@@ -648,6 +1260,23 @@ async def recognise_speakers_job(
             incident_key=f"transcript-integrity:{conversation_id}",
         )
         raise SpeakerDataIntegrityError(reason) from error
+
+    if normalized_segments != preflight_segments or normalized_words != preflight_words:
+        transcript_version = await persist_timing_normalized_revision(
+            conversation,
+            transcript_version,
+            segments=normalized_segments,
+            words=normalized_words,
+            audio_duration=conversation.audio_total_duration or 0.0,
+        )
+        source_version = transcript_version
+        await conversation.save()
+        logger.info(
+            "Normalized harmless transcript edge timing for %s into derived "
+            "version %s",
+            conversation_id,
+            transcript_version.version_id,
+        )
 
     # Check if speaker recognition is enabled
     speaker_client = SpeakerRecognitionClient()
@@ -717,6 +1346,9 @@ async def recognise_speakers_job(
     # (Parameters may be empty if called via job dependency)
     actual_transcript_text = transcript_text or transcript_version.transcript or ""
     actual_words = words if words else []
+    word_timing_method = (
+        "provided_job_words" if actual_words and not transcript_version.words else None
+    )
 
     # If words not provided as parameter, read from version.words field (standardized location)
     if not actual_words and transcript_version.words:
@@ -731,6 +1363,7 @@ async def recognise_speakers_job(
     # Backward compatibility: Fall back to metadata if words field is empty (old data)
     elif not actual_words and transcript_version.metadata.get("words"):
         actual_words = transcript_version.metadata.get("words", [])
+        word_timing_method = "legacy_metadata_words"
         logger.info(
             f"🔤 Loaded {len(actual_words)} words from transcript version metadata (legacy)"
         )
@@ -748,9 +1381,17 @@ async def recognise_speakers_job(
                         }
                     )
         if actual_words:
+            word_timing_method = "embedded_segment_words"
             logger.info(
                 f"🔤 Extracted {len(actual_words)} words from segments (legacy)"
             )
+
+    if not actual_transcript_text and actual_words:
+        actual_transcript_text = " ".join(
+            str(word.get("word", "")).strip() for word in actual_words
+        ).strip()
+        if actual_transcript_text:
+            logger.info("🔤 Recovered transcript text from stored timed words")
 
     if not actual_transcript_text:
         logger.warning(f"🎤 No transcript text found in version {version_id}")
@@ -785,6 +1426,36 @@ async def recognise_speakers_job(
             actual_words = await synthesize_words_via_alignment(
                 conversation_id, speech_for_align, total_dur
             )
+            if actual_words:
+                word_timing_method = "forced_alignment"
+            else:
+                actual_words = estimate_words_from_segment_timing(speech_for_align)
+                if actual_words:
+                    word_timing_method = "segment_clock_estimate"
+                    logger.warning(
+                        "🔤 Forced alignment returned no words; using segment-clock "
+                        "word estimates for Pyannote text matching"
+                    )
+
+    if word_timing_method and actual_words:
+        transcript_version = await persist_word_timed_revision(
+            conversation,
+            transcript_version,
+            words=actual_words,
+            method=word_timing_method,
+            audio_duration=float(conversation.audio_total_duration or 0.0),
+        )
+        source_version = transcript_version
+        actual_words = [
+            word.model_dump(mode="python") for word in transcript_version.words
+        ]
+        await conversation.save()
+        logger.info(
+            "🔤 Persisted %d %s word clocks as derived source version %s",
+            len(actual_words),
+            word_timing_method,
+            transcript_version.version_id,
+        )
 
     # Check if we can run pyannote diarization
     # Pyannote requires word timestamps to align speaker segments with text
@@ -793,12 +1464,12 @@ async def recognise_speakers_job(
         float(conversation.audio_total_duration or 0.0),
     )
     can_run_pyannote = (
-        bool(actual_words) and not use_provider_diarization and continuous_audio
+        bool(actual_words) and not use_provider_diarization and bool(audio_ranges)
     )
     if actual_words and not use_provider_diarization and not continuous_audio:
-        logger.warning(
-            "🎤 Audio has chunk gaps; using existing transcript segments instead of "
-            "full-conversation diarization"
+        logger.info(
+            "🎤 Audio has chunk gaps; Pyannote will preserve the original clock by "
+            "padding missing ranges with silence"
         )
 
     if not actual_words and not provider_diarized:
@@ -830,6 +1501,7 @@ async def recognise_speakers_job(
 
     try:
         ran_pyannote_diarization = False
+        used_word_timeline_fallback = False
         if transcript_version.segments and not can_run_pyannote:
             # Have existing segments and can't/shouldn't run pyannote - do identification only
             # Covers: provider already diarized, no word timestamps but segments exist, etc.
@@ -893,6 +1565,7 @@ async def recognise_speakers_job(
                 backend_token=backend_token,
                 transcript_data=transcript_data,
                 user_id=user_id,
+                audio_ranges=audio_ranges if not continuous_audio else None,
             )
 
         # Check for errors from speaker service
@@ -957,38 +1630,40 @@ async def recognise_speakers_job(
                 raise SpeakerServiceError(f"{error_type}: {error_message}")
 
         # Pyannote re-diarization can occasionally find no speaker turns even on clearly
-        # audible speech (a segmentation miss — observed on short code-mixed phone audio).
-        # When that happens but the source already has segments (e.g. provider diarization
-        # we read), fall back to identifying those existing segments instead of giving up.
-        # The fallback result flows through the SAME unknown-label mapping below, so it
-        # yields identified names or "Unknown Speaker 1..N" — never a bare provider label.
+        # audible short speech. Do not reuse provider utterance boundaries here: that
+        # would preserve exactly the Smallest.ai fragmentation this pass is replacing.
+        # Build neutral spans from the immutable word clock, then run ordinary voice
+        # identification over those spans. Provenance remains explicit below.
         if ran_pyannote_diarization and not (speaker_result or {}).get("segments"):
-            speech_segments = [
-                s for s in transcript_version.segments if _is_speech_segment(s)
-            ]
-            if speech_segments:
+            fallback_segments = _word_timeline_fallback_segments(
+                actual_words,
+                duration=float(conversation.audio_total_duration or 0.0),
+                max_gap=float(diarization_settings.get("collar", 2.0)),
+            )
+            if fallback_segments:
                 logger.warning(
-                    f"🎤 Re-diarization returned 0 segments; falling back to identifying "
-                    f"{len(speech_segments)} existing source segments"
+                    "🎤 Re-diarization returned 0 segments; using %d "
+                    "provider-independent word-timeline span(s)",
+                    len(fallback_segments),
                 )
-                segments_data = [
-                    {
-                        "start": s.start,
-                        "end": s.end,
-                        "text": s.text,
-                        "speaker": s.speaker,
-                    }
-                    for s in speech_segments
-                ]
                 speaker_result = await speaker_client.identify_provider_segments(
                     conversation_id=conversation_id,
-                    segments=segments_data,
+                    segments=fallback_segments,
                     user_id=user_id,
                     per_segment=use_per_segment,
                     min_segment_duration=0.5 if use_per_segment else 1.5,
                 )
-                # Segments now come from existing source labels, not fresh pyannote.
-                ran_pyannote_diarization = False
+                result_segments = speaker_result.get("segments") or []
+                if len(result_segments) != len(fallback_segments):
+                    raise SpeakerDataIntegrityError(
+                        "Word-timeline identification changed segment cardinality: "
+                        f"{len(fallback_segments)} in, {len(result_segments)} out"
+                    )
+                for result_segment, fallback_segment in zip(
+                    result_segments, fallback_segments, strict=True
+                ):
+                    result_segment["words"] = fallback_segment["words"]
+                used_word_timeline_fallback = True
 
         # Service worked but found no segments (legitimate empty result, and the fallback
         # above — if any — also found nothing).
@@ -1013,7 +1688,21 @@ async def recognise_speakers_job(
                 "processing_time_seconds": time.time() - start_time,
             }
 
-        speaker_segments = speaker_result["segments"]
+        claim_duration = (
+            range_duration(conversation.audio_ranges)
+            if conversation.audio_ranges
+            else float(conversation.audio_total_duration or 0.0)
+        )
+        speaker_segments = _normalize_speaker_segment_bounds(
+            speaker_result["segments"],
+            duration=claim_duration,
+        )
+        if ran_pyannote_diarization and actual_words:
+            speaker_segments = _project_source_words_onto_speaker_turns(
+                speaker_segments,
+                actual_words,
+            )
+        speaker_result["segments"] = speaker_segments
         logger.info(f"🎤 Speaker recognition returned {len(speaker_segments)} segments")
 
         background_user = await get_user_by_id(user_id)
@@ -1061,13 +1750,20 @@ async def recognise_speakers_job(
         updated_segments = []
         empty_segment_count = 0
         for seg in speaker_segments:
-            # FIX: More robust empty segment detection
-            text = seg.get("text", "").strip()
+            words_data = seg.get("words", []) or []
+            text = str(seg.get("text", "") or "").strip()
+            if not text and words_data:
+                text = " ".join(
+                    str(word.get("word", "")).strip()
+                    for word in words_data
+                    if str(word.get("word", "")).strip()
+                )
 
-            # Skip segments with no text, whitespace-only, or very short
-            if not text or len(text) < 3:
+            # A one-character word is still transcript evidence. Only a truly empty
+            # turn may be discarded; dropping short text loses words such as "I".
+            if not text:
                 empty_segment_count += 1
-                logger.debug(f"Filtered empty/short segment: text='{text}'")
+                logger.debug("Filtered speaker turn with no text or words")
                 continue
 
             # Skip segments with invalid structure
@@ -1082,8 +1778,7 @@ async def recognise_speakers_job(
                 seg.get("speaker", "Unknown"), UNKNOWN_SPEAKER_PREFIX
             )
 
-            # Extract words from speaker service response (already matched to this segment)
-            words_data = seg.get("words", [])
+            # Words were already matched to this neural turn by the speaker service.
             segment_words = [
                 Conversation.Word(
                     word=w.get("word", ""),
@@ -1128,23 +1823,37 @@ async def recognise_speakers_job(
                 "🎤 Preserved %d human speaker labels missed by reprocessing",
                 len(human_label_failures),
             )
+            # A human overlay changes who said what, which can move an episode's
+            # participants — reconcile the range even if the model output is unchanged.
+            await note_conversation_dirty(
+                conversation_id, "speaker_overlay", source_kind="speaker"
+            )
 
-        # Re-insert non-speech segments (event/note) that were skipped during identification
-        # They need to be merged back into position based on timestamps
-        non_speech_segments = [
-            s for s in transcript_version.segments if not _is_speech_segment(s)
-        ]
+        # Compose meaningful event/note boundaries into the exclusive speech timeline.
+        non_speech_segments = _retained_non_speech_segments(transcript_version.segments)
+        if ran_pyannote_diarization and actual_words:
+            non_speech_segments = _strip_reprojected_words_from_events(
+                non_speech_segments,
+                actual_words,
+            )
         if non_speech_segments:
-            for ns_seg in non_speech_segments:
-                # Find correct insertion position based on start time
-                insert_pos = len(updated_segments)
-                for i, seg in enumerate(updated_segments):
-                    if seg.start > ns_seg.start:
-                        insert_pos = i
-                        break
-                updated_segments.insert(insert_pos, ns_seg)
+            updated_segments = _compose_exclusive_projection(
+                updated_segments, non_speech_segments
+            )
             logger.info(
-                f"🎤 Re-inserted {len(non_speech_segments)} non-speech segments"
+                "🎤 Composed %d meaningful non-speech boundaries into an exclusive projection",
+                len(non_speech_segments),
+            )
+
+        before_merge_count = len(updated_segments)
+        updated_segments = _merge_adjacent_projected_speech(
+            updated_segments,
+            max_gap=float(diarization_settings.get("collar", 2.0)),
+        )
+        if len(updated_segments) != before_merge_count:
+            logger.info(
+                "🎤 Merged %d adjacent same-speaker projection seams",
+                before_merge_count - len(updated_segments),
             )
 
         # Extract unique identified speakers for metadata
@@ -1174,12 +1883,17 @@ async def recognise_speakers_job(
         if human_label_failures:
             sr_metadata["human_label_recognition_failures"] = human_label_failures
 
-        # Which engine produced these segments: pyannote when it actually returned turns,
-        # otherwise carry the source's (we identified existing/provider segments).
+        # Which engine produced these segments. An empty neural result is represented as
+        # Chronicle's deterministic word-timeline fallback, never mislabeled as pyannote
+        # and never inherited from provider utterance boundaries.
         diarization_source_value = (
-            "pyannote"
-            if ran_pyannote_diarization
-            else source_version.diarization_source
+            "word_timeline_fallback"
+            if used_word_timeline_fallback
+            else (
+                "pyannote"
+                if ran_pyannote_diarization
+                else source_version.diarization_source
+            )
         )
 
         # Per-diarized-speaker pooled centroids used for identification, so a later
@@ -1189,18 +1903,11 @@ async def recognise_speakers_job(
         # "Unknown Speaker N") so each centroid maps 1:1 to its segments' `speaker`.
         raw_centroids = speaker_result.get("cluster_centroids") or {}
         if raw_centroids:
-            diar_to_final = {}
-            for seg in speaker_segments:
-                diar = seg.get("speaker")
-                if diar is None:
-                    continue
-                diar_to_final[diar] = seg.get("identified_as") or unknown_label_map.get(
-                    diar, UNKNOWN_SPEAKER_PREFIX
-                )
-            centroids_map = {
-                diar_to_final.get(diar, diar): centroid
-                for diar, centroid in raw_centroids.items()
-            }
+            centroids_map = _rekey_cluster_centroids(
+                raw_centroids,
+                speaker_segments,
+                unknown_label_map,
+            )
         else:
             # The provider/segment-identification path (identify_provider_segments)
             # can return the embeddings it already computed. Pool those directly so
@@ -1227,6 +1934,11 @@ async def recognise_speakers_job(
             }
             if centroids_map:
                 new_metadata["cluster_centroids"] = centroids_map
+            if used_word_timeline_fallback:
+                new_metadata["diarization_fallback"] = {
+                    "mode": "word_timeline",
+                    "reason": "pyannote_empty",
+                }
             new_version = conversation.add_transcript_version(
                 version_id=version_id,
                 transcript=source_version.transcript,
@@ -1254,7 +1966,67 @@ async def recognise_speakers_job(
             if centroids_map:
                 transcript_version.metadata["cluster_centroids"] = centroids_map
 
+        projected_version = new_version if create_mode else transcript_version
+        if create_mode:
+            compacted_versions = await _compact_embedded_speaker_history(
+                conversation,
+                keep_version_id=projected_version.version_id,
+            )
+            if compacted_versions:
+                logger.info(
+                    "🎤 Compacted %d archived speaker projection(s) from the "
+                    "Conversation read model",
+                    compacted_versions,
+                )
+        diarization_artifact = await persist_diarization_artifact(
+            user_id=user_id,
+            audio_ranges=conversation.audio_ranges,
+            retry_key=f"speaker-diarization:{conversation_id}:{version_id}",
+            provider=(
+                "word_timeline_fallback"
+                if used_word_timeline_fallback
+                else ("pyannote" if ran_pyannote_diarization else "provider")
+            ),
+            model=speaker_result.get("diarization_model"),
+            segments=speaker_segments,
+            configuration={
+                **dict(diarization_settings),
+                "requested_source": preferred_source,
+                "ran_pyannote_segmentation": ran_pyannote_diarization,
+                "pyannote_returned_turns": not used_word_timeline_fallback,
+                "fallback_mode": (
+                    "word_timeline" if used_word_timeline_fallback else None
+                ),
+                "neural_window_ceiling_seconds": 1200,
+            },
+        )
+        projected_version.metadata["diarization_artifact_id"] = (
+            diarization_artifact.artifact_id
+        )
+        transcript_artifact_ids = await resolve_transcript_artifact_ids(
+            conversation_id,
+            source_version,
+        )
+        if transcript_artifact_ids:
+            projected_version.metadata["transcript_artifact_ids"] = (
+                transcript_artifact_ids
+            )
+        revision = await persist_conversation_revision(
+            conversation,
+            projected_version,
+            retry_key=f"speaker-projection:{conversation_id}:{version_id}",
+            transcript_artifact_ids=transcript_artifact_ids,
+            diarization_artifact_ids=[diarization_artifact.artifact_id],
+        )
+
         await conversation.save()
+
+        await note_conversation_dirty(
+            conversation_id,
+            "speaker_revision",
+            source_revision=revision.revision_id,
+            source_kind="speaker",
+        )
 
         processing_time = time.time() - start_time
         logger.info(
@@ -1268,6 +2040,8 @@ async def recognise_speakers_job(
             "speaker_recognition_enabled": True,
             "identified_speakers": list(identified_speakers),
             "segment_count": len(updated_segments),
+            "diarization_artifact_id": diarization_artifact.artifact_id,
+            "transcript_revision_id": revision.revision_id,
             "processing_time_seconds": processing_time,
         }
 

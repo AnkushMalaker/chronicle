@@ -106,6 +106,7 @@ from advanced_omi_backend.services.reaper import run_reaper
 from advanced_omi_backend.services.status_reconciler import (
     reconcile_conversation_statuses,
 )
+from advanced_omi_backend.services.timeline.dirty_ranges import reconcile_dirty_ranges
 from advanced_omi_backend.services.timeline.discovery import (
     process_current_timeline_days,
 )
@@ -345,6 +346,7 @@ async def lifespan(app: FastAPI):
             register_cron_job("device_audio_ingest", process_device_audio)
             register_cron_job("screen_context_retention", purge_screen_context)
             register_cron_job("timeline_analysis", process_current_timeline_days)
+            register_cron_job("rolling_reconciliation_scan", reconcile_dirty_ranges)
             register_cron_job("episode_thumbnails", process_episode_thumbnails)
             register_cron_job(
                 "manual_memory_image_enrichment", process_manual_memory_images

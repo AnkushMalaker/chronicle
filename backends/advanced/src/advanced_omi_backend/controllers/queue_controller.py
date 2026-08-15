@@ -30,6 +30,7 @@ from advanced_omi_backend.heartbeat import (
 )
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.redis_factory import create_sync_redis
+from advanced_omi_backend.redis_keys import dirty_range_enqueue_lock
 from advanced_omi_backend.services.audio_stream.durability import (
     AUDIO_PERSISTENCE_GROUP,
     delete_stream_if_durable,
@@ -41,6 +42,9 @@ from advanced_omi_backend.services.audio_stream.session_store import (
 )
 from advanced_omi_backend.services.memory.audit import MemoryCause, UpdateStrategy
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
+from advanced_omi_backend.services.timeline.dirty_ranges import (
+    schedule_conversation_dirty,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -673,9 +677,8 @@ def enqueue_speech_detection(
 
     At most ONE speech-detection job may be live per session. Re-enqueuing while
     one is already listening (a WebSocket reconnect, or several conversation-end
-    handlers firing at once) previously spawned a swarm of duplicate detectors
-    that raced to mark the actively-recording placeholder conversation as
-    ``transcription_failed``. This guards every restart path against that.
+    handlers firing at once) previously spawned a swarm of duplicate detectors that
+    raced over the same capture session. This guards every restart path against that.
 
     The current live job (if any) is tracked in ``speech_detection_job:{session_id}``;
     a short Redis mutex collapses a simultaneous burst of callers into one winner.
@@ -759,6 +762,44 @@ def enqueue_speech_detection(
         return speech_job.id
     finally:
         redis_conn.delete(lock_key)
+
+
+def enqueue_dirty_range_reconciliation(dirty_range_id: str) -> Optional[str]:
+    """Single-flight enqueue of the rolling reconciliation job for one dirty range.
+
+    The recovery scan runs every few minutes and a range stays ``pending`` until its
+    job leases it, so two consecutive scans would otherwise queue the same range
+    twice. The short Redis lock collapses that; the job itself is lease-guarded, so a
+    duplicate that slips through still cannot run twice.
+    """
+    # Lazy import: circular dependency with the `workers` package (its __init__
+    # imports back from this module).
+    from advanced_omi_backend.workers.timeline_jobs import reconcile_range_job
+
+    lock_key = dirty_range_enqueue_lock(dirty_range_id)
+    if not redis_conn.set(lock_key, "1", nx=True, ex=300):
+        return None
+    try:
+        job = default_queue.enqueue(
+            reconcile_range_job,
+            dirty_range_id,
+            job_timeout=1800,
+            result_ttl=JOB_RESULT_TTL,
+            failure_ttl=86400,
+            job_id=f"reconcile-range_{dirty_range_id}",
+            description="Reconciling dirty evidence range",
+            meta={"dirty_range_id": dirty_range_id},
+        )
+        return job.id
+    except Exception:
+        # Leave nothing latched: the next scan must be able to retry immediately.
+        redis_conn.delete(lock_key)
+        logger.warning(
+            "Failed to enqueue reconciliation for dirty range %s",
+            dirty_range_id,
+            exc_info=True,
+        )
+        return None
 
 
 def start_streaming_jobs(
@@ -969,6 +1010,12 @@ def start_post_conversation_jobs(
     # dependencies onto a previously-deferred chain — that orphans it forever.
     # Clear any stale chain jobs first so each enqueue below starts fresh.
     _clear_post_conversation_chain(conversation_id)
+
+    # Rolling reconciliation: a recording closing is a scheduling signal, not an
+    # episode boundary. Mark the conversation's absolute audio interval dirty and let
+    # the debounce gather the transcript/speaker revisions this chain is about to
+    # produce. Best-effort — the recovery scan and later triggers re-open the range.
+    schedule_conversation_dirty(conversation_id, "conversation_closed")
 
     version_id = transcript_version_id or str(uuid.uuid4())
 

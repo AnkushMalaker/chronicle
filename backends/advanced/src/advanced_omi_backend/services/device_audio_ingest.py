@@ -11,16 +11,18 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from beanie import PydanticObjectId
-from starlette.datastructures import UploadFile
 
 from advanced_omi_backend.config import require_speech_for_transcription
 from advanced_omi_backend.controllers.audio_controller import (
-    upload_and_process_audio_files,
+    materialize_and_process_audio_claim,
 )
-from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.audio_capture import AudioRangeRef
 from advanced_omi_backend.models.device_input import DeviceInputItem, utcnow
 from advanced_omi_backend.models.timeline import AudioEvidenceSpan
 from advanced_omi_backend.models.user import User
+from advanced_omi_backend.services.audio_claims import clip_audio_ranges
+from advanced_omi_backend.services.timeline.dirty_ranges import note_evidence_dirty
+from advanced_omi_backend.utils.audio_chunk_utils import convert_wav_to_chunks
 from advanced_omi_backend.utils.vad_analysis import (
     AudioEvidenceProfile,
     SpeechDetectionReason,
@@ -214,6 +216,61 @@ def audio_stream_key(item: DeviceInputItem) -> tuple[str, str, str]:
         item.source_id,
         str(item.metadata.get("direction", "unknown")),
     )
+
+
+def _capture_external_source_id(
+    source_id: str, direction: str, session: Sequence[DeviceInputItem]
+) -> str:
+    """Stable identity for one closed ScreenPipe compute window."""
+    return (
+        f"screenpipe-capture:{source_id}:{direction}:"
+        f"{session[0].source_item_id}-{session[-1].source_item_id}"
+    )
+
+
+def _capture_session_id(user_id: str, external_source_id: str) -> str:
+    """Make retries converge on one finite capture instead of copying its audio."""
+    digest = hashlib.sha256(f"{user_id}:{external_source_id}".encode()).hexdigest()
+    return f"screenpipe-{digest[:40]}"
+
+
+async def _persist_capture_window(
+    user: User,
+    source_id: str,
+    direction: str,
+    session: list[DeviceInputItem],
+    wav_path: Path,
+):
+    """Persist the complete mixed window before VAD or semantic segmentation."""
+    external_source_id = _capture_external_source_id(source_id, direction, session)
+    return await convert_wav_to_chunks(
+        user_id=user.user_id,
+        capture_source_id=f"{source_id}:{direction}",
+        wav_file_path=wav_path,
+        captured_at=min(_as_utc(item.captured_at) for item in session),
+        capture_session_id=_capture_session_id(user.user_id, external_source_id),
+        origin="screenpipe",
+        external_source_id=external_source_id,
+        data_purpose="capture_evidence",
+    )
+
+
+async def _segment_audio_range(
+    capture_range: AudioRangeRef, segment: "_Segment"
+) -> AudioRangeRef:
+    """Claim only the segment's wall-clock interval from the persisted capture."""
+    capture_start = _as_utc(capture_range.started_at)
+    start = max(0.0, (_as_utc(segment.started_at) - capture_start).total_seconds())
+    end = min(
+        capture_range.duration_seconds,
+        (_as_utc(segment.ended_at) - capture_start).total_seconds(),
+    )
+    ranges = await clip_audio_ranges([capture_range], start, end)
+    if len(ranges) != 1:
+        raise RuntimeError(
+            "ScreenPipe segment did not resolve to exactly one capture range"
+        )
+    return ranges[0]
 
 
 async def _mix_session(
@@ -429,6 +486,7 @@ async def _save_evidence_span(
     state: str,
     conversation_id: str | None = None,
     bounds: tuple[datetime, datetime] | None = None,
+    audio_ranges: Sequence[AudioRangeRef] = (),
 ) -> AudioEvidenceSpan:
     # A segment's bounds are the cut, not its items: a cut lands inside a source file,
     # and the span must describe the audio that was actually ingested.
@@ -457,6 +515,7 @@ async def _save_evidence_span(
         "ended_at": ended_at,
         "meeting_id": _meeting_id(session[0]),
         "conversation_id": conversation_id,
+        "audio_ranges": list(audio_ranges),
         "state": state,
         "covered_seconds": covered,
         "missing_seconds": missing,
@@ -489,6 +548,7 @@ async def _save_evidence_span(
             setattr(existing, field, value)
         existing.attempts += 1
         await existing.save()
+        await _mark_span_dirty(existing)
         return existing
     span = AudioEvidenceSpan(
         user_id=session[0].user_id,
@@ -500,7 +560,26 @@ async def _save_evidence_span(
         **values,
     )
     await span.insert()
+    await _mark_span_dirty(span)
     return span
+
+
+async def _mark_span_dirty(span: AudioEvidenceSpan) -> None:
+    """Continuous capture is evidence too — its span bounds are the dirty range.
+
+    A definitively silent span has no conversation to hang off, so this is the only
+    trigger that reports it. Reconciliation still needs it: silence is what tells the
+    reconciler an episode ended.
+    """
+
+    await note_evidence_dirty(
+        span.user_id,
+        span.started_at,
+        span.ended_at,
+        span.source_range_hash,
+        "evidence_span",
+        source_kind="evidence_span",
+    )
 
 
 def _carve_window(
@@ -568,47 +647,46 @@ async def _ingest_segment(
     source_id: str,
     direction: str,
     segment: _Segment,
+    audio_range: AudioRangeRef,
 ) -> str | None:
-    """Turn one carved segment into a conversation. Returns its id, or None on failure."""
-    with segment.path.open("rb") as handle:
-        result = await upload_and_process_audio_files(
+    """Materialize one detected Conversation without copying capture audio."""
+    external_source_id = (
+        f"screenpipe:{source_id}:{direction}:"
+        f"{segment.items[0].source_item_id}-{segment.items[-1].source_item_id}"
+    )
+    try:
+        conversation = await materialize_and_process_audio_claim(
             user,
-            [UploadFile(file=handle, filename=segment.path.name)],
+            audio_range,
             device_name=f"{source_id}-{direction}",
-            source="screenpipe",
-            # ``_mix_session`` delays each source chunk to its offset from the window
-            # start, and a segment is a slice of that, so its audio starts exactly here.
-            captured_at=segment.started_at,
-            external_source_id=(
-                f"screenpipe:{source_id}:{direction}:"
-                f"{segment.items[0].source_item_id}-{segment.items[-1].source_item_id}"
-            ),
+            title="Detected conversation",
+            segmentation_key=f"detected:{external_source_id}:v2",
+            external_source_id=external_source_id,
             external_source_type="screenpipe",
-            data_purpose="capture_evidence",
+            # This is the semantic layer the user asked to see on Recordings. The
+            # underlying full window remains capture_evidence on AudioCaptureSession;
+            # only the speech-derived range is a visible Conversation.
+            data_purpose="conversation",
             memory_excluded=True,
-            memory_exclusion_reason="continuous_screenpipe_capture",
-            # Speaker recognition DOES run: without it the timeline agent only ever
-            # sees "Speaker 0", so it cannot name who was present and falls back to
-            # "a friend". Memory extraction and LLM title/summary stay off — this is
-            # evidence, not a conversation.
+            memory_exclusion_reason="timeline_day_memory_owns_continuous_capture",
             skip_memory_extraction=True,
             skip_title_summary=True,
         )
-    if (
-        not isinstance(result, dict)
-        or not result.get("files")
-        or result["files"][0].get("status") != "started"
-    ):
+    except Exception:
+        logger.exception(
+            "Failed to materialize ScreenPipe claim %s", external_source_id
+        )
         await _save_evidence_span(
             segment.items,
             direction,
             segment.profile,
             state="failed",
             bounds=(segment.started_at, segment.ended_at),
+            audio_ranges=[audio_range],
         )
         return None
 
-    conversation_id = result["files"][0]["conversation_id"]
+    conversation_id = conversation.conversation_id
     await _save_evidence_span(
         segment.items,
         direction,
@@ -616,13 +694,8 @@ async def _ingest_segment(
         state="transcribed" if segment.profile.scored else "unscored",
         conversation_id=conversation_id,
         bounds=(segment.started_at, segment.ended_at),
+        audio_ranges=[audio_range],
     )
-    conversation = await Conversation.find_one(
-        Conversation.conversation_id == conversation_id
-    )
-    if conversation is not None:
-        conversation.created_at = segment.started_at
-        await conversation.save()
 
     observations = await DeviceInputItem.find(
         DeviceInputItem.user_id == str(user.id),
@@ -684,7 +757,17 @@ async def process_device_audio() -> dict[str, Any]:
                         / f"screenpipe-{source_id}-{session[0].source_item_id}.wav"
                     )
                     await _mix_session(session, Path(temp_dir), output)
-                    profile = _profile_wav(output)
+                    # Capture is evidence, not a Conversation. Persist the entire
+                    # window first—even silence—then let VAD decide whether any
+                    # semantic Conversation should claim part of it. The deterministic
+                    # session id makes a retry resume the same chunks.
+                    capture = await _persist_capture_window(
+                        user, source_id, direction, session, output
+                    )
+                    # Decode + energy loop + one ctypes VAD call per 256-sample hop:
+                    # ~112k foreign calls for a 30-minute window. Cron jobs run on the
+                    # API's own loop, so doing that inline stops the whole process.
+                    profile = await asyncio.to_thread(_profile_wav, output)
                     speech_detection = (
                         _speech_detection(profile) if require_speech else None
                     )
@@ -697,12 +780,18 @@ async def process_device_audio() -> dict[str, Any]:
                         unscored_reasons[reason] = unscored_reasons.get(reason, 0) + 1
                     if speech_detection is not None and speech_detection.should_reject:
                         await _save_evidence_span(
-                            session, direction, profile, state="no_speech"
+                            session,
+                            direction,
+                            profile,
+                            state="no_speech",
+                            audio_ranges=[capture.audio_range],
                         )
-                        # Silent session: never enters the conversation pipeline.
+                        # Silent capture remains durable evidence but never enters the
+                        # semantic Conversation/transcription pipeline.
                         logger.info(
                             "🔇 ScreenPipe session %s-%s (%d chunks) has no speech "
-                            "— rejecting without transcription (reason=%s, scored=%s)",
+                            "— raw capture retained without a Conversation "
+                            "(reason=%s, scored=%s)",
                             source_id,
                             direction,
                             len(session),
@@ -713,7 +802,11 @@ async def process_device_audio() -> dict[str, Any]:
                             await item.delete()
                         rejected_no_speech += 1
                         continue
-                    segments = _carve_window(session, output, profile)
+                    # Re-decodes the window and re-profiles every piece it cuts, so it
+                    # costs another full VAD pass per segment.
+                    segments = await asyncio.to_thread(
+                        _carve_window, session, output, profile
+                    )
                     if len(segments) > 1:
                         logger.info(
                             "✂️ Capture window %s-%s (%.0f min) cut into %d recordings "
@@ -728,24 +821,24 @@ async def process_device_audio() -> dict[str, Any]:
                             _TARGET_SESSION.total_seconds() / 60,
                         )
                     for segment in segments:
+                        segment_range = await _segment_audio_range(
+                            capture.audio_range, segment
+                        )
                         ingested = await _ingest_segment(
-                            user, source_id, direction, segment
+                            user, source_id, direction, segment, segment_range
                         )
                         if ingested is None:
-                            # A failed upload leaves the chunks staged so the next tick
-                            # can retry. The retried window has grown by then, so it
-                            # mixes to a new range and re-uploads from scratch: every
-                            # pass leaks a Conversation holding a full copy of the
-                            # audio, and nothing ever converges. Bound the retries per
-                            # window *start*, the identity that survives the growth.
+                            # Raw capture is already durable. Leave the transport items
+                            # staged for bounded semantic-materialization retries; the
+                            # deterministic capture id prevents audio duplication.
                             attempts = await _session_ingest_attempts(
                                 segment.items, direction
                             )
                             if attempts >= _MAX_INGEST_ATTEMPTS:
                                 logger.error(
                                     "🛑 ScreenPipe window %s-%s (start=%s) failed to "
-                                    "ingest %d times — dropping %d staged chunks so it "
-                                    "stops retrying",
+                                    "materialize %d times — dropping %d staged input "
+                                    "items; raw capture remains durable",
                                     source_id,
                                     direction,
                                     segment.items[0].source_item_id,
@@ -758,6 +851,7 @@ async def process_device_audio() -> dict[str, Any]:
                                     segment.profile,
                                     state="abandoned",
                                     bounds=(segment.started_at, segment.ended_at),
+                                    audio_ranges=[segment_range],
                                 )
                                 for item in segment.items:
                                     await item.delete()

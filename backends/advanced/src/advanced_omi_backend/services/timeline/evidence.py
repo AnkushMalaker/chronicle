@@ -1,18 +1,24 @@
 """Deterministic evidence broker for one user's local day."""
 
+import asyncio
 import hashlib
 import json
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import DeviceInputItem
 from advanced_omi_backend.models.manual_memory import ManualMemory
-from advanced_omi_backend.models.timeline import AudioEvidenceSpan
+from advanced_omi_backend.models.timeline import AudioEvidenceSpan, TimelineEpisode
+from advanced_omi_backend.services.transcript_time import (
+    AnchorMap,
+    load_anchor_map,
+    place_segments,
+)
 
 from .contracts import (
+    EvidenceBundle,
     TimelineCoverageWindow,
     TimelineEvidenceItem,
     TimelineEvidenceManifest,
@@ -20,6 +26,9 @@ from .contracts import (
 from .timezone import canonical_timezone
 
 SCREEN_EVIDENCE_CONTINUITY_GAP = timedelta(minutes=20)
+TRANSCRIPT_BLOCK_MAX_DURATION = timedelta(minutes=5)
+TRANSCRIPT_BLOCK_GAP = timedelta(seconds=90)
+TRANSCRIPT_BLOCK_MAX_CHARS = 6000
 
 
 def utc(value: datetime) -> datetime:
@@ -396,7 +405,7 @@ def _clip_evidence_to_range(
 
 
 async def _conversation_audio_bounds(
-    day_start: datetime, range_end: datetime
+    user_id: str, day_start: datetime, range_end: datetime
 ) -> dict[str, tuple[datetime, datetime]]:
     """Absolute audio bounds per conversation with audio inside the day.
 
@@ -406,38 +415,41 @@ async def _conversation_audio_bounds(
     absent from the result and therefore not placed on any day -- an upload's
     ``created_at`` is when the file arrived, which would file it on the wrong one.
 
-    Chunks carry no user id, so the result spans users; the caller's conversation
-    query is what scopes it.
+    Conversation claims, not raw chunks, define which speech-bearing semantic objects
+    belong on the day. Raw capture may continue through silence without producing a
+    recording at all.
     """
-    pipeline = [
+    collection = Conversation.get_pymongo_collection()
+    rows = await collection.find(
         {
-            "$match": {
-                "captured_at": {"$gte": day_start, "$lt": range_end},
-                "deleted": {"$ne": True},
-            }
+            "user_id": user_id,
+            "deleted": {"$ne": True},
+            "data_purpose": {"$ne": "annotation"},
+            "audio_ranges": {
+                "$elemMatch": {
+                    "started_at": {"$lt": range_end},
+                    "ended_at": {"$gt": day_start},
+                    "time_basis": {"$ne": "unknown"},
+                }
+            },
         },
-        {
-            "$group": {
-                "_id": "$conversation_id",
-                "started_at": {"$min": "$captured_at"},
-                "ended_at": {
-                    "$max": {
-                        "$add": [
-                            "$captured_at",
-                            {"$multiply": [{"$ifNull": ["$duration", 10.0]}, 1000]},
-                        ]
-                    }
-                },
-            }
-        },
-    ]
-    collection = AudioChunkDocument.get_pymongo_collection()
-    rows = await collection.aggregate(pipeline).to_list(length=None)
+        {"conversation_id": 1, "audio_ranges": 1},
+    ).to_list(length=None)
     bounds: dict[str, tuple[datetime, datetime]] = {}
     for row in rows:
-        conversation_id = str(row["_id"] or "")
-        if conversation_id and row["started_at"] is not None:
-            bounds[conversation_id] = (utc(row["started_at"]), utc(row["ended_at"]))
+        overlapping = [
+            audio_range
+            for audio_range in row.get("audio_ranges", [])
+            if utc(audio_range["started_at"]) < range_end
+            and utc(audio_range["ended_at"]) > day_start
+            and audio_range.get("time_basis") != "unknown"
+        ]
+        conversation_id = str(row.get("conversation_id") or "")
+        if conversation_id and overlapping:
+            bounds[conversation_id] = (
+                min(utc(item["started_at"]) for item in overlapping),
+                max(utc(item["ended_at"]) for item in overlapping),
+            )
     return bounds
 
 
@@ -482,6 +494,92 @@ def _transcript_item(
     )
 
 
+def _transcript_items(
+    conversation: Conversation,
+    bounds: tuple[datetime, datetime],
+    anchors: AnchorMap,
+) -> list[TimelineEvidenceItem]:
+    """Wall-clock transcript blocks small enough for semantic internal boundaries.
+
+    A whole recording used to be one evidence item. The validator then snapped any
+    proposed boundary back to that item's outer bounds, making a 73-minute recording
+    effectively indivisible. Timestamped blocks preserve speaker text while offering
+    the final agent real silence/topic cut points; it may still merge adjacent blocks.
+    """
+
+    started_at, ended_at = (utc(bounds[0]), utc(bounds[1]))
+    placed = [
+        segment
+        for segment in place_segments(conversation, anchors)
+        if segment.started_at < ended_at and segment.ended_at > started_at
+    ]
+    if not placed:
+        fallback = _transcript_item(conversation, bounds)
+        return [fallback] if fallback is not None else []
+
+    groups: list[list[Any]] = []
+    current: list[Any] = []
+    current_chars = 0
+    for segment in placed:
+        line = f"{segment.label}: {segment.text}".strip()
+        split = bool(current) and (
+            segment.started_at - current[-1].ended_at > TRANSCRIPT_BLOCK_GAP
+            or segment.ended_at - current[0].started_at > TRANSCRIPT_BLOCK_MAX_DURATION
+            or current_chars + len(line) + 1 > TRANSCRIPT_BLOCK_MAX_CHARS
+        )
+        if split:
+            groups.append(current)
+            current = []
+            current_chars = 0
+        current.append(segment)
+        current_chars += len(line) + 1
+    if current:
+        groups.append(current)
+
+    source_parts = (conversation.external_source_id or "").split(":")
+    direction = source_parts[2] if len(source_parts) >= 3 else "unknown"
+    role = "media_content" if direction == "output" else "uncertain"
+    version = conversation.active_transcript
+    version_id = version.version_id if version else "unversioned"
+    result: list[TimelineEvidenceItem] = []
+    for index, group in enumerate(groups):
+        excerpt = "\n".join(
+            f"{segment.label}: {segment.text}" for segment in group if segment.text
+        )[:TRANSCRIPT_BLOCK_MAX_CHARS]
+        block_start = max(started_at, group[0].started_at)
+        block_end = min(ended_at, group[-1].ended_at)
+        content_hash = hashlib.sha256(
+            f"{version_id}:{block_start.isoformat()}:{block_end.isoformat()}:{excerpt}".encode()
+        ).hexdigest()
+        result.append(
+            TimelineEvidenceItem(
+                evidence_id=_evidence_id(
+                    "transcript_block",
+                    conversation.conversation_id,
+                    version_id,
+                    block_start.isoformat(),
+                    block_end.isoformat(),
+                ),
+                kind="transcript",
+                source_item_id=conversation.conversation_id,
+                started_at=block_start,
+                ended_at=block_end,
+                role=role,
+                excerpt=excerpt or None,
+                content_hash=content_hash,
+                metadata={
+                    "direction": direction,
+                    "conversation_id": conversation.conversation_id,
+                    "speakers": sorted({segment.label for segment in group}),
+                    "segment_count": len(group),
+                    "transcript_block_index": index,
+                    "transcript_block_count": len(groups),
+                },
+            )
+        )
+    return result
+
+
 def _attributed_transcript(version: Any, fallback: str) -> str:
     """`speaker: text` lines, falling back to the plain transcript when undiarized."""
 
@@ -522,64 +620,34 @@ def _window_items(
             for item in evidence
             if _overlaps(item.started_at, item.ended_at, cursor, window_end)
         ]
-        windows.append(
-            TimelineCoverageWindow(
-                window_id=window_id,
-                started_at=cursor,
-                ended_at=window_end,
-                evidence_ids=ids,
+        if ids:
+            windows.append(
+                TimelineCoverageWindow(
+                    window_id=window_id,
+                    started_at=cursor,
+                    ended_at=window_end,
+                    evidence_ids=ids,
+                )
             )
-        )
         cursor += step
     return windows
 
 
-async def assemble_day_evidence(
-    user_id: str,
-    local_date: date,
-    timezone_name: str,
-    *,
-    window_minutes: int = 20,
-    overlap_minutes: int = 3,
-    now: datetime | None = None,
-) -> tuple[TimelineEvidenceManifest, dict[str, bytes]]:
-    timezone_name = canonical_timezone(timezone_name)
-    day_start, day_end = day_bounds(local_date, timezone_name)
-    checked_at = utc(now or datetime.now(timezone.utc))
-    range_end = (
-        min(day_end, checked_at) if day_start <= checked_at < day_end else day_end
-    )
-    if range_end <= day_start:
-        range_end = day_end
+def _parse_device_input_rows(rows: list[dict[str, Any]]) -> list[DeviceInputItem]:
+    return [DeviceInputItem.model_validate(row) for row in rows]
 
-    spans = await AudioEvidenceSpan.find(
-        AudioEvidenceSpan.user_id == user_id,
-        AudioEvidenceSpan.started_at < range_end,
-        AudioEvidenceSpan.ended_at >= day_start,
-    ).to_list()
-    rows = await DeviceInputItem.find(
-        DeviceInputItem.user_id == user_id,
-        DeviceInputItem.kind != "audio",
-        DeviceInputItem.captured_at < range_end,
-        {"$or": [{"ended_at": None}, {"ended_at": {"$gte": day_start}}]},
-    ).to_list()
-    manual_memories = await ManualMemory.find(
-        ManualMemory.user_id == user_id,
-        ManualMemory.shared_at >= day_start,
-        ManualMemory.shared_at < range_end,
-    ).to_list()
-    audio_bounds = await _conversation_audio_bounds(day_start, range_end)
-    conversations = await Conversation.find(
-        Conversation.user_id == user_id,
-        {"conversation_id": {"$in": sorted(audio_bounds)}},
-        # A deleted recording is not evidence. Without this an episode can cite —
-        # and a promoted recording can point at — audio the user can no longer play,
-        # which is what a duplicate sweep leaves behind.
-        {"deleted": {"$ne": True}},
-        # Mining/audit clips are dataset material, not something that happened to
-        # the user on this day. They are also the one corpus with no capture time.
-        {"data_purpose": {"$ne": "annotation"}},
-    ).to_list()
+
+def _build_application_evidence(
+    rows: list[DeviceInputItem],
+) -> tuple[list[TimelineEvidenceItem], dict[str, bytes]]:
+    """Expand every device row into screen evidence, then compact it.
+
+    Hydrating the rows off-loop is not enough on its own: expanding them is pure
+    Python over thousands of nested samples, and lazy-model attribute access parses
+    on first touch, so the cost simply moves here. Measured on this deployment at
+    1.7-2.8s per run on the event loop. Nothing here awaits, so it belongs beside
+    the hydration in a worker thread.
+    """
 
     device_evidence: list[TimelineEvidenceItem] = []
     images: dict[str, bytes] = {}
@@ -594,16 +662,123 @@ async def assemble_day_evidence(
                     if item.image_filename
                 }
             )
+    return _coalesce_application_evidence(device_evidence), images
+
+
+async def _device_input_rows(
+    user_id: str, day_start: datetime, range_end: datetime
+) -> list[DeviceInputItem]:
+    """Fetch raw evidence asynchronously and move Pydantic hydration off-loop.
+
+    A screen-heavy day contains thousands of nested samples. Beanie normally performs
+    their CPU-heavy model construction inside ``Cursor.to_list`` on the backend event
+    loop, which pauses live requests for seconds. BSON I/O stays asynchronous; only the
+    pure model hydration moves to a worker thread.
+    """
+
+    collection = DeviceInputItem.get_pymongo_collection()
+    raw_rows = await collection.find(
+        {
+            "user_id": user_id,
+            "kind": {"$ne": "audio"},
+            "captured_at": {"$lt": range_end},
+            "$or": [{"ended_at": None}, {"ended_at": {"$gte": day_start}}],
+        }
+    ).to_list(length=None)
+    return await asyncio.to_thread(_parse_device_input_rows, raw_rows)
+
+
+def _day_transcript_items(
+    conversations: list[Conversation],
+    anchors: list[AnchorMap],
+    audio_bounds: dict[str, tuple[datetime, datetime]],
+    day_start: datetime,
+    range_end: datetime,
+) -> list[TimelineEvidenceItem]:
+    """Slice each conversation's transcript into the day's evidence blocks.
+
+    Transcripts are the largest documents a day cites, and blocking them out is pure
+    Python per segment, so this runs off the loop like the screen evidence above. The
+    anchor maps it needs are awaited by the caller first.
+    """
+
+    items: list[TimelineEvidenceItem] = []
+    for conversation, anchor_map in zip(conversations, anchors, strict=True):
+        for item in _transcript_items(
+            conversation,
+            audio_bounds[conversation.conversation_id],
+            anchor_map,
+        ):
+            if _overlaps(item.started_at, item.ended_at, day_start, range_end):
+                items.append(item)
+    return items
+
+
+async def _assemble_range_manifest(
+    user_id: str,
+    local_date: date,
+    timezone_name: str,
+    day_start: datetime,
+    range_end: datetime,
+    window_minutes: int,
+    overlap_minutes: int,
+) -> tuple[TimelineEvidenceManifest, dict[str, bytes]]:
+    """Assemble one manifest over an arbitrary absolute ``[day_start, range_end)``.
+
+    This is the whole of the former ``assemble_day_evidence`` body after day-bounds
+    resolution. Both the day pipeline and ``load_reconciliation_evidence`` call it, so
+    the two cannot drift into parallel evidence ontologies. Every query below is bounded
+    by the requested range. ``local_date``/``timezone_name`` are recorded on the manifest
+    as projection hints only; they never select evidence.
+    """
+
+    spans = await AudioEvidenceSpan.find(
+        AudioEvidenceSpan.user_id == user_id,
+        AudioEvidenceSpan.started_at < range_end,
+        AudioEvidenceSpan.ended_at >= day_start,
+    ).to_list()
+    rows = await _device_input_rows(user_id, day_start, range_end)
+    manual_memories = await ManualMemory.find(
+        ManualMemory.user_id == user_id,
+        ManualMemory.shared_at >= day_start,
+        ManualMemory.shared_at < range_end,
+    ).to_list()
+    audio_bounds = await _conversation_audio_bounds(user_id, day_start, range_end)
+    conversations = await Conversation.find(
+        Conversation.user_id == user_id,
+        {"conversation_id": {"$in": sorted(audio_bounds)}},
+        # A deleted recording is not evidence. Without this an episode can cite —
+        # and a promoted recording can point at — audio the user can no longer play,
+        # which is what a duplicate sweep leaves behind.
+        {"deleted": {"$ne": True}},
+        # Mining/audit clips are dataset material, not something that happened to
+        # the user on this day. They are also the one corpus with no capture time.
+        {"data_purpose": {"$ne": "annotation"}},
+    ).to_list()
+
+    application_evidence, images = await asyncio.to_thread(
+        _build_application_evidence, rows
+    )
 
     evidence = [_audio_item(span) for span in spans]
-    evidence.extend(_coalesce_application_evidence(device_evidence))
+    evidence.extend(application_evidence)
     evidence.extend(_manual_memory_item(memory) for memory in manual_memories)
-    for conversation in conversations:
-        item = _transcript_item(
-            conversation, audio_bounds[conversation.conversation_id]
+    anchors = await asyncio.gather(
+        *(
+            load_anchor_map(conversation.conversation_id)
+            for conversation in conversations
         )
-        if item and _overlaps(item.started_at, item.ended_at, day_start, range_end):
-            evidence.append(item)
+    )
+    evidence.extend(
+        await asyncio.to_thread(
+            _day_transcript_items,
+            conversations,
+            anchors,
+            audio_bounds,
+            day_start,
+            range_end,
+        )
+    )
 
     for span in spans:
         if span.missing_seconds <= 0:
@@ -658,3 +833,134 @@ async def assemble_day_evidence(
         evidence=evidence,
     )
     return manifest, images
+
+
+async def assemble_day_evidence(
+    user_id: str,
+    local_date: date,
+    timezone_name: str,
+    *,
+    window_minutes: int = 20,
+    overlap_minutes: int = 3,
+    now: datetime | None = None,
+) -> tuple[TimelineEvidenceManifest, dict[str, bytes]]:
+    timezone_name = canonical_timezone(timezone_name)
+    day_start, day_end = day_bounds(local_date, timezone_name)
+    checked_at = utc(now or datetime.now(timezone.utc))
+    range_end = (
+        min(day_end, checked_at) if day_start <= checked_at < day_end else day_end
+    )
+    if range_end <= day_start:
+        range_end = day_end
+    return await _assemble_range_manifest(
+        user_id,
+        local_date,
+        timezone_name,
+        day_start,
+        range_end,
+        window_minutes,
+        overlap_minutes,
+    )
+
+
+# ``discovery.py`` imports this module, so its ``_existing_payload``/``_pinned_payload``
+# cannot be imported here without a cycle. These mirror them exactly; change both
+# together until the day pipeline is retired.
+def _existing_episode_payload(episodes: list[TimelineEpisode]) -> list[dict[str, Any]]:
+    return [
+        {
+            "episode_id": episode.episode_id,
+            "started_at": episode.started_at.isoformat(),
+            "ended_at": episode.ended_at.isoformat(),
+            "kind": episode.kind,
+            "title": episode.title,
+            "summary": episode.summary,
+        }
+        for episode in episodes
+    ]
+
+
+def _pinned_episode_payload(episodes: list[TimelineEpisode]) -> list[dict[str, Any]]:
+    return [
+        {
+            "episode_key": episode.episode_key,
+            "started_at": episode.started_at.isoformat(),
+            "ended_at": episode.ended_at.isoformat(),
+            "kind": episode.kind,
+            "title": episode.title,
+            "summary": episode.summary,
+        }
+        for episode in episodes
+    ]
+
+
+def _range_episode_query(
+    user_id: str, started_at: datetime, ended_at: datetime
+) -> dict[str, Any]:
+    return {
+        "user_id": user_id,
+        "started_at": {"$lt": ended_at},
+        "ended_at": {"$gt": started_at},
+    }
+
+
+async def load_reconciliation_evidence(
+    user_id: str,
+    started_at: datetime,
+    ended_at: datetime,
+    *,
+    timezone_name: str,
+    evidence_revision: int = 0,
+    window_minutes: int = 20,
+    overlap_minutes: int = 3,
+    now: datetime | None = None,
+) -> EvidenceBundle:
+    """Bounded range evidence for one reconciliation run.
+
+    ``started_at``/``ended_at`` are absolute UTC and need not align to a local day. The
+    manifest's ``local_date``/``timezone`` are derived from the range start as
+    projection hints; its string ``evidence_revision`` remains the content hash of the
+    assembled evidence, which is a different thing from the integer dirty-range counter
+    carried on the bundle and passed through here.
+    """
+
+    timezone_name = canonical_timezone(timezone_name)
+    range_start = utc(started_at)
+    range_end = utc(ended_at)
+    checked_at = utc(now) if now is not None else None
+    if checked_at is not None and range_start < checked_at < range_end:
+        range_end = checked_at
+    if range_end <= range_start:
+        raise ValueError("reconciliation range must be positive")
+
+    local_date = range_start.astimezone(ZoneInfo(timezone_name)).date()
+    manifest, _images = await _assemble_range_manifest(
+        user_id,
+        local_date,
+        timezone_name,
+        range_start,
+        range_end,
+        window_minutes,
+        overlap_minutes,
+    )
+
+    query = _range_episode_query(user_id, range_start, range_end)
+    existing = await TimelineEpisode.find(
+        {**query, "pipeline": "rolling", "status": {"$ne": "superseded"}}
+    ).to_list()
+    # A human pin is respected whichever writer produced the row, so this is not
+    # restricted by pipeline.
+    pinned = await TimelineEpisode.find(
+        {**query, "$or": [{"status": "confirmed"}, {"pinned": True}]}
+    ).to_list()
+
+    return EvidenceBundle(
+        manifest=manifest,
+        existing_episodes=_existing_episode_payload(
+            sorted(existing, key=lambda row: (row.started_at, row.episode_id))
+        ),
+        pinned_episodes=_pinned_episode_payload(
+            sorted(pinned, key=lambda row: (row.started_at, row.episode_key))
+        ),
+        evidence_revision=evidence_revision,
+    )

@@ -1,7 +1,7 @@
 """Creation and browsing APIs for memories a person deliberately saves."""
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from uuid import NAMESPACE_URL, uuid5
@@ -31,6 +31,7 @@ from advanced_omi_backend.services.memory.vault_media import (
     promote_image_bytes,
     sniff_image_type,
 )
+from advanced_omi_backend.services.timeline.dirty_ranges import note_evidence_dirty
 from advanced_omi_backend.workers.manual_memory_jobs import enqueue_manual_memory_image
 
 router = APIRouter(prefix="/manual-memories", tags=["manual-memories"])
@@ -163,6 +164,17 @@ async def create_manual_memory(
         if existing is None:
             raise
         return {"status": "existing", **_serialize(existing)}
+    # A deliberately saved memory is evidence about the moment it was shared, so
+    # reconcile a minute around it. It is a point event, and the range model requires
+    # positive duration.
+    await note_evidence_dirty(
+        user_id,
+        memory.shared_at - timedelta(seconds=30),
+        memory.shared_at + timedelta(seconds=30),
+        memory.memory_id,
+        "manual_memory",
+        source_kind="manual_memory",
+    )
     for attachment in memory.attachments:
         enqueue_manual_memory_image(memory.memory_id, attachment.attachment_id)
     return {"status": "created", **_serialize(memory)}

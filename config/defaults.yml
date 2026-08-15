@@ -90,19 +90,18 @@ models:
       max_tokens: 2000
     model_output: json
 
-  - name: muse-glimmer-llm
-    description: Local multimodal agent LLM via llama.cpp (Muse Glimmer 30B K-Quant-17GB)
+  - name: qwen3.8-llm
+    description: Local multimodal agent LLM via llama.cpp (Qwen3.8 27B Dynamic Q4_K_XL)
     model_type: llm
     model_provider: llamacpp
     api_family: openai
     thinking: true
     capabilities: [vision]
-    model_name: meta-models/Muse-Glimmer-30B-GGUF:muse-glimmer-30B-kquant-17gb.gguf
-    system_prompt_prefix: "Reasoning strength: high"
+    model_name: unsloth/Qwen3.8-27B-GGUF:Qwen3.8-27B-UD-Q4_K_XL.gguf
     context_window: 131072
     # Served by the same llama.cpp container as llamacpp-llm above, which hosts one
-    # model at a time. The 17GB target plus its 1.4GB perception encoder and 1.6GB
-    # DFlash drafter are the official 24GB-GPU profile.
+    # model at a time. The 17.9GB target plus its ~0.9GB vision projector and Q8 KV
+    # cache are the validated 24GB-GPU profile.
     model_url: ${oc.env:LLM_BASE_URL,''}
     discovery_service: chronicle-llm
     discovery_path: /v1
@@ -111,7 +110,7 @@ models:
     model_params:
       temperature: 1.0
       top_p: 0.95
-      top_k: 64
+      top_k: 20
       max_tokens: 2000
     model_output: json
 
@@ -601,6 +600,7 @@ memory:
     codex:
       model: "gpt-5.6-luna"         # Codex model used for routine vault writes
       reasoning_effort: low         # keep routine ingestion economical; raise for quality evals
+      service_tier: ""              # set to priority for Codex Fast mode (higher usage)
       # codex --sandbox. workspace-write (writes confined to the vault dir) needs
       # bubblewrap, which cannot run nested inside the rootless-podman containers —
       # there the container is the isolation boundary and the wizard sets
@@ -620,11 +620,11 @@ memory:
     pi:
       # Chronicle model-registry entry. The adapter resolves its provider, upstream
       # model id, base URL, and API key, then writes an isolated Pi models.json.
-      model: muse-glimmer-llm
+      model: qwen3.8-llm
       timeout_seconds: 900
       context_window: 131072
       # Keep most of the window for Pi's system prompt, tool schemas, transcript,
-      # and multi-round tool results. The local Muse setup serves the full 131K profile.
+      # and multi-round tool results. The local Qwen setup serves the 131K profile.
       max_tokens: 4096
       thinking: high
   extraction:
@@ -715,18 +715,28 @@ llm_operations:
   # by default: the validated Qwen profile ran with thinking disabled, while `none`
   # normalizes safely to the lowest supported effort for OpenAI reasoning models.
   memory_write:
+    # Vault writes are durable state transitions, not creative generation. Exact-input
+    # replays showed temperature 1.0 split one concept into duplicate Topics in 2/3
+    # runs; temperature 0 reduced that spread. Deterministic gates remain authoritative.
+    temperature: 0.0
     reasoning_effort: high
-    max_tokens: 8000
+    max_tokens: 16000
   # Vault retrieval agent. This is separate so reads can use a cheaper/faster model
   # or a different agent backend without changing ingestion.
   memory_search:
     reasoning_effort: high
     max_tokens: 8000
-  title_summary:
+  conversation_title:
     temperature: 0.3
-    # Same overflow as detailed_summary below: the reasoning budget is spent before
-    # any title is emitted, and the job logs a warning and leaves the placeholder.
-    max_tokens: 8000
+    reasoning_effort: none
+    # Qwen3.8 can emit hidden reasoning before its tiny visible answer. Keep the
+    # token ceiling large enough to reach content; the RQ job's 30s timeout is the
+    # actual latency bound.
+    max_tokens: 2048
+  short_summary:
+    temperature: 0.3
+    reasoning_effort: none
+    max_tokens: 2048
   detailed_summary:
     temperature: 0.3
     # Reasoning models spend completion tokens on reasoning before any output;
@@ -741,7 +751,10 @@ llm_operations:
   prompt_optimization:
     temperature: 0.3
     max_tokens: 4000
-  plugin_assistant: {}
+  plugin_assistant:
+    temperature: 0.0
+    reasoning_effort: none
+    max_tokens: 200
   # Privacy screen for annotation exports: flag segments too personal to
   # share with an outside annotator. JSON output (list of flagged indices).
   sensitivity_screening:
@@ -785,15 +798,22 @@ backend:
   diarization:
     diarization_source: provider
     similarity_threshold: 0.5
-    min_duration: 0.5
+    # Preserve short interjections and their transcript words. Cluster identity uses
+    # pooled long excerpts; display fragmentation is reduced after projection.
+    min_duration: 0.0
     collar: 2.0
-    min_duration_off: 1.5
-    min_speakers: 2
-    max_speakers: 6
+    # Keep Pyannote's neural timeline strictly exclusive. Same-speaker gaps are
+    # consolidated later with `collar`, where another speaker/event blocks merging.
+    min_duration_off: 0.0
+    # Leave speaker count unconstrained by default.  These are optional expert
+    # overrides, not priors: forcing even a generous range can change pyannote's
+    # segmentation and silently merge or invent speakers.
+    min_speakers: null
+    max_speakers: null
     # Cross-chunk speaker reconciliation (links per-chunk centroids into global
     # speakers when long audio is chunked). Minimum cosine similarity to merge two
-    # chunk-local speaker centroids — lower merges more aggressively. max_speakers
-    # also caps the resulting global speaker count.
+    # chunk-local speaker centroids — lower merges more aggressively. An explicitly
+    # configured max_speakers also caps the resulting global speaker count.
     reconciliation_threshold: 0.4
     # Open-set identification: a diarized speaker is only named if the best gallery
     # match beats the runner-up by at least this cosine margin (else "unknown").
@@ -978,6 +998,14 @@ cron_jobs:
     # that way. The safety rule is unchanged and fail-closed: a log is deleted only
     # when every consumer group proves zero pending and zero lag.
     schedule: "*/15 * * * *"
+  rolling_reconciliation_scan:
+    description: "Enqueue dirty evidence ranges whose debounce or forced deadline passed"
+    enabled: true
+    # Scheduling only — the scan does Mongo queries and RQ enqueues, so it is safe on
+    # the API event loop. Five minutes matches the debounce: a range that stops
+    # changing is looked at shortly after, and forced progress is never delayed by
+    # more than one tick.
+    schedule: "*/5 * * * *"
   timeline_analysis:
     description: "Reconcile changed current-day capture evidence into semantic episodes"
     enabled: true
@@ -1000,9 +1028,10 @@ timeline:
   executor: codex
   # Run identity. Must match services/timeline/prompt.py's PROMPT_VERSION; changing the
   # prompt text without bumping both leaves completed days cached on the old rules.
-  prompt_version: timeline-episodes-v11
+  prompt_version: timeline-episodes-v17
   codex:
     model: gpt-5.6-luna
+    service_tier: ""              # set to priority for Codex Fast mode (higher usage)
     # `low` was chosen for cost, but a pass that returns no episodes costs a full run
     # (~600k input tokens) and delivers nothing — the cheap setting was the expensive
     # one. An empty result now escalates one step and retries.
@@ -1014,6 +1043,23 @@ timeline:
     timeout_seconds: 1800
     max_used_percent: 80
     retry_hours: 6
+  pi:
+    operation: timeline_segmentation
+    reasoning_effort: low
+    # A dense screen-heavy day used the complete 24K allowance and was cut off near
+    # its final episodes. Keep final synthesis roomy; dense block condensation retains
+    # its smaller cap and successful block summaries are cached independently.
+    max_tokens: 32000
+    # A third local format attempt is cheaper than abandoning a day and replaying its
+    # already-condensed context through the rebuild repair stage.
+    max_attempts: 3
+    context_block_max_chars: 80000
+    context_block_max_items: 160
+    condense_min_chars: 50000
+    condense_min_items: 80
+    condense_max_tokens: 12000
+    condense_max_attempts: 3
+    condense_thinking: low
   thumbnails:
     # Vision pass that picks which sampled frame depicts an episode.
     codex:
