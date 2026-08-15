@@ -42,6 +42,7 @@ const compiled = ts.transpileModule(source, {
 
 let listener;
 let gateMaximumMs;
+let playerOptions;
 let gateReleaseCount = 0;
 let playerRemoveCount = 0;
 let subscriptionRemoveCount = 0;
@@ -75,15 +76,18 @@ class MockFile {
 
 const mocks = {
   'expo-audio': {
-    createAudioPlayer: () => ({
-      addListener: (eventName, callback) => {
-        assert.equal(eventName, 'playbackStatusUpdate');
-        listener = callback;
-        return { remove: () => { subscriptionRemoveCount += 1; } };
-      },
-      play: () => {},
-      remove: () => { playerRemoveCount += 1; },
-    }),
+    createAudioPlayer: (_source, options) => {
+      playerOptions = options;
+      return {
+        addListener: (eventName, callback) => {
+          assert.equal(eventName, 'playbackStatusUpdate');
+          listener = callback;
+          return { remove: () => { subscriptionRemoveCount += 1; } };
+        },
+        play: () => {},
+        remove: () => { playerRemoveCount += 1; },
+      };
+    },
     setAudioModeAsync: async () => {},
   },
   'expo-file-system': {
@@ -134,6 +138,11 @@ playbackModule._compile(compiled.outputText, sourcePath);
     });
 
     assert.equal(typeof listener, 'function', 'the real playback completion listener is attached');
+    assert.deepEqual(
+      playerOptions,
+      { keepAudioSessionActive: true },
+      'speaker playback must not deactivate the AVAudioSession owned by the live recorder'
+    );
     assert.equal(
       gateMaximumMs,
       1_250,

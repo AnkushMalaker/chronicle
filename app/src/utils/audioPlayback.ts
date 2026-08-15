@@ -141,7 +141,10 @@ export async function playDownlinkAudio(data: PlayAudioData): Promise<void> {
 
   let player: AudioPlayer;
   try {
-    player = createAudioPlayer(source);
+    // expo-audio and expo-audio-studio share iOS's singleton AVAudioSession.
+    // The player default deactivates that session when playback finishes, which
+    // silently stops the separately-owned live recorder from emitting frames.
+    player = createAudioPlayer(source, { keepAudioSessionActive: true });
   } catch (e) {
     console.warn('[AudioPlayback] Failed to create audio player:', e);
     if (tempFile) {
