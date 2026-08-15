@@ -35,6 +35,12 @@ from advanced_omi_backend.llm_client import get_llm_client
 from advanced_omi_backend.middleware.app_middleware import setup_middleware
 from advanced_omi_backend.models.annotation import Annotation
 from advanced_omi_backend.models.api_key import ApiKey
+from advanced_omi_backend.models.audio_capture import (
+    AudioCaptureSession,
+    ConversationTranscriptRevision,
+    DiarizationArtifact,
+    TranscriptArtifact,
+)
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import (
@@ -48,6 +54,8 @@ from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
 from advanced_omi_backend.models.system_event import SystemEvent
 from advanced_omi_backend.models.timeline import (
     AudioEvidenceSpan,
+    DirtyEvidenceRange,
+    EpisodeDispatchLatch,
     TimelineAnalysisRun,
     TimelineDay,
     TimelineEpisode,
@@ -144,7 +152,11 @@ async def lifespan(app: FastAPI):
                 User,
                 ApiKey,
                 Conversation,
+                AudioCaptureSession,
                 AudioChunkDocument,
+                TranscriptArtifact,
+                DiarizationArtifact,
+                ConversationTranscriptRevision,
                 WaveformData,
                 Annotation,
                 MemoryAuditEntry,
@@ -158,6 +170,8 @@ async def lifespan(app: FastAPI):
                 TimelineAnalysisRun,
                 TimelineEpisode,
                 TimelineDay,
+                DirtyEvidenceRange,
+                EpisodeDispatchLatch,
             ],
         )
         application_logger.info("Beanie initialized for all document models")

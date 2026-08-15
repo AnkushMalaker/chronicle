@@ -9,6 +9,8 @@ from beanie import Document
 from pydantic import BaseModel, Field, model_validator
 from pymongo import ASCENDING, DESCENDING, IndexModel
 
+from advanced_omi_backend.models.audio_capture import AudioRangeRef
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -58,7 +60,7 @@ class TimelineAssertion(BaseModel):
     evidence_ids: list[str] = Field(min_length=1)
 
 
-class TimelineAudioRange(BaseModel):
+class TimelineAudioRange(AudioRangeRef):
     """Immutable audio-document references supporting one episode interval.
 
     Chunk ids and absolute bounds remain valid when an operational conversation is
@@ -66,18 +68,8 @@ class TimelineAudioRange(BaseModel):
     consumers must not use it as the range's identity.
     """
 
-    range_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    chunk_ids: list[str] = Field(min_length=1)
-    started_at: datetime
-    ended_at: datetime
     source_stream: Optional[str] = None
     conversation_ids: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def validate_range(self) -> "TimelineAudioRange":
-        if self.ended_at <= self.started_at:
-            raise ValueError("timeline audio range must have positive duration")
-        return self
 
 
 def _utc(value: datetime) -> datetime:
@@ -193,6 +185,7 @@ class AudioEvidenceSpan(Document):
     direction: Literal["input", "output", "unknown"] = "unknown"
     meeting_id: Optional[str] = None
     conversation_id: Optional[str] = None
+    audio_ranges: list[AudioRangeRef] = Field(default_factory=list)
     state: Literal["transcribed", "no_speech", "unscored", "failed", "abandoned"]
     # Ingest attempts for this range. A failed upload leaves the staged chunks in
     # place so the next tick can retry; without a bound that retry is forever, and
@@ -323,7 +316,27 @@ class TimelineEpisode(Document):
     conversational: bool = False
     # Agent output is provisional until a person edits it. A "confirmed" default would
     # pin every generated episode and make reanalysis a no-op.
-    status: Literal["provisional", "confirmed", "superseded"] = "provisional"
+    # Transition enum: "confirmed" (human-pinned, day pipeline) coexists with the
+    # rolling states "open"/"settled" until cutover removes it; rolling models pinning
+    # with the separate ``pinned`` flag. See docs/backend/rolling-reconciliation.md.
+    status: Literal["open", "provisional", "confirmed", "settled", "superseded"] = (
+        "provisional"
+    )
+    # Which writer owns this row during the transition: the day-scoped analysis
+    # pipeline or rolling reconciliation. Read paths select by the user's active
+    # pipeline so the two writers never render into the same projection.
+    pipeline: Literal["day", "rolling"] = "day"
+    # Monotonic per-``episode_key`` revision counter and the evidence revision the
+    # publishing run reconciled. Zero/None on day-pipeline rows.
+    revision: int = Field(default=0, ge=0)
+    evidence_revision: Optional[int] = None
+    # Lineage across split/merge: the keys this episode was derived from and the keys
+    # that replaced it. A superseded key resolves through ``successor_keys``.
+    predecessor_keys: list[str] = Field(default_factory=list)
+    successor_keys: list[str] = Field(default_factory=list)
+    # Human pinning, orthogonal to settlement. ``confirmed_fields`` lists the pinned
+    # fields for both pipelines.
+    pinned: bool = False
     salience: Literal["background", "routine", "notable", "highlight"] = "routine"
     confidence: float = Field(ge=0, le=1)
     activity_mode: Literal["foreground", "background", "ambient", "idle"]
@@ -377,6 +390,99 @@ class TimelineEpisode(Document):
             IndexModel([("user_id", ASCENDING), ("local_date", DESCENDING)]),
             IndexModel([("run_id", ASCENDING), ("started_at", ASCENDING)]),
             IndexModel([("user_id", ASCENDING), ("episode_key", ASCENDING)]),
+        ]
+
+
+class DirtyEvidenceRange(Document):
+    """An absolute evidence interval awaiting rolling reconciliation.
+
+    Producers call ``services/timeline/dirty_ranges.mark_evidence_dirty``; overlapping
+    or nearby ``pending``/``waiting`` rows coalesce. A ``leased`` row is never
+    coalesced into: the lease snapshots ``evidence_revision`` into
+    ``leased_evidence_revision`` and the run's publish fences on that snapshot, while
+    new triggers open a fresh pending row over the same interval. Scheduling clocks
+    live on the row: ``not_before`` is the debounce, ``force_after`` bounds how long
+    continuous evidence can postpone a first look.
+    """
+
+    dirty_range_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    started_at: datetime
+    ended_at: datetime
+    # Per-user monotonic counter (Redis INCR, see redis_keys.timeline_evidence_revision)
+    # recording the newest evidence change folded into this range.
+    evidence_revision: int
+    leased_evidence_revision: Optional[int] = None
+    # Producer revision ids folded in, keyed by source kind — observability + fencing.
+    source_revisions: dict[str, list[str]] = Field(default_factory=dict)
+    trigger_reasons: list[str] = Field(default_factory=list)
+    not_before: datetime
+    force_after: datetime
+    state: Literal["pending", "leased", "waiting", "completed", "failed"] = "pending"
+    lease_owner: Optional[str] = None
+    lease_expires_at: Optional[datetime] = None
+    attempts: int = Field(default=0, ge=0)
+    last_error: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "DirtyEvidenceRange":
+        if self.ended_at <= self.started_at:
+            raise ValueError("dirty evidence range must have positive duration")
+        return self
+
+    class Settings:
+        name = "dirty_evidence_ranges"
+        indexes = [
+            IndexModel([("dirty_range_id", ASCENDING)], unique=True),
+            IndexModel(
+                [
+                    ("user_id", ASCENDING),
+                    ("state", ASCENDING),
+                    ("not_before", ASCENDING),
+                ],
+                name="dirty_range_schedule",
+            ),
+            IndexModel(
+                [
+                    ("user_id", ASCENDING),
+                    ("started_at", ASCENDING),
+                    ("ended_at", ASCENDING),
+                ],
+                name="dirty_range_overlap",
+            ),
+            IndexModel(
+                [("state", ASCENDING), ("lease_expires_at", ASCENDING)],
+                name="dirty_range_lease_recovery",
+            ),
+        ]
+
+
+class EpisodeDispatchLatch(Document):
+    """Exactly-once latch for user-facing events per ``(episode_key, event_type)``.
+
+    ``conversation.complete`` and the per-conversation memory write fire on the first
+    settled conversational revision of an episode key; resettlement or supersession
+    finds the latch and does nothing.
+    """
+
+    user_id: str
+    episode_key: str
+    event_type: str
+    episode_id: str
+    revision: int
+    dispatched_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "episode_dispatch_latches"
+        indexes = [
+            IndexModel(
+                [("episode_key", ASCENDING), ("event_type", ASCENDING)],
+                unique=True,
+                name="episode_dispatch_identity",
+            ),
+            IndexModel([("user_id", ASCENDING), ("dispatched_at", DESCENDING)]),
         ]
 
 

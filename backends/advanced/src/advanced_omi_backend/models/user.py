@@ -115,6 +115,10 @@ class User(BeanieBaseUser, Document):
     # service). Each allowed speaker is {speaker_id, name}. Empty list = inert.
     wakeword_gate_enabled: bool = False
     wakeword_allowed_speakers: list[dict] = Field(default_factory=list)
+    # Which timeline writer this user's projections and event dispatch follow during
+    # the rolling-reconciliation transition. "day" = existing day-scoped analysis;
+    # "rolling" = evidence-driven reconciliation. Cutover flips the default.
+    active_timeline_pipeline: str = "day"
 
     class Settings:
         name = "users"  # Collection name in MongoDB - standardized from "fastapi_users"

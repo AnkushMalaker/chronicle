@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, Optional
 
 import redis.asyncio as redis_async
 
+from advanced_omi_backend.observability.otel_setup import force_flush_otel
 from advanced_omi_backend.prompt_defaults import register_all_defaults
 from advanced_omi_backend.prompt_registry import get_prompt_registry
 from advanced_omi_backend.redis_factory import create_async_redis
@@ -45,6 +46,12 @@ async def _ensure_beanie_initialized():
             from pymongo.errors import ConfigurationError
 
             from advanced_omi_backend.models.annotation import Annotation
+            from advanced_omi_backend.models.audio_capture import (
+                AudioCaptureSession,
+                ConversationTranscriptRevision,
+                DiarizationArtifact,
+                TranscriptArtifact,
+            )
             from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
             from advanced_omi_backend.models.conversation import Conversation
             from advanced_omi_backend.models.device_input import (
@@ -57,6 +64,8 @@ async def _ensure_beanie_initialized():
             from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
             from advanced_omi_backend.models.timeline import (
                 AudioEvidenceSpan,
+                DirtyEvidenceRange,
+                EpisodeDispatchLatch,
                 TimelineAnalysisRun,
                 TimelineDay,
                 TimelineEpisode,
@@ -85,7 +94,11 @@ async def _ensure_beanie_initialized():
                 document_models=[
                     User,
                     Conversation,
+                    AudioCaptureSession,
                     AudioChunkDocument,
+                    TranscriptArtifact,
+                    DiarizationArtifact,
+                    ConversationTranscriptRevision,
                     WaveformData,
                     Annotation,
                     MemoryAuditEntry,
@@ -98,6 +111,8 @@ async def _ensure_beanie_initialized():
                     TimelineAnalysisRun,
                     TimelineEpisode,
                     TimelineDay,
+                    DirtyEvidenceRange,
+                    EpisodeDispatchLatch,
                 ],
             )
 
@@ -339,6 +354,11 @@ def async_job(
                     f"❌ {job_name} failed after {elapsed:.2f}s: {e}", exc_info=True
                 )
                 raise
+            finally:
+                # RQ work-horses exit with os._exit(), bypassing the OpenTelemetry
+                # batch exporter's atexit hook. Flush after the complete job tree has
+                # ended so late spans (notably the day-memory model call) are not lost.
+                force_flush_otel()
 
         # Store default job configuration as attributes for RQ introspection
         wrapper.job_timeout = timeout

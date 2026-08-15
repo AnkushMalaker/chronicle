@@ -105,16 +105,6 @@ def session_conversation_count(session_id: str | SessionId) -> str:
     return f"session:conversation_count:{_identity_value(session_id)}"
 
 
-def conversation_current(session_id: str | SessionId) -> str:
-    """Pointer to the session's current conversation (drives WAV rotation)."""
-    return f"conversation:current:{_identity_value(session_id)}"
-
-
-def conversation_create_lock(session_id: str | SessionId) -> str:
-    """Per-session lock serializing first-conversation creation across workers."""
-    return f"conversation:create_lock:{_identity_value(session_id)}"
-
-
 def speech_detection_job(session_id: str | SessionId) -> str:
     """Pointer to the live speech-detection job id for the session."""
     return f"speech_detection_job:{_identity_value(session_id)}"
@@ -150,3 +140,13 @@ def device_downlink_channel(client_id: ClientId) -> DeviceDownlinkChannel:
     """Redis Pub/Sub channel for backend-to-device output."""
     client_id = _require_identity(client_id, ClientId)
     return DeviceDownlinkChannel.from_value(f"device:downlink:{client_id}")
+
+
+def timeline_evidence_revision(user_id: str | UserId) -> str:
+    """Per-user monotonic evidence-revision counter (INCR) for dirty-range fencing."""
+    return f"timeline:evidence_revision:{_identity_value(user_id)}"
+
+
+def dirty_range_enqueue_lock(dirty_range_id: str) -> str:
+    """Single-flight lock guarding reconciliation-job enqueue for one dirty range."""
+    return f"timeline:dirty_range_enqueue_lock:{dirty_range_id}"

@@ -125,6 +125,64 @@ class TimelineAgentResult(BaseModel):
     usage: dict[str, Any] = Field(default_factory=dict)
 
 
+class EvidenceBundle(BaseModel):
+    """Everything a reconciliation run may consider for one absolute range.
+
+    Produced by ``load_reconciliation_evidence`` (the range core extracted from
+    ``assemble_day_evidence``). ``local_date``/``timezone`` on the manifest are
+    derived from the range start in the user's timezone — projection hints, not
+    authority. ``existing_episodes`` and ``pinned_episodes`` carry the prior
+    interpretation so a run revises rather than rederives.
+    """
+
+    manifest: TimelineEvidenceManifest
+    # Serialized active TimelineEpisode revisions intersecting the range
+    # (rolling pipeline rows only).
+    existing_episodes: list[dict[str, Any]] = Field(default_factory=list)
+    # Human-pinned episodes/boundaries the agent must not cross.
+    pinned_episodes: list[dict[str, Any]] = Field(default_factory=list)
+    # The per-user evidence-revision counter value this bundle reflects.
+    evidence_revision: int = 0
+
+
+class RequestMoreContext(BaseModel):
+    action: Literal["request_more_context"] = "request_more_context"
+    left_seconds: float = Field(default=0, ge=0)
+    right_seconds: float = Field(default=0, ge=0)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class WaitForFutureEvidence(BaseModel):
+    action: Literal["wait_for_future_evidence"] = "wait_for_future_evidence"
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class Publish(BaseModel):
+    action: Literal["publish"] = "publish"
+    result: TimelineAgentResult
+
+
+# One reconciliation-loop step: publish revisions, ask for bounded expansion on a
+# side, or park until future evidence arrives. Chronicle enforces the budgets
+# (5-minute increments per side per iteration, ≤6 iterations ⇒ ≤30 min/side).
+ReconcileAction = Publish | RequestMoreContext | WaitForFutureEvidence
+
+
+class PublishResult(BaseModel):
+    """Outcome of atomically publishing one reconciliation generation."""
+
+    episode_ids: list[str] = Field(default_factory=list)
+    episode_keys: list[str] = Field(default_factory=list)
+    superseded_episode_ids: list[str] = Field(default_factory=list)
+    # Local dates whose day projections the publish touched (both, for a
+    # cross-midnight episode).
+    affected_local_dates: list[date] = Field(default_factory=list)
+    # False when the CAS fence on the leased evidence revision failed; the caller
+    # marks the range stale and the re-dirtied range retries.
+    fenced: bool = True
+    material_change: bool = False
+
+
 class TimelineEpisodeExecutor(Protocol):
     async def analyze(
         self,
@@ -133,4 +191,5 @@ class TimelineEpisodeExecutor(Protocol):
         existing_episodes: list[dict[str, Any]],
         pinned_episodes: list[dict[str, Any]] | None = None,
         reasoning_effort: str | None = None,
+        validation_feedback: str | None = None,
     ) -> TimelineAgentResult: ...
