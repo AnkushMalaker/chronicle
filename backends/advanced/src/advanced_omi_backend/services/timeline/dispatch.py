@@ -236,6 +236,8 @@ async def finalize_conversation_close_job(
     user_id: str,
     end_reason: Optional[str] = None,
     trigger: str = "",
+    *,
+    redis_client=None,
 ) -> dict[str, Any]:
     """Terminal close-path job for rolling users: settle state, dispatch nothing.
 
