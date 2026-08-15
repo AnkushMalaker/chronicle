@@ -20,6 +20,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Tuple
 
+# The deterministic Daily ``## Episodes`` index is a projection of active timeline
+# episodes, shared with the incremental projection layer so a settled-day write and a
+# rolling refresh install identical content. Aliased under the historical private names
+# because callers (and scripts) import them from this module.
+from advanced_omi_backend.services.timeline.projection import (
+    ensure_day_episode_index as _ensure_day_episode_index,
+)
+from advanced_omi_backend.services.timeline.projection import (
+    render_day_episode_index as _render_day_episode_index,
+)
+from advanced_omi_backend.services.timeline.projection import (
+    replace_h2_section as _replace_h2_section,
+)
+
 from ..audit import record_vault_change
 from ..base import (
     DayWriteOutcome,
@@ -50,99 +64,34 @@ from ..vault_verify import (
 
 memory_logger = logging.getLogger("memory_service")
 
-_DAY_DIGEST_EPISODE_HEADING_RE = re.compile(
-    r"^###\s+(\d{2}:\d{2}–\d{2}:\d{2})\s+·\s+(.+?)\s+·\s+(.+?)\s*$",
-    re.MULTILINE,
+# Deterministic vault invariants are completion gates, not advisory review notes. The
+# semantic reviewer also returns findings (``redundant``/``unsupported``), but those are
+# model judgements and remain warnings. If one of these structural rules survives the
+# repair pass, the day must stay retryable instead of being latched as written with a
+# malformed vault.
+_BLOCKING_VAULT_RULES = frozenset(
+    {
+        "record_missing",
+        "forbidden_folder",
+        "immutable_section",
+        "illegal_path",
+        "root_note_role",
+        "not_a_person",
+        "duplicate_section",
+        "empty_semantic_note",
+        "note_schema",
+        "new_category",
+        "topic_scope_overlap",
+        "case_collision",
+        "episode_ranges",
+    }
 )
-_H2_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 
 
 def _safe_exception_diagnostic(exc: BaseException) -> str:
     """Return a useful diagnostic without persisting arbitrary provider text."""
 
     return type(exc).__name__
-
-
-def _line_value(block: str, key: str) -> str:
-    prefix = f"{key}:"
-    for line in block.splitlines():
-        if line.startswith(prefix):
-            return line[len(prefix) :].strip()
-    return ""
-
-
-def _render_day_episode_index(day_digest: str) -> str:
-    """Render the trusted Daily ``## Episodes`` index from a day digest.
-
-    The memory agent is useful for semantic People/Topic deltas, but this section is a
-    mechanical mirror of the active timeline run. Keeping it deterministic prevents a
-    good day write from failing because the model omitted or partially rewrote episode
-    ranges.
-    """
-
-    matches = list(_DAY_DIGEST_EPISODE_HEADING_RE.finditer(day_digest or ""))
-    bullets: list[str] = []
-    for index, match in enumerate(matches):
-        block_start = match.end()
-        block_end = (
-            matches[index + 1].start() if index + 1 < len(matches) else len(day_digest)
-        )
-        block = day_digest[block_start:block_end]
-        clock, kind, salience = (part.strip() for part in match.groups())
-        title = _line_value(block, "title")
-        summary = _line_value(block, "summary")
-        text = f"- {clock} · {kind} · {salience}"
-        if title:
-            text += f" — {title}"
-        if summary:
-            text += f": {summary}"
-        bullets.append(text)
-    return "\n".join(bullets)
-
-
-def _replace_h2_section(note: str, heading: str, body: str) -> str:
-    section = f"## {heading}\n\n{body.rstrip()}\n"
-    match = next(
-        (
-            candidate
-            for candidate in _H2_SECTION_RE.finditer(note)
-            if candidate.group(1).strip().lower() == heading.lower()
-        ),
-        None,
-    )
-    if match is None:
-        prefix = note.rstrip()
-        return f"{prefix}\n\n{section}" if prefix else section
-
-    next_heading = _H2_SECTION_RE.search(note, match.end())
-    section_end = next_heading.start() if next_heading else len(note)
-    before = note[: match.start()].rstrip()
-    after = note[section_end:].lstrip("\n")
-    pieces = []
-    if before:
-        pieces.append(before)
-    pieces.append(section.rstrip())
-    if after:
-        pieces.append(after.rstrip())
-    return "\n\n".join(pieces) + "\n"
-
-
-def _ensure_day_episode_index(
-    note_path: Path, local_date: str, day_digest: str
-) -> bool:
-    body = _render_day_episode_index(day_digest)
-    if not body:
-        return False
-    try:
-        note = note_path.read_text(encoding="utf-8")
-    except OSError:
-        note = f"# {local_date}\n"
-    updated = _replace_h2_section(note, "Episodes", body)
-    if updated == note:
-        return False
-    note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(updated, encoding="utf-8")
-    return True
 
 
 def _repair_guidance(findings: List[Any]) -> str:
@@ -515,6 +464,7 @@ class MemoryService(MemoryServiceBase):
         local_date: str,
         user_id: str,
         *,
+        day_index_digest: str,
         source_date: Optional[str] = None,
     ) -> Tuple[DayWriteOutcome, List[str]]:
         """Record one settled local day of timeline episodes into the vault.
@@ -548,6 +498,7 @@ class MemoryService(MemoryServiceBase):
                 "chronicle.memory.primary_backend": write_backend,
                 "chronicle.memory.recovery_backend": recovery_backend or "none",
                 "chronicle.memory.transcript_chars": len(day_digest or ""),
+                "chronicle.memory.day_index_chars": len(day_index_digest or ""),
             },
         ) as span:
             set_observation_io(
@@ -562,6 +513,7 @@ class MemoryService(MemoryServiceBase):
                 day_digest,
                 local_date,
                 user_id,
+                day_index_digest=day_index_digest,
                 source_date=source_date,
             )
             set_safe_span_attributes(
@@ -584,6 +536,7 @@ class MemoryService(MemoryServiceBase):
         local_date: str,
         user_id: str,
         *,
+        day_index_digest: Optional[str] = None,
         source_date: Optional[str] = None,
     ) -> Tuple[DayWriteOutcome, List[str]]:
         """Write path for a settled day, with one recovery attempt.
@@ -591,14 +544,17 @@ class MemoryService(MemoryServiceBase):
         Deliberately simpler than ``_run_agent_with_note_guarantee``: that guarantee is
         built around a conversation note whose id the caller owns, and its
         source-preserving fallback writes a ``Conversations/`` note that would be wrong
-        here. A day has no such deterministic fallback — an unwritten day stays
-        unwritten, and the caller records it as failed so it can be retried.
+        here. Chronicle owns the deterministic Daily index; the model owns only the
+        semantic cross-day notes. If that judgement does not deliberately complete,
+        the caller records the day as failed so it can be retried.
         """
         # Lazy: ..agent imports llm_client, which imports this package's config back.
         from ..agent.memory_agent import (
             VERIFY_CAPABLE_BACKENDS,
+            allow_new_categories,
             day_note_path,
             forbidden_folders,
+            immutable_sections,
             required_notes,
         )
 
@@ -618,20 +574,24 @@ class MemoryService(MemoryServiceBase):
         seed_vault_scaffold(user_root)  # idempotent: .base + hub notes
         existing_before = self._vault_note_set(user_root)
         day_rel = day_note_path(local_date)
+        system_touched: list[str] = []
+        index_digest = day_index_digest or day_digest
+
+        # The episode index is source-backed presentation, not a semantic judgement.
+        # Install it before the agent runs so the model spends its context and tool
+        # budget only on genuinely durable People/Topic/category facts. This also
+        # prevents a large first-time day from truncating while serialising an index
+        # Chronicle deterministically replaces after the run anyway.
+        if _ensure_day_episode_index(user_root / day_rel, local_date, index_digest):
+            system_touched.append(day_rel)
 
         def day_range_findings():
-            return verify_day_episode_ranges(user_root / day_rel, day_digest)
+            return verify_day_episode_ranges(user_root / day_rel, index_digest)
 
-        def day_note_written(agent_result) -> bool:
-            """Did *this run* record the day note — not merely: does the file exist.
+        def day_index_recorded() -> bool:
+            """Did Chronicle install the exact active Timeline index for this day?"""
 
-            Existence proves nothing here. Every date already has a ``Daily/<date>.md``
-            from the retired per-observation curation, so an existence check passes for
-            a run that edited some People notes and never wrote the day at all. Two of
-            four backfilled days reported success that way before this was tightened.
-            """
-
-            return agent_result is not None and day_rel in (agent_result.touched or [])
+            return (user_root / day_rel).is_file() and not day_range_findings()
 
         def deliberate_no_op(agent_result) -> bool:
             """Did the agent finish cleanly and decide nothing needed recording.
@@ -659,6 +619,17 @@ class MemoryService(MemoryServiceBase):
                 # agent that genuinely decided the day needs nothing called verify_vault
                 # first, as it is told to; one that stopped mid-thought did not.
                 and (agent_result.verified or not verify_expected)
+            )
+
+        def semantic_write_completed(agent_result) -> bool:
+            """Did the semantic agent deliberately finish its assigned vault work?"""
+
+            return (
+                agent_result is not None
+                and not agent_result.truncated
+                and not agent_result.stalled
+                and (agent_result.verified or not verify_expected)
+                and (bool(agent_result.touched) or deliberate_no_op(agent_result))
             )
 
         result = None
@@ -698,9 +669,7 @@ class MemoryService(MemoryServiceBase):
                     )
                     result = None
                     continue
-            if (day_note_written(result) or deliberate_no_op(result)) and not (
-                result.truncated or result.stalled
-            ):
+            if semantic_write_completed(result):
                 # A deliberate no-op ends the run here: there is nothing for the
                 # recovery backend to recover.
                 break
@@ -709,27 +678,25 @@ class MemoryService(MemoryServiceBase):
         # on it choosing to. Re-run the same checks here and give anything left back as
         # guidance for one repair pass — the findings name the note and the fix.
         #
-        # The day note is required only of a run that edited something. An agent that
-        # touched nothing judged the day already covered, which is a legitimate outcome;
-        # one that wrote People notes and skipped the day note left the record itself
-        # unwritten, which is the case worth repairing.
+        # Chronicle owns the day note, so no record note is required from the semantic
+        # agent. It may legitimately touch only People/Topic/category notes, or verify
+        # the vault and make no edits when the day contains no durable information.
         def _required() -> tuple[str, ...]:
-            return (
-                required_notes("day", local_date)
-                if result is not None and result.touched
-                else ()
-            )
+            return required_notes("day", local_date)
 
-        if result is not None and _ensure_day_episode_index(
-            user_root / day_rel, local_date, day_digest
-        ):
-            result.touched = list(dict.fromkeys([*result.touched, day_rel]))
+        # Enforce ownership after the agent too. If it ignored the prompt and rewrote
+        # the index, restore the concise source-backed form without spending another
+        # model round.
+        if _ensure_day_episode_index(user_root / day_rel, local_date, index_digest):
+            system_touched.append(day_rel)
 
         findings = verify_vault_changes(
             user_root,
             existing_before,
             required=_required(),
             forbidden_folders=forbidden_folders("day"),
+            immutable_sections=immutable_sections("day"),
+            forbid_new_categories=not allow_new_categories("day"),
         )
         findings.extend(day_range_findings())
         # Structural checks pass on a well-formed duplicate. A second, read-only agent
@@ -770,13 +737,15 @@ class MemoryService(MemoryServiceBase):
                     result.touched = list(
                         dict.fromkeys([*result.touched, *repair.touched])
                     )
-            if _ensure_day_episode_index(user_root / day_rel, local_date, day_digest):
-                result.touched = list(dict.fromkeys([*result.touched, day_rel]))
+            if _ensure_day_episode_index(user_root / day_rel, local_date, index_digest):
+                system_touched.append(day_rel)
             findings = verify_vault_changes(
                 user_root,
                 existing_before,
                 required=_required(),
                 forbidden_folders=forbidden_folders("day"),
+                immutable_sections=immutable_sections("day"),
+                forbid_new_categories=not allow_new_categories("day"),
             )
             findings.extend(day_range_findings())
             # Re-review too: the repair edited notes, and only a second read can say
@@ -791,9 +760,9 @@ class MemoryService(MemoryServiceBase):
                 )
             )
         if findings:
-            # Not fatal: the day *is* recorded, and failing here would burn the day's
-            # attempt budget and eventually skip it entirely over a schema nit. Loud
-            # instead, so a rule the model cannot satisfy is visible rather than silent.
+            # Reviewer judgements are advisory. Deterministic structural findings are
+            # gated below after touches have been audited, so a malformed day remains
+            # retryable rather than being silently latched as written.
             memory_logger.warning(
                 "🧹 Day %s recorded with %d unresolved vault problem(s): %s",
                 local_date,
@@ -801,7 +770,9 @@ class MemoryService(MemoryServiceBase):
                 "; ".join(f"{f.path} [{f.rule}]" for f in findings),
             )
 
-        touched = list(result.touched) if result else []
+        touched = list(
+            dict.fromkeys([*system_touched, *(list(result.touched) if result else [])])
+        )
         await self._record_agent_touches(
             user_id,
             local_date,
@@ -810,14 +781,17 @@ class MemoryService(MemoryServiceBase):
             existing_before,
             removed=result.removed if result else None,
         )
-        unresolved_ranges = [
-            finding for finding in findings if finding.rule == "episode_ranges"
+        blocking_findings = [
+            finding for finding in findings if finding.rule in _BLOCKING_VAULT_RULES
         ]
-        if unresolved_ranges:
+        if blocking_findings:
             memory_logger.error(
-                "❌ add_day_memory %s: active episode ranges were not reconciled: %s",
+                "❌ add_day_memory %s: deterministic vault invariants remain after "
+                "repair: %s",
                 local_date,
-                "; ".join(finding.detail for finding in unresolved_ranges),
+                "; ".join(
+                    f"{finding.path} [{finding.rule}]" for finding in blocking_findings
+                ),
             )
             return DayWriteOutcome.FAILED, touched
         if result is None:
@@ -839,10 +813,10 @@ class MemoryService(MemoryServiceBase):
                 time.perf_counter() - t0,
                 (result.summary or "").strip()[:300],
             )
-            return DayWriteOutcome.COMPLETE, []
-        if not day_note_written(result):
+            return DayWriteOutcome.COMPLETE, touched
+        if not day_index_recorded():
             memory_logger.error(
-                "❌ add_day_memory %s: the day note %s was not written this run "
+                "❌ add_day_memory %s: the canonical day index %s was not recorded "
                 "(touched %d other note(s)) (%.2fs)",
                 local_date,
                 day_rel,
@@ -852,7 +826,7 @@ class MemoryService(MemoryServiceBase):
             return DayWriteOutcome.FAILED, touched
         if result is not None and (result.truncated or result.stalled):
             diagnostics = "; ".join(result.errors) or "no diagnostic reported"
-            if day_note_written(result) and not findings:
+            if day_index_recorded() and not findings:
                 # Structurally clean, but the run was cut off: it may have stopped
                 # before any of its durable People/Topic edits, and nothing here can
                 # tell. Neither complete nor failed — see ``DayWriteOutcome.PARTIAL``.
@@ -875,6 +849,14 @@ class MemoryService(MemoryServiceBase):
                 result.tool_calls,
                 time.perf_counter() - t0,
                 diagnostics,
+            )
+            return DayWriteOutcome.FAILED, touched
+        if verify_expected and not result.verified:
+            memory_logger.error(
+                "❌ add_day_memory %s: semantic agent ended without verify_vault "
+                "after primary and recovery attempts (%.2fs)",
+                local_date,
+                time.perf_counter() - t0,
             )
             return DayWriteOutcome.FAILED, touched
         if result.errors:

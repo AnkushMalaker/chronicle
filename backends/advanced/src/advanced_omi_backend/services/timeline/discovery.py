@@ -11,8 +11,6 @@ from zoneinfo import ZoneInfo
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from advanced_omi_backend.controllers.queue_controller import enqueue_summary_job_bundle
-from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.timeline import (
     TimelineAnalysisRun,
     TimelineAssertion,
@@ -36,10 +34,11 @@ from .executor import (
     TimelineIncompleteSegmentation,
     build_executor,
     settings_dict,
+    unsupported_episode_gap,
     validate_agent_result,
 )
 from .prompt import PROMPT_VERSION
-from .recording_refs import build_audio_ranges, resolve_live_recordings
+from .recording_refs import build_audio_ranges
 from .timezone import canonical_timezone
 from .workspace import write_workspace
 
@@ -117,7 +116,9 @@ def _claimable(now: datetime) -> dict[str, Any]:
     }
 
 
-async def process_timeline_run(run_id: str) -> dict[str, int]:
+async def process_timeline_run(
+    run_id: str, *, retain_unconfirmed_existing: bool = True
+) -> dict[str, int]:
     """Analyze one specific run now, regardless of what else is queued.
 
     On-demand analysis used the shared oldest-first claim, so pressing "Analyze day"
@@ -141,7 +142,9 @@ async def process_timeline_run(run_id: str) -> dict[str, int]:
     run = await TimelineAnalysisRun.find_one(TimelineAnalysisRun.run_id == run_id)
     if run is None:
         return {"processed": 0, "failed": 0, "deferred": 0}
-    return await _run_claimed(run)
+    return await _run_claimed(
+        run, retain_unconfirmed_existing=retain_unconfirmed_existing
+    )
 
 
 async def _claim_next_run() -> TimelineAnalysisRun | None:
@@ -187,9 +190,36 @@ async def _active_episodes(run: TimelineAnalysisRun) -> list[TimelineEpisode]:
     )
     if day is None or not day.active_run_id:
         return []
+    return await _valid_episodes_for_run(day.active_run_id, run.user_id)
+
+
+async def _valid_episodes_for_run(run_id: str, user_id: str) -> list[TimelineEpisode]:
+    """Load usable prior episodes without letting corrupt derived rows block repair.
+
+    A generation produced before BSON-precision validation can contain a positive
+    sub-millisecond interval that MongoDB stored with equal bounds. Beanie correctly
+    refuses to instantiate that row, but a forced reanalysis must still be able to
+    replace the bad generation. Exclude only explicitly non-positive rows and log the
+    exact count; the replacement generation remains subject to full validation.
+    """
+
+    # Merge/split now supersede absorbed rows in place instead of deleting them, so a
+    # run's row set can contain retired claims; feeding one back as existing or pinned
+    # context would resurrect merged-away content in the next generation.
+    identity = {"user_id": user_id, "run_id": run_id, "status": {"$ne": "superseded"}}
+    collection = TimelineEpisode.get_pymongo_collection()
+    invalid = await collection.count_documents(
+        {**identity, "$expr": {"$lte": ["$ended_at", "$started_at"]}}
+    )
+    if invalid:
+        logger.error(
+            "Ignoring %d non-positive prior Timeline episode(s) from run %s while "
+            "building its corrected replacement",
+            invalid,
+            run_id,
+        )
     return await TimelineEpisode.find(
-        TimelineEpisode.run_id == day.active_run_id,
-        TimelineEpisode.user_id == run.user_id,
+        {**identity, "$expr": {"$gt": ["$ended_at", "$started_at"]}}
     ).to_list()
 
 
@@ -223,10 +253,19 @@ def _evidence_ref(item) -> TimelineEvidenceRef:
     )
 
 
-# Escalation ladder for a segmentation pass that came back empty. Low effort is the
-# configured default because it is cheap and usually enough on a short day; it degrades
-# badly as a day accumulates windows, which is exactly when the retry matters.
-_EFFORT_ESCALATION = {"none": "low", "low": "medium", "medium": "high", "high": "high"}
+# Escalation ladder for a semantically invalid segmentation pass. Low effort is the
+# configured default because it is cheap and usually enough on a short day; dense days
+# sometimes need both medium and high before they obey grounding/continuity invariants.
+_EFFORT_LADDER = ("none", "low", "medium", "high")
+
+
+def _effort_attempts(configured_effort: Any) -> tuple[str, ...]:
+    effort = str(configured_effort) if configured_effort else "low"
+    if effort in _EFFORT_LADDER:
+        return _EFFORT_LADDER[_EFFORT_LADDER.index(effort) :]
+    if effort in {"xhigh", "max"}:
+        return (effort,)
+    return (effort, "high")
 
 
 async def _analyze_with_escalation(
@@ -238,7 +277,7 @@ async def _analyze_with_escalation(
     configured_effort: Any,
     span: Any = None,
 ) -> TimelineAgentResult:
-    """Run segmentation, retrying once at higher reasoning effort if it says nothing.
+    """Run segmentation, escalating through high effort after invalid drafts.
 
     An empty result is a model failure, not an account of the day (see
     ``TimelineIncompleteSegmentation``). Retrying at the same effort would mostly
@@ -246,13 +285,11 @@ async def _analyze_with_escalation(
     """
 
     executor = build_executor()
-    effort = str(configured_effort) if configured_effort else "low"
     attempts: list[str] = []
     last_error: Exception | None = None
 
-    for attempt_effort in (effort, _EFFORT_ESCALATION.get(effort, "high")):
-        if attempts and attempt_effort == attempts[-1]:
-            break  # Already at the top of the ladder; a second identical run is waste.
+    effort_sequence = _effort_attempts(configured_effort)
+    for attempt_index, attempt_effort in enumerate(effort_sequence):
         attempts.append(attempt_effort)
         result = await executor.analyze(
             workspace,
@@ -260,21 +297,30 @@ async def _analyze_with_escalation(
             _existing_payload(existing),
             _pinned_payload(pinned),
             reasoning_effort=attempt_effort,
+            validation_feedback=str(last_error) if last_error else None,
         )
         try:
             validate_agent_result(
                 result,
                 manifest,
                 [(episode.started_at, episode.ended_at) for episode in pinned],
+                salvage_gap_bridging_episodes=(
+                    attempt_index == len(effort_sequence) - 1
+                ),
             )
         except TimelineIncompleteSegmentation as error:
             last_error = error
             logger.warning(
-                "🕳️ Timeline segmentation returned nothing at effort=%s (%d windows); "
-                "%s",
+                "🕳️ Timeline segmentation failed validation at effort=%s "
+                "(%d windows): %s; %s",
                 attempt_effort,
                 len(manifest.windows),
-                "retrying at higher effort" if len(attempts) == 1 else "giving up",
+                error,
+                (
+                    "retrying at higher effort"
+                    if len(attempts) < len(effort_sequence)
+                    else "giving up"
+                ),
             )
             continue
         set_span_attributes(
@@ -289,7 +335,7 @@ async def _analyze_with_escalation(
     set_span_attributes(
         span,
         {
-            "chronicle.timeline.effort": attempts[-1] if attempts else effort,
+            "chronicle.timeline.effort": attempts[-1] if attempts else "low",
             "chronicle.timeline.segmentation_attempts": len(attempts),
         },
     )
@@ -308,7 +354,9 @@ _COVERAGE_REGRESSION_TOLERANCE = timedelta(minutes=5)
 _COVERAGE_REGRESSION_FRACTION = 0.10
 
 
-def _merged_interval_seconds(intervals: list[tuple[datetime, datetime]]) -> float:
+def _merged_intervals(
+    intervals: list[tuple[datetime, datetime]],
+) -> list[tuple[datetime, datetime]]:
     merged: list[tuple[datetime, datetime]] = []
     for low, high in sorted(intervals):
         if high <= low:
@@ -317,7 +365,35 @@ def _merged_interval_seconds(intervals: list[tuple[datetime, datetime]]) -> floa
             merged[-1] = (merged[-1][0], max(merged[-1][1], high))
         else:
             merged.append((low, high))
-    return sum((high - low).total_seconds() for low, high in merged)
+    return merged
+
+
+def _merged_interval_seconds(intervals: list[tuple[datetime, datetime]]) -> float:
+    return sum(
+        (high - low).total_seconds() for low, high in _merged_intervals(intervals)
+    )
+
+
+def _intersection_seconds(
+    intervals: list[tuple[datetime, datetime]],
+    coverage: list[tuple[datetime, datetime]],
+) -> float:
+    """Measure only interval time that intersects actual captured evidence."""
+
+    left = _merged_intervals(intervals)
+    right = _merged_intervals(coverage)
+    total = 0.0
+    left_index = right_index = 0
+    while left_index < len(left) and right_index < len(right):
+        low = max(left[left_index][0], right[right_index][0])
+        high = min(left[left_index][1], right[right_index][1])
+        if high > low:
+            total += (high - low).total_seconds()
+        if left[left_index][1] <= right[right_index][1]:
+            left_index += 1
+        else:
+            right_index += 1
+    return total
 
 
 def _stored_interval(value: Any) -> datetime:
@@ -375,8 +451,11 @@ async def _guard_coverage_regression(
         for item in manifest.evidence
         if item.kind != "capture_gap"
     ]
-    new_seconds = _merged_interval_seconds(new_intervals)
-    prior_seconds = _merged_interval_seconds(prior_intervals)
+    # Unassigned intervals can span the silence between sparse evidence islands. The
+    # guard protects captured information, not the wall clock: counting an empty
+    # interior made deleting a corrupt 11-hour bridging episode look like lost data.
+    new_seconds = _intersection_seconds(new_intervals, captured_intervals)
+    prior_seconds = _intersection_seconds(prior_intervals, captured_intervals)
     captured_seconds = _merged_interval_seconds(captured_intervals)
     added_seconds = new_seconds - prior_seconds
     if (
@@ -384,6 +463,26 @@ async def _guard_coverage_regression(
         and captured_seconds > 0
         and new_seconds / captured_seconds > _COVERAGE_REGRESSION_FRACTION
     ):
+        previous = await _valid_episodes_for_run(day.active_run_id, run.user_id)
+        invalid_prior = next(
+            (
+                (episode, gap)
+                for episode in previous
+                if (gap := unsupported_episode_gap(episode, manifest.evidence))
+                is not None
+            ),
+            None,
+        )
+        if invalid_prior is not None:
+            episode, (low, high) = invalid_prior
+            logger.warning(
+                "Allowing timeline coverage repair because prior run %s episode %s "
+                "bridges %.1f uncaptured minutes",
+                day.active_run_id,
+                getattr(episode, "episode_id", "unknown"),
+                (high - low).total_seconds() / 60,
+            )
+            return
         raise TimelineCoverageRegression(
             "analysis would increase unexplained captured time from "
             f"{prior_seconds / 60:.1f} to {new_seconds / 60:.1f} minutes across "
@@ -472,88 +571,6 @@ def _carry_forward(
     return carried
 
 
-def _cited_conversation_ids(episode: TimelineEpisode) -> set[str]:
-    """Every conversation this episode points at, agent-named or assembly-recorded.
-
-    ``related_conversation_ids`` is the agent's answer and can omit or invent one;
-    ``evidence_refs[].metadata['conversation_id']`` is recorded at assembly time and is
-    the reliable half. Take the union — the caller only acts on ids that resolve to a
-    real capture-evidence recording, which discards anything invented.
-    """
-
-    cited = {str(item) for item in episode.related_conversation_ids if item}
-    for ref in episode.evidence_refs:
-        conversation_id = ref.metadata.get("conversation_id")
-        if conversation_id:
-            cited.add(str(conversation_id))
-    return cited
-
-
-async def _promote_conversational_recordings(
-    episodes: list[TimelineEpisode],
-) -> list[str]:
-    """Return capture-evidence recordings to the user-facing Recordings list.
-
-    ScreenPipe audio is ingested as ``capture_evidence`` because most of it is ambient,
-    but a standup or 1:1 captured that way is a real conversation the user expects to
-    find. The segmentation agent is what can tell the two apart, so promotion happens
-    here rather than at ingest.
-
-    Memory is deliberately *not* enqueued: these recordings are remembered through the
-    settled-day episode pass (services/timeline/memory.py), not the per-conversation
-    chain. Only title/summary runs, so a promoted recording is not left untitled.
-    """
-
-    cited: set[str] = set()
-    for episode in episodes:
-        if episode.conversational:
-            cited |= _cited_conversation_ids(episode)
-    if not cited:
-        return []
-
-    # A cited id names a container, and dedup, merge and trim all replace the container
-    # while leaving the audio alone. Promoting only what is still live by that exact id
-    # silently drops the meeting instead — see services/timeline/recording_refs.py.
-    cited = await resolve_live_recordings(cited)
-    if not cited:
-        return []
-
-    collection = Conversation.get_pymongo_collection()
-    query = {
-        "conversation_id": {"$in": sorted(cited)},
-        "data_purpose": "capture_evidence",
-    }
-    promoted = [
-        document["conversation_id"]
-        async for document in collection.find(query, {"conversation_id": 1})
-    ]
-    if not promoted:
-        return []
-
-    await collection.update_many(
-        {"conversation_id": {"$in": promoted}},
-        {
-            "$set": {
-                "data_purpose": "conversation",
-                "memory_excluded": False,
-                "memory_exclusion_reason": None,
-            }
-        },
-    )
-    for conversation_id in promoted:
-        enqueue_summary_job_bundle(
-            conversation_id,
-            include_memory_context=False,
-            meta={"conversation_id": conversation_id, "trigger": "timeline_promotion"},
-        )
-    logger.info(
-        "🗣️ Promoted %d capture-evidence recording(s) to conversations: %s",
-        len(promoted),
-        ", ".join(item[:8] for item in promoted),
-    )
-    return promoted
-
-
 async def _publish(
     run: TimelineAnalysisRun,
     manifest: TimelineEvidenceManifest,
@@ -617,11 +634,6 @@ async def _publish(
     await _guard_coverage_regression(run, manifest, result)
     if documents or carried:
         await TimelineEpisode.insert_many(documents + carried)
-        # Promotion is one-way and idempotent: it only ever moves a recording out of
-        # capture_evidence, and re-running finds nothing left to move. A later
-        # generation that no longer calls the episode conversational therefore does not
-        # re-hide a recording the user has already seen.
-        await _promote_conversational_recordings(documents + carried)
     coverage = {
         "started_at": manifest.started_at.isoformat(),
         "ended_at": manifest.ended_at.isoformat(),
@@ -679,7 +691,9 @@ async def _publish(
     run.output_episode_ids = episode_ids + [episode.episode_id for episode in carried]
 
 
-async def _process_run(run: TimelineAnalysisRun) -> None:
+async def _process_run(
+    run: TimelineAnalysisRun, *, retain_unconfirmed_existing: bool = True
+) -> None:
     settings = settings_dict()
     manifest, images = await assemble_day_evidence(
         run.user_id,
@@ -703,6 +717,12 @@ async def _process_run(run: TimelineAnalysisRun) -> None:
     # confirm-and-pin defaulted to "confirmed" without a person ever touching them, and
     # pinning those would freeze whole days against reanalysis.
     pinned = [episode for episode in existing if episode.confirmed_at is not None]
+    # An explicit rebuild must decide the day again from evidence. Feeding the prior
+    # unconfirmed generation back as context strongly anchors smaller models: a real
+    # recovery run copied the two old episodes verbatim and ignored three newly
+    # recovered recordings. Human-pinned episodes remain separate immutable context
+    # and are carried forward below.
+    analysis_existing = existing if retain_unconfirmed_existing else []
     with tempfile.TemporaryDirectory(prefix="chronicle-timeline-") as temp_dir:
         workspace = Path(temp_dir)
         write_workspace(
@@ -736,7 +756,7 @@ async def _process_run(run: TimelineAnalysisRun) -> None:
             result = await _analyze_with_escalation(
                 manifest,
                 workspace,
-                existing,
+                analysis_existing,
                 pinned,
                 configured_effort=(settings.get(run.executor) or {}).get(
                     "reasoning_effort"
@@ -765,14 +785,19 @@ async def _process_run(run: TimelineAnalysisRun) -> None:
     await run.save()
 
 
-async def _run_claimed(run: TimelineAnalysisRun) -> dict[str, int]:
+async def _run_claimed(
+    run: TimelineAnalysisRun, *, retain_unconfirmed_existing: bool = True
+) -> dict[str, int]:
     """Execute one already-claimed run, recording how it ended."""
 
     settings = settings_dict()
     retry_hours = int((settings.get("codex") or {}).get("retry_hours", 6))
     incident_key = f"timeline.analysis:{run.user_id}:{run.local_date}"
     try:
-        await _process_run(run)
+        if retain_unconfirmed_existing:
+            await _process_run(run)
+        else:
+            await _process_run(run, retain_unconfirmed_existing=False)
         record_event_sync(
             severity="info",
             category="pipeline",

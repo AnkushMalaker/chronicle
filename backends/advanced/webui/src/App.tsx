@@ -20,6 +20,7 @@ const Chat = lazy(() => import('./pages/Chat'))
 const RecordingsRouter = lazy(() => import('./pages/RecordingsRouter'))
 const RecordingDetail = lazy(() => import('./pages/RecordingDetail'))
 const EpisodeDetail = lazy(() => import('./pages/EpisodeDetail'))
+const EpisodeByKey = lazy(() => import('./pages/EpisodeByKey'))
 const Users = lazy(() => import('./pages/Users'))
 const System = lazy(() => import('./pages/System'))
 const Settings = lazy(() => import('./pages/Settings'))
@@ -115,6 +116,13 @@ function App() {
                 <Route path="timeline" element={
                   <PageErrorBoundary>
                     <Suspense fallback={<PageSkeleton />}><Timeline /></Suspense>
+                  </PageErrorBoundary>
+                } />
+                {/* Durable identity: survives reanalysis, split, and merge. Must be
+                    declared before the `:episodeId` route so "key" is not read as one. */}
+                <Route path="timeline/key/:episodeKey" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}><EpisodeByKey /></Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="timeline/:episodeId" element={

@@ -87,6 +87,19 @@ api.interceptors.response.use(
   }
 )
 
+export interface CurrentUser {
+  id: string
+  email: string
+  display_name: string | null
+  assistant_name: string | null
+  is_superuser: boolean
+}
+
+export interface AuthToken {
+  access_token: string
+  token_type: string
+}
+
 // API endpoints
 export const authApi = {
   login: async (email: string, password: string) => {
@@ -94,18 +107,18 @@ export const authApi = {
     formData.append('username', email)
     formData.append('password', password)
     // Login with JWT for API calls
-    const jwtResponse = await api.post('/auth/jwt/login', formData)
+    const jwtResponse = await api.post<AuthToken>('/auth/jwt/login', formData)
     // Also try to set cookie for audio file access (may fail cross-origin, that's ok)
     try {
-      await api.post('/auth/cookie/login', formData)
+      await api.post<void>('/auth/cookie/login', formData)
     } catch {
       // Cookie auth may fail cross-origin, audio playback will use token fallback
     }
     return jwtResponse
   },
-  getMe: () => api.get('/users/me'),
+  getMe: () => api.get<CurrentUser>('/users/me'),
   updateMe: (data: { display_name?: string; assistant_name?: string }) =>
-    api.patch('/users/me', data),
+    api.patch<CurrentUser>('/users/me', data),
 }
 
 export const conversationsApi = {
@@ -360,6 +373,14 @@ export interface TimelineDay {
   episodes: TimelineEpisode[]
 }
 
+/**
+ * The answer to a stable-key lookup: either the episode that currently covers the
+ * key, or — when a split or merge replaced it — the keys that did.
+ */
+export type TimelineEpisodeByKey =
+  | ({ resolved: true } & TimelineEpisode)
+  | { resolved: false; episode_key: string; successor_keys: string[] }
+
 export const timelineApi = {
   getDay: (date: string, timezone: string) =>
     api.get<TimelineDay>('/api/timeline/day', { params: { date, timezone } }),
@@ -373,6 +394,15 @@ export const timelineApi = {
     api.get<Blob>(`/api/timeline/episodes/${episodeId}/thumbnail`, { responseType: 'blob' }),
   getEpisode: (episodeId: string) =>
     api.get<TimelineEpisode>(`/api/timeline/episodes/${episodeId}`),
+  /**
+   * Resolve a durable episode key to the claim that currently covers it.
+   *
+   * The key outlives reanalysis, editing, split and merge, so a bookmark or vault
+   * link uses it instead of the per-row `episode_id`. A key whose own row was
+   * superseded resolves to its successors rather than to nothing.
+   */
+  resolveEpisodeKey: (episodeKey: string) =>
+    api.get<TimelineEpisodeByKey>(`/api/timeline/key/${episodeKey}`),
   /** Any edit confirms the episode, pinning it against future reanalysis. */
   updateEpisode: (episodeId: string, changes: TimelineEpisodeUpdate) =>
     api.patch<TimelineEpisode>(`/api/timeline/episodes/${episodeId}`, changes),
