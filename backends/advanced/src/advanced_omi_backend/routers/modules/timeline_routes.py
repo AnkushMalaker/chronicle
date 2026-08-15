@@ -21,6 +21,7 @@ from advanced_omi_backend.models.timeline import (
 )
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services.audio_claims import resolve_audio_ranges
+from advanced_omi_backend.services.timeline.dirty_ranges import mark_evidence_dirty
 from advanced_omi_backend.services.timeline.discovery import (
     process_timeline_run,
     request_timeline_analysis,
@@ -28,6 +29,10 @@ from advanced_omi_backend.services.timeline.discovery import (
 from advanced_omi_backend.services.timeline.timezone import canonical_timezone
 
 router = APIRouter(prefix="/timeline", tags=["timeline"])
+
+# One manual request may not dirty an unbounded interval: the reconciler expands
+# agentically from what it is given, so the request is the outer budget.
+MANUAL_RECONCILE_MAX_RANGE = timedelta(hours=6)
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -171,6 +176,55 @@ async def analyze_timeline_day(
     # The compare-and-set claim still prevents the cron from owning it concurrently.
     background_tasks.add_task(process_timeline_run, run.run_id)
     return _run_payload(run)
+
+
+class ReconcileRequest(BaseModel):
+    started_at: datetime
+    ended_at: datetime
+    force: bool = False
+
+
+@router.post("/reconcile")
+async def request_range_reconciliation(
+    body: ReconcileRequest,
+    user: User = Depends(current_active_user),
+):
+    """Ask for an absolute range to be reconciled — an ordinary dirty-range trigger.
+
+    ``force`` only sets ``not_before`` to now, collapsing the debounce; it never skips
+    leasing, fencing, or budgets. The range is capped so one request cannot enqueue an
+    unbounded reconciliation.
+    """
+
+    started_at, ended_at = _at(body.started_at), _at(body.ended_at)
+    if ended_at <= started_at:
+        raise HTTPException(status_code=422, detail="Range must have positive duration")
+    if ended_at - started_at > MANUAL_RECONCILE_MAX_RANGE:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Range must be at most "
+                f"{int(MANUAL_RECONCILE_MAX_RANGE.total_seconds() // 3600)} hours"
+            ),
+        )
+
+    dirty_range = await mark_evidence_dirty(
+        str(user.id),
+        started_at,
+        ended_at,
+        f"manual:{uuid.uuid4()}",
+        "manual",
+        source_kind="manual",
+        not_before=utcnow() if body.force else None,
+    )
+    return {
+        "dirty_range_id": dirty_range.dirty_range_id,
+        "state": dirty_range.state,
+        "started_at": _utc(dirty_range.started_at),
+        "ended_at": _utc(dirty_range.ended_at),
+        "not_before": _utc(dirty_range.not_before),
+        "force_after": _utc(dirty_range.force_after),
+    }
 
 
 @router.get("/analysis/{run_id}")

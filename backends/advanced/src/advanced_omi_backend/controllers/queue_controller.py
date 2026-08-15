@@ -45,6 +45,7 @@ from advanced_omi_backend.services.sse_publisher import publish_sse_event
 from advanced_omi_backend.services.timeline.dirty_ranges import (
     schedule_conversation_dirty,
 )
+from advanced_omi_backend.services.timeline.dispatch import active_pipeline_sync
 
 logger = logging.getLogger(__name__)
 
@@ -1000,6 +1001,9 @@ def start_post_conversation_jobs(
     """
     # Lazy import: circular dependency with the `workers` package (its __init__
     # imports back from this module).
+    from advanced_omi_backend.services.timeline.dispatch import (
+        finalize_conversation_close_job,
+    )
     from advanced_omi_backend.workers.conversation_jobs import (
         dispatch_conversation_complete_event_job,
     )
@@ -1016,6 +1020,20 @@ def start_post_conversation_jobs(
     # the debounce gather the transcript/speaker revisions this chain is about to
     # produce. Best-effort — the recovery scan and later triggers re-open the range.
     schedule_conversation_dirty(conversation_id, "conversation_closed")
+
+    # Rolling users keep every evidence producer above and below — transcription,
+    # speaker recognition, VAD, summaries — because reconciliation needs them. What
+    # they lose is the pair of *user-facing* effects the close used to trigger
+    # directly: the per-conversation memory write and the conversation.complete plugin
+    # event. Those now fire once, from the first settled conversational episode
+    # revision (services/timeline/dispatch.py). Day users take the untouched path.
+    rolling = active_pipeline_sync(user_id) == "rolling"
+    if rolling:
+        skip_memory_extraction = True
+        logger.info(
+            f"⏭️  Rolling pipeline: user-facing dispatch for conversation "
+            f"{conversation_id[:8]} deferred to episode settlement"
+        )
 
     version_id = transcript_version_id or str(uuid.uuid4())
 
@@ -1176,8 +1194,15 @@ def start_post_conversation_jobs(
     event_dependencies = [terminal_job] if terminal_job else []
 
     # Enqueue event dispatch job (may have no dependencies if all jobs were skipped)
+    # The terminal job is never skippable: it owns end_reason, completed_at, and the
+    # reconciled processing_status. For rolling users it is the finalize-only variant,
+    # which does that same work and dispatches nothing.
     event_dispatch_job = default_queue.enqueue(
-        dispatch_conversation_complete_event_job,
+        (
+            finalize_conversation_close_job
+            if rolling
+            else dispatch_conversation_complete_event_job
+        ),
         conversation_id,
         client_id or "",
         user_id,

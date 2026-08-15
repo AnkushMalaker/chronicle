@@ -60,6 +60,7 @@ from .contracts import (
     WaitForFutureEvidence,
 )
 from .dirty_ranges import LEASE_MINUTES, MAX_ATTEMPTS, complete_range, park_waiting
+from .dispatch import dispatch_settled_episodes
 from .episode_bounds import speech_profile_for_range
 from .evidence import load_reconciliation_evidence
 from .executor import (
@@ -458,6 +459,7 @@ async def publish_reconciliation(
     observed: Optional[dict[str, int]] = None,
     timezone_name: Optional[str] = None,
     refresh_projections_fn: Optional[Callable[..., Awaitable[Any]]] = None,
+    dispatch_fn: Optional[Callable[..., Awaitable[Any]]] = None,
     now: Optional[datetime] = None,
 ) -> PublishResult:
     """Atomically publish one reconciliation generation, fenced on prior revisions.
@@ -621,6 +623,19 @@ async def publish_reconciliation(
         # publish. The day audit regenerates it.
         logger.warning(
             "🩹 Projection refresh failed after publishing %s",
+            dirty_range.dirty_range_id,
+            exc_info=True,
+        )
+
+    # User-facing events fire from settlement, not from the recording closing. Like the
+    # projection refresh above, this is downstream of a valid publish: a dispatch
+    # failure is reported, never allowed to undo or fail the generation that landed.
+    dispatch = dispatch_fn or dispatch_settled_episodes
+    try:
+        await dispatch(user_id, [document.episode_id for document in documents])
+    except Exception:
+        logger.error(
+            "❌ Settled-episode dispatch failed after publishing %s",
             dirty_range.dirty_range_id,
             exc_info=True,
         )
