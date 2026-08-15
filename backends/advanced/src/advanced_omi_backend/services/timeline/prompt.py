@@ -2,7 +2,10 @@
 
 import json
 
-PROMPT_VERSION = "timeline-episodes-v11"
+PROMPT_VERSION = "timeline-episodes-v17"
+# Range mode (rolling reconciliation) is versioned separately from the day prompt so a
+# change to one never silently reinterprets the other's cached runs.
+RANGE_PROMPT_VERSION = "timeline-reconcile-v1"
 
 
 OUTPUT_SCHEMA = {
@@ -127,16 +130,33 @@ OUTPUT_SCHEMA = {
 }
 
 
-def build_prompt(output_path: str) -> str:
+def build_prompt(output_path: str | None, *, evidence_guide: str | None = None) -> str:
+    guide = evidence_guide or (
+        "Read README.md and windows/index.json, then process every numbered window "
+        "JSON in order."
+    )
+    if output_path:
+        output_instruction = (
+            "You may keep compact working notes under work/. Write only the final JSON "
+            f"to `{output_path}` and ensure it matches this schema:"
+        )
+    else:
+        output_instruction = (
+            "Return only the final schema-valid JSON object in your response, with no "
+            "Markdown fence, commentary, or file/tool call. It must match this schema:"
+        )
     return f"""You are assembling one Chronicle local day into semantic timeline episodes.
 
-Read README.md and windows/index.json, then process every numbered window JSON in order.
-You may keep compact working notes under work/. Write only the final JSON to
-`{output_path}` and ensure it matches this schema:
+{guide}
+{output_instruction}
 
 {json.dumps(OUTPUT_SCHEMA, indent=2)}
 
 Rules:
+- The context declares the local date, timezone, and exact UTC start/end bounds for the
+  day. Timestamps are UTC instants. Do not filter evidence by its UTC calendar date: a
+  positive-offset local day's early hours legitimately appear on the previous UTC date.
+  Process every supplied event inside the declared local-day bounds.
 - Windows are coverage units, never mandatory episode boundaries. Merge across them.
 - A screen observation is a coarse application session, not a claim that exactly one
   semantic event occurred. Keep it whole when finer boundaries are unsupported; never
@@ -178,6 +198,10 @@ Rules:
 - Every episode start and end must be supported by cited evidence at or near that
   boundary. Use the exact timestamps from the first and last cited evidence instead of
   rounded times. Assertions must cite their supporting evidence IDs.
+- Never bridge separate evidence islands across more than fifteen minutes with no supplied
+  evidence. A compact context event may contain several timestamped snippets; its outer
+  start/end bounds do not claim that the interval between those snippets was continuous.
+  Split them into separate episodes or leave the empty interval unassigned.
 - Episode citations must temporally overlap the episode interval.
 - Every episode must include at least one supplied evidence ID; otherwise leave the
   interval unassigned instead of creating an ungrounded episode.
@@ -192,9 +216,79 @@ Rules:
   do not echo window IDs into the result.
 - Salience is display value, not confidence.
 - Express optional episode metadata as short string key/value entries in `attributes`.
-- Prefer a few coherent episodes over arbitrary periodic fragments.
+- Prefer a few coherent episodes over arbitrary periodic fragments, but never achieve
+  that compactness by joining unrelated evidence across an empty interval.
 - Confirmed episodes, when supplied, are settled by the person whose day this is. Treat
   their intervals as already accounted for: do not re-segment them, do not emit an
   episode overlapping them, and do not list their time as unassigned. You may still cite
   evidence inside a confirmed interval from an episode that mostly lies outside it.
 """
+
+
+# ── Range mode: rolling reconciliation ───────────────────────────────────────
+#
+# Day mode is untouched. A reconciliation run looks at one absolute range, revises the
+# prior interpretation of it, and may decline to answer yet — so its output is one of
+# three actions rather than always a segmentation.
+
+RANGE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["publish", "request_more_context", "wait_for_future_evidence"],
+        },
+        "episodes": OUTPUT_SCHEMA["properties"]["episodes"],
+        "unassigned_intervals": OUTPUT_SCHEMA["properties"]["unassigned_intervals"],
+        "left_seconds": {"type": "number", "minimum": 0},
+        "right_seconds": {"type": "number", "minimum": 0},
+        "reason": {"type": "string"},
+    },
+    "required": ["action"],
+}
+
+
+RANGE_PREAMBLE = """You are revising Chronicle's interpretation of ONE absolute time range.
+
+This is not a fresh segmentation. The supplied existing episodes are the prior
+interpretation of this range; treat them as the answer already given and update it with
+what the evidence now shows. Keep an episode you have no reason to change exactly as it
+is — identical bounds, kind, title, and summary — so Chronicle can recognise it as
+unchanged and leave its record alone. Change bounds only where evidence supports the
+new ones, split an episode only where the evidence separates two activities, and merge
+two only where the evidence shows one.
+
+The range is a scheduling unit, not a semantic one: an episode may legitimately begin
+before it or end after it. When a boundary you need falls outside the supplied context,
+ask for more instead of guessing.
+
+Answer with exactly one action:
+
+- `publish` — you can account for the range. Supply `episodes` and
+  `unassigned_intervals` in the standard schema below.
+- `request_more_context` — a boundary is unsupported by the evidence you were given.
+  Supply `left_seconds` and/or `right_seconds` for the side(s) you need and a `reason`.
+  Chronicle grants at most five minutes per side per request, six times in a run; ask
+  only for the side that is actually ambiguous.
+- `wait_for_future_evidence` — the range runs into the present, or an artifact it
+  depends on has not been produced yet. Supply a `reason`. Chronicle parks the range
+  and reconsiders it when new evidence arrives.
+
+Budget exhaustion never licenses an invented boundary: ask, wait, or leave the interval
+unassigned.
+"""
+
+
+def build_range_prompt(
+    output_path: str | None, *, evidence_guide: str | None = None
+) -> str:
+    """The day prompt's rules, framed as a revision of one range with three actions."""
+
+    return (
+        RANGE_PREAMBLE
+        + "\n"
+        + json.dumps(RANGE_OUTPUT_SCHEMA, indent=2)
+        + "\n\nThe episode rules below apply unchanged to a `publish` action.\n\n"
+        + build_prompt(output_path, evidence_guide=evidence_guide)
+    )

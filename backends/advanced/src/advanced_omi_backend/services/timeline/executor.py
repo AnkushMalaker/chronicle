@@ -1,7 +1,9 @@
 """Validation and executor selection for semantic timeline analysis."""
 
 import logging
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from omegaconf import OmegaConf
@@ -9,12 +11,25 @@ from omegaconf import OmegaConf
 from advanced_omi_backend.config_loader import load_config
 
 from .codex_executor import CodexTimelineExecutor
-from .contracts import TimelineAgentResult, TimelineEvidenceManifest, UnassignedInterval
+from .contracts import (
+    EvidenceBundle,
+    Publish,
+    ReconcileAction,
+    RequestMoreContext,
+    TimelineAgentResult,
+    TimelineEvidenceManifest,
+    UnassignedInterval,
+    WaitForFutureEvidence,
+)
+from .pi_executor import PiTimelineExecutor
+from .workspace import write_workspace
 
 logger = logging.getLogger(__name__)
 
 BOUNDARY_SUPPORT_TOLERANCE = timedelta(minutes=2)
 ACCOUNTING_GAP_TOLERANCE = timedelta(minutes=1)
+EPISODE_EVIDENCE_GAP_TOLERANCE = timedelta(minutes=15)
+BSON_DATETIME_PRECISION = timedelta(milliseconds=1)
 
 
 def _evidence_end(item) -> datetime:
@@ -27,11 +42,79 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _bson_datetime(value: datetime) -> datetime:
+    """Normalize a timestamp to MongoDB BSON's millisecond precision."""
+
+    value = _utc(value)
+    return value.replace(microsecond=(value.microsecond // 1000) * 1000)
+
+
 def _supports_boundary(item, boundary: datetime) -> bool:
     return (
         item.started_at - BOUNDARY_SUPPORT_TOLERANCE
         <= boundary
         <= _evidence_end(item) + BOUNDARY_SUPPORT_TOLERANCE
+    )
+
+
+def unsupported_episode_gap(
+    episode, evidence_items
+) -> tuple[datetime, datetime] | None:
+    """Return a large empty interval that an episode improperly bridges.
+
+    Use all day evidence, not only the episode's bounded citation sample: compact
+    context intentionally exposes representative IDs, so intermediate supplied items
+    can prove continuity without every ID being echoed by the model.
+    """
+
+    episode_start = _utc(episode.started_at)
+    episode_end = _utc(episode.ended_at)
+    intervals: list[tuple[datetime, datetime]] = []
+    for item in evidence_items:
+        if item.kind == "capture_gap":
+            continue
+        low = max(_utc(item.started_at), episode_start)
+        high = min(_utc(_evidence_end(item)), episode_end)
+        if high <= low:
+            continue
+        intervals.append((low, high))
+    covered_until: datetime | None = None
+    for low, high in sorted(intervals):
+        if (
+            covered_until is not None
+            and low - covered_until > EPISODE_EVIDENCE_GAP_TOLERANCE
+        ):
+            return covered_until, low
+        covered_until = max(covered_until or high, high)
+    return None
+
+
+def _unique_evidence_suffixes(evidence_ids) -> dict[str, str]:
+    """Map a model-shortened ID back only when the suffix is unambiguous."""
+
+    candidates: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for evidence_id in evidence_ids:
+        suffix = evidence_id.rsplit(":", 1)[-1]
+        previous = candidates.get(suffix)
+        if previous is not None and previous != evidence_id:
+            ambiguous.add(suffix)
+        else:
+            candidates[suffix] = evidence_id
+    return {
+        suffix: evidence_id
+        for suffix, evidence_id in candidates.items()
+        if suffix not in ambiguous
+    }
+
+
+def _canonicalize_evidence_ids(values, evidence, suffixes) -> tuple[list[str], int]:
+    repaired = [
+        value if value in evidence else suffixes.get(value, value) for value in values
+    ]
+    unique = list(dict.fromkeys(repaired))
+    return unique, sum(
+        original != fixed for original, fixed in zip(values, repaired, strict=True)
     )
 
 
@@ -223,6 +306,8 @@ def validate_agent_result(
     result: TimelineAgentResult,
     manifest: TimelineEvidenceManifest,
     pinned_intervals: list[tuple[datetime, datetime]] | None = None,
+    *,
+    salvage_gap_bridging_episodes: bool = False,
 ) -> None:
     # Checked before _fill_unassigned_evidence, which would otherwise manufacture the
     # very intervals whose absence proves the agent said nothing.
@@ -256,6 +341,29 @@ def validate_agent_result(
             raise ValueError(f"unassigned interval {index} must have positive duration")
 
     evidence = {item.evidence_id: item for item in manifest.evidence}
+    suffixes = _unique_evidence_suffixes(evidence)
+    citation_repairs = 0
+    for episode in result.episodes:
+        episode.evidence_ids, repaired = _canonicalize_evidence_ids(
+            episode.evidence_ids, evidence, suffixes
+        )
+        citation_repairs += repaired
+        for assertion in episode.assertions:
+            assertion.evidence_ids, repaired = _canonicalize_evidence_ids(
+                assertion.evidence_ids, evidence, suffixes
+            )
+            citation_repairs += repaired
+        if episode.representative_evidence_id not in (None, ""):
+            canonical, repaired = _canonicalize_evidence_ids(
+                [episode.representative_evidence_id], evidence, suffixes
+            )
+            episode.representative_evidence_id = canonical[0]
+            citation_repairs += repaired
+    if citation_repairs:
+        logger.warning(
+            "Restored evidence-kind prefixes on %d uniquely matched citation(s)",
+            citation_repairs,
+        )
     # One malformed episode must not discard a whole day of good ones. Under
     # --output-schema the agent's own planning narration is schema-valid, so a stray
     # `{"kind": "task"}` entry can appear beside nine real episodes; rejecting the run
@@ -263,6 +371,7 @@ def validate_agent_result(
     # fails loudly if nothing survives.
     kept: list[int] = []
     dropped: list[str] = []
+    removed_unknown_citations: list[str] = []
     for index, episode in enumerate(result.episodes):
         if (
             episode.started_at < manifest.started_at
@@ -272,15 +381,27 @@ def validate_agent_result(
             continue
         unknown = set(episode.evidence_ids) - evidence.keys()
         if unknown:
-            dropped.append(
-                f"episode {index} references unknown evidence: {sorted(unknown)}"
-            )
-            continue
+            known_evidence_ids = [
+                evidence_id
+                for evidence_id in episode.evidence_ids
+                if evidence_id in evidence
+            ]
+            if not known_evidence_ids:
+                dropped.append(
+                    f"episode {index} references unknown evidence: {sorted(unknown)}"
+                )
+                continue
+            episode.evidence_ids = known_evidence_ids
+            removed_unknown_citations.append(f"episode {index}: {sorted(unknown)}")
         overlapping_evidence_ids: list[str] = []
         for evidence_id in episode.evidence_ids:
             item = evidence[evidence_id]
             item_end = item.ended_at or item.started_at
-            if item.started_at < episode.ended_at and item_end > episode.started_at:
+            # Evidence at an exact episode boundary is still grounding. Screen
+            # observations commonly have zero duration, and condensed output uses
+            # one observation as the start marker and the next as the end marker.
+            # A strict half-open comparison discarded those otherwise exact spans.
+            if item.started_at <= episode.ended_at and item_end >= episode.started_at:
                 overlapping_evidence_ids.append(evidence_id)
         if not overlapping_evidence_ids:
             dropped.append(f"episode {index} has no temporally overlapping evidence")
@@ -299,6 +420,37 @@ def validate_agent_result(
             dropped.append(
                 f"episode {index} cannot be bounded to a positive cited interval"
             )
+            continue
+        # BSON truncates datetimes to milliseconds. A genuinely positive point-event
+        # draft such as .792974 -> .792975 passed Pydantic here but round-tripped from
+        # Mongo as .792 -> .792, making the published TimelineEpisode unreadable.
+        # Validate the persisted representation, extending only intervals that were
+        # positive before truncation. One millisecond is the smallest truthful stored
+        # span and remains inside the analyzed day.
+        episode.started_at = _bson_datetime(episode.started_at)
+        episode.ended_at = _bson_datetime(episode.ended_at)
+        if episode.ended_at <= episode.started_at:
+            extended_end = episode.started_at + BSON_DATETIME_PRECISION
+            if extended_end > manifest.ended_at:
+                dropped.append(f"episode {index} collapses at BSON datetime precision")
+                continue
+            episode.ended_at = extended_end
+        unsupported_gap = unsupported_episode_gap(episode, manifest.evidence)
+        if unsupported_gap is not None:
+            low, high = unsupported_gap
+            diagnostic = (
+                f"episode {index} bridges an uncaptured internal gap of "
+                f"{(high - low).total_seconds():.0f}s ({low.isoformat()} to "
+                f"{high.isoformat()}); split the episode or leave the gap unassigned"
+            )
+            if not salvage_gap_bridging_episodes:
+                raise TimelineIncompleteSegmentation(diagnostic)
+            # After the model has seen this exact validation failure at lower efforts,
+            # preserving one still-bridged episode would assert continuity through
+            # time Chronicle did not capture. Drop only that draft; the ordinary
+            # evidence-accounting pass below materializes its evidence islands as
+            # unassigned intervals, while every independently valid episode survives.
+            dropped.append(diagnostic)
             continue
         bound_evidence = set(overlapping_evidence_ids)
         for assertion in episode.assertions:
@@ -336,6 +488,12 @@ def validate_agent_result(
             len(kept),
             "; ".join(dropped[:5]),
         )
+    if removed_unknown_citations:
+        logger.warning(
+            "🧹 Removed unknown citations from %d otherwise valid episode(s): %s",
+            len(removed_unknown_citations),
+            "; ".join(removed_unknown_citations[:5]),
+        )
     if result.episodes and not kept:
         raise TimelineIncompleteSegmentation(
             f"every one of {len(result.episodes)} drafted episodes was malformed: "
@@ -357,14 +515,98 @@ def validate_agent_result(
 
 def settings_dict() -> dict[str, Any]:
     value = load_config().get("timeline", {})
-    converted = OmegaConf.to_container(value, resolve=True)
+    converted = (
+        OmegaConf.to_container(value, resolve=True)
+        if OmegaConf.is_config(value)
+        else value
+    )
     return converted if isinstance(converted, dict) else {}
 
 
 def build_executor():
     settings = settings_dict()
     executor = str(settings.get("executor") or "codex")
-    if executor != "codex":
-        raise ValueError(f"unsupported timeline executor: {executor}")
+    if executor == "codex":
+        return CodexTimelineExecutor(settings.get("codex") or {})
+    if executor == "pi":
+        return PiTimelineExecutor(settings.get("pi") or {})
+    raise ValueError(f"unsupported timeline executor: {executor}")
 
-    return CodexTimelineExecutor(settings.get("codex") or {})
+
+# ── Range mode: the rolling reconciliation adapter ───────────────────────────
+
+
+def parse_range_action(payload: dict[str, Any]) -> ReconcileAction:
+    """Validate one range-mode agent answer into a :data:`ReconcileAction`.
+
+    The action is explicit rather than inferred: an answer carrying no episodes is a
+    model failure in day mode, and treating it as "nothing happened" here would be the
+    same silent day-blanking bug in a new place.
+    """
+
+    action = str(payload.get("action") or "").strip()
+    if action == "publish":
+        return Publish(
+            result=TimelineAgentResult.model_validate(
+                {
+                    "episodes": payload.get("episodes") or [],
+                    "unassigned_intervals": payload.get("unassigned_intervals") or [],
+                }
+            )
+        )
+    if action == "request_more_context":
+        return RequestMoreContext(
+            left_seconds=float(payload.get("left_seconds") or 0),
+            right_seconds=float(payload.get("right_seconds") or 0),
+            reason=str(payload.get("reason") or "unspecified"),
+        )
+    if action == "wait_for_future_evidence":
+        return WaitForFutureEvidence(reason=str(payload.get("reason") or "unspecified"))
+    raise ValueError(f"unsupported reconciliation action: {action!r}")
+
+
+class RangeReconcileExecutor:
+    """Runs one reconciliation step over an :class:`EvidenceBundle`.
+
+    A range-aware executor exposes ``reconcile_range(bundle, ...) -> ReconcileAction``
+    and is used directly. The shipped day executors do not: their prompt and output
+    schema are fixed internally, so this adapter runs their ordinary segmentation over
+    the range's manifest and reports it as a ``publish``. That is the correct degraded
+    behaviour — Chronicle still enforces validation, pinned boundaries, and fencing —
+    but such an executor can never ask for expansion or to wait, so a run against it
+    always terminates in one iteration.
+    """
+
+    def __init__(self, executor: Any):
+        self._executor = executor
+
+    async def reconcile(
+        self,
+        bundle: EvidenceBundle,
+        *,
+        reasoning_effort: str | None = None,
+        validation_feedback: str | None = None,
+    ) -> ReconcileAction:
+        native = getattr(self._executor, "reconcile_range", None)
+        if native is not None:
+            return await native(
+                bundle,
+                reasoning_effort=reasoning_effort,
+                validation_feedback=validation_feedback,
+            )
+        with tempfile.TemporaryDirectory(prefix="chronicle-reconcile-") as temp_dir:
+            workspace = Path(temp_dir)
+            write_workspace(workspace, bundle.manifest)
+            result = await self._executor.analyze(
+                workspace,
+                bundle.manifest,
+                bundle.existing_episodes,
+                bundle.pinned_episodes,
+                reasoning_effort=reasoning_effort,
+                validation_feedback=validation_feedback,
+            )
+        return Publish(result=result)
+
+
+def build_range_executor() -> RangeReconcileExecutor:
+    return RangeReconcileExecutor(build_executor())
