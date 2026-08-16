@@ -5,9 +5,32 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Awaitable, Callable, Literal, Optional
 
-InteractionSource = Literal["streaming", "wake", "system"]
+InteractionSource = Literal["committed", "streaming", "wake", "system"]
 InteractionInputKind = Literal["start", "turn"]
 InteractionStatus = Literal["active", "ended"]
+
+
+@dataclass(frozen=True)
+class AudioInterval:
+    """One immutable audio episode in a capture session's native clock."""
+
+    audio_session_id: str
+    capture_epoch: int
+    start_ms: float
+    end_ms: float
+    voice_session_id: Optional[str] = None
+    turn_id: Optional[str] = None
+    turn_revision: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.audio_session_id:
+            raise ValueError("audio_session_id is required")
+        if self.capture_epoch < 0:
+            raise ValueError("capture_epoch must be non-negative")
+        if self.start_ms < 0 or self.end_ms <= self.start_ms:
+            raise ValueError("audio interval must have positive ordered bounds")
+        if self.turn_revision < 0:
+            raise ValueError("turn_revision must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -41,7 +64,7 @@ class InteractionInput:
     kind: InteractionInputKind
     user_id: str
     client_id: str
-    audio_session_id: str
+    audio_interval: AudioInterval
     text: str
     source: InteractionSource
     received_at: float
@@ -52,7 +75,16 @@ class InteractionInput:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "InteractionInput":
-        return cls(**value)
+        return cls(
+            **{
+                **value,
+                "audio_interval": AudioInterval(**value["audio_interval"]),
+            }
+        )
+
+    @property
+    def audio_session_id(self) -> str:
+        return self.audio_interval.audio_session_id
 
 
 @dataclass
@@ -65,6 +97,8 @@ class InteractionSession:
     user_id: str
     client_id: str
     audio_session_id: str
+    capture_epoch: int
+    voice_session_id: Optional[str]
     phase: str
     plugin_state: dict[str, Any]
     started_at: float

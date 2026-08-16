@@ -14,6 +14,7 @@ import pytest
 from advanced_omi_backend import llm_client
 from advanced_omi_backend.integrations.swiggy import Bucket, SwiggyError
 from advanced_omi_backend.services.interaction_modes import (
+    AudioInterval,
     InteractionContext,
     InteractionInput,
     InteractionRegistry,
@@ -179,6 +180,8 @@ def _session(*, phase="starting", state=None, user_id="user-1"):
         user_id=user_id,
         client_id="device-1",
         audio_session_id="audio-1",
+        capture_epoch=0,
+        voice_session_id=None,
         phase=phase,
         plugin_state=state or {},
         started_at=now,
@@ -206,7 +209,13 @@ def _context(
         kind=kind,
         user_id=session.user_id,
         client_id=session.client_id,
-        audio_session_id=session.audio_session_id,
+        audio_interval=AudioInterval(
+            audio_session_id=session.audio_session_id,
+            capture_epoch=session.capture_epoch,
+            start_ms=100,
+            end_ms=1_000,
+            voice_session_id=session.voice_session_id,
+        ),
         text=text,
         source="streaming",
         received_at=time.time(),

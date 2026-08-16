@@ -50,6 +50,8 @@ async def _seed_payment_session(redis_client):
         user_id="user-1",
         client_id="device-1",
         audio_session_id="audio-1",
+        capture_epoch=0,
+        voice_session_id=None,
         phase="awaiting_payment",
         plugin_state={"order_id": "order-1", "payment_status": "pending"},
         started_at=now,

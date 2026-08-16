@@ -40,9 +40,11 @@ from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
 )
-from advanced_omi_backend.services.interaction_modes import InteractionIngress
+from advanced_omi_backend.services.interaction_modes import (
+    AudioInterval,
+    InteractionIngress,
+)
 from advanced_omi_backend.services.transcription import get_transcription_provider
-from advanced_omi_backend.services.wakeword.executor import is_muted
 from advanced_omi_backend.services.wakeword.followup import maybe_handle_followup
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.utils.audio_utils import pcm_to_wav_bytes
@@ -966,16 +968,35 @@ class StreamingTranscriptionConsumer:
             # session is exclusive, and must not accidentally run Home Assistant,
             # summarization, or another keyword plugin with the same words.
             try:
+                words = result.get("words") or []
+                timed_words = [
+                    word
+                    for word in words
+                    if isinstance(word, dict)
+                    and word.get("start") is not None
+                    and word.get("end") is not None
+                ]
+                view = await self.store.read(session_id)
+                if not timed_words or view is None:
+                    raise ValueError(
+                        "interaction routing requires final word-level audio bounds"
+                    )
+                audio_interval = AudioInterval(
+                    audio_session_id=session_id,
+                    capture_epoch=view.capture_epoch,
+                    start_ms=min(float(word["start"]) for word in timed_words) * 1000,
+                    end_ms=max(float(word["end"]) for word in timed_words) * 1000,
+                    voice_session_id=view.voice_session_id or None,
+                )
                 mode_ingress = InteractionIngress(
                     self.redis_client, self.plugin_router.interaction_registry
                 )
                 mode_result = await mode_ingress.submit(
                     user_id=user_id,
                     client_id=client_id,
-                    audio_session_id=session_id,
+                    audio_interval=audio_interval,
                     text=result.get("text", ""),
                     source="streaming",
-                    muted=await is_muted(self.redis_client, session_id),
                 )
                 if mode_result.consumed:
                     logger.info(

@@ -15,6 +15,9 @@ from advanced_omi_backend.heartbeat import beat
 from advanced_omi_backend.observability.otel_setup import force_flush_otel, init_otel
 from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
 from advanced_omi_backend.redis_keys import ClientId, SessionId
+from advanced_omi_backend.services.interaction_modes.committed_turns import (
+    CommittedTurnRouter,
+)
 from advanced_omi_backend.services.interaction_modes.contracts import InteractionInput
 from advanced_omi_backend.services.interaction_modes.ingress import INPUT_STREAM
 from advanced_omi_backend.services.interaction_modes.processor import (
@@ -45,10 +48,14 @@ class InteractionModeWorker:
     def __init__(self, redis_client, plugin_router):
         self.redis = redis_client
         self.processor = InteractionProcessor(redis_client, plugin_router)
+        self.turn_router = CommittedTurnRouter(
+            redis_client, plugin_router.interaction_registry
+        )
         self.running = False
 
     async def stop(self) -> None:
         self.running = False
+        await self.turn_router.stop()
 
     async def _setup_group(self) -> None:
         try:
@@ -60,45 +67,61 @@ class InteractionModeWorker:
     async def run(self) -> None:
         await self._setup_group()
         self.running = True
+        turn_router_task = asyncio.create_task(self.turn_router.run())
         last_pending_recovery = 0.0
         logger.info("InteractionModeWorker listening on %s", INPUT_STREAM)
-        while self.running:
-            await beat(self.redis, "interaction-mode")
-            if (
-                time.monotonic() - last_pending_recovery
-                >= PENDING_RECOVERY_INTERVAL_SECONDS
-            ):
+        try:
+            while self.running:
+                if turn_router_task.done():
+                    turn_router_task.result()
+                    raise RuntimeError("committed-turn router exited unexpectedly")
+                await beat(self.redis, "interaction-mode")
+                if (
+                    time.monotonic() - last_pending_recovery
+                    >= PENDING_RECOVERY_INTERVAL_SECONDS
+                ):
+                    try:
+                        await self._recover_pending()
+                    except Exception as exc:  # noqa: BLE001 - retry on the next sweep
+                        logger.error(
+                            "Interaction pending-input recovery failed: %s",
+                            exc,
+                            exc_info=True,
+                        )
+                    last_pending_recovery = time.monotonic()
                 try:
-                    await self._recover_pending()
-                except Exception as exc:  # noqa: BLE001 - retry on the next sweep
+                    for dispatch in await self.processor.expire_due():
+                        await self._safe_deliver(dispatch)
+                except Exception as exc:  # noqa: BLE001 - keep the worker alive
                     logger.error(
-                        "Interaction pending-input recovery failed: %s",
-                        exc,
-                        exc_info=True,
+                        "Interaction expiry sweep failed: %s", exc, exc_info=True
                     )
-                last_pending_recovery = time.monotonic()
-            try:
-                for dispatch in await self.processor.expire_due():
-                    await self._safe_deliver(dispatch)
-            except Exception as exc:  # noqa: BLE001 - keep the worker alive
-                logger.error("Interaction expiry sweep failed: %s", exc, exc_info=True)
 
-            try:
-                messages = await self.redis.xreadgroup(
-                    GROUP_NAME,
-                    CONSUMER_NAME,
-                    {INPUT_STREAM: ">"},
-                    count=10,
-                    block=1000,
-                )
-            except Exception as exc:  # noqa: BLE001 - tolerate Redis blips
-                logger.error("Interaction input read failed: %s", exc, exc_info=True)
-                await asyncio.sleep(1)
-                continue
+                try:
+                    messages = await self.redis.xreadgroup(
+                        GROUP_NAME,
+                        CONSUMER_NAME,
+                        {INPUT_STREAM: ">"},
+                        count=10,
+                        block=1000,
+                    )
+                except Exception as exc:  # noqa: BLE001 - tolerate Redis blips
+                    logger.error(
+                        "Interaction input read failed: %s", exc, exc_info=True
+                    )
+                    await asyncio.sleep(1)
+                    continue
 
-            for _stream, entries in messages or []:
-                for message_id, fields in entries:
-                    await self._handle(message_id, fields)
+                for _stream, entries in messages or []:
+                    for message_id, fields in entries:
+                        await self._handle(message_id, fields)
+        finally:
+            await self.turn_router.stop()
+            turn_router_task.cancel()
+            try:
+                await turn_router_task
+            except asyncio.CancelledError:
+                pass
 
     async def _recover_pending(self) -> int:
         """Claim inputs stranded by a dead worker after its safety lock expires."""

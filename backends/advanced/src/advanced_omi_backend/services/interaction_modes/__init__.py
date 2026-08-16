@@ -7,6 +7,7 @@ Conversations independently while a mode remains active.
 """
 
 from .contracts import (
+    AudioInterval,
     InteractionContext,
     InteractionInput,
     InteractionModeDefinition,
@@ -19,6 +20,7 @@ from .store import InteractionStore
 
 __all__ = [
     "InteractionContext",
+    "AudioInterval",
     "InteractionIngress",
     "InteractionIngressResult",
     "InteractionInput",

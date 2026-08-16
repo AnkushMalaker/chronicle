@@ -29,13 +29,16 @@ from advanced_omi_backend.plugins.router import (
 from advanced_omi_backend.services.audio_stream.aggregator import (
     TranscriptionResultsAggregator,
 )
-from advanced_omi_backend.services.interaction_modes import InteractionIngress
+from advanced_omi_backend.services.audio_stream.session_store import SessionStore
+from advanced_omi_backend.services.interaction_modes import (
+    AudioInterval,
+    InteractionIngress,
+)
 from advanced_omi_backend.services.transcription import get_transcription_provider
 from advanced_omi_backend.services.wakeword.contracts import WakeDetectionEvent
 from advanced_omi_backend.services.wakeword.executor import (
     execute_voice_command,
     get_active_conversation_id,
-    is_muted,
     publish_sse,
     set_device_led,
 )
@@ -290,17 +293,28 @@ class WakeWordDispatcher:
         # A registered interaction activation (or any turn while one is active)
         # bypasses the ordinary wake-word plugin chain.  The dedicated mode worker
         # owns the reply and subsequent state transitions.
-        mode_result = await InteractionIngress(
-            self.redis_client, self.plugin_router.interaction_registry
-        ).submit(
-            user_id=user_id,
-            client_id=str(client_id),
-            audio_session_id=session_id_value,
-            text=command,
-            source="wake",
-            muted=await is_muted(self.redis_client, session_id_value),
-        )
-        if mode_result.consumed:
+        capture_session = await SessionStore(self.redis_client).read(session_id_value)
+        mode_result = None
+        if capture_session is not None and capture_secs > 0:
+            end_ms = max(0.0, (detected_at - capture_session.started_at) * 1000)
+            start_ms = max(0.0, end_ms - capture_secs * 1000)
+            if end_ms > start_ms:
+                mode_result = await InteractionIngress(
+                    self.redis_client, self.plugin_router.interaction_registry
+                ).submit(
+                    user_id=user_id,
+                    client_id=str(client_id),
+                    audio_interval=AudioInterval(
+                        audio_session_id=session_id_value,
+                        capture_epoch=capture_session.capture_epoch,
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                        voice_session_id=capture_session.voice_session_id or None,
+                    ),
+                    text=command,
+                    source="wake",
+                )
+        if mode_result is not None and mode_result.consumed:
             logger.info(
                 "Interaction mode consumed wake command "
                 "(mode=%s, accepted=%s, reason=%s)",

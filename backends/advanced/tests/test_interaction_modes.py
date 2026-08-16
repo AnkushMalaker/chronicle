@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import itertools
 import json
 import time
 from contextlib import contextmanager
@@ -16,6 +17,7 @@ from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStore as ProductionSessionStore,
 )
 from advanced_omi_backend.services.interaction_modes import (
+    AudioInterval,
     InteractionIngress,
     InteractionModeDefinition,
     InteractionRegistry,
@@ -93,6 +95,21 @@ class _ModePlugin(BasePlugin):
         self.end_reasons.append(context.end_reason)
 
 
+_interval_slots = itertools.count(1)
+
+
+def _interval(
+    audio_session_id: str = "audio-1", *, slot: int | None = None
+) -> AudioInterval:
+    slot = next(_interval_slots) if slot is None else slot
+    return AudioInterval(
+        audio_session_id=audio_session_id,
+        capture_epoch=0,
+        start_ms=slot * 2_000,
+        end_ms=slot * 2_000 + 1_000,
+    )
+
+
 @pytest.fixture
 def registry():
     value = InteractionRegistry()
@@ -145,35 +162,35 @@ def test_router_rejects_unknown_configured_mode():
         PluginRouter().register_plugin("swiggy_instamart", plugin)
 
 
-async def test_ingress_activates_deduplicates_and_exclusively_consumes(registry):
+async def test_ingress_activates_claims_interval_and_exclusively_consumes(registry):
     redis_client = fake_aioredis.FakeRedis(decode_responses=True)
     ingress = InteractionIngress(redis_client, registry)
 
     started = await ingress.submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-1",
+        audio_interval=_interval(slot=1),
         text="Hermes, order Swiggy add milk",
         source="streaming",
     )
     duplicate = await ingress.submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-1",
+        audio_interval=_interval(slot=1),
         text="order Swiggy add milk",
         source="wake",
     )
     unrelated_turn = await ingress.submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-1",
+        audio_interval=_interval(slot=2),
         text="make that two packets",
         source="streaming",
     )
 
     assert started.consumed and started.accepted and started.reason == "start"
     assert duplicate.consumed and not duplicate.accepted
-    assert duplicate.reason == "duplicate"
+    assert duplicate.reason == "episode_already_claimed"
     assert unrelated_turn.consumed and unrelated_turn.accepted
     assert unrelated_turn.interaction_id == started.interaction_id
     assert await redis_client.xlen(INPUT_STREAM) == 2
@@ -185,7 +202,7 @@ async def test_ingress_allows_a_repeated_turn_from_the_same_source(registry):
     await ingress.submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-1",
+        audio_interval=_interval(),
         text="order swiggy",
         source="streaming",
     )
@@ -193,14 +210,14 @@ async def test_ingress_allows_a_repeated_turn_from_the_same_source(registry):
     first = await ingress.submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-1",
+        audio_interval=_interval(),
         text="one",
         source="streaming",
     )
     repeated = await ingress.submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-1",
+        audio_interval=_interval(),
         text="one",
         source="streaming",
     )
@@ -226,7 +243,16 @@ async def test_streaming_consumer_routes_activation_before_normal_plugins():
         stream_name="audio:stream:audio-1",
     )
 
-    await consumer.trigger_plugins("audio-1", {"text": "order Swiggy"})
+    await consumer.trigger_plugins(
+        "audio-1",
+        {
+            "text": "order Swiggy",
+            "words": [
+                {"word": "order", "start": 0.1, "end": 0.3},
+                {"word": "Swiggy", "start": 0.3, "end": 0.6},
+            ],
+        },
+    )
 
     assert await redis_client.xlen(INPUT_STREAM) == 1
     normal_dispatch.assert_not_awaited()
@@ -242,6 +268,12 @@ async def test_acoustic_hermes_command_routes_to_the_same_mode():
     )
     dispatcher._resolve_command = AsyncMock(
         return_value=("order Swiggy", "transcribed")
+    )
+    await SessionStore(redis_client).init_session(
+        "audio-1",
+        user_id="user-1",
+        client_id="device-1",
+        stream_name="audio:stream:audio-1",
     )
     payload = {
         "session_id": "audio-1",
@@ -259,13 +291,13 @@ async def test_acoustic_hermes_command_routes_to_the_same_mode():
     assert await redis_client.xlen(INPUT_STREAM) == 1
 
 
-async def test_muted_mode_input_is_suppressed_without_becoming_a_turn(registry):
+async def test_distinct_audio_interval_is_not_suppressed_by_assistant_text(registry):
     redis_client = fake_aioredis.FakeRedis(decode_responses=True)
     ingress = InteractionIngress(redis_client, registry)
     await ingress.submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-1",
+        audio_interval=_interval(),
         text="order swiggy",
         source="streaming",
     )
@@ -273,15 +305,14 @@ async def test_muted_mode_input_is_suppressed_without_becoming_a_turn(registry):
     result = await ingress.submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-1",
+        audio_interval=_interval(),
         text="the assistant's own spoken reply",
         source="streaming",
-        muted=True,
     )
 
-    assert result.consumed and not result.accepted
-    assert result.reason == "tts_muted"
-    assert await redis_client.xlen(INPUT_STREAM) == 1
+    assert result.consumed and result.accepted
+    assert result.reason == "turn"
+    assert await redis_client.xlen(INPUT_STREAM) == 2
 
 
 async def test_processor_applies_full_state_and_ends_session(registry):
@@ -295,7 +326,7 @@ async def test_processor_applies_full_state_and_ends_session(registry):
     started = await ingress.submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-1",
+        audio_interval=_interval(),
         text="order swiggy add milk",
         source="streaming",
     )
@@ -312,7 +343,7 @@ async def test_processor_applies_full_state_and_ends_session(registry):
     await ingress.submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-2",
+        audio_interval=_interval("audio-2"),
         text="complete order",
         source="streaming",
     )
@@ -356,7 +387,7 @@ async def test_processor_emits_privacy_safe_langfuse_trace(monkeypatch, registry
     started = await ingress.submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-1",
+        audio_interval=_interval(),
         text="order swiggy add milk",
         source="streaming",
     )
@@ -441,7 +472,7 @@ async def test_first_turn_after_idle_deadline_runs_complete_expiry_transition():
     accepted = await ingress.submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-2",
+        audio_interval=_interval("audio-2"),
         text="add milk",
         source="streaming",
     )
@@ -469,7 +500,7 @@ async def test_worker_recovers_an_input_stranded_in_another_consumer(monkeypatch
     await InteractionIngress(redis_client, router.interaction_registry).submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-1",
+        audio_interval=_interval(),
         text="order swiggy add milk",
         source="streaming",
     )
@@ -542,7 +573,7 @@ async def _activate_at(redis_client, router, now):
     result = await ingress.submit(
         user_id="user-1",
         client_id="device-1",
-        audio_session_id="audio-1",
+        audio_interval=_interval(),
         text="order swiggy",
         source="streaming",
         now=now,

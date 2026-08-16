@@ -117,6 +117,8 @@ class InteractionProcessor:
             )
 
         session.audio_session_id = item.audio_session_id
+        session.capture_epoch = item.audio_interval.capture_epoch
+        session.voice_session_id = item.audio_interval.voice_session_id
 
         async def checkpoint() -> None:
             # Deliberately does not mark this input processed: the external

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 import uuid
@@ -11,12 +10,17 @@ from typing import Optional
 
 import redis.asyncio as redis
 
-from .contracts import InteractionInput, InteractionSession, InteractionSource
-from .registry import InteractionRegistry, normalize_interaction_text
+from .contracts import (
+    AudioInterval,
+    InteractionInput,
+    InteractionSession,
+    InteractionSource,
+)
+from .episode_claims import AudioEpisodeArbiter
+from .registry import InteractionRegistry
 from .store import InteractionStore
 
 INPUT_STREAM = "interaction:inputs"
-DEDUPE_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -41,10 +45,9 @@ class InteractionIngress:
         *,
         user_id: str,
         client_id: str,
-        audio_session_id: str,
+        audio_interval: AudioInterval,
         text: str,
         source: InteractionSource,
-        muted: bool = False,
         now: Optional[float] = None,
     ) -> InteractionIngressResult:
         received_at = now if now is not None else time.time()
@@ -57,32 +60,19 @@ class InteractionIngress:
         if active is None and match is None:
             return InteractionIngressResult(consumed=False, reason="no_mode")
 
-        # Once a mode is active it owns this device's utterances.  Muted input is
-        # therefore consumed (so it cannot leak to normal plugins) but not queued.
-        if muted:
+        claimed = await AudioEpisodeArbiter(self.redis).claim(
+            user_id=user_id,
+            client_id=client_id,
+            interval=audio_interval,
+            source=source,
+            now=received_at,
+        )
+        if not claimed.accepted:
             return InteractionIngressResult(
                 consumed=True,
                 interaction_id=active.interaction_id if active else None,
                 mode_id=active.mode_id if active else match.definition.mode_id,
-                reason="tts_muted",
-            )
-
-        canonical = normalize_interaction_text(text)
-        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
-        dedupe_key = f"interaction:dedupe:{user_id}:{client_id}:{digest}"
-        claimed = await self.redis.set(dedupe_key, source, ex=DEDUPE_SECONDS, nx=True)
-        prior_source = None if claimed else await self.redis.get(dedupe_key)
-        if isinstance(prior_source, bytes):
-            prior_source = prior_source.decode()
-        # The same spoken audio can arrive once from streaming STT and once from
-        # the acoustic wake path. Suppress that cross-source duplicate, while
-        # still allowing a user to repeat a short command through one source.
-        if not claimed and prior_source != source:
-            return InteractionIngressResult(
-                consumed=True,
-                interaction_id=active.interaction_id if active else None,
-                mode_id=active.mode_id if active else match.definition.mode_id,
-                reason="duplicate",
+                reason="episode_already_claimed",
             )
 
         activation_phrase: Optional[str] = None
@@ -95,7 +85,9 @@ class InteractionIngress:
                 owner_plugin_id=match.owner_plugin_id,
                 user_id=user_id,
                 client_id=client_id,
-                audio_session_id=audio_session_id,
+                audio_session_id=audio_interval.audio_session_id,
+                capture_epoch=audio_interval.capture_epoch,
+                voice_session_id=audio_interval.voice_session_id,
                 phase="starting",
                 plugin_state={},
                 started_at=received_at,
@@ -127,7 +119,7 @@ class InteractionIngress:
             kind=kind,
             user_id=user_id,
             client_id=client_id,
-            audio_session_id=audio_session_id,
+            audio_interval=audio_interval,
             text=queued_text,
             source=source,
             received_at=received_at,

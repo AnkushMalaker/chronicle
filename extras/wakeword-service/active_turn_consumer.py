@@ -304,6 +304,12 @@ class ActiveTurnConsumer:
             if event.kind == "committed":
                 await self.redis_client.xadd(
                     COMMITTED_TURNS_STREAM,
-                    {**metadata, "pcm": event.pcm},
+                    {
+                        **metadata,
+                        "sample_rate": str(SAMPLE_RATE),
+                        "channels": "1",
+                        "sample_width": "2",
+                        "pcm": event.pcm,
+                    },
                 )
                 self.turns_committed += 1
