@@ -28,6 +28,8 @@ GROUP_NAME = "committed-turn-router"
 CONSUMER_NAME = "interaction-mode-worker"
 STT_POLL_SECONDS = 0.05
 STT_WATERMARK_WAIT_SECONDS = 1.5
+PENDING_CLAIM_MIN_IDLE_MS = 130_000
+PENDING_RECOVERY_INTERVAL_SECONDS = 15
 
 
 def _value(fields: dict, key: str):
@@ -293,7 +295,15 @@ class CommittedTurnRouter:
             if "BUSYGROUP" not in str(error):
                 raise
         self.running = True
+        await self.recover_pending()
+        last_pending_recovery = time.monotonic()
         while self.running:
+            if (
+                time.monotonic() - last_pending_recovery
+                >= PENDING_RECOVERY_INTERVAL_SECONDS
+            ):
+                await self.recover_pending()
+                last_pending_recovery = time.monotonic()
             messages = await self.redis.xreadgroup(
                 GROUP_NAME,
                 CONSUMER_NAME,
@@ -303,10 +313,50 @@ class CommittedTurnRouter:
             )
             for _stream, entries in messages or []:
                 for message_id, fields in entries:
-                    await self.route(fields)
-                    await self.redis.xack(
-                        COMMITTED_TURNS_STREAM, GROUP_NAME, message_id
-                    )
+                    await self._handle_entry(message_id, fields)
+
+    async def recover_pending(
+        self, *, claim_min_idle_ms: int = PENDING_CLAIM_MIN_IDLE_MS
+    ) -> int:
+        """Replay this consumer's deliveries, then claim work stranded by peers."""
+        recovered = 0
+        while True:
+            messages = await self.redis.xreadgroup(
+                GROUP_NAME,
+                CONSUMER_NAME,
+                {COMMITTED_TURNS_STREAM: "0"},
+                count=10,
+            )
+            entries = [entry for _stream, batch in messages or [] for entry in batch]
+            if not entries:
+                break
+            for message_id, fields in entries:
+                await self._handle_entry(message_id, fields)
+                recovered += 1
+
+        cursor = "0-0"
+        for _ in range(100):
+            response = await self.redis.xautoclaim(
+                COMMITTED_TURNS_STREAM,
+                GROUP_NAME,
+                CONSUMER_NAME,
+                claim_min_idle_ms,
+                start_id=cursor,
+                count=10,
+            )
+            cursor, entries = response[0], response[1]
+            if not entries:
+                break
+            for message_id, fields in entries:
+                await self._handle_entry(message_id, fields)
+                recovered += 1
+            if cursor in {"0-0", b"0-0"}:
+                break
+        return recovered
+
+    async def _handle_entry(self, message_id, fields: dict) -> None:
+        await self.route(fields)
+        await self.redis.xack(COMMITTED_TURNS_STREAM, GROUP_NAME, message_id)
 
     async def stop(self) -> None:
         self.running = False

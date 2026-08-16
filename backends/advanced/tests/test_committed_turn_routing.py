@@ -274,3 +274,24 @@ async def test_committed_router_rejects_stale_voice_binding_before_transcription
         await router.route(_turn_fields("stale-voice"))
 
     assembler.exact_transcriber.assert_not_awaited()
+
+
+async def test_committed_router_redelivers_pending_turn_before_new_work():
+    redis_client = AsyncMock()
+    redis_client.xreadgroup.side_effect = [
+        [(b"voice:turns:committed", [(b"1-0", _turn_fields())])],
+        [],
+    ]
+    redis_client.xautoclaim.return_value = (b"0-0", [], [])
+    router = CommittedTurnRouter(redis_client, InteractionRegistry())
+    router.route = AsyncMock()
+
+    recovered = await router.recover_pending(claim_min_idle_ms=0)
+
+    assert recovered == 1
+    router.route.assert_awaited_once_with(_turn_fields())
+    redis_client.xack.assert_awaited_once_with(
+        "voice:turns:committed", "committed-turn-router", b"1-0"
+    )
+    first_read = redis_client.xreadgroup.await_args_list[0]
+    assert first_read.args[2] == {"voice:turns:committed": "0"}
