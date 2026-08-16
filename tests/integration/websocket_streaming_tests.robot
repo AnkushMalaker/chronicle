@@ -111,7 +111,7 @@ Button Press Should Close Active Conversation
     ...                stop_playback and double_press to close_conversation — see
     ...                plugins/button_control/config.yml.)
     [Tags]    audio-streaming	conversation
-    [Timeout]    120s
+    [Timeout]    180s
 
     # Arrange: Open stream and get enough speech to start a conversation
     ${device_name}=    Set Variable    ws-button-close
@@ -136,7 +136,7 @@ Button Press Should Close Active Conversation
     Send Button Event To Stream    ${stream_id}    DOUBLE_PRESS
 
     # Assert: Conversation should close with end_reason=close_requested
-    Wait Until Keyword Succeeds    30s    2s
+    Wait Until Keyword Succeeds    90s    2s
     ...    Conversation Should Have End Reason    ${conversation_id}    close_requested
 
     # Cleanup
@@ -272,7 +272,7 @@ API Close Request Stops Active Conversation
     [Documentation]    Verify that POST /api/conversations/{client_id}/close
     ...                stops an active streaming conversation with end_reason=close_requested
     [Tags]    audio-streaming	conversation
-    [Timeout]    120s
+    [Timeout]    180s
 
     ${device_name}=    Set Variable    ws-api-close
     ${stream_id}=    Open Audio Stream    device_name=${device_name}
@@ -296,7 +296,7 @@ API Close Request Stops Active Conversation
     ${response}=    POST On Session    api    /api/conversations/${client_id}/close    expected_status=200
 
     # Verify end_reason
-    Wait Until Keyword Succeeds    30s    2s
+    Wait Until Keyword Succeeds    90s    2s
     ...    Conversation Should Have End Reason    ${conversation_id}    close_requested
 
     [Teardown]    Run Keyword And Ignore Error    Close Audio Stream    ${stream_id}

@@ -7,6 +7,7 @@ Provides direct MongoDB access for verifying audio chunk storage.
 import os
 from pathlib import Path
 
+from bson import ObjectId
 from dotenv import load_dotenv
 from pymongo import MongoClient
 
@@ -27,7 +28,11 @@ def get_db_name():
 
 def get_audio_chunks(conversation_id):
     """
-    Get all audio chunks for a conversation from MongoDB.
+    Get the immutable audio chunks claimed by a conversation.
+
+    Chunks are capture-owned and no longer carry ``conversation_id``.  Resolve the
+    conversation's ordered ``audio_ranges`` instead, preserving the first occurrence
+    of every chunk ID when adjacent ranges share a boundary chunk.
 
     Args:
         conversation_id: Conversation ID to query
@@ -39,12 +44,35 @@ def get_audio_chunks(conversation_id):
     db = client[get_db_name()]
 
     try:
-        # Query audio_chunks collection
-        chunks = list(
-            db.audio_chunks.find(
-                {"conversation_id": conversation_id}, sort=[("chunk_index", 1)]
-            )
+        conversation = db.conversations.find_one(
+            {"conversation_id": conversation_id}, {"audio_ranges": 1}
         )
+        if conversation is None:
+            raise AssertionError(f"Conversation not found: {conversation_id}")
+
+        ordered_ids = []
+        seen_ids = set()
+        for audio_range in conversation.get("audio_ranges") or []:
+            for raw_id in audio_range.get("chunk_ids") or []:
+                chunk_id = str(raw_id)
+                if chunk_id not in seen_ids:
+                    seen_ids.add(chunk_id)
+                    ordered_ids.append(chunk_id)
+
+        if not ordered_ids:
+            return []
+
+        object_ids = [ObjectId(chunk_id) for chunk_id in ordered_ids]
+        by_id = {
+            str(chunk["_id"]): chunk
+            for chunk in db.audio_chunks.find({"_id": {"$in": object_ids}})
+        }
+        missing = [chunk_id for chunk_id in ordered_ids if chunk_id not in by_id]
+        if missing:
+            raise AssertionError(
+                f"Conversation {conversation_id} claims missing chunks: {missing}"
+            )
+        chunks = [by_id[chunk_id] for chunk_id in ordered_ids]
 
         # Convert ObjectId to string and Binary to bytes length for Robot Framework
         for chunk in chunks:
@@ -73,12 +101,43 @@ def get_conversation_chunk_count(conversation_id):
     Returns:
         Number of chunks
     """
+    return len(get_audio_chunks(conversation_id))
+
+
+def get_capture_session(capture_session_id):
+    """Return one technical capture session with a Robot-friendly ``_id``."""
     client = MongoClient(get_mongodb_uri())
     db = client[get_db_name()]
-
     try:
-        count = db.audio_chunks.count_documents({"conversation_id": conversation_id})
-        return count
+        capture = db.audio_capture_sessions.find_one(
+            {"capture_session_id": capture_session_id}
+        )
+        if capture is None:
+            raise AssertionError(f"Capture session not found: {capture_session_id}")
+        capture["_id"] = str(capture["_id"])
+        return capture
+    finally:
+        client.close()
+
+
+def get_audio_chunks_for_capture_session(capture_session_id):
+    """Return capture-owned chunks in ingest order, independent of Conversations."""
+    client = MongoClient(get_mongodb_uri())
+    db = client[get_db_name()]
+    try:
+        chunks = list(
+            db.audio_chunks.find(
+                {"capture_session_id": capture_session_id}, sort=[("sequence", 1)]
+            )
+        )
+        for chunk in chunks:
+            chunk["_id"] = str(chunk["_id"])
+            if "audio_data" in chunk:
+                chunk["audio_data_length"] = len(chunk["audio_data"])
+                chunk["audio_data"] = (
+                    f"<Binary data: {chunk['audio_data_length']} bytes>"
+                )
+        return chunks
     finally:
         client.close()
 

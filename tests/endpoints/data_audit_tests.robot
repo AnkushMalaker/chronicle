@@ -90,13 +90,18 @@ Full Split And Merge Round Trip
     Should Be Equal As Integers    ${child_count}    2    Split at one point should produce two children
 
     # Assert — children have chunks and re-timed transcripts starting near zero
-    ${total_child_chunks}=    Set Variable    ${0}
+    ${claimed_chunk_ids}=    Create List
     FOR    ${child}    IN    @{children}
         Should Be True    ${child}[chunk_count] > 0    Child should own at least one audio chunk
-        ${total_child_chunks}=    Evaluate    ${total_child_chunks} + ${child}[chunk_count]
         ${child_doc}=    Get Conversation By ID    ${child}[conversation_id]
         Should Be Equal    ${child_doc}[conversation_id]    ${child}[conversation_id]
+        FOR    ${audio_range}    IN    @{child_doc}[audio_ranges]
+            FOR    ${chunk_id}    IN    @{audio_range}[chunk_ids]
+                Append To List    ${claimed_chunk_ids}    ${chunk_id}
+            END
+        END
     END
+    ${unique_child_chunk_count}=    Evaluate    len(set(${claimed_chunk_ids}))
 
     # Assert — the parent no longer appears in the active conversation list
     ${remaining}=    Get Conversations By Client ID    ${conversation}[client_id]
@@ -117,8 +122,8 @@ Full Split And Merge Round Trip
     ${merged}=    Set Variable    ${merge_response.json()}
 
     # Assert — merged conversation owns all the chunks and the sources are gone
-    Should Be Equal As Integers    ${merged}[chunk_count]    ${total_child_chunks}
-    ...    Merged conversation should own every child chunk
+    Should Be Equal As Integers    ${merged}[chunk_count]    ${unique_child_chunk_count}
+    ...    Merge should deduplicate a boundary chunk claimed by both split children
     ${merged_doc}=    Get Conversation By ID    ${merged}[merged_conversation_id]
     Should Be Equal    ${merged_doc}[conversation_id]    ${merged}[merged_conversation_id]
     ${after_merge}=    Get Conversations By Client ID    ${conversation}[client_id]

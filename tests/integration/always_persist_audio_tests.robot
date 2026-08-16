@@ -5,9 +5,9 @@ Documentation    Durable Audio Persistence Tests
 ...              transcription success.
 ...
 ...              Critical scenarios:
-...              - Placeholder conversation created immediately
+...              - Technical capture session created immediately
 ...              - Audio chunks persisted despite transcription failure
-...              - Processing status transitions correctly
+...              - Semantic Conversation created only after speech
 
 Resource         ../resources/websocket_keywords.robot
 Resource         ../resources/conversation_keywords.robot
@@ -45,10 +45,9 @@ Test Cleanup
 
 *** Test Cases ***
 
-Placeholder Conversation Created Before Audio Ingress
-    [Documentation]    Verify that a durable conversation owner is created
-    ...                immediately (before speech detection) with placeholder title and
-    ...                processing_status="active".
+Capture Session Created Before Audio Ingress
+    [Documentation]    Verify that durable capture identity exists before speech while no
+    ...                semantic Conversation is materialized.
     [Tags]    conversation	audio-streaming
 
     ${device_name}=    Set Variable    test-placeholder
@@ -57,50 +56,39 @@ Placeholder Conversation Created Before Audio Ingress
     # Get baseline conversation count for THIS client_id only
     ${convs_before}=    Get Conversations By Client ID    ${client_id}
     ${count_before}=    Get Length    ${convs_before}
-    ${expected_count}=    Evaluate    ${count_before} + 1
-
     ${stream_id}=    Open Durable Audio Stream    device_name=${device_name}
+    ${session_id}=    Wait Until Keyword Succeeds    10s    250ms
+    ...    Get Active Session ID For Client    ${client_id}
+    ${capture}=    Wait Until Keyword Succeeds    10s    250ms
+    ...    Get Capture Session By ID    ${session_id}
 
-    # Poll for conversation to be created by audio persistence job (may take 10-15s to start)
-    ${convs_after}=    Wait Until Keyword Succeeds    30s    2s
-    ...    Wait For Conversation By Client ID    ${client_id}    ${expected_count}
+    Should Be Equal    ${capture}[capture_session_id]    ${session_id}
+    Should Be Equal    ${capture}[capture_source_id]    ${client_id}
+    Should Be Equal    ${capture}[status]    active
+    Should Be Equal    ${capture}[origin]    streaming
+    Should Be Equal As Integers    ${capture}[capture_epoch]    0
+    Should Be Equal    ${capture}[processing_profile]    ambient
+    Should Be Equal    ${capture}[effects][aec][reporting]    unreported
+    Should Be Equal    ${capture}[effects][noise_suppression][reporting]    unreported
+
+    ${convs_after}=    Get Conversations By Client ID    ${client_id}
     ${count_after}=    Get Length    ${convs_after}
-
-    # Verify new conversation created for this client
-    Should Be True    ${count_after} >= ${expected_count}
-    ...    Expected at least ${expected_count} conversation(s) for client ${client_id}, found ${count_after}
-
-    # Find the new conversation (most recent)
-    ${new_conv}=    Set Variable    ${convs_after}[0]
-    ${conversation_id}=    Set Variable    ${new_conv}[conversation_id]
-
-    # Verify placeholder title
-    Verify Placeholder Conversation Title    ${conversation_id}
-
-    # Verify processing_status (3-state machine: still in flight -> active)
-    Verify Conversation Processing Status    ${conversation_id}    active
-
-    Verify Durable Audio Placeholder Flag    ${conversation_id}
+    Should Be Equal As Integers    ${count_after}    ${count_before}
+    ...    Silence before ingress must not create a semantic Conversation
 
     # Close stream
     Close Audio Stream    ${stream_id}
 
-    Log    ✅ Durable placeholder conversation created before ingress
+    Log    ✅ Durable capture session exists without a placeholder Conversation
 
 
-Redis Owner Key Set Before Audio Ingress
-    [Documentation]    Verify that conversation:current:{session_id} Redis key is set
-    ...                immediately, allowing audio persistence
-    ...                job to start saving chunks.
+Redis Capture State Set Before Audio Ingress
+    [Documentation]    Verify Redis binds persistence to capture identity and carries
+    ...                required provenance without a Conversation owner.
     [Tags]    audio-streaming	infra
 
     ${device_name}=    Set Variable    test-redis-key
     ${client_id}=    Get Client ID From Device Name    ${device_name}
-
-    # Get baseline conversation count for THIS client_id only
-    ${convs_before}=    Get Conversations By Client ID    ${client_id}
-    ${count_before}=    Get Length    ${convs_before}
-    ${expected_count}=    Evaluate    ${count_before} + 1
 
     ${stream_id}=    Open Durable Audio Stream    device_name=${device_name}
 
@@ -108,34 +96,24 @@ Redis Owner Key Set Before Audio Ingress
     ${session_id}=    Wait Until Keyword Succeeds    10s    250ms
     ...    Get Active Session ID For Client    ${client_id}
 
-    # Poll for conversation to be created by audio persistence job
-    ${convs_after}=    Wait Until Keyword Succeeds    30s    2s
-    ...    Wait For Conversation By Client ID    ${client_id}    ${expected_count}
-    ${count_after}=    Get Length    ${convs_after}
+    ${session}=    Get Redis Session Data    ${session_id}
+    Should Be Equal    ${session}[client_id]    ${client_id}
+    Should Be Equal    ${session}[status]    active
+    Should Be Equal    ${session}[processing_profile]    ambient
+    Should Be Equal As Integers    ${session}[capture_epoch]    0
+    Should Be Empty    ${session}[active_conversation_id]
+    ${legacy_owner_exists}=    Redis Command    EXISTS    conversation:current:${session_id}
+    Should Be Equal As Integers    ${legacy_owner_exists}    0
 
-    # Verify new conversation created for this client
-    Should Be True    ${count_after} >= ${expected_count}
-    ...    Expected at least ${expected_count} conversation(s) for client ${client_id}, found ${count_after}
-
-    # Get the new conversation (most recent)
-    ${conversation}=    Set Variable    ${convs_after}[0]
-    ${conversation_id}=    Set Variable    ${conversation}[conversation_id]
-
-    # Verify Redis key exists and points to the conversation
-    ${redis_conv_id}=    Verify Conversation Current Key    ${session_id}    ${conversation_id}
-
-    Should Be Equal As Strings    ${redis_conv_id}    ${conversation_id}
-    ...    Redis key should point to placeholder conversation
-
-    Log    ✅ Redis key conversation:current:${session_id} correctly set to ${conversation_id}
+    Log    ✅ Redis session is capture-owned and has no provisional Conversation
 
     # Close stream
     Close Audio Stream    ${stream_id}
 
 
-Multiple Sessions Create Separate Conversations
-    [Documentation]    Verify that starting multiple audio sessions with always_persist=true
-    ...                creates separate placeholder conversations for each session.
+Multiple Streams Create Separate Capture Sessions
+    [Documentation]    Verify that each recording attempt gets a distinct durable capture
+    ...                session without creating a silent Conversation.
     [Tags]    conversation	audio-streaming
 
     # NOTE: Device names must be <=10 chars to be unique (backend truncates to 10 chars)
@@ -153,10 +131,6 @@ Multiple Sessions Create Separate Conversations
     ${count_before_1}=    Get Length    ${convs_before_1}
     ${count_before_2}=    Get Length    ${convs_before_2}
     ${count_before_3}=    Get Length    ${convs_before_3}
-    ${expected_count_1}=    Evaluate    ${count_before_1} + 1
-    ${expected_count_2}=    Evaluate    ${count_before_2} + 1
-    ${expected_count_3}=    Evaluate    ${count_before_3} + 1
-
     # Start 3 separate sessions
     ${stream_1}=    Open Durable Audio Stream    device_name=multi-1
     Sleep    1s
@@ -164,39 +138,37 @@ Multiple Sessions Create Separate Conversations
     Sleep    1s
     ${stream_3}=    Open Durable Audio Stream    device_name=multi-3
 
-    # Poll for each conversation to be created (audio persistence jobs may take 10-15s)
-    ${convs_after_1}=    Wait Until Keyword Succeeds    30s    2s
-    ...    Wait For Conversation By Client ID    ${client_id_1}    ${expected_count_1}
-    ${convs_after_2}=    Wait Until Keyword Succeeds    30s    2s
-    ...    Wait For Conversation By Client ID    ${client_id_2}    ${expected_count_2}
-    ${convs_after_3}=    Wait Until Keyword Succeeds    30s    2s
-    ...    Wait For Conversation By Client ID    ${client_id_3}    ${expected_count_3}
+    ${session_id_1}=    Wait Until Keyword Succeeds    10s    250ms
+    ...    Get Active Session ID For Client    ${client_id_1}
+    ${session_id_2}=    Wait Until Keyword Succeeds    10s    250ms
+    ...    Get Active Session ID For Client    ${client_id_2}
+    ${session_id_3}=    Wait Until Keyword Succeeds    10s    250ms
+    ...    Get Active Session ID For Client    ${client_id_3}
+
+    Should Not Be Equal    ${session_id_1}    ${session_id_2}
+    Should Not Be Equal    ${session_id_2}    ${session_id_3}
+    Should Not Be Equal    ${session_id_1}    ${session_id_3}
+
+    ${capture_1}=    Get Capture Session By ID    ${session_id_1}
+    ${capture_2}=    Get Capture Session By ID    ${session_id_2}
+    ${capture_3}=    Get Capture Session By ID    ${session_id_3}
+    Should Be Equal    ${capture_1}[processing_profile]    ambient
+    Should Be Equal    ${capture_2}[processing_profile]    ambient
+    Should Be Equal    ${capture_3}[processing_profile]    ambient
+
+    ${convs_after_1}=    Get Conversations By Client ID    ${client_id_1}
+    ${convs_after_2}=    Get Conversations By Client ID    ${client_id_2}
+    ${convs_after_3}=    Get Conversations By Client ID    ${client_id_3}
 
     ${count_after_1}=    Get Length    ${convs_after_1}
     ${count_after_2}=    Get Length    ${convs_after_2}
     ${count_after_3}=    Get Length    ${convs_after_3}
 
-    # Verify each client has at least 1 new conversation
-    Should Be True    ${count_after_1} >= ${expected_count_1}
-    ...    Expected at least ${expected_count_1} conversation(s) for client ${client_id_1}, found ${count_after_1}
-    Should Be True    ${count_after_2} >= ${expected_count_2}
-    ...    Expected at least ${expected_count_2} conversation(s) for client ${client_id_2}, found ${count_after_2}
-    Should Be True    ${count_after_3} >= ${expected_count_3}
-    ...    Expected at least ${expected_count_3} conversation(s) for client ${client_id_3}, found ${count_after_3}
+    Should Be Equal As Integers    ${count_after_1}    ${count_before_1}
+    Should Be Equal As Integers    ${count_after_2}    ${count_before_2}
+    Should Be Equal As Integers    ${count_after_3}    ${count_before_3}
 
-    # Verify each conversation has unique conversation_id
-    ${conv_id_1}=    Set Variable    ${convs_after_1}[0][conversation_id]
-    ${conv_id_2}=    Set Variable    ${convs_after_2}[0][conversation_id]
-    ${conv_id_3}=    Set Variable    ${convs_after_3}[0][conversation_id]
-
-    Should Not Be Equal    ${conv_id_1}    ${conv_id_2}
-    ...    Duplicate conversation_id found: ${conv_id_1}
-    Should Not Be Equal    ${conv_id_2}    ${conv_id_3}
-    ...    Duplicate conversation_id found: ${conv_id_2}
-    Should Not Be Equal    ${conv_id_1}    ${conv_id_3}
-    ...    Duplicate conversation_id found: ${conv_id_1}
-
-    Log    ✅ 3 separate conversations created with unique IDs
+    Log    ✅ 3 separate capture sessions created without silent Conversations
 
     # Close all streams
     Close Audio Stream    ${stream_1}
@@ -219,9 +191,8 @@ Audio Chunks Persisted Despite Transcription Failure
     # Start stream with always_persist=true
     ${stream_id}=    Open Durable Audio Stream    device_name=${device_name}
 
-    # Poll for conversation to be created by audio persistence job
-    ${conversations}=    Wait Until Keyword Succeeds    30s    2s
-    ...    Wait For Conversation By Client ID    ${client_id}    1
+    ${session_id}=    Wait Until Keyword Succeeds    10s    250ms
+    ...    Get Active Session ID For Client    ${client_id}
 
     # Send audio chunks (transcription will fail due to invalid API key in config)
     # Use realtime pacing to ensure chunks arrive while persistence job is running
@@ -231,38 +202,24 @@ Audio Chunks Persisted Despite Transcription Failure
     ${total_chunks}=    Close Audio Stream    ${stream_id}
     Log    Sent ${total_chunks} total chunks
 
-    # Get the conversation for this client
-    ${conversation}=    Set Variable    ${conversations}[0]
-    ${conversation_id}=    Set Variable    ${conversation}[conversation_id]
-
-    # Wait for transcription to attempt and fail (poll instead of fixed sleep)
-    Wait Until Keyword Succeeds    60s    5s
-    ...    Verify Conversation Processing Status    ${conversation_id}    transcription_failed
-
-    # Refresh conversation data after status change (title may have updated)
-    ${updated_conv}=    Get Conversation By ID    ${conversation_id}
-
-    # Verify title indicates failure
-    ${title}=    Set Variable    ${updated_conv}[title]
-    ${title_lower}=    Convert To Lower Case    ${title}
-    Should Contain    ${title_lower}    transcription
-    Should Contain    ${title_lower}    fail
-    ...    Expected title to contain 'transcription' and 'fail', got: ${title}
-
-    # CRITICAL: Verify audio chunks were saved despite transcription failure
-    ${chunks}=    Verify Audio Chunks Exist    ${conversation_id}    min_chunks=1
+    # Capture persists independently even when STT cannot materialize a Conversation.
+    ${chunks}=    Wait Until Keyword Succeeds    60s    2s
+    ...    Verify Capture Session Has Chunks    ${session_id}
 
     ${chunk_count}=    Get Length    ${chunks}
     Should Be True    ${chunk_count} > 0
     ...    Expected audio chunks to be saved despite transcription failure
 
+    ${conversations}=    Get Conversations By Client ID    ${client_id}
+    Should Be Empty    ${conversations}
+    ...    Failed transcription must not create an empty semantic Conversation
+
     Log    ✅ Audio chunks persisted despite transcription failure (${chunk_count} chunks saved)
 
 
-Conversation Updates To Completed When Transcription Succeeds
-    [Documentation]    Verify that when transcription succeeds, the placeholder conversation
-    ...                updates from processing_status="active" to "completed",
-    ...                and the title updates from placeholder to actual summary.
+Speech Materializes And Completes Conversation
+    [Documentation]    Verify successful speech materializes a Conversation and completes
+    ...                it through the terminal processing job.
     [Tags]    conversation	audio-streaming
 
     ${device_name}=    Set Variable    test-complete
@@ -276,19 +233,14 @@ Conversation Updates To Completed When Transcription Succeeds
     # Start stream with always_persist=true
     ${stream_id}=    Open Durable Audio Stream    device_name=${device_name}
 
-    # Poll for placeholder conversation to be created by audio persistence job
-    ${convs_after}=    Wait Until Keyword Succeeds    30s    2s
-    ...    Wait For Conversation By Client ID    ${client_id}    ${expected_count}
-    ${conversation}=    Set Variable    ${convs_after}[0]
-    ${conversation_id}=    Set Variable    ${conversation}[conversation_id]
-
-    # Verify initial placeholder state (3-state machine: still in flight -> active)
-    Verify Conversation Processing Status    ${conversation_id}    active
-    Verify Placeholder Conversation Title    ${conversation_id}
-
     # Send audio chunks with speech (transcription will succeed)
     # Use realtime pacing so Deepgram can finalize segments
     Send Audio Chunks To Stream    ${stream_id}    ${TEST_AUDIO_FILE}    num_chunks=200    realtime_pacing=True
+
+    ${convs_after}=    Wait Until Keyword Succeeds    60s    2s
+    ...    Wait For Conversation By Client ID    ${client_id}    ${expected_count}
+    ${conversation}=    Set Variable    ${convs_after}[0]
+    ${conversation_id}=    Set Variable    ${conversation}[conversation_id]
 
     # Close stream
     Close Audio Stream    ${stream_id}

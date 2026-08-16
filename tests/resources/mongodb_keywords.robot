@@ -19,6 +19,33 @@ Get Audio Chunks For Conversation
     RETURN    ${chunks}
 
 
+Get Capture Session By ID
+    [Documentation]    Retrieve the technical capture session that owns an ingest attempt
+    [Arguments]    ${capture_session_id}
+
+    ${capture}=    Get Capture Session    ${capture_session_id}
+    RETURN    ${capture}
+
+
+Get Capture Session Chunks
+    [Documentation]    Retrieve immutable chunks owned by one technical capture session
+    [Arguments]    ${capture_session_id}
+
+    ${chunks}=    Get Audio Chunks For Capture Session    ${capture_session_id}
+    RETURN    ${chunks}
+
+
+Verify Capture Session Has Chunks
+    [Documentation]    Wait-friendly assertion that a capture session owns persisted chunks
+    [Arguments]    ${capture_session_id}    ${min_chunks}=1
+
+    ${chunks}=    Get Audio Chunks For Capture Session    ${capture_session_id}
+    ${count}=    Get Length    ${chunks}
+    Should Be True    ${count} >= ${min_chunks}
+    ...    Expected at least ${min_chunks} chunks for capture ${capture_session_id}, found ${count}
+    RETURN    ${chunks}
+
+
 Get Client Conversations Including Deleted
     [Documentation]    All conversations for a client (incl. soft-deleted) with
     ...                deletion_reason / audio fields / transcript char count. The API
@@ -57,42 +84,48 @@ Verify Audio Chunk Metadata
     [Arguments]    ${chunk}
 
     # Verify required fields exist
-    Dictionary Should Contain Key    ${chunk}    conversation_id
-    Dictionary Should Contain Key    ${chunk}    chunk_index
+    Dictionary Should Contain Key    ${chunk}    user_id
+    Dictionary Should Contain Key    ${chunk}    capture_source_id
+    Dictionary Should Contain Key    ${chunk}    capture_session_id
+    Dictionary Should Contain Key    ${chunk}    sequence
     Dictionary Should Contain Key    ${chunk}    original_size
     Dictionary Should Contain Key    ${chunk}    compressed_size
-    Dictionary Should Contain Key    ${chunk}    start_time
-    Dictionary Should Contain Key    ${chunk}    end_time
+    Dictionary Should Contain Key    ${chunk}    captured_at
     Dictionary Should Contain Key    ${chunk}    duration
     Dictionary Should Contain Key    ${chunk}    sample_rate
     Dictionary Should Contain Key    ${chunk}    channels
 
     # Verify field values are valid
-    Should Be True    ${chunk}[chunk_index] >= 0
+    Should Be True    ${chunk}[sequence] >= 0
     Should Be True    ${chunk}[original_size] > 0
     Should Be True    ${chunk}[compressed_size] > 0
     Should Be True    ${chunk}[duration] > 0
     Should Be Equal As Integers    ${chunk}[sample_rate]    16000
     Should Be Equal As Integers    ${chunk}[channels]    1
 
-    Log    ✅ Chunk ${chunk}[chunk_index]: ${chunk}[duration]s duration
+    Log    ✅ Capture chunk ${chunk}[sequence]: ${chunk}[duration]s duration
 
 
 Verify Chunks Are Sequential
-    [Documentation]    Verify chunks have sequential chunk_index values
+    [Documentation]    Verify chunks have sequential capture-owned sequence values
     [Arguments]    ${chunks}
 
     ${chunk_count}=    Get Length    ${chunks}
     Should Be True    ${chunk_count} > 0    No chunks to verify
 
-    # Sort by chunk_index
-    ${sorted_chunks}=    Evaluate    sorted(${chunks}, key=lambda x: x['chunk_index'])
+    ${capture_session_ids}=    Evaluate    {c['capture_session_id'] for c in ${chunks}}
+    ${capture_session_count}=    Get Length    ${capture_session_ids}
+    Should Be Equal As Integers    ${capture_session_count}    1
+    ...    This assertion expects one finite upload capture session
+
+    # Sort by capture-session sequence
+    ${sorted_chunks}=    Evaluate    sorted(${chunks}, key=lambda x: x['sequence'])
 
     # Verify sequential numbering starting from 0
     FOR    ${i}    IN RANGE    ${chunk_count}
         ${chunk}=    Set Variable    ${sorted_chunks}[${i}]
-        Should Be Equal As Integers    ${chunk}[chunk_index]    ${i}
-        ...    Chunk index mismatch: expected ${i}, got ${chunk}[chunk_index]
+        Should Be Equal As Integers    ${chunk}[sequence]    ${i}
+        ...    Capture sequence mismatch: expected ${i}, got ${chunk}[sequence]
     END
 
     Log    ✅ ${chunk_count} chunks are sequential (0 to ${chunk_count - 1})

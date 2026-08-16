@@ -45,7 +45,7 @@ MongoDB Chunks Created From File Upload
 
 
 MongoDB Chunks Are Sequential
-    [Documentation]    Verify chunks have sequential chunk_index values
+    [Documentation]    Verify chunks have sequential capture-session sequence values
     [Tags]    audio-upload
 
     ${response}=    POST On Session    api    /api/audio/upload

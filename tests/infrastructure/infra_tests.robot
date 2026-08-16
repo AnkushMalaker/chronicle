@@ -344,7 +344,7 @@ WebSocket Disconnect Conversation End Reason Test
     Close Audio Stream Without Stop Event    ${stream_id}
 
     # Assert: conversation closes with correct end_reason
-    Wait Until Keyword Succeeds    30s    2s
+    Wait Until Keyword Succeeds    90s    2s
     ...    Conversation Should Have End Reason    ${conversation_id}    websocket_disconnect
 
     [Teardown]    Run Keyword And Ignore Error    Close Audio Stream    ${stream_id}

@@ -21,6 +21,8 @@ services:
       - ../../config:/app/config  # Mount config directory with defaults.yml
       - ../../tests/configs:/app/test-configs:ro  # Mount test-specific configs
       - ../../tests/cassettes:/app/test-cassettes:ro  # Recorded real provider responses replayed by the mock STT
+      - ./tests:/workspace/backends/advanced/tests:ro  # Direct production-entrypoint contract gates run by Robot
+      - ../../plugins:/workspace/plugins:ro  # Preserve repository-relative plugin imports in those gates
       - ${PLUGINS_CONFIG:-../../tests/config/plugins.test.yml}:/app/config/plugins.yml  # Mount test plugins config to correct location
       - ../../plugins:/app/plugins  # External plugins directory
     environment:
@@ -106,7 +108,7 @@ services:
   mongo-test:
     image: mongo:8.0.14
     ports:
-      - "27018:27017"  # Avoid conflict with dev on 27017
+      - "${TEST_MONGODB_PORT:-27018}:27017"  # Override only when another isolated test DB owns 27018
     volumes:
       - ./data/test_mongo_data:/data/db
     # Use test database name to ensure isolation

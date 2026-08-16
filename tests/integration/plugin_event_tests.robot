@@ -142,7 +142,7 @@ Memory Processing Should Trigger Event
 WebSocket Disconnect Should Trigger Conversation Complete Event
     [Documentation]    Verify conversation.complete event when WebSocket disconnects
     [Tags]    audio-streaming	conversation
-    [Timeout]    60s
+    [Timeout]    180s
 
     # Clear events
     Clear Plugin Events
@@ -169,10 +169,10 @@ WebSocket Disconnect Should Trigger Conversation Complete Event
     # Get baseline count for THIS specific conversation (should be 0 before waiting)
     ${baseline_count}=    Set Variable    ${0}
 
-    # Wait for plugin event dispatch (polls every 2s, max 30s)
-    # Event dispatch depends on memory and title/summary jobs completing (~20-25s total)
+    # Wait for the terminal event job. It intentionally follows memory and all
+    # summaries because it owns end_reason/completed_at settlement.
     # Filter by conversation_id to avoid picking up events from other conversations
-    ${new_events}=    Wait For Plugin Event    conversation.complete    ${baseline_count}    timeout=30s    conversation_id=${conversation_id}
+    ${new_events}=    Wait For Plugin Event    conversation.complete    ${baseline_count}    timeout=90s    conversation_id=${conversation_id}
 
     Should Be True    ${new_events} > 0
     ...    msg=At least one conversation.complete event should be logged for conversation ${conversation_id}
