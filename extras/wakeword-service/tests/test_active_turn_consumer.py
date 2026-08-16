@@ -1,5 +1,7 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -53,18 +55,14 @@ async def test_active_consumer_publishes_only_committed_turns():
         model_factory=FakeModels,
         monotonic_ms=clock,
     )
-    for sequence, pcm in enumerate(
-        [b"speech-1", b"speech-2", b"silence", b"silence", b"silence"]
-    ):
+    for sequence, pcm in enumerate([b"speech-1", b"speech-2", b"silence", b"silence", b"silence"]):
         await consumer.handle_frame(_fields(sequence, pcm))
 
     assert all(stream != COMMITTED_TURNS_STREAM for stream, _, _ in redis.added)
     clock.now_ms += 2_000
     await consumer.flush_due()
 
-    committed = [
-        fields for stream, fields, _ in redis.added if stream == COMMITTED_TURNS_STREAM
-    ]
+    committed = [fields for stream, fields, _ in redis.added if stream == COMMITTED_TURNS_STREAM]
     assert len(committed) == 1
     assert committed[0]["voice_session_id"] == "voice-1"
     assert committed[0]["audio_session_id"] == "audio-1"
@@ -85,3 +83,51 @@ async def test_consumer_health_records_fresh_success_and_errors():
     assert health["frames_consumed"] == 1
     assert health["error_count"] == 1
     assert health["last_success_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_consumer_recovers_own_and_stranded_peer_frames_before_acknowledging():
+    own = (b"10-0", _fields(10, b"speech-own"))
+    peer = (b"11-0", _fields(11, b"speech-peer"))
+    redis = SimpleNamespace(
+        xreadgroup=AsyncMock(side_effect=[[(b"voice:frames:voice-1", [own])], []]),
+        xautoclaim=AsyncMock(return_value=(b"0-0", [peer], [])),
+        xack=AsyncMock(),
+    )
+    consumer = ActiveTurnConsumer(redis_client=redis, model_factory=FakeModels)
+    consumer.handle_frame = AsyncMock()
+
+    recovered = await consumer.recover_pending(
+        "voice:frames:voice-1",
+        claim_min_idle_ms=0,
+    )
+
+    assert recovered == 2
+    assert consumer.handle_frame.await_count == 2
+    assert redis.xack.await_count == 2
+    redis.xautoclaim.assert_awaited_once_with(
+        "voice:frames:voice-1",
+        "active_turns",
+        consumer.consumer_name,
+        0,
+        start_id="0-0",
+        count=20,
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_active_frame_remains_pending_for_retry():
+    entry = (b"12-0", _fields(12, b"speech"))
+    redis = SimpleNamespace(
+        xreadgroup=AsyncMock(return_value=[(b"voice:frames:voice-1", [entry])]),
+        xautoclaim=AsyncMock(),
+        xack=AsyncMock(),
+    )
+    consumer = ActiveTurnConsumer(redis_client=redis, model_factory=FakeModels)
+    consumer.handle_frame = AsyncMock(side_effect=RuntimeError("model reset"))
+
+    recovered = await consumer.recover_pending("voice:frames:voice-1")
+
+    assert recovered == 0
+    redis.xack.assert_not_awaited()
+    redis.xautoclaim.assert_not_awaited()

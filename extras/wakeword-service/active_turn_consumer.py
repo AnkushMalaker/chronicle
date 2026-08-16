@@ -12,13 +12,11 @@ from collections.abc import Callable
 
 import numpy as np
 import redis.asyncio as redis
-from pipecat.audio.turn.smart_turn.base_smart_turn import (
-    EndOfTurnState,
-    SmartTurnParams,
-)
+from pipecat.audio.turn.smart_turn.base_smart_turn import EndOfTurnState, SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroOnnxModel
 from redis import exceptions as redis_exceptions
+
 from turn_segmenter import TurnEvent, TurnFrame, TurnPolicy, TurnSegmenter
 
 logger = logging.getLogger(__name__)
@@ -28,6 +26,8 @@ GROUP_NAME = "active_turns"
 COMMITTED_TURNS_STREAM = "voice:turns:committed"
 TURN_EVENTS_STREAM = "voice:turns:events"
 DISCOVERY_SECONDS = 0.5
+PENDING_CLAIM_MIN_IDLE_MS = 30_000
+PENDING_RECOVERY_INTERVAL_SECONDS = 5.0
 VAD_FRAME_SAMPLES = 512
 SAMPLE_RATE = 16_000
 
@@ -63,9 +63,7 @@ class SileroSmartTurnModels:
 
     async def evaluate(self, pcm: bytes) -> tuple[bool, bool | None]:
         audio = np.frombuffer(pcm, dtype=np.int16)
-        buffered = (
-            np.concatenate([self.remainder, audio]) if self.remainder.size else audio
-        )
+        buffered = np.concatenate([self.remainder, audio]) if self.remainder.size else audio
         full_size = (buffered.size // VAD_FRAME_SAMPLES) * VAD_FRAME_SAMPLES
         self.remainder = buffered[full_size:].copy()
         saw_frame = False
@@ -75,9 +73,7 @@ class SileroSmartTurnModels:
             saw_frame = True
             frame = buffered[offset : offset + VAD_FRAME_SAMPLES]
             confidence = float(
-                np.asarray(
-                    self.vad(frame.astype(np.float32) / 32768.0, SAMPLE_RATE)
-                ).flatten()[0]
+                np.asarray(self.vad(frame.astype(np.float32) / 32768.0, SAMPLE_RATE)).flatten()[0]
             )
             is_speech = confidence >= self.vad_threshold
             speech = speech or is_speech
@@ -173,9 +169,7 @@ class ActiveTurnConsumer:
             cursor, keys = await self.redis_client.scan(
                 cursor, match=FRAME_STREAM_PATTERN, count=100
             )
-            streams.extend(
-                key.decode() if isinstance(key, bytes) else key for key in keys
-            )
+            streams.extend(key.decode() if isinstance(key, bytes) else key for key in keys)
             if cursor in {0, b"0", "0"}:
                 break
         for stream in streams:
@@ -185,13 +179,16 @@ class ActiveTurnConsumer:
 
     async def _consume(self, stream: str) -> None:
         try:
-            await self.redis_client.xgroup_create(
-                stream, GROUP_NAME, "0", mkstream=True
-            )
+            await self.redis_client.xgroup_create(stream, GROUP_NAME, "0", mkstream=True)
         except redis_exceptions.ResponseError as error:
             if "BUSYGROUP" not in str(error):
                 raise
+        await self.recover_pending(stream)
+        last_pending_recovery = time.monotonic()
         while self.running:
+            if time.monotonic() - last_pending_recovery >= PENDING_RECOVERY_INTERVAL_SECONDS:
+                await self.recover_pending(stream)
+                last_pending_recovery = time.monotonic()
             messages = await self.redis_client.xreadgroup(
                 GROUP_NAME,
                 self.consumer_name,
@@ -201,18 +198,61 @@ class ActiveTurnConsumer:
             )
             for _stream, entries in messages or []:
                 for message_id, fields in entries:
-                    try:
-                        await self.handle_frame(fields)
-                        self.last_consumed_id = (
-                            message_id.decode()
-                            if isinstance(message_id, bytes)
-                            else message_id
-                        )
-                    except Exception:
-                        self.error_count += 1
-                        logger.exception("Active-turn frame failed on %s", stream)
-                    finally:
-                        await self.redis_client.xack(stream, GROUP_NAME, message_id)
+                    await self._handle_entry(stream, message_id, fields)
+
+    async def recover_pending(
+        self,
+        stream: str,
+        *,
+        claim_min_idle_ms: int = PENDING_CLAIM_MIN_IDLE_MS,
+    ) -> int:
+        """Replay this consumer's pending frames, then claim frames from dead peers."""
+        recovered = 0
+        while True:
+            messages = await self.redis_client.xreadgroup(
+                GROUP_NAME,
+                self.consumer_name,
+                {stream: "0"},
+                count=20,
+            )
+            entries = [entry for _stream, batch in messages or [] for entry in batch]
+            if not entries:
+                break
+            for message_id, fields in entries:
+                if not await self._handle_entry(stream, message_id, fields):
+                    return recovered
+                recovered += 1
+
+        cursor = "0-0"
+        for _ in range(100):
+            response = await self.redis_client.xautoclaim(
+                stream,
+                GROUP_NAME,
+                self.consumer_name,
+                claim_min_idle_ms,
+                start_id=cursor,
+                count=20,
+            )
+            cursor, entries = response[0], response[1]
+            if not entries:
+                break
+            for message_id, fields in entries:
+                if not await self._handle_entry(stream, message_id, fields):
+                    return recovered
+                recovered += 1
+            if cursor in {"0-0", b"0-0"}:
+                break
+        return recovered
+
+    async def _handle_entry(self, stream: str, message_id, fields: dict) -> bool:
+        try:
+            await self.handle_frame(fields)
+        except Exception:
+            logger.exception("Active-turn frame failed on %s", stream)
+            return False
+        await self.redis_client.xack(stream, GROUP_NAME, message_id)
+        self.last_consumed_id = message_id.decode() if isinstance(message_id, bytes) else message_id
+        return True
 
     async def handle_frame(self, fields: dict) -> None:
         try:
@@ -231,9 +271,7 @@ class ActiveTurnConsumer:
             }
             missing = [key for key, value in required.items() if value is None]
             if missing:
-                raise ValueError(
-                    "active-turn frame missing fields: " + ", ".join(missing)
-                )
+                raise ValueError("active-turn frame missing fields: " + ", ".join(missing))
             voice_session_id = str(required["voice_session_id"])
             audio_session_id = str(required["audio_session_id"])
             capture_epoch = int(required["capture_epoch"])

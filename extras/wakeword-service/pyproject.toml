@@ -25,6 +25,7 @@ test = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = ["tests"]
 
 # nanowakeword (==2.1.4) and pipecat-ai are pulled from PyPI — the repo's
 # untracked/ copies are pristine at those tags, so PyPI matches. The exact
