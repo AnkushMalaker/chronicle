@@ -5,7 +5,7 @@ React Native mobile application for connecting OMI devices and streaming audio t
 ## Features
 
 - **OMI Device Integration**: Connect via Bluetooth and stream audio
-- **Phone Audio Streaming**: Use phone's microphone directly (NEW)
+- **Duplex Phone Voice**: Native capture, response playback, and barge-in on iOS and Android API 31+
 - **Cross-Platform**: iOS and Android support using React Native
 - **Real-time Audio Streaming**: OPUS audio transmission to backend services
 - **WebSocket Communication**: Efficient real-time data transfer
@@ -151,17 +151,20 @@ Backend URL: wss://[ngrok-subdomain].ngrok.io/ws?codec=pcm
    - Public: `wss://[your-domain]/ws?codec=pcm`
 5. **Save configuration**
 
-## Phone Audio Streaming (NEW)
+## Duplex Phone Voice
 
 ### Overview
-Stream audio directly from your phone's microphone to Chronicle backend, bypassing Bluetooth devices. This feature provides a direct audio input method for users who want to use their phone as the audio source.
+The phone is a protocol-v1 Chronicle voice endpoint. One native engine owns microphone
+capture and Chronicle response playback while the session is active. The backend binds
+every response to the authenticated socket, audio session, voice session, capture
+epoch, and response generation.
 
 ### Features
-- **Direct Microphone Access**: Use phone's built-in microphone
-- **Real-time Audio Streaming**: Live audio processing with visualization
-- **Seamless Integration**: Switch between Bluetooth and phone audio modes
-- **Cross-Platform**: Works on both iOS and Android
-- **Live Audio Meters**: Visual feedback showing audio levels in real-time
+- **Barge-in**: Verified speakerphone AEC and isolated headphone routes capture while Chronicle speaks
+- **Safe fallback**: Unsupported routes report native half duplex instead of claiming simultaneous capture
+- **Native cancellation**: Socket loss, route changes, interruptions, and engine resets flush playback immediately
+- **Session fencing**: Reconnects create new audio and voice sessions and require short-lived resume proof
+- **Cross-platform replacement**: One `chronicle-duplex-audio` interface backs iOS and Android
 
 ### Setup & Usage
 
@@ -173,33 +176,27 @@ Stream audio directly from your phone's microphone to Chronicle backend, bypassi
 5. **Start speaking** - audio streams in real-time to backend
 
 #### Requirements
-- **iOS**: iOS 13+ with microphone permissions
-- **Android**: Android API 21+ with microphone permissions
+- **iOS**: A native development or release build with microphone permission
+- **Android**: Android API 31+ native build with microphone permission
 - **Network**: Stable connection to Chronicle backend
-- **Backend**: Advanced backend running with `/ws?codec=pcm` endpoint
+- **Backend**: Advanced backend with voice duplex protocol v1 at `/ws?codec=pcm`
 
 #### Switching Audio Sources
 - **Mutual Exclusion**: Cannot use Bluetooth and phone audio simultaneously
 - **Automatic Detection**: App disables conflicting options when one is active
 - **Visual Feedback**: Clear indicators show active audio source
 
-#### Mic Processing (iOS)
-The mic picker has a **Processing** row controlling how much of Apple's input
-processing is applied. It only affects the built-in mic path on iOS:
+#### Native audio ownership
 
-- **Far-field** (default): records with the `Measurement` audio-session mode —
-  no automatic gain control or noise suppression — and prefers an
-  omnidirectional polar pattern on the built-in mic. Best for whole-room
-  ambient capture where distant speakers must not be attenuated.
-- **Voice**: keeps iOS's default input processing. Better for close-talking
-  dictation into the phone.
+The native side lives in `modules/chronicle-duplex-audio/`, so native changes require
+a new development-client or release build. iOS uses one voice-processing
+`AVAudioEngine` graph. Android API 31+ uses communication-device routing,
+`AudioRecord`, platform AEC/noise suppression, and one `AudioTrack`.
 
-iOS's system **Mic Mode** (Control Center: Standard / Voice Isolation / Wide
-Spectrum) is user-controlled and per-app; apps cannot set it. If Voice
-Isolation is active when recording starts, the app warns and offers the system
-picker, since Voice Isolation removes every voice except the nearest one.
-The native side lives in `modules/chronicle-mic-control/` (a local Expo
-module), so a new dev-client/EAS build is required after adding or changing it.
+The engine reports the route and the effects it actually enabled. Speakerphone is
+full duplex only when AEC is enabled; wired, USB, or Bluetooth communication
+headphones may use isolated duplex. All other routes use explicit half duplex. The
+JavaScript layer does not create a second player or gate microphone buffers.
 
 ### Troubleshooting Phone Audio
 
