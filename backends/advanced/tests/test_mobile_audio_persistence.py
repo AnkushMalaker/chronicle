@@ -31,7 +31,11 @@ async def test_pcm_durable_packet_is_acked_only_after_crossing_the_wal(monkeypat
         flush_session_buffer=AsyncMock(return_value="wal-message-1"),
     )
     websocket = SimpleNamespace(send_json=AsyncMock())
-    state = SimpleNamespace(stream_session_id="capture-1")
+    state = SimpleNamespace(
+        stream_session_id="capture-1",
+        voice_session_id=None,
+        processing_profile="ambient",
+    )
     publish = AsyncMock(return_value="subscriber-task")
     monkeypatch.setattr(websocket_controller, "_handle_audio_chunk", publish)
     header = {
@@ -80,7 +84,11 @@ async def test_pcm_duplicate_spool_packet_is_acked_without_reentering_wal(monkey
         flush_session_buffer=AsyncMock(),
     )
     websocket = SimpleNamespace(send_json=AsyncMock())
-    state = SimpleNamespace(stream_session_id="capture-1")
+    state = SimpleNamespace(
+        stream_session_id="capture-1",
+        voice_session_id=None,
+        processing_profile="ambient",
+    )
     publish = AsyncMock()
     monkeypatch.setattr(websocket_controller, "_handle_audio_chunk", publish)
     header = {

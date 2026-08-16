@@ -76,6 +76,7 @@ from advanced_omi_backend.services.plugin_service import get_plugin_router
 from advanced_omi_backend.services.response_coordinator import ResponseCoordinator
 from advanced_omi_backend.services.sse_publisher import publish_sse_event_async
 from advanced_omi_backend.services.transcription import is_transcription_available
+from advanced_omi_backend.services.voice_frames import VoiceFramePublisher
 from advanced_omi_backend.services.voice_sessions import (
     ClientUpgradeRequired,
     VoiceSessionCoordinator,
@@ -1488,6 +1489,22 @@ async def _handle_pcm_wyoming_audio_packet(
     )
     if duplicate:
         return None, False
+
+    if client_state.voice_session_id and client_state.processing_profile in {
+        "duplex_aec",
+        "duplex_isolated",
+        "half_duplex",
+    }:
+        session_id = client_state.stream_session_id
+        if session_id is None:
+            raise RuntimeError("Interactive frame has no active audio session")
+        await VoiceFramePublisher(audio_stream_producer.redis_client).publish(
+            voice_session_id=client_state.voice_session_id,
+            audio_session_id=session_id,
+            capture_epoch=client_state.capture_epoch,
+            pcm=audio_data,
+            metadata=audio_format,
+        )
 
     task = await _handle_audio_chunk(
         client_state,

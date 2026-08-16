@@ -29,6 +29,7 @@ import os
 from contextlib import asynccontextmanager
 
 import uvicorn
+from active_turn_consumer import ActiveTurnConsumer
 from consumer import DETECTIONS_STREAM, GROUP_NAME, WakeWordConsumer
 from detector import HermesDetector
 from fastapi import FastAPI, HTTPException, Query
@@ -311,6 +312,15 @@ async def lifespan(app: FastAPI):
     app.state.consumer = consumer
     consumer_task = asyncio.create_task(consumer.start())
     app.state.consumer_task = consumer_task
+    active_turn_consumer = ActiveTurnConsumer(
+        redis_url=REDIS_URL,
+        smart_turn_model_path=SMART_TURN_MODEL_PATH,
+        silero_vad_model_path=SILERO_VAD_MODEL_PATH,
+        vad_threshold=VAD_THRESHOLD,
+    )
+    app.state.active_turn_consumer = active_turn_consumer
+    active_turn_task = asyncio.create_task(active_turn_consumer.start())
+    app.state.active_turn_task = active_turn_task
     logger.info(
         f"Wake-word service ready (words={', '.join(WAKEWORDS)}, group={GROUP_NAME})"
     )
@@ -319,9 +329,15 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await consumer.stop()
+        await active_turn_consumer.stop()
         consumer_task.cancel()
+        active_turn_task.cancel()
         try:
             await consumer_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await active_turn_task
         except asyncio.CancelledError:
             pass
 
@@ -392,12 +408,26 @@ async def health(response: Response):
         and task is not None
         and not task.done()
     )
-    status_str = "ok" if consumer_alive else "unhealthy"
-    if not consumer_alive:
+    active_turn_consumer: ActiveTurnConsumer | None = getattr(
+        app.state, "active_turn_consumer", None
+    )
+    active_turn_task: asyncio.Task | None = getattr(app.state, "active_turn_task", None)
+    active_turn_alive = bool(
+        active_turn_consumer is not None
+        and active_turn_consumer.running
+        and active_turn_task is not None
+        and not active_turn_task.done()
+    )
+    status_str = "ok" if consumer_alive and active_turn_alive else "unhealthy"
+    if status_str != "ok":
         response.status_code = 503
     return {
         "status": status_str,
         "consumer_alive": consumer_alive,
+        "active_turn_consumer_alive": active_turn_alive,
+        "active_turn_consumer": (
+            active_turn_consumer.health() if active_turn_consumer else None
+        ),
         "wakewords": _wakeword_summaries(),
         "redis_url": REDIS_URL,
         "consumer_group": GROUP_NAME,
