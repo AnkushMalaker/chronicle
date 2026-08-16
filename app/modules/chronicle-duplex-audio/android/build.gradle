@@ -1,0 +1,23 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.chronicle.duplexaudio'
+version = '1.0.0'
+
+android {
+  namespace 'com.chronicle.duplexaudio'
+  defaultConfig {
+    minSdkVersion 31
+    versionCode 1
+    versionName '1.0.0'
+    testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+  }
+}
+
+dependencies {
+  testImplementation 'junit:junit:4.13.2'
+  androidTestImplementation 'androidx.test:core:1.6.1'
+  androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+}

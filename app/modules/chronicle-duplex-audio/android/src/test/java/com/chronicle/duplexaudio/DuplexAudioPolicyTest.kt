@@ -1,0 +1,43 @@
+package com.chronicle.duplexaudio
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
+import org.junit.Test
+
+class DuplexAudioPolicyTest {
+  @Test fun speakerphoneRequiresVerifiedAecForFullDuplex() {
+    assertEquals(DuplexMode.FULL, DuplexAudioPolicy.mode(false, true, true))
+    assertEquals(DuplexMode.HALF, DuplexAudioPolicy.mode(false, true, false))
+  }
+
+  @Test fun wiredAndBluetoothCommunicationAudioAreIsolated() {
+    assertEquals(DuplexMode.ISOLATED, DuplexAudioPolicy.mode(true, false, false))
+  }
+
+  @Test fun staleEpochIsRejectedBeforeAudioTrackWrite() {
+    val gate = ResponseEpochGate()
+    gate.start(4)
+    assertThrows(IllegalArgumentException::class.java) {
+      gate.schedule(EpochResponse("old", 1, 3))
+    }
+  }
+
+  @Test fun recorderRouteAndFocusFailuresFlushOneCancellationAck() {
+    val gate = ResponseEpochGate()
+    val response = EpochResponse("response-1", 7, 4)
+    gate.start(4)
+    gate.schedule(response)
+    assertEquals(response, gate.systemChanged())
+    assertNull(gate.systemChanged())
+  }
+
+  @Test fun onlyOneAudioTrackResponseCanBeScheduled() {
+    val gate = ResponseEpochGate()
+    gate.start(4)
+    gate.schedule(EpochResponse("one", 1, 4))
+    assertThrows(IllegalStateException::class.java) {
+      gate.schedule(EpochResponse("two", 1, 4))
+    }
+  }
+}
