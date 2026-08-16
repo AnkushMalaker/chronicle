@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import importlib
+import json
 import sys
 import time
 import uuid
@@ -264,8 +265,8 @@ class _SearchToolCompletions:
     async def create(self, **_kwargs):
         tool_call = SimpleNamespace(
             function=SimpleNamespace(
-                name="search_products",
-                arguments='{"query":"paneer"}',
+                name="collect_items",
+                arguments=('{"items":[{"query":"paneer","quantity":1,"notes":""}]}'),
             )
         )
         return SimpleNamespace(
@@ -275,6 +276,19 @@ class _SearchToolCompletions:
                 )
             ]
         )
+
+
+def _tool_response(name, arguments):
+    tool_call = SimpleNamespace(
+        function=SimpleNamespace(name=name, arguments=json.dumps(arguments))
+    )
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=None, tool_calls=[tool_call])
+            )
+        ]
+    )
 
 
 async def _reach_candidates(plugin, services):
@@ -486,6 +500,140 @@ async def test_address_choice_precedes_search_and_pending_request_is_resumed():
     assert tools[0] == "get_addresses"
     assert tools[1] == "get_cart"
     assert tools[2] == "search_products"
+
+
+def test_ordinals_only_select_when_the_entire_turn_or_explicitly_marked():
+    assert SwiggyInstamartPlugin._candidate_choice("two") == (2, None)
+    assert SwiggyInstamartPlugin._candidate_choice("option two") == (2, None)
+    assert SwiggyInstamartPlugin._candidate_choice("number two quantity 3") == (2, 3)
+    assert SwiggyInstamartPlugin._candidate_choice("the two different modes") is None
+    assert SwiggyInstamartPlugin._candidate_choice("please get two") is None
+
+
+async def test_collect_items_searches_five_queries_with_concurrency_capped_at_three(
+    monkeypatch,
+):
+    fake = _FakeSwiggy()
+    plugin = _plugin(fake)
+    session = _session(
+        phase="shopping",
+        state={
+            "selected_address": {"id": "home-id", "label": "Home"},
+            "candidates": [],
+        },
+    )
+    active = 0
+    maximum_active = 0
+    searched = []
+
+    async def slow_search(_client, _address_id, query, *, samples):
+        nonlocal active, maximum_active
+        assert samples == 1
+        active += 1
+        maximum_active = max(maximum_active, active)
+        searched.append(query)
+        await asyncio.sleep(0.01)
+        active -= 1
+        product = SimpleNamespace(
+            name=query.title(),
+            brand="Test",
+            variants=[
+                SimpleNamespace(
+                    in_stock=True,
+                    spin_id=f"{query}-spin",
+                    sku_id=f"{query}-sku",
+                    quantity="1 pack",
+                    label="1 pack",
+                    price=10,
+                )
+            ],
+        )
+        return SimpleNamespace(organic=[product], products=[product])
+
+    items = [
+        {"query": query, "quantity": index + 1, "notes": ""}
+        for index, query in enumerate(("milk", "bread", "eggs", "rice", "tea"))
+    ]
+
+    async def collect_items_chat(*_args, **_kwargs):
+        return _tool_response("collect_items", {"items": items})
+
+    monkeypatch.setattr(plugin_module, "search_products", slow_search)
+    monkeypatch.setattr(plugin_module, "async_chat_with_tools", collect_items_chat)
+
+    result = await plugin.on_interaction_turn(
+        _context(session, "milk, bread, eggs, rice, and tea")
+    )
+
+    assert maximum_active == 3
+    assert sorted(searched) == sorted(item["query"] for item in items)
+    assert result.phase == "shopping"
+    assert result.plugin_state["candidate_quantity"] == 1
+    assert len(result.plugin_state["pending_collections"]) == 4
+    assert "milk" in result.reply.lower()
+    assert "which option" in result.reply.lower()
+
+
+async def test_collect_items_rejects_more_than_five_without_searching(monkeypatch):
+    fake = _FakeSwiggy()
+    plugin = _plugin(fake)
+    session = _session(
+        phase="shopping",
+        state={
+            "selected_address": {"id": "home-id", "label": "Home"},
+            "candidates": [],
+        },
+    )
+    items = [
+        {"query": f"item {index}", "quantity": 1, "notes": ""} for index in range(6)
+    ]
+
+    async def collect_items_chat(*_args, **_kwargs):
+        return _tool_response("collect_items", {"items": items})
+
+    monkeypatch.setattr(plugin_module, "async_chat_with_tools", collect_items_chat)
+
+    result = await plugin.on_interaction_turn(_context(session, "six groceries"))
+
+    assert "one to five" in result.reply.lower()
+    assert not any(name == "search_products" for name, _ in fake.calls)
+
+
+async def test_cart_mutations_are_serialized_even_when_callbacks_overlap(monkeypatch):
+    fake = _FakeSwiggy()
+    plugin = _plugin(fake)
+    original_call = fake.call
+    active_mutations = 0
+    maximum_active = 0
+
+    async def slow_mutation(server, tool, **arguments):
+        nonlocal active_mutations, maximum_active
+        if tool == "update_cart":
+            active_mutations += 1
+            maximum_active = max(maximum_active, active_mutations)
+            await asyncio.sleep(0.01)
+            try:
+                return await original_call(server, tool, **arguments)
+            finally:
+                active_mutations -= 1
+        return await original_call(server, tool, **arguments)
+
+    monkeypatch.setattr(fake, "call", slow_mutation)
+    state = {
+        "selected_address": {"id": "home-id", "label": "Home"},
+        "pending_cart_update": {
+            "selected_address_id": "home-id",
+            "items": [{"spinId": "milk-spin", "quantity": 1}],
+            "reply_prefix": "Added milk. ",
+        },
+    }
+
+    await asyncio.gather(
+        plugin._resume_cart_update(copy.deepcopy(state)),
+        plugin._resume_cart_update(copy.deepcopy(state)),
+    )
+
+    assert maximum_active == 1
 
 
 async def test_free_form_turn_uses_fast_bounded_agent_and_survives_hung_primary(

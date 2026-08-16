@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -87,12 +88,35 @@ _SHOPPING_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "search_products",
-            "description": "Search Instamart for a product the user wants.",
+            "name": "collect_items",
+            "description": (
+                "Collect every grocery requested in this turn. The application "
+                "searches them and asks the user to choose exact variants."
+            ),
             "parameters": {
                 "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 5,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "quantity": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 20,
+                                },
+                                "notes": {"type": "string"},
+                            },
+                            "required": ["query", "quantity", "notes"],
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                "required": ["items"],
                 "additionalProperties": False,
             },
         },
@@ -203,6 +227,7 @@ class SwiggyInstamartPlugin(BasePlugin):
         ).strip()
         self._token_store: Optional[FileTokenStore] = None
         self.client: Optional[SwiggyClient] = None
+        self._mutation_lock = asyncio.Lock()
 
     async def initialize(self):
         if not self.enabled:
@@ -451,7 +476,8 @@ class SwiggyInstamartPlugin(BasePlugin):
             return await self._enter_shopping(context, state)
         if normalized in _CLEAR_PHRASES:
             try:
-                await self.client.call(Server.INSTAMART, "clear_cart")
+                async with self._mutation_lock:
+                    await self.client.call(Server.INSTAMART, "clear_cart")
             except (SwiggyAuthError, SwiggyError) as exc:
                 return self._swiggy_failure(exc, state=state)
             return await self._enter_shopping(context, state, prefix="Cart cleared. ")
@@ -490,7 +516,12 @@ class SwiggyInstamartPlugin(BasePlugin):
         choice = self._candidate_choice(normalized)
         if choice is not None and state.get("candidates"):
             number, quantity = choice
-            return await self._choose_candidate(context, state, number, quantity)
+            return await self._choose_candidate(
+                context,
+                state,
+                number,
+                quantity or int(state.get("candidate_quantity") or 1),
+            )
 
         add_match = re.match(
             r"^(?:add|find|search(?: for)?|look for)\s+(.+)$", normalized
@@ -507,17 +538,39 @@ class SwiggyInstamartPlugin(BasePlugin):
         return await self._llm_shopping_turn(context, state, text)
 
     async def _search(self, state: dict, query: str) -> InteractionResult:
-        address = state.get("selected_address") or {}
         try:
-            result = await search_products(
-                self.client,
-                str(address.get("id") or ""),
-                query,
-                samples=self.search_samples,
-            )
+            candidates = await self._find_candidates(state, query)
         except (SwiggyAuthError, SwiggyError) as exc:
             return self._swiggy_failure(exc, state=state)
+        state["candidates"] = candidates
+        state["candidate_query"] = query
+        state["candidate_quantity"] = 1
+        state["candidate_notes"] = ""
+        state["pending_collections"] = []
+        if not candidates:
+            return InteractionResult(
+                reply=f"I couldn't find an in-stock match for {query}.",
+                phase="shopping",
+                plugin_state=state,
+            )
+        options = "; ".join(
+            f"{index}, {value['brand']} {value['name']}, {value['variant']}, {value['price']:g} rupees"
+            for index, value in enumerate(candidates[:3], start=1)
+        )
+        return InteractionResult(
+            reply=f"I found: {options}. Which number and how many?",
+            phase="shopping",
+            plugin_state=state,
+        )
 
+    async def _find_candidates(self, state: dict, query: str) -> list[dict]:
+        address = state.get("selected_address") or {}
+        result = await search_products(
+            self.client,
+            str(address.get("id") or ""),
+            query,
+            samples=self.search_samples,
+        )
         candidates = []
         for product in result.organic or result.products:
             for variant in product.variants:
@@ -537,21 +590,84 @@ class SwiggyInstamartPlugin(BasePlugin):
                     break
             if len(candidates) >= 6:
                 break
-        state["candidates"] = candidates
-        if not candidates:
+        return candidates
+
+    async def _collect_items(self, state: dict, raw_items: Any) -> InteractionResult:
+        if not isinstance(raw_items, list) or not 1 <= len(raw_items) <= 5:
             return InteractionResult(
-                reply=f"I couldn't find an in-stock match for {query}.",
+                reply="Please request one to five grocery items at a time.",
                 phase="shopping",
                 plugin_state=state,
             )
-        options = "; ".join(
-            f"{index}, {value['brand']} {value['name']}, {value['variant']}, {value['price']:g} rupees"
-            for index, value in enumerate(candidates[:3], start=1)
-        )
+        items = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                return InteractionResult(
+                    reply="I couldn't safely understand that grocery list.",
+                    phase="shopping",
+                    plugin_state=state,
+                )
+            query = str(raw_item.get("query") or "").strip()
+            notes = str(raw_item.get("notes") or "").strip()
+            try:
+                quantity = int(raw_item.get("quantity", 1))
+            except (TypeError, ValueError):
+                quantity = 0
+            if not query or not 1 <= quantity <= 20:
+                return InteractionResult(
+                    reply="Each grocery needs a name and a quantity from one to twenty.",
+                    phase="shopping",
+                    plugin_state=state,
+                )
+            items.append({"query": query, "quantity": quantity, "notes": notes})
+
+        semaphore = asyncio.Semaphore(3)
+
+        async def search_item(item: dict) -> dict:
+            async with semaphore:
+                candidates = await self._find_candidates(state, item["query"])
+            return {**item, "candidates": candidates}
+
+        try:
+            collections = await asyncio.gather(*(search_item(item) for item in items))
+        except (SwiggyAuthError, SwiggyError) as exc:
+            return self._swiggy_failure(exc, state=state)
+
+        missing = [item["query"] for item in collections if not item["candidates"]]
+        available = [item for item in collections if item["candidates"]]
+        if not available:
+            return InteractionResult(
+                reply="I couldn't find an in-stock match for any of those items.",
+                phase="shopping",
+                plugin_state=state,
+            )
+        state["pending_collections"] = available
+        prompt = self._advance_collection(state)
+        if missing:
+            prompt = f"I couldn't find {', '.join(missing)}. {prompt}"
         return InteractionResult(
-            reply=f"I found: {options}. Which number and how many?",
+            reply=prompt,
             phase="shopping",
             plugin_state=state,
+        )
+
+    @staticmethod
+    def _advance_collection(state: dict) -> str:
+        pending = list(state.get("pending_collections") or [])
+        current = pending.pop(0)
+        state["pending_collections"] = pending
+        state["candidates"] = current["candidates"]
+        state["candidate_query"] = current["query"]
+        state["candidate_quantity"] = current["quantity"]
+        state["candidate_notes"] = current["notes"]
+        options = "; ".join(
+            f"{index}, {value['brand']} {value['name']}, {value['variant']}, {value['price']:g} rupees"
+            for index, value in enumerate(current["candidates"][:3], start=1)
+        )
+        note = f" ({current['notes']})" if current["notes"] else ""
+        return (
+            f"For {current['query']}{note}, I found: {options}. "
+            f"Which option for quantity {current['quantity']}?"
         )
 
     async def _choose_candidate(
@@ -662,12 +778,13 @@ class SwiggyInstamartPlugin(BasePlugin):
         """Apply a checkpointed full-cart replacement; safe to repeat after a crash."""
         pending = state.get("pending_cart_update") or {}
         try:
-            await self.client.call(
-                Server.INSTAMART,
-                "update_cart",
-                selectedAddressId=pending["selected_address_id"],
-                items=pending["items"],
-            )
+            async with self._mutation_lock:
+                await self.client.call(
+                    Server.INSTAMART,
+                    "update_cart",
+                    selectedAddressId=pending["selected_address_id"],
+                    items=pending["items"],
+                )
             fresh = await self._get_cart()
         except (KeyError, SwiggyAuthError, SwiggyError) as exc:
             return self._swiggy_failure(
@@ -675,8 +792,11 @@ class SwiggyInstamartPlugin(BasePlugin):
             )
         state = dict(state)
         state.pop("pending_cart_update", None)
+        reply = f"{pending.get('reply_prefix', '')}{summarize_cart(fresh)}"
+        if state.get("pending_collections"):
+            reply = f"{reply} {self._advance_collection(state)}"
         return InteractionResult(
-            reply=f"{pending.get('reply_prefix', '')}{summarize_cart(fresh)}",
+            reply=reply,
             phase="shopping",
             plugin_state=state,
         )
@@ -698,7 +818,9 @@ class SwiggyInstamartPlugin(BasePlugin):
             for index, value in enumerate((state.get("candidates") or [])[:3], start=1)
         ]
         system = (
-            "You classify one spoken Instamart shopping turn into exactly one safe tool. "
+            "You classify one committed spoken Instamart shopping turn into one safe "
+            "structured intent. Put every requested grocery in collect_items, up to "
+            "five items, preserving quantity and notes. "
             "Never invent IDs. Product IDs are resolved by the application. "
             "Checkout and order confirmation are unavailable. If the request is unclear, "
             "respond briefly without a tool. Current spoken candidates: "
@@ -730,14 +852,20 @@ class SwiggyInstamartPlugin(BasePlugin):
                 phase="shopping",
                 plugin_state=state,
             )
+        if len(message.tool_calls) != 1:
+            return InteractionResult(
+                reply="I couldn't safely understand that grocery list. Please try one to five items again.",
+                phase="shopping",
+                plugin_state=state,
+            )
         call = message.tool_calls[0]
         try:
             arguments = json.loads(call.function.arguments or "{}")
         except (TypeError, ValueError):
             arguments = {}
         name = call.function.name
-        if name == "search_products" and str(arguments.get("query") or "").strip():
-            return await self._search(state, str(arguments["query"]).strip())
+        if name == "collect_items":
+            return await self._collect_items(state, arguments.get("items"))
         if name == "choose_candidate":
             return await self._choose_candidate(
                 context,
@@ -843,13 +971,14 @@ class SwiggyInstamartPlugin(BasePlugin):
         await context.checkpoint()
 
         try:
-            checkout = await self.client.call(
-                Server.INSTAMART,
-                "checkout",
-                addressId=address["id"],
-                paymentMethod="UPI",
-                generateUPIQR=True,
-            )
+            async with self._mutation_lock:
+                checkout = await self.client.call(
+                    Server.INSTAMART,
+                    "checkout",
+                    addressId=address["id"],
+                    paymentMethod="UPI",
+                    generateUPIQR=True,
+                )
         except (SwiggyAuthError, SwiggyError) as exc:
             logger.error("Instamart checkout outcome is unknown: %s", exc)
             return InteractionResult(
@@ -1008,18 +1137,7 @@ class SwiggyInstamartPlugin(BasePlugin):
 
     @staticmethod
     def _resolve_number_or_label(text: str, values: list[dict]) -> Optional[dict]:
-        number = None
-        if text.isdigit():
-            number = int(text)
-        if text in _ORDINALS:
-            number = _ORDINALS[text]
-        for word, value in _ORDINALS.items():
-            if re.search(rf"\b{word}\b", text):
-                number = value
-                break
-        match = re.search(r"\b([1-9])\b", text)
-        if match:
-            number = int(match.group(1))
+        number = SwiggyInstamartPlugin._explicit_selection_number(text)
         if number is not None and 1 <= number <= len(values):
             return values[number - 1]
         exact_matches = [
@@ -1040,18 +1158,28 @@ class SwiggyInstamartPlugin(BasePlugin):
         return matched[0] if len(matched) == 1 else None
 
     @staticmethod
-    def _candidate_choice(text: str) -> Optional[tuple[int, int]]:
-        number = None
-        for word, value in _ORDINALS.items():
-            if re.search(rf"\b{word}\b", text):
-                number = value
-                break
-        match = re.search(r"\b([1-3])\b", text)
-        if match:
-            number = int(match.group(1))
+    def _explicit_selection_number(text: str) -> Optional[int]:
+        token = text.strip()
+        if token.isdigit():
+            return int(token)
+        if token in _ORDINALS:
+            return _ORDINALS[token]
+        match = re.fullmatch(
+            r"(?:option|number)\s+(one|first|two|second|three|third|[1-9])"
+            r"(?:\s+(?:quantity|qty|times|of)\s+\d+)?",
+            token,
+        )
+        if not match:
+            return None
+        selected = match.group(1)
+        return int(selected) if selected.isdigit() else _ORDINALS[selected]
+
+    @staticmethod
+    def _candidate_choice(text: str) -> Optional[tuple[int, Optional[int]]]:
+        number = SwiggyInstamartPlugin._explicit_selection_number(text)
         if number is None:
             return None
-        quantity = 1
+        quantity = None
         quantity_match = re.search(r"(?:quantity|qty|times|of)\s+(\d+)", text)
         if quantity_match:
             quantity = max(1, min(20, int(quantity_match.group(1))))
