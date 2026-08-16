@@ -26,13 +26,29 @@ from advanced_omi_backend.controllers.session_controller import (
     get_streaming_status,
 )
 from advanced_omi_backend.routers.modules.queue_routes import summarize_job_result
+from advanced_omi_backend.services.audio_stream.session_store import SessionStatus
 from advanced_omi_backend.services.audio_stream.session_store import (
-    SessionStatus,
-    SessionStore,
-    SessionView,
+    SessionStore as ProductionSessionStore,
 )
+from advanced_omi_backend.services.audio_stream.session_store import SessionView
 
 pytestmark = pytest.mark.unit
+
+
+class SessionStore(ProductionSessionStore):
+    """Ambient provenance fixture for drainage tests."""
+
+    async def init_session(self, session_id: str, **kwargs) -> None:
+        kwargs.update(
+            capture_epoch=0,
+            processing_profile="ambient",
+            effects={
+                "aec": {"reporting": "unreported"},
+                "noise_suppression": {"reporting": "unreported"},
+            },
+            voice_session_id=None,
+        )
+        await super().init_session(session_id, **kwargs)
 
 
 def _view(session_id, **kw):

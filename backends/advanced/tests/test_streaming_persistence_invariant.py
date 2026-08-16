@@ -247,6 +247,117 @@ async def test_connect_initializes_capture_before_enqueuing_workers(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_protocol_v1_audio_start_persists_provenance_and_returns_session_binding(
+    monkeypatch,
+):
+    state = ClientState("client-1", "user-1")
+    producer = AsyncMock()
+    websocket = SimpleNamespace(send_json=AsyncMock())
+    model = SimpleNamespace(model_provider="deepgram", name="stt")
+    registry = SimpleNamespace(get_default=lambda model_type: model)
+    monkeypatch.setattr(websocket_controller, "get_models_registry", lambda: registry)
+    monkeypatch.setattr(
+        websocket_controller,
+        "start_streaming_jobs",
+        lambda **kwargs: {
+            "speech_detection": "speech-1",
+            "audio_persistence": "persist-1",
+        },
+    )
+    monkeypatch.setattr(websocket_controller, "publish_sse_event_async", _ignore_sse)
+    monkeypatch.setattr(
+        websocket_controller, "subscribe_to_interim_results", _ignore_sse
+    )
+    audio_format = {
+        "rate": 16000,
+        "channels": 1,
+        "width": 2,
+        "voice_duplex_protocol": 1,
+        "capture_epoch": 8,
+        "processing_profile": "duplex_aec",
+        "effects": {
+            "aec": {
+                "reporting": "reported",
+                "requested": True,
+                "available": True,
+                "enabled": True,
+            },
+            "noise_suppression": {
+                "reporting": "reported",
+                "requested": True,
+                "available": True,
+                "enabled": True,
+            },
+        },
+        "voice_session_id": "voice-1",
+    }
+
+    await websocket_controller._initialize_streaming_session(
+        state,
+        producer,
+        "user-1",
+        "user@example.com",
+        "client-1",
+        audio_format,
+        websocket=websocket,
+    )
+
+    init_kwargs = producer.init_session.await_args.kwargs
+    assert init_kwargs["capture_epoch"] == 8
+    assert init_kwargs["processing_profile"] == "duplex_aec"
+    assert init_kwargs["effects"].aec.enabled is True
+    assert init_kwargs["voice_session_id"] == "voice-1"
+    acknowledgment = websocket.send_json.await_args.args[0]
+    assert acknowledgment["type"] == "audio-session.started"
+    assert acknowledgment["audio_session_id"] == state.stream_session_id
+    assert acknowledgment["voice_session_id"] == "voice-1"
+    assert acknowledgment["capture_epoch"] == 8
+
+
+@pytest.mark.asyncio
+async def test_older_capture_is_explicit_ambient_but_never_advertises_duplex(
+    monkeypatch,
+):
+    state = ClientState("client-1", "user-1")
+    producer = AsyncMock()
+    model = SimpleNamespace(model_provider="deepgram", name="stt")
+    registry = SimpleNamespace(get_default=lambda model_type: model)
+    monkeypatch.setattr(websocket_controller, "get_models_registry", lambda: registry)
+    monkeypatch.setattr(
+        websocket_controller,
+        "start_streaming_jobs",
+        lambda **kwargs: {
+            "speech_detection": "speech-1",
+            "audio_persistence": "persist-1",
+        },
+    )
+    monkeypatch.setattr(websocket_controller, "publish_sse_event_async", _ignore_sse)
+
+    await websocket_controller._initialize_streaming_session(
+        state,
+        producer,
+        "user-1",
+        "user@example.com",
+        "client-1",
+        {"rate": 16000, "channels": 1, "width": 2},
+    )
+
+    init_kwargs = producer.init_session.await_args.kwargs
+    assert state.voice_duplex_protocol is None
+    assert init_kwargs["capture_epoch"] == 0
+    assert init_kwargs["processing_profile"] == "ambient"
+    assert init_kwargs["effects"].aec.reporting == "unreported"
+    assert init_kwargs["voice_session_id"] is None
+
+
+def test_protocol_v1_audio_start_rejects_partial_provenance():
+    with pytest.raises(ValueError, match="missing provenance"):
+        websocket_controller._capture_provenance_from_audio_format(
+            {"voice_duplex_protocol": 1, "capture_epoch": 1}
+        )
+
+
+@pytest.mark.asyncio
 async def test_connect_rejects_ingress_when_capture_initialization_fails(monkeypatch):
     state = ClientState("client-1", "user-1")
     state.client_id = "client-1"

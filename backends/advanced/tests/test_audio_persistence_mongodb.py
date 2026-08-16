@@ -21,7 +21,11 @@ from bson import Binary
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import DuplicateKeyError
 
-from advanced_omi_backend.models.audio_capture import AudioCaptureSession, AudioRangeRef
+from advanced_omi_backend.models.audio_capture import (
+    AudioCaptureSession,
+    AudioRangeRef,
+    CaptureEffects,
+)
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation, create_conversation
 from advanced_omi_backend.services.audio_claims import apply_audio_ranges
@@ -121,6 +125,10 @@ async def store_claimed_chunks(
         client_id="test-client",
         origin="batch",
         time_basis="recorded",
+        capture_epoch=0,
+        processing_profile="imported",
+        effects=CaptureEffects.not_applicable(),
+        voice_session_id=None,
         status="complete",
         started_at=captured_at,
         ended_at=captured_at + timedelta(seconds=count * 10),

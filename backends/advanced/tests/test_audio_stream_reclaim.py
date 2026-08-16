@@ -25,12 +25,28 @@ from advanced_omi_backend.services.audio_stream.durability import (
 from advanced_omi_backend.services.audio_stream.reclaim import (
     reclaim_settled_audio_streams,
 )
+from advanced_omi_backend.services.audio_stream.session_store import SessionStatus
 from advanced_omi_backend.services.audio_stream.session_store import (
-    SessionStatus,
-    SessionStore,
+    SessionStore as ProductionSessionStore,
 )
 
 pytestmark = pytest.mark.unit
+
+
+class SessionStore(ProductionSessionStore):
+    """Ambient provenance fixture for WAL-reclaim tests."""
+
+    async def init_session(self, session_id: str, **kwargs) -> None:
+        kwargs.update(
+            capture_epoch=0,
+            processing_profile="ambient",
+            effects={
+                "aec": {"reporting": "unreported"},
+                "noise_suppression": {"reporting": "unreported"},
+            },
+            voice_session_id=None,
+        )
+        await super().init_session(session_id, **kwargs)
 
 
 async def _session(redis, session_id, status=None):

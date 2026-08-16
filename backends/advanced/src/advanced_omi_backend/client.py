@@ -48,6 +48,12 @@ class ClientState:
     # NOTE: reserved — nothing populates this yet, so the streaming-finalize
     # buffer flush currently falls back to default 16kHz/mono/16-bit.
     stream_audio_format: Dict = field(default_factory=dict)
+    # Negotiated capture/interactive provenance for this connection's current epoch.
+    voice_duplex_protocol: Optional[int] = None
+    capture_epoch: int = 0
+    processing_profile: str = "ambient"
+    capture_effects: Dict = field(default_factory=dict)
+    voice_session_id: Optional[str] = None
 
     # Batch-mode accumulator: audio is buffered here until a 30-minute roll or
     # an audio-stop, then flushed into a conversation.

@@ -12,7 +12,9 @@ from fakeredis import aioredis as fake_aioredis
 
 from advanced_omi_backend.plugins import BasePlugin
 from advanced_omi_backend.plugins.router import PluginRouter
-from advanced_omi_backend.services.audio_stream.session_store import SessionStore
+from advanced_omi_backend.services.audio_stream.session_store import (
+    SessionStore as ProductionSessionStore,
+)
 from advanced_omi_backend.services.interaction_modes import (
     InteractionIngress,
     InteractionModeDefinition,
@@ -34,6 +36,22 @@ from advanced_omi_backend.services.transcription.streaming_consumer import (
 from advanced_omi_backend.services.wakeword.dispatcher import WakeWordDispatcher
 from advanced_omi_backend.workers import interaction_mode_worker
 from advanced_omi_backend.workers.interaction_mode_worker import InteractionModeWorker
+
+
+class SessionStore(ProductionSessionStore):
+    """Ambient provenance fixture for interaction tests."""
+
+    async def init_session(self, session_id: str, **kwargs) -> None:
+        kwargs.update(
+            capture_epoch=0,
+            processing_profile="ambient",
+            effects={
+                "aec": {"reporting": "unreported"},
+                "noise_suppression": {"reporting": "unreported"},
+            },
+            voice_session_id=None,
+        )
+        await super().init_session(session_id, **kwargs)
 
 
 class _ModePlugin(BasePlugin):

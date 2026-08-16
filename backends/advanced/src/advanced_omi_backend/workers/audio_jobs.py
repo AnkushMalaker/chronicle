@@ -78,7 +78,7 @@ def _time_basis_from_fields(fields: dict) -> str:
     if raw is None:
         return "received"
     value = raw.decode() if isinstance(raw, bytes) else str(raw)
-    if value not in {"recorded", "received"}:
+    if value not in {"captured", "recorded", "received"}:
         raise AudioPersistenceInvariantError(
             f"Invalid WAL capture time basis {value!r}"
         )

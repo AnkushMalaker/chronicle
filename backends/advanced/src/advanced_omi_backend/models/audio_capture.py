@@ -41,12 +41,76 @@ def bson_datetime(value: datetime) -> datetime:
 
 CaptureOrigin = Literal["streaming", "upload", "batch", "screenpipe", "import"]
 CaptureStatus = Literal["active", "finalizing", "complete", "failed"]
-CaptureTimeBasis = Literal["recorded", "received", "unknown"]
+CaptureTimeBasis = Literal["captured", "recorded", "received", "unknown"]
 ArtifactStatus = Literal["pending", "complete", "failed"]
+CaptureProcessingProfile = Literal[
+    "ambient",
+    "imported",
+    "source_native",
+    "duplex_aec",
+    "duplex_isolated",
+    "half_duplex",
+]
+EffectReporting = Literal["reported", "unreported", "not_applicable"]
 
 # Packet clocks can jitter slightly around their nominal audio duration. A larger
 # deviation is a real capture discontinuity and must become an audio-document seam.
 CAPTURE_CONTINUITY_TOLERANCE_SECONDS = 0.25
+
+
+class CaptureEffectStatus(BaseModel):
+    """What one capture engine actually reported about a platform effect."""
+
+    reporting: EffectReporting
+    requested: Optional[bool] = None
+    available: Optional[bool] = None
+    enabled: Optional[bool] = None
+
+    @model_validator(mode="after")
+    def validate_reporting(self) -> "CaptureEffectStatus":
+        values = (self.requested, self.available, self.enabled)
+        if self.reporting == "reported":
+            if any(value is None for value in values):
+                raise ValueError(
+                    "reported effects require requested, available, and enabled"
+                )
+            if self.enabled and (not self.requested or not self.available):
+                raise ValueError(
+                    "an enabled effect must have been requested and available"
+                )
+        elif any(value is not None for value in values):
+            raise ValueError(
+                "unreported and not-applicable effects cannot carry boolean claims"
+            )
+        return self
+
+
+class CaptureEffects(BaseModel):
+    """Capture-time effect provenance, persisted once on the owning session."""
+
+    aec: CaptureEffectStatus
+    noise_suppression: CaptureEffectStatus
+
+    @classmethod
+    def unreported(cls) -> "CaptureEffects":
+        return cls(
+            aec=CaptureEffectStatus(reporting="unreported"),
+            noise_suppression=CaptureEffectStatus(reporting="unreported"),
+        )
+
+    @classmethod
+    def not_applicable(cls) -> "CaptureEffects":
+        return cls(
+            aec=CaptureEffectStatus(reporting="not_applicable"),
+            noise_suppression=CaptureEffectStatus(reporting="not_applicable"),
+        )
+
+    @property
+    def is_reported(self) -> bool:
+        return (
+            self.aec.reporting == "reported"
+            and self.noise_suppression.reporting == "reported"
+        )
 
 
 class AudioRangeRef(BaseModel):
@@ -86,6 +150,10 @@ class AudioCaptureSession(Document):
     client_id: str
     origin: CaptureOrigin
     time_basis: CaptureTimeBasis
+    capture_epoch: int = Field(ge=0)
+    processing_profile: CaptureProcessingProfile
+    effects: CaptureEffects
+    voice_session_id: Optional[str]
     status: CaptureStatus = "active"
     source_stream: Optional[str] = None
     external_source_id: Optional[str] = None
@@ -112,6 +180,27 @@ class AudioCaptureSession(Document):
             self.ended_at = as_utc(self.ended_at)
             if self.ended_at < self.started_at:
                 raise ValueError("capture session cannot end before it starts")
+        interactive = self.processing_profile in {
+            "duplex_aec",
+            "duplex_isolated",
+            "half_duplex",
+        }
+        if interactive and not self.voice_session_id:
+            raise ValueError("interactive capture profiles require a voice_session_id")
+        if not interactive and self.voice_session_id is not None:
+            raise ValueError(
+                "non-interactive capture profiles cannot bind a voice session"
+            )
+        if interactive and not self.effects.is_reported:
+            raise ValueError("interactive capture profiles require reported effects")
+        if self.processing_profile == "imported" and (
+            self.capture_epoch != 0 or self.effects != CaptureEffects.not_applicable()
+        ):
+            raise ValueError(
+                "imported capture requires epoch zero and not-applicable effects"
+            )
+        if self.processing_profile == "source_native" and self.capture_epoch != 0:
+            raise ValueError("source-native capture requires epoch zero")
         return self
 
     class Settings:

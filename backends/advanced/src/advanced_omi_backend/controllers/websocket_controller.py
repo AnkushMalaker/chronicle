@@ -13,6 +13,7 @@ import os
 import time
 import traceback
 import uuid
+from datetime import datetime, timezone
 from functools import partial
 from typing import Optional
 
@@ -41,6 +42,10 @@ from advanced_omi_backend.controllers.queue_controller import (
     transcription_queue,
 )
 from advanced_omi_backend.model_registry import get_models_registry
+from advanced_omi_backend.models.audio_capture import (
+    CaptureEffects,
+    CaptureProcessingProfile,
+)
 from advanced_omi_backend.models.conversation import create_conversation
 from advanced_omi_backend.plugins.events import BUTTON_STATE_TO_EVENT, ButtonState
 from advanced_omi_backend.redis_factory import create_async_redis
@@ -69,6 +74,10 @@ from advanced_omi_backend.services.transcription import is_transcription_availab
 from advanced_omi_backend.services.wakeword.followup import handle_dial_followup
 from advanced_omi_backend.users import register_client_to_user, touch_client_last_seen
 from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
+from advanced_omi_backend.voice_protocol import (
+    VOICE_DUPLEX_PROTOCOL,
+    AudioSessionStarted,
+)
 from advanced_omi_backend.workers.transcription_jobs import transcribe_full_audio_job
 
 # Thread pool executors for audio decoding
@@ -89,6 +98,59 @@ _MOBILE_AUDIO_RECEIPT_TTL_SECONDS = 7 * 24 * 60 * 60
 # client_id) must evict its stale connection and create a fresh ClientState as one
 # atomic step, so two concurrent connections can't interleave and orphan state.
 _client_setup_locks: dict[str, asyncio.Lock] = {}
+
+
+def _capture_provenance_from_audio_format(
+    audio_format: dict,
+) -> tuple[int | None, int, CaptureProcessingProfile, CaptureEffects, str | None]:
+    """Resolve a complete capture provenance tuple from one audio-start header.
+
+    Protocol-v1 clients must report every field exactly. Older clients retain only
+    ordinary ambient capture, which the backend records explicitly as epoch zero with
+    unreported effects; they are never eligible for interactive voice activation.
+    """
+
+    raw_protocol = audio_format.get("voice_duplex_protocol")
+    if raw_protocol is None:
+        return None, 0, "ambient", CaptureEffects.unreported(), None
+    if raw_protocol != VOICE_DUPLEX_PROTOCOL:
+        raise ValueError(f"Unsupported voice duplex protocol: {raw_protocol!r}")
+
+    required = {"capture_epoch", "processing_profile", "effects", "voice_session_id"}
+    missing = sorted(required.difference(audio_format))
+    if missing:
+        raise ValueError(
+            f"Protocol-v1 audio-start is missing provenance: {', '.join(missing)}"
+        )
+    capture_epoch = audio_format["capture_epoch"]
+    if (
+        not isinstance(capture_epoch, int)
+        or isinstance(capture_epoch, bool)
+        or capture_epoch < 0
+    ):
+        raise ValueError("capture_epoch must be a non-negative integer")
+    processing_profile = audio_format["processing_profile"]
+    valid_profiles = {
+        "ambient",
+        "imported",
+        "source_native",
+        "duplex_aec",
+        "duplex_isolated",
+        "half_duplex",
+    }
+    if processing_profile not in valid_profiles:
+        raise ValueError(f"Unsupported processing_profile: {processing_profile!r}")
+    effects = CaptureEffects.model_validate(audio_format["effects"])
+    voice_session_id = audio_format["voice_session_id"]
+    if voice_session_id is not None and not isinstance(voice_session_id, str):
+        raise ValueError("voice_session_id must be a string or null")
+    return (
+        raw_protocol,
+        capture_epoch,
+        processing_profile,
+        effects,
+        voice_session_id,
+    )
 
 
 def _get_client_setup_lock(client_id: str) -> asyncio.Lock:
@@ -658,6 +720,14 @@ async def _initialize_streaming_session(
         f"🔴 BACKEND: _initialize_streaming_session called for {client_id}"
     )
 
+    (
+        protocol,
+        capture_epoch,
+        processing_profile,
+        effects,
+        voice_session_id,
+    ) = _capture_provenance_from_audio_format(audio_format)
+
     if client_state.stream_session_id is not None:
         application_logger.debug(f"Session already initialized for {client_id}")
         return None
@@ -699,11 +769,20 @@ async def _initialize_streaming_session(
         connection_id=connection_id,
         mode="streaming",
         provider=provider,
+        capture_epoch=capture_epoch,
+        processing_profile=processing_profile,
+        effects=effects,
+        voice_session_id=voice_session_id,
     )
     # Publish the connection's active-session pointer only after the durable Redis
     # session and producer buffer both exist. A failed CONNECTING attempt therefore
     # cannot masquerade as an active capture during cleanup/reconnect.
     client_state.stream_session_id = session_id
+    client_state.voice_duplex_protocol = protocol
+    client_state.capture_epoch = capture_epoch
+    client_state.processing_profile = processing_profile
+    client_state.capture_effects = effects.model_dump(mode="json")
+    client_state.voice_session_id = voice_session_id
 
     # Store audio format in Redis session (not in ClientState)
     await audio_stream_producer.store.set_audio_format(session_id, audio_format)
@@ -743,6 +822,19 @@ async def _initialize_streaming_session(
         application_logger.info(
             f"📡 Launched interim results subscriber for session {session_id}"
         )
+
+    if websocket and protocol == VOICE_DUPLEX_PROTOCOL:
+        started = AudioSessionStarted(
+            type="audio-session.started",
+            event_id=uuid.uuid4(),
+            client_id=client_id,
+            audio_session_id=session_id,
+            capture_epoch=capture_epoch,
+            processing_profile=processing_profile,
+            voice_session_id=voice_session_id,
+            sent_at=datetime.now(timezone.utc),
+        )
+        await websocket.send_json(started.model_dump(mode="json", exclude_none=False))
 
     return subscriber_task
 
@@ -813,6 +905,7 @@ async def _publish_audio_to_stream(
     channels: int,
     sample_width: int,
     captured_at: float | None = None,
+    time_basis: str | None = None,
 ) -> None:
     """
     Publish audio chunk to Redis Stream with chunk tracking.
@@ -844,6 +937,7 @@ async def _publish_audio_to_stream(
         channels=channels,
         sample_width=sample_width,
         captured_at=captured_at,
+        time_basis=time_basis,
     )
 
 
@@ -989,6 +1083,7 @@ async def _handle_streaming_mode_audio(
         audio_format.get("channels", 1),
         audio_format.get("width", 2),
         _captured_at_seconds(audio_format),
+        audio_format.get("time_basis"),
     )
 
     return subscriber_task

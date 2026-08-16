@@ -29,6 +29,7 @@ from pymongo.errors import DuplicateKeyError
 from advanced_omi_backend.models.audio_capture import (
     AudioCaptureSession,
     AudioRangeRef,
+    CaptureEffects,
     as_utc,
 )
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
@@ -947,6 +948,17 @@ async def convert_audio_to_chunks(
     ended_at = captured_at + timedelta(seconds=total_duration_seconds)
     content_sha256 = pcm_identity(audio_data, sample_rate, channels, sample_width)
     chunk_size_bytes = int(chunk_duration * bytes_per_second)
+    if origin in {"upload", "batch", "import"}:
+        processing_profile = "imported"
+        effects = CaptureEffects.not_applicable()
+    elif origin == "screenpipe":
+        processing_profile = "source_native"
+        effects = CaptureEffects.unreported()
+    elif origin == "streaming":
+        processing_profile = "ambient"
+        effects = CaptureEffects.unreported()
+    else:
+        raise ValueError(f"Unsupported capture origin: {origin!r}")
 
     # Finite audio is content-addressed per user. Backup restores and repeated uploads
     # may carry a new source/session ID for bytes already stored; keep the oldest
@@ -1009,6 +1021,10 @@ async def convert_audio_to_chunks(
             ("sample_width", sample_width),
             ("content_sha256", content_sha256),
             ("time_basis", time_basis),
+            ("capture_epoch", 0),
+            ("processing_profile", processing_profile),
+            ("effects", effects),
+            ("voice_session_id", None),
         ):
             if getattr(existing, field) != expected:
                 mismatches.append(field)
@@ -1033,6 +1049,10 @@ async def convert_audio_to_chunks(
         client_id=capture_source_id,
         origin=origin,
         time_basis=time_basis,
+        capture_epoch=0,
+        processing_profile=processing_profile,
+        effects=effects,
+        voice_session_id=None,
         status="active",
         external_source_id=external_source_id,
         content_sha256=content_sha256,

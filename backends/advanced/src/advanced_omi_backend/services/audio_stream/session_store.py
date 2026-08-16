@@ -106,6 +106,10 @@ class SessionView:
     stream_name: str = ""
     provider: str = ""
     mode: str = ""
+    capture_epoch: int = 0
+    processing_profile: str = ""
+    effects: Optional[dict] = None
+    voice_session_id: str = ""
     # timestamps (unix float; speech_detected_at is kept as ISO str)
     started_at: float = 0.0
     last_chunk_at: float = 0.0
@@ -205,6 +209,10 @@ class SessionView:
             stream_name=s("stream_name"),
             provider=s("provider"),
             mode=s("mode"),
+            capture_epoch=fint("capture_epoch"),
+            processing_profile=s("processing_profile"),
+            effects=fjson("effects", None),
+            voice_session_id=s("voice_session_id"),
             started_at=ffloat("started_at") or 0.0,
             last_chunk_at=ffloat("last_chunk_at") or 0.0,
             finalized_at=ffloat("finalized_at"),
@@ -278,6 +286,10 @@ class SessionStore:
         connection_id: str = "",
         mode: str = "streaming",
         provider: str = "deepgram",
+        capture_epoch: int,
+        processing_profile: str,
+        effects: dict,
+        voice_session_id: str | None,
     ) -> None:
         """Create the session hash (status=active). Single atomic write.
 
@@ -302,6 +314,10 @@ class SessionStore:
                 "stream_name": stream_name,
                 "provider": provider,
                 "mode": mode,
+                "capture_epoch": str(capture_epoch),
+                "processing_profile": processing_profile,
+                "effects": json.dumps(effects, separators=(",", ":"), sort_keys=True),
+                "voice_session_id": voice_session_id or "",
                 "started_at": now,
                 "last_chunk_at": now,
                 "chunks_published": "0",

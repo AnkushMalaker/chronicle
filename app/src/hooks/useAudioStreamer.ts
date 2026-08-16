@@ -40,6 +40,14 @@ const AUDIO_FORMAT = {
   width: 2,
   channels: 1,
   mode: 'streaming',
+  voice_duplex_protocol: 1,
+  capture_epoch: 0,
+  processing_profile: 'ambient',
+  effects: {
+    aec: { reporting: 'unreported', requested: null, available: null, enabled: null },
+    noise_suppression: { reporting: 'unreported', requested: null, available: null, enabled: null },
+  },
+  voice_session_id: null,
 };
 
 /** -------------------- Foreground Service helpers (NEW) -------------------- */

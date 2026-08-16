@@ -11,14 +11,41 @@ import json
 import pytest
 from fakeredis import aioredis as fake_aioredis
 
+from advanced_omi_backend.services.audio_stream.session_store import SessionStatus
 from advanced_omi_backend.services.audio_stream.session_store import (
-    SessionStatus,
-    SessionStore,
+    SessionStore as ProductionSessionStore,
+)
+from advanced_omi_backend.services.audio_stream.session_store import (
     SessionView,
     SpeakerCheckStatus,
 )
 
 pytestmark = pytest.mark.unit
+
+
+class SessionStore(ProductionSessionStore):
+    """Ambient provenance fixture for tests that exercise unrelated store behavior."""
+
+    async def init_session(self, session_id: str, **kwargs) -> None:
+        kwargs.update(
+            capture_epoch=0,
+            processing_profile="ambient",
+            effects={
+                "aec": {"reporting": "unreported"},
+                "noise_suppression": {"reporting": "unreported"},
+            },
+            voice_session_id=None,
+        )
+        await super().init_session(session_id, **kwargs)
+
+
+async def test_production_session_init_requires_capture_provenance():
+    store = ProductionSessionStore(_fake_redis())
+
+    with pytest.raises(TypeError):
+        await store.init_session(
+            "sess-1", user_id="u1", client_id="c1", stream_name="audio:stream:c1"
+        )
 
 
 def _fake_redis(decode_responses=False):

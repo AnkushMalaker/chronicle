@@ -481,6 +481,35 @@ async def test_explicit_capture_timestamp_marks_wal_audio_as_recorded():
 
 
 @pytest.mark.asyncio
+async def test_interactive_native_timestamp_marks_wal_audio_as_captured():
+    redis = _ProducerRedis()
+    producer = AudioStreamProducer(redis)
+    producer.update_session_chunk_count = AsyncMock()
+    producer.session_buffers["session-1"] = SessionBuffer(
+        user_id="user-1",
+        client_id="client-1",
+        stream_name="audio:stream:session-1",
+        time_basis="captured",
+    )
+
+    await producer.add_audio_chunk(
+        b"\x00\x01" * 4000,
+        "session-1",
+        "user-1",
+        "client-1",
+        sample_rate=16000,
+        channels=1,
+        sample_width=2,
+        captured_at=1_770_000_000.125,
+        time_basis="captured",
+    )
+
+    fields = redis.calls[0][1]
+    assert fields[b"captured_at"] == b"1770000000.125"
+    assert fields[b"time_basis"] == b"captured"
+
+
+@pytest.mark.asyncio
 async def test_producer_flushes_partial_wal_chunk_before_capture_gap():
     redis = _ProducerRedis()
     producer = AudioStreamProducer(redis)

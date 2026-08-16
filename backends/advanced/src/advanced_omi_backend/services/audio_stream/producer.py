@@ -13,6 +13,8 @@ from redis.exceptions import WatchError
 from advanced_omi_backend.models.audio_capture import (
     CAPTURE_CONTINUITY_TOLERANCE_SECONDS,
     AudioCaptureSession,
+    CaptureEffects,
+    CaptureProcessingProfile,
 )
 from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
 from advanced_omi_backend.redis_keys import audio_session
@@ -103,10 +105,15 @@ class AudioStreamProducer:
         session_id: str,
         user_id: str,
         client_id: str,
+        *,
         user_email: str = "",
         connection_id: str = "",
         mode: str = "streaming",
         provider: str = "deepgram",
+        capture_epoch: int,
+        processing_profile: CaptureProcessingProfile,
+        effects: CaptureEffects,
+        voice_session_id: str | None,
     ):
         """
         Initialize session tracking metadata in Redis.
@@ -170,6 +177,10 @@ class AudioStreamProducer:
             connection_id=connection_id,
             mode=mode,
             provider=provider,
+            capture_epoch=capture_epoch,
+            processing_profile=processing_profile,
+            effects=effects.model_dump(mode="json"),
+            voice_session_id=voice_session_id,
         )
 
         capture = AudioCaptureSession(
@@ -178,7 +189,16 @@ class AudioStreamProducer:
             capture_source_id=client_id,
             client_id=client_id,
             origin="streaming" if mode == "streaming" else "batch",
-            time_basis="received",
+            time_basis=(
+                "captured"
+                if processing_profile
+                in {"duplex_aec", "duplex_isolated", "half_duplex"}
+                else "received"
+            ),
+            capture_epoch=capture_epoch,
+            processing_profile=processing_profile,
+            effects=effects,
+            voice_session_id=voice_session_id,
             source_stream=stream_name,
         )
         await capture.insert()
@@ -188,7 +208,15 @@ class AudioStreamProducer:
 
         # Initialize audio buffer for this session
         self.session_buffers[session_id] = SessionBuffer(
-            user_id=user_id, client_id=client_id, stream_name=stream_name
+            user_id=user_id,
+            client_id=client_id,
+            stream_name=stream_name,
+            time_basis=(
+                "captured"
+                if processing_profile
+                in {"duplex_aec", "duplex_isolated", "half_duplex"}
+                else "received"
+            ),
         )
 
         logger.info(
@@ -323,6 +351,7 @@ class AudioStreamProducer:
         channels: int = 1,
         sample_width: int = 2,
         captured_at: float | None = None,
+        time_basis: str | None = None,
     ) -> list[str]:
         """
         Add audio data to session buffer and publish fixed-size chunks.
@@ -355,7 +384,13 @@ class AudioStreamProducer:
 
         bytes_per_second = sample_rate * channels * sample_width
         target_chunk_size = int(bytes_per_second * 0.25)
-        incoming_time_basis = "recorded" if captured_at is not None else "received"
+        incoming_time_basis = time_basis or (
+            "recorded" if captured_at is not None else "received"
+        )
+        if incoming_time_basis not in {"captured", "recorded", "received"}:
+            raise ValueError(
+                f"Invalid incoming capture time basis: {incoming_time_basis}"
+            )
         incoming_captured_at = captured_at if captured_at is not None else time.time()
 
         # A partial producer chunk is still physical audio. Close it before a clock
