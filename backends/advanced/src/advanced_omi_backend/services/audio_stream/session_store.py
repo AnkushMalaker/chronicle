@@ -354,6 +354,17 @@ class SessionStore:
             session_id, {"type": "finalize", "reason": completion_reason or "unknown"}
         )
 
+    async def bind_voice_session(self, session_id: str, voice_session_id: str) -> None:
+        """Bind one active capture to the interactive session created for it."""
+        if not voice_session_id:
+            raise ValueError("voice_session_id is required")
+        view = await self.read(session_id)
+        if view is None or view.status != SessionStatus.ACTIVE:
+            raise KeyError(f"active capture session not found: {session_id}")
+        await self._redis.hset(
+            self._key(session_id), "voice_session_id", voice_session_id
+        )
+
     async def mark_complete(self, session_id: str, reason: CompletionReason) -> None:
         """Set status=finished + completion_reason atomically, then publish a signal.
 

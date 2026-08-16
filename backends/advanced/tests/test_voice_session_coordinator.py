@@ -149,7 +149,7 @@ async def test_route_change_rebinds_capture_and_increments_generation(coordinato
 
 
 async def test_disconnect_suppresses_output_and_single_use_resume_rotates_identity(
-    coordinator,
+    coordinator, redis_client
 ):
     started = await _start(coordinator)
     disconnected = await coordinator.disconnect(
@@ -158,6 +158,10 @@ async def test_disconnect_suppresses_output_and_single_use_resume_rotates_identi
     )
     assert disconnected.state == "reconnecting"
     assert disconnected.generation == 1
+    raw = await redis_client.hgetall(
+        f"voice:session:{started.session.voice_session_id}"
+    )
+    assert raw["resume_from_generation"] == "0"
 
     resumed = await coordinator.resume(
         previous_voice_session_id=started.session.voice_session_id,
@@ -168,7 +172,7 @@ async def test_disconnect_suppresses_output_and_single_use_resume_rotates_identi
         new_audio_session_id="audio-2",
         new_capture_epoch=5,
         new_socket_id="socket-2",
-        last_response_generation=1,
+        last_response_generation=0,
     )
 
     assert resumed.session.voice_session_id != started.session.voice_session_id
@@ -188,7 +192,7 @@ async def test_disconnect_suppresses_output_and_single_use_resume_rotates_identi
             new_audio_session_id="audio-3",
             new_capture_epoch=6,
             new_socket_id="socket-3",
-            last_response_generation=1,
+            last_response_generation=0,
         )
 
 

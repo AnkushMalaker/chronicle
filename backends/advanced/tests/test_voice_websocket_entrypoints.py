@@ -115,6 +115,8 @@ async def test_phone_playback_event_enters_response_coordinator_through_handler(
     await responses.offer(response.response_id, b"RIFF12345678")
     state = ClientState("client-1", "user-1")
     state.socket_id = "socket-1"
+    state.stream_session_id = "audio-1"
+    state.capture_epoch = 2
     producer = SimpleNamespace(redis_client=redis_client)
     event = {
         "type": "response.playback",
@@ -170,3 +172,86 @@ async def test_old_phone_activation_returns_upgrade_boundary_without_ending_capt
     assert result is None
     assert payload["error"] == "client_upgrade_required"
     assert state.stream_session_id == "audio-1"
+
+
+async def test_protocol_v1_activation_binds_voice_to_capture_before_downlink():
+    redis_client = fake_aioredis.FakeRedis(decode_responses=False)
+    state = ClientState("client-1", "user-1")
+    state.socket_id = "socket-1"
+    state.stream_session_id = "audio-1"
+    state.voice_duplex_protocol = 1
+    store = SimpleNamespace(bind_voice_session=AsyncMock())
+    producer = SimpleNamespace(redis_client=redis_client, store=store)
+    channel = str(device_downlink_channel(ClientId.from_value("client-1")))
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(channel)
+    await pubsub.get_message(timeout=1)
+
+    result = await websocket_controller.request_voice_session_start(
+        client_state=state,
+        audio_stream_producer=producer,
+    )
+    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
+    payload = json.loads(message["data"])
+
+    assert state.voice_session_id == result.session.voice_session_id
+    store.bind_voice_session.assert_awaited_once_with(
+        "audio-1", result.session.voice_session_id
+    )
+    assert payload["type"] == "voice-session.start"
+    assert payload["audio_session_id"] == "audio-1"
+    assert payload["voice_session_id"] == result.session.voice_session_id
+
+
+async def test_resume_rotates_binding_and_publishes_new_start_after_capture_bind():
+    redis_client = fake_aioredis.FakeRedis(decode_responses=False)
+    coordinator = VoiceSessionCoordinator(redis_client)
+    previous = await coordinator.start(
+        user_id="user-1",
+        client_id="client-1",
+        audio_session_id="audio-1",
+        capture_epoch=4,
+        socket_id="socket-1",
+        advertised_protocol=1,
+    )
+    await coordinator.disconnect(
+        voice_session_id=previous.session.voice_session_id,
+        socket_id="socket-1",
+    )
+    state = ClientState("client-1", "user-1")
+    state.socket_id = "socket-2"
+    state.stream_session_id = "audio-2"
+    state.capture_epoch = 5
+    store = SimpleNamespace(bind_voice_session=AsyncMock())
+    producer = SimpleNamespace(redis_client=redis_client, store=store)
+    channel = str(device_downlink_channel(ClientId.from_value("client-1")))
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(channel)
+    await pubsub.get_message(timeout=1)
+
+    resumed = await websocket_controller._handle_phone_voice_event(
+        payload={
+            "type": "voice-session.resume",
+            "protocol": 1,
+            "event_id": "00000000-0000-4000-8000-000000000099",
+            "client_id": "client-1",
+            "sent_at": "2026-08-16T12:00:00Z",
+            "previous_voice_session_id": previous.session.voice_session_id,
+            "previous_capture_epoch": 4,
+            "resume_token": previous.resume_token,
+            "last_response_generation": 0,
+        },
+        client_state=state,
+        audio_stream_producer=producer,
+    )
+    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
+    payload = json.loads(message["data"])
+
+    assert resumed.session.voice_session_id != previous.session.voice_session_id
+    assert state.voice_session_id == resumed.session.voice_session_id
+    store.bind_voice_session.assert_awaited_once_with(
+        "audio-2", resumed.session.voice_session_id
+    )
+    assert payload["type"] == "voice-session.start"
+    assert payload["audio_session_id"] == "audio-2"
+    assert payload["capture_epoch"] == 5

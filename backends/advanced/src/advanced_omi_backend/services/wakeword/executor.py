@@ -134,8 +134,30 @@ def _error_tone_b64() -> str:
     return _wav_b64(frames)
 
 
+@functools.lru_cache(maxsize=1)
+def _armed_tone_b64() -> str:
+    """Short rising cue confirming that command capture has started."""
+    frames = bytearray()
+    _append_note(frames, 523.25, 85, 0.22, envelope="blip")
+    _silence(frames, 25)
+    _append_note(frames, 783.99, 110, 0.22, envelope="blip")
+    return _wav_b64(frames)
+
+
+@functools.lru_cache(maxsize=1)
+def _done_tone_b64() -> str:
+    """Short falling cue confirming that command capture has ended."""
+    frames = bytearray()
+    _append_note(frames, 783.99, 75, 0.20, envelope="blip")
+    _silence(frames, 20)
+    _append_note(frames, 523.25, 95, 0.20, envelope="blip")
+    return _wav_b64(frames)
+
+
 # Logical tone name -> base64 WAV generator.
 _TONE_GENERATORS = {
+    "armed": _armed_tone_b64,
+    "done": _done_tone_b64,
     "thinking": _thinking_tone_b64,  # soft handoff to the agentic path
     "error": _error_tone_b64,  # mistake / not-found / failure
 }

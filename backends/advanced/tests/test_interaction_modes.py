@@ -46,15 +46,16 @@ class SessionStore(ProductionSessionStore):
     """Ambient provenance fixture for interaction tests."""
 
     async def init_session(self, session_id: str, **kwargs) -> None:
-        kwargs.update(
-            capture_epoch=0,
-            processing_profile="ambient",
-            effects={
+        kwargs.setdefault("capture_epoch", 0)
+        kwargs.setdefault("processing_profile", "ambient")
+        kwargs.setdefault(
+            "effects",
+            {
                 "aec": {"reporting": "unreported"},
                 "noise_suppression": {"reporting": "unreported"},
             },
-            voice_session_id=None,
         )
+        kwargs.setdefault("voice_session_id", None)
         await super().init_session(session_id, **kwargs)
 
 
@@ -228,7 +229,7 @@ async def test_ingress_allows_a_repeated_turn_from_the_same_source(registry):
     assert await redis_client.xlen(INPUT_STREAM) == 3
 
 
-async def test_streaming_consumer_routes_activation_before_normal_plugins():
+async def test_streaming_fragments_do_not_enter_interaction_modes():
     redis_client = fake_aioredis.FakeRedis(decode_responses=True)
     router = PluginRouter()
     router.register_plugin("swiggy_instamart", _ModePlugin())
@@ -256,11 +257,36 @@ async def test_streaming_consumer_routes_activation_before_normal_plugins():
         },
     )
 
-    assert await redis_client.xlen(INPUT_STREAM) == 1
+    assert await redis_client.xlen(INPUT_STREAM) == 0
+    normal_dispatch.assert_awaited_once()
+
+
+async def test_streaming_fragment_is_inert_for_protocol_v1_voice_session():
+    redis_client = fake_aioredis.FakeRedis(decode_responses=True)
+    router = PluginRouter()
+    normal_dispatch = AsyncMock()
+    router.dispatch_event = normal_dispatch
+    consumer = StreamingTranscriptionConsumer.__new__(StreamingTranscriptionConsumer)
+    consumer.redis_client = redis_client
+    consumer.plugin_router = router
+    consumer.store = SessionStore(redis_client)
+    await consumer.store.init_session(
+        "audio-1",
+        user_id="user-1",
+        client_id="device-1",
+        stream_name="audio:stream:audio-1",
+        voice_session_id="voice-1",
+    )
+
+    await consumer.trigger_plugins(
+        "audio-1",
+        {"text": "turn on the lights", "words": []},
+    )
+
     normal_dispatch.assert_not_awaited()
 
 
-async def test_acoustic_hermes_command_routes_to_the_same_mode():
+async def test_acoustic_wake_does_not_bypass_committed_turn_router(monkeypatch):
     redis_client = fake_aioredis.FakeRedis(decode_responses=True)
     router = PluginRouter()
     router.register_plugin("swiggy_instamart", _ModePlugin())
@@ -270,6 +296,11 @@ async def test_acoustic_hermes_command_routes_to_the_same_mode():
     )
     dispatcher._resolve_command = AsyncMock(
         return_value=("order Swiggy", "transcribed")
+    )
+    command_dispatch = AsyncMock()
+    monkeypatch.setattr(
+        "advanced_omi_backend.services.wakeword.dispatcher.execute_voice_command",
+        command_dispatch,
     )
     await SessionStore(redis_client).init_session(
         "audio-1",
@@ -290,7 +321,74 @@ async def test_acoustic_hermes_command_routes_to_the_same_mode():
 
     await dispatcher._handle_message({"event": json.dumps(payload)})
 
-    assert await redis_client.xlen(INPUT_STREAM) == 1
+    assert await redis_client.xlen(INPUT_STREAM) == 0
+    command_dispatch.assert_awaited_once()
+
+
+async def test_acoustic_wake_is_inert_while_protocol_v1_turn_owns_audio(monkeypatch):
+    redis_client = fake_aioredis.FakeRedis(decode_responses=True)
+    router = PluginRouter()
+    dispatcher = WakeWordDispatcher(redis_client, router)
+    dispatcher._check_speaker_gate = AsyncMock(
+        return_value={"allowed": True, "reason": "gate_off", "identified": None}
+    )
+    dispatcher._resolve_command = AsyncMock(
+        return_value=("turn on the lights", "transcribed")
+    )
+    command_dispatch = AsyncMock()
+    monkeypatch.setattr(
+        "advanced_omi_backend.services.wakeword.dispatcher.execute_voice_command",
+        command_dispatch,
+    )
+    await SessionStore(redis_client).init_session(
+        "audio-1",
+        user_id="user-1",
+        client_id="device-1",
+        stream_name="audio:stream:audio-1",
+        voice_session_id="voice-1",
+    )
+    payload = {
+        "session_id": "audio-1",
+        "client_id": "device-1",
+        "user_id": "user-1",
+        "audio_b64": base64.b64encode(b"\x00\x00").decode(),
+        "sample_rate": 16000,
+        "detected_at": time.time(),
+        "has_speech": True,
+        "wakeword": "hermes",
+    }
+
+    await dispatcher._handle_message({"event": json.dumps(payload)})
+
+    command_dispatch.assert_not_awaited()
+
+
+async def test_wake_tone_request_enters_response_coordinator_facade(monkeypatch):
+    redis_client = fake_aioredis.FakeRedis(decode_responses=True)
+    dispatcher = WakeWordDispatcher(redis_client, PluginRouter())
+    play_tone = AsyncMock()
+    monkeypatch.setattr(
+        "advanced_omi_backend.services.wakeword.dispatcher.play_tone_on_device",
+        play_tone,
+    )
+
+    await dispatcher._handle_message(
+        {
+            "event": json.dumps(
+                {
+                    "kind": "tone",
+                    "client_id": "device-1",
+                    "session_id": "audio-1",
+                    "tone": "armed",
+                }
+            )
+        }
+    )
+
+    play_tone.assert_awaited_once()
+    assert str(play_tone.await_args.args[1]) == "device-1"
+    assert str(play_tone.await_args.args[2]) == "audio-1"
+    assert play_tone.await_args.args[3] == "armed"
 
 
 async def test_distinct_audio_interval_is_not_suppressed_by_assistant_text(registry):

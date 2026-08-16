@@ -4,9 +4,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fakeredis import aioredis as fake_aioredis
 
 from advanced_omi_backend.client import ClientState
 from advanced_omi_backend.controllers import websocket_controller
+from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
 
 pytestmark = pytest.mark.unit
 
@@ -251,7 +253,22 @@ async def test_protocol_v1_audio_start_persists_provenance_and_returns_session_b
     monkeypatch,
 ):
     state = ClientState("client-1", "user-1")
+    state.socket_id = "socket-new"
     producer = AsyncMock()
+    producer.redis_client = fake_aioredis.FakeRedis(decode_responses=False)
+    coordinator = VoiceSessionCoordinator(producer.redis_client)
+    previous = await coordinator.start(
+        user_id="user-1",
+        client_id="client-1",
+        audio_session_id="audio-previous",
+        capture_epoch=7,
+        socket_id="socket-old",
+        advertised_protocol=1,
+    )
+    await coordinator.disconnect(
+        voice_session_id=previous.session.voice_session_id,
+        socket_id="socket-old",
+    )
     websocket = SimpleNamespace(send_json=AsyncMock())
     model = SimpleNamespace(model_provider="deepgram", name="stt")
     registry = SimpleNamespace(get_default=lambda model_type: model)
@@ -289,7 +306,7 @@ async def test_protocol_v1_audio_start_persists_provenance_and_returns_session_b
                 "enabled": True,
             },
         },
-        "voice_session_id": "voice-1",
+        "voice_session_id": previous.session.voice_session_id,
     }
 
     await websocket_controller._initialize_streaming_session(
@@ -306,12 +323,79 @@ async def test_protocol_v1_audio_start_persists_provenance_and_returns_session_b
     assert init_kwargs["capture_epoch"] == 8
     assert init_kwargs["processing_profile"] == "duplex_aec"
     assert init_kwargs["effects"].aec.enabled is True
-    assert init_kwargs["voice_session_id"] == "voice-1"
+    assert init_kwargs["voice_session_id"] == previous.session.voice_session_id
     acknowledgment = websocket.send_json.await_args.args[0]
     assert acknowledgment["type"] == "audio-session.started"
     assert acknowledgment["audio_session_id"] == state.stream_session_id
-    assert acknowledgment["voice_session_id"] == "voice-1"
+    assert acknowledgment["voice_session_id"] == previous.session.voice_session_id
     assert acknowledgment["capture_epoch"] == 8
+
+
+@pytest.mark.asyncio
+async def test_interactive_phone_audio_start_activates_protocol_v1_after_ack(
+    monkeypatch,
+):
+    state = ClientState("client-1", "user-1")
+    producer = AsyncMock()
+    websocket = SimpleNamespace(send_json=AsyncMock())
+    model = SimpleNamespace(model_provider="deepgram", name="stt")
+    registry = SimpleNamespace(get_default=lambda model_type: model)
+    activation = AsyncMock()
+    monkeypatch.setattr(websocket_controller, "get_models_registry", lambda: registry)
+    monkeypatch.setattr(
+        websocket_controller,
+        "start_streaming_jobs",
+        lambda **kwargs: {
+            "speech_detection": "speech-1",
+            "audio_persistence": "persist-1",
+        },
+    )
+    monkeypatch.setattr(websocket_controller, "publish_sse_event_async", _ignore_sse)
+    monkeypatch.setattr(
+        websocket_controller, "subscribe_to_interim_results", _ignore_sse
+    )
+    monkeypatch.setattr(websocket_controller, "request_voice_session_start", activation)
+
+    await websocket_controller._initialize_streaming_session(
+        state,
+        producer,
+        "user-1",
+        "user@example.com",
+        "client-1",
+        {
+            "rate": 16000,
+            "channels": 1,
+            "width": 2,
+            "voice_duplex_protocol": 1,
+            "capture_epoch": 3,
+            "processing_profile": "half_duplex",
+            "effects": {
+                "aec": {
+                    "reporting": "reported",
+                    "requested": True,
+                    "available": False,
+                    "enabled": False,
+                },
+                "noise_suppression": {
+                    "reporting": "reported",
+                    "requested": True,
+                    "available": True,
+                    "enabled": True,
+                },
+            },
+            "voice_session_id": None,
+        },
+        websocket=websocket,
+    )
+
+    assert (
+        websocket.send_json.await_args_list[0].args[0]["type"]
+        == "audio-session.started"
+    )
+    activation.assert_awaited_once_with(
+        client_state=state,
+        audio_stream_producer=producer,
+    )
 
 
 @pytest.mark.asyncio

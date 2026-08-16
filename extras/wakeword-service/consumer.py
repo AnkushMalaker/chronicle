@@ -17,7 +17,6 @@ import json
 import logging
 import os
 import time
-from pathlib import Path
 from typing import Dict
 
 import redis.asyncio as redis
@@ -45,28 +44,6 @@ logger = logging.getLogger(__name__)
 STREAM_PATTERN = "audio:stream:*"
 GROUP_NAME = "wakeword_detection"
 DETECTIONS_STREAM = "wakeword:detections"
-
-# Notification tones (HA Voice PE sounds, CC-BY 4.0 — see tones/LICENSE.md).
-# This service is the single source of tone audio: tones are sent to every client
-# (HAVPE relay, phone app, web UI) as inline ``play-audio`` bytes, which they all
-# decode and play. No client bundles its own copy.
-_TONES_DIR = Path(__file__).resolve().parent / "tones"
-_TONE_FILES = {"armed": "armed.wav", "done": "done.wav"}  # logical name -> file
-
-
-def _load_tones() -> Dict[str, str]:
-    """Load each tone as a base64 ``play-audio`` payload once at import."""
-    loaded: Dict[str, str] = {}
-    for name, filename in _TONE_FILES.items():
-        path = _TONES_DIR / filename
-        try:
-            loaded[name] = base64.b64encode(path.read_bytes()).decode("ascii")
-        except OSError as e:  # noqa: BLE001 - a missing tone must not break detection
-            logger.warning("Tone '%s' unavailable (%s): %s", name, path, e)
-    return loaded
-
-
-_TONE_B64 = _load_tones()
 
 # Stop processing a stream after this long with no new chunks (zombie guard).
 STREAM_IDLE_TIMEOUT_SECONDS = 300
@@ -372,7 +349,7 @@ class WakeWordConsumer:
         # the tone lag). Collect-only (shadow) arms farm FP data silently: no tone,
         # no command dispatch.
         if not getattr(event, "collect_only", False):
-            await self._send_tone(event.client_id, "done")
+            await self._publish_tone_request(event.client_id, event.session_id, "done")
         # Snapshot the trigger window for false-positive review. Off-loop so the
         # synchronous WAV/JSON writes don't block the frame loop.
         await asyncio.to_thread(self._save_sample, PENDING, event, event.trigger_audio)
@@ -503,7 +480,9 @@ class WakeWordConsumer:
         """Push a UI pulse the instant the wake word arms (before capture/ASR)."""
         # Listening tone FIRST — a pure ack needing only client_id, so it never waits
         # behind the user lookup / SSE below (keeps the cue instant under load).
-        await self._send_tone(session_ref.client_id, "armed")
+        await self._publish_tone_request(
+            session_ref.client_id, session_ref.session_id, "armed"
+        )
         # Cyan "Listening" ring on LED-capable devices (HAVPE). Like the tone it only
         # needs client_id, so it stays snappy; non-LED clients ignore the frame.
         await self._publish_downlink(
@@ -530,20 +509,25 @@ class WakeWordConsumer:
         )
         logger.info(f"🔔 wake.armed SSE for '{session_ref.client_id}'")
 
-    async def _send_tone(self, client_id: ClientId, tone: str) -> None:
-        """Play a notification tone on the device via inline ``play-audio`` bytes.
-
-        ``play-audio`` carries the tone bytes inline, so every client type (HAVPE
-        relay, phone app, web UI) can play it the same way — no client needs its own
-        bundled copy. Best-effort: a missing tone asset just means no sound.
-        """
-        audio_b64 = _TONE_B64.get(tone)
-        if not audio_b64:
-            return
-        await self._publish_downlink(
-            client_id,
-            "play-audio",
-            {"audio_b64": audio_b64, "format": "wav", "announcement": True},
+    async def _publish_tone_request(
+        self, client_id: ClientId, session_id: SessionId, tone: str
+    ) -> None:
+        """Publish a semantic cue; the backend response coordinator owns audio."""
+        if tone not in {"armed", "done"}:
+            raise ValueError(f"unsupported wake tone: {tone}")
+        await self.redis_client.xadd(
+            DETECTIONS_STREAM,
+            {
+                "event": json.dumps(
+                    {
+                        "kind": "tone",
+                        "client_id": str(client_id),
+                        "session_id": str(session_id),
+                        "tone": tone,
+                    },
+                    separators=(",", ":"),
+                )
+            },
         )
 
     async def _publish_downlink(

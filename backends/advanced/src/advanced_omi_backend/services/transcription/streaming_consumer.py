@@ -40,10 +40,6 @@ from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
 )
-from advanced_omi_backend.services.interaction_modes import (
-    AudioInterval,
-    InteractionIngress,
-)
 from advanced_omi_backend.services.transcription import get_transcription_provider
 from advanced_omi_backend.services.wakeword.followup import maybe_handle_followup
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
@@ -943,6 +939,13 @@ class StreamingTranscriptionConsumer:
             if identity is None:
                 return
             user_id, client_id = identity
+            capture = await self.store.read(session_id)
+            if capture is not None and capture.voice_session_id:
+                logger.debug(
+                    "Skipping fragment-level plugin routing for active voice session %s",
+                    capture.voice_session_id,
+                )
+                return
 
             # Primary speaker gating
             if speaker_name:
@@ -961,54 +964,6 @@ class StreamingTranscriptionConsumer:
                 except Exception as e:
                     logger.warning(f"Error checking primary speakers: {e}")
                     # Don't block plugins on lookup failure
-
-            # Interaction modes have first refusal over every final utterance from
-            # their user/device.  This is intentionally ahead of the short Hermes
-            # follow-up window and the ordinary plugin chain: an active shopping
-            # session is exclusive, and must not accidentally run Home Assistant,
-            # summarization, or another keyword plugin with the same words.
-            try:
-                words = result.get("words") or []
-                timed_words = [
-                    word
-                    for word in words
-                    if isinstance(word, dict)
-                    and word.get("start") is not None
-                    and word.get("end") is not None
-                ]
-                view = await self.store.read(session_id)
-                if not timed_words or view is None:
-                    raise ValueError(
-                        "interaction routing requires final word-level audio bounds"
-                    )
-                audio_interval = AudioInterval(
-                    audio_session_id=session_id,
-                    capture_epoch=view.capture_epoch,
-                    start_ms=min(float(word["start"]) for word in timed_words) * 1000,
-                    end_ms=max(float(word["end"]) for word in timed_words) * 1000,
-                    voice_session_id=view.voice_session_id or None,
-                )
-                mode_ingress = InteractionIngress(
-                    self.redis_client, self.plugin_router.interaction_registry
-                )
-                mode_result = await mode_ingress.submit(
-                    user_id=user_id,
-                    client_id=client_id,
-                    audio_interval=audio_interval,
-                    text=result.get("text", ""),
-                    source="streaming",
-                )
-                if mode_result.consumed:
-                    logger.info(
-                        "Interaction mode consumed streaming transcript "
-                        "(mode=%s, accepted=%s, reason=%s)",
-                        mode_result.mode_id,
-                        mode_result.accepted,
-                        mode_result.reason,
-                    )
-                    return
-            except Exception as e:  # noqa: BLE001 - never break transcript storage
-                logger.error(f"Interaction-mode ingress error: {e}", exc_info=True)
 
             # Wake-word follow-up: if a follow-up window is open for this session,
             # treat this utterance as a contextual follow-up (no wake word needed)

@@ -483,6 +483,11 @@ class VoiceSessionCoordinator:
                             "generation": str(generation),
                             "updated_at": str(now),
                             "resume_expires_at": str(disconnected.resume_expires_at),
+                            # The phone can prove only the last generation it saw
+                            # before the transport vanished. The increment above is
+                            # deliberately server-side so stale output is fenced,
+                            # but cannot be guessed by an honest reconnecting client.
+                            "resume_from_generation": str(session.generation),
                         },
                     )
                     pipe.set(
@@ -534,7 +539,8 @@ class VoiceSessionCoordinator:
                         or time.time() > old.resume_expires_at
                         or not proof
                         or not hmac.compare_digest(proof, _token_hash(resume_token))
-                        or last_response_generation != generation
+                        or last_response_generation
+                        != int(raw_old.get("resume_from_generation", "-1"))
                         or new_capture_epoch <= previous_capture_epoch
                     ):
                         raise StaleVoiceBinding("resume proof is invalid or expired")

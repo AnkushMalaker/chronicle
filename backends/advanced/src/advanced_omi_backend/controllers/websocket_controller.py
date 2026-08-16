@@ -260,6 +260,27 @@ async def request_voice_session_start(
             json.dumps(error, separators=(",", ":")),
         )
         return None
+    await _publish_voice_session_start(
+        started=started,
+        client_state=client_state,
+        audio_stream_producer=audio_stream_producer,
+    )
+    return started
+
+
+async def _publish_voice_session_start(
+    *,
+    started,
+    client_state,
+    audio_stream_producer,
+) -> None:
+    """Persist the new binding before making its start event observable."""
+
+    await audio_stream_producer.store.bind_voice_session(
+        started.session.audio_session_id, started.session.voice_session_id
+    )
+    client_state.voice_session_id = started.session.voice_session_id
+    client_id = started.session.client_id
     event = VoiceSessionStart(
         type="voice-session.start",
         event_id=uuid.uuid4(),
@@ -276,7 +297,6 @@ async def request_voice_session_start(
         str(device_downlink_channel(ClientId.from_value(client_id))),
         json.dumps(event.model_dump(mode="json"), separators=(",", ":")),
     )
-    return started
 
 
 async def _handle_phone_voice_event(
@@ -290,6 +310,11 @@ async def _handle_phone_voice_event(
     event = parse_voice_protocol_event(payload)
     if event.client_id != client_state.client_id:
         raise ValueError("voice event client_id does not match authenticated socket")
+    if hasattr(event, "audio_session_id") and (
+        event.audio_session_id != client_state.stream_session_id
+        or event.capture_epoch != client_state.capture_epoch
+    ):
+        raise ValueError("voice event does not match the socket's active capture")
     if not await VoiceEventDeduplicator(audio_stream_producer.redis_client).claim(
         user_id=client_state.user_id,
         client_id=client_state.client_id,
@@ -323,7 +348,7 @@ async def _handle_phone_voice_event(
     if isinstance(event, VoiceSessionResume):
         if not client_state.stream_session_id:
             raise ValueError("voice resume requires the new capture session")
-        return await voice_sessions.resume(
+        resumed = await voice_sessions.resume(
             previous_voice_session_id=event.previous_voice_session_id,
             previous_capture_epoch=event.previous_capture_epoch,
             resume_token=event.resume_token,
@@ -334,6 +359,12 @@ async def _handle_phone_voice_event(
             user_id=client_state.user_id,
             client_id=client_state.client_id,
         )
+        await _publish_voice_session_start(
+            started=resumed,
+            client_state=client_state,
+            audio_stream_producer=audio_stream_producer,
+        )
+        return resumed
     if isinstance(event, VoiceSessionStopped):
         return await voice_sessions.end(
             voice_session_id=event.voice_session_id,
@@ -978,6 +1009,32 @@ async def _initialize_streaming_session(
         voice_session_id,
     ) = _capture_provenance_from_audio_format(audio_format)
 
+    if voice_session_id is not None:
+        if processing_profile not in {
+            "duplex_aec",
+            "duplex_isolated",
+            "half_duplex",
+        }:
+            raise ValueError("a voice session requires an interactive capture profile")
+        active_voice = await VoiceSessionCoordinator(
+            audio_stream_producer.redis_client
+        ).get_active(user_id, client_id)
+        same_ready_socket = (
+            active_voice is not None
+            and active_voice.socket_id == client_state.socket_id
+            and active_voice.state in {"ready_full", "ready_isolated", "ready_half"}
+        )
+        resumable_socket = (
+            active_voice is not None and active_voice.state == "reconnecting"
+        )
+        if (
+            active_voice is None
+            or active_voice.voice_session_id != voice_session_id
+            or capture_epoch <= active_voice.capture_epoch
+            or not (same_ready_socket or resumable_socket)
+        ):
+            raise ValueError("audio-start voice binding is stale or unauthenticated")
+
     if client_state.stream_session_id is not None:
         application_logger.debug(f"Session already initialized for {client_id}")
         return None
@@ -1085,6 +1142,15 @@ async def _initialize_streaming_session(
             sent_at=datetime.now(timezone.utc),
         )
         await websocket.send_json(started.model_dump(mode="json", exclude_none=False))
+        if voice_session_id is None and processing_profile in {
+            "duplex_aec",
+            "duplex_isolated",
+            "half_duplex",
+        }:
+            await request_voice_session_start(
+                client_state=client_state,
+                audio_stream_producer=audio_stream_producer,
+            )
 
     return subscriber_task
 
