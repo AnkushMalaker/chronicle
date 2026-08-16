@@ -1,0 +1,11 @@
+{
+  "type": "voice-session.resume",
+  "protocol": 1,
+  "event_id": "00000000-0000-4000-8000-000000000005",
+  "client_id": "user01-phone",
+  "previous_voice_session_id": "voice-session-1",
+  "previous_capture_epoch": 13,
+  "resume_token": "resume-token-with-at-least-32-bytes-of-entropy",
+  "last_response_generation": 7,
+  "sent_at": "2026-08-16T12:00:04Z"
+}

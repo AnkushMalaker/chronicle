@@ -1,0 +1,12 @@
+{
+  "type": "voice-session.stopped",
+  "protocol": 1,
+  "event_id": "00000000-0000-4000-8000-000000000007",
+  "client_id": "user01-phone",
+  "audio_session_id": "capture-epoch-13",
+  "voice_session_id": "voice-session-1",
+  "capture_epoch": 13,
+  "sent_at": "2026-08-16T12:00:06Z",
+  "restoration_succeeded": true,
+  "failure_code": null
+}

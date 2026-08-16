@@ -1,0 +1,20 @@
+{
+  "type": "voice-session.capabilities-changed",
+  "protocol": 1,
+  "event_id": "00000000-0000-4000-8000-000000000004",
+  "client_id": "user01-phone",
+  "audio_session_id": "capture-epoch-12",
+  "voice_session_id": "voice-session-1",
+  "capture_epoch": 13,
+  "sent_at": "2026-08-16T12:00:03Z",
+  "reason": "route_changed",
+  "capabilities": {
+    "mode": "duplex_isolated",
+    "input_route": "bluetooth_hfp",
+    "output_route": "headphones",
+    "native_sample_rate": 48000,
+    "aec": {"requested": false, "available": true, "enabled": false},
+    "noise_suppression": {"requested": true, "available": true, "enabled": true},
+    "fallback_reason": null
+  }
+}

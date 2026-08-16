@@ -1,0 +1,13 @@
+{
+  "type": "voice-session.start",
+  "protocol": 1,
+  "event_id": "00000000-0000-4000-8000-000000000002",
+  "client_id": "user01-phone",
+  "audio_session_id": "capture-far-field",
+  "voice_session_id": "voice-session-1",
+  "capture_epoch": 11,
+  "sent_at": "2026-08-16T12:00:01Z",
+  "resume_token": "resume-token-with-at-least-32-bytes-of-entropy",
+  "response_generation": 4,
+  "readiness_deadline_ms": 2000
+}
