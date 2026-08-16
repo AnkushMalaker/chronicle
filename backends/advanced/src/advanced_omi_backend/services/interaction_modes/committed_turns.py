@@ -13,11 +13,13 @@ from redis import exceptions as redis_exceptions
 
 from advanced_omi_backend.redis_keys import SessionId, transcription_results_stream
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
+from advanced_omi_backend.services.response_coordinator import ResponseCoordinator
 from advanced_omi_backend.services.transcription import get_transcription_provider
 from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
 from advanced_omi_backend.utils.audio_utils import pcm_to_wav_bytes
 
 from .contracts import AudioInterval
+from .episode_claims import AudioEpisodeArbiter
 from .ingress import InteractionIngress, InteractionIngressResult
 from .registry import InteractionRegistry
 
@@ -97,6 +99,9 @@ class TranscriptResolution:
 
 
 ExactTranscriber = Callable[[bytes, int, int, int], Awaitable[str]]
+CommittedCommandDispatcher = Callable[
+    [CommittedAudioTurn, str, str, str, int], Awaitable[None]
+]
 
 
 class CommittedTranscriptAssembler:
@@ -193,12 +198,14 @@ class CommittedTurnRouter:
         registry: InteractionRegistry,
         *,
         transcript_assembler: CommittedTranscriptAssembler | None = None,
+        command_dispatcher: CommittedCommandDispatcher | None = None,
     ):
         self.redis = redis_client
         self.ingress = InteractionIngress(redis_client, registry)
         self.transcripts = transcript_assembler or CommittedTranscriptAssembler(
             redis_client
         )
+        self.command_dispatcher = command_dispatcher
         self.running = False
 
     async def route(self, fields: dict) -> InteractionIngressResult:
@@ -230,18 +237,49 @@ class CommittedTurnRouter:
                 "committed turn does not match authenticated capture binding"
             )
 
+        claimed = await AudioEpisodeArbiter(self.redis).claim(
+            user_id=voice.user_id,
+            client_id=voice.client_id,
+            interval=turn.interval,
+            source="committed",
+        )
+        if not claimed.accepted:
+            return InteractionIngressResult(
+                consumed=True,
+                accepted=False,
+                reason="episode_already_claimed",
+            )
+        response_generation = await ResponseCoordinator(
+            self.redis, VoiceSessionCoordinator(self.redis)
+        ).begin_turn(voice.user_id, voice.client_id)
         transcript = await self.transcripts.resolve(turn)
         if not transcript.text:
             return InteractionIngressResult(
                 consumed=False, reason="empty_exact_transcript"
             )
-        return await self.ingress.submit(
+        result = await self.ingress.submit(
             user_id=voice.user_id,
             client_id=voice.client_id,
             audio_interval=turn.interval,
             text=transcript.text,
             source="committed",
+            response_generation=response_generation,
+            episode_claim=claimed.claim,
         )
+        if not result.consumed and self.command_dispatcher is not None:
+            await self.command_dispatcher(
+                turn,
+                transcript.text,
+                voice.user_id,
+                voice.client_id,
+                response_generation,
+            )
+            return InteractionIngressResult(
+                consumed=True,
+                accepted=True,
+                reason="ordinary_command",
+            )
+        return result
 
     async def run(self) -> None:
         try:

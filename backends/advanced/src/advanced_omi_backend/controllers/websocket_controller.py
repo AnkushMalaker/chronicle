@@ -73,9 +73,13 @@ from advanced_omi_backend.services.device_audio import (
 )
 from advanced_omi_backend.services.observability import record_event_sync
 from advanced_omi_backend.services.plugin_service import get_plugin_router
-from advanced_omi_backend.services.response_coordinator import ResponseCoordinator
+from advanced_omi_backend.services.response_coordinator import (
+    ResponseCoordinator,
+    ResponseCoordinatorError,
+)
 from advanced_omi_backend.services.sse_publisher import publish_sse_event_async
 from advanced_omi_backend.services.transcription import is_transcription_available
+from advanced_omi_backend.services.voice_events import VoiceEventDeduplicator
 from advanced_omi_backend.services.voice_frames import VoiceFramePublisher
 from advanced_omi_backend.services.voice_sessions import (
     ClientUpgradeRequired,
@@ -286,6 +290,12 @@ async def _handle_phone_voice_event(
     event = parse_voice_protocol_event(payload)
     if event.client_id != client_state.client_id:
         raise ValueError("voice event client_id does not match authenticated socket")
+    if not await VoiceEventDeduplicator(audio_stream_producer.redis_client).claim(
+        user_id=client_state.user_id,
+        client_id=client_state.client_id,
+        event_id=event.event_id,
+    ):
+        return None
     voice_sessions = VoiceSessionCoordinator(audio_stream_producer.redis_client)
     responses = ResponseCoordinator(audio_stream_producer.redis_client, voice_sessions)
     common = {
@@ -474,10 +484,12 @@ async def subscribe_to_device_downlink(
     redis_client = None
     pubsub = None
     opus_stream = is_opus_streaming_client(client_id_value)
+    ack_deadline_tasks: set[asyncio.Task] = set()
 
     try:
-        redis_client = create_async_redis(decode_responses=True)
+        redis_client = create_async_redis(decode_responses=False)
         voice_sessions = VoiceSessionCoordinator(redis_client)
+        responses = ResponseCoordinator(redis_client, voice_sessions)
         pubsub = redis_client.pubsub()
         await pubsub.subscribe(channel)
         logger.info(
@@ -526,6 +538,26 @@ async def subscribe_to_device_downlink(
                         )
                         if not forwarded:
                             continue
+                        if msg_type == "response.audio":
+
+                            async def expire_after(
+                                response_id: str, delay: float
+                            ) -> None:
+                                await asyncio.sleep(delay)
+                                try:
+                                    await responses.expire_stalled(response_id)
+                                except ResponseCoordinatorError:
+                                    pass
+
+                            for delay in (
+                                5.0,
+                                7.0 + payload["duration_ms"] / 1000,
+                            ):
+                                task = asyncio.create_task(
+                                    expire_after(payload["response_id"], delay)
+                                )
+                                ack_deadline_tasks.add(task)
+                                task.add_done_callback(ack_deadline_tasks.discard)
                     elif msg_type == "stop-audio":
                         # Barge-in: stop whatever TTS is playing on the device. For
                         # Opus clients this cancels the in-flight stream + flushes the
@@ -586,6 +618,13 @@ async def subscribe_to_device_downlink(
             exc_info=True,
         )
     finally:
+        for task in ack_deadline_tasks:
+            task.cancel()
+        for task in ack_deadline_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         if pubsub is not None:
             try:
                 await pubsub.unsubscribe(channel)

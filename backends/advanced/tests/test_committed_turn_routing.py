@@ -21,6 +21,8 @@ from advanced_omi_backend.services.interaction_modes.episode_claims import (
 )
 from advanced_omi_backend.services.interaction_modes.ingress import INPUT_STREAM
 from advanced_omi_backend.services.interaction_modes.registry import InteractionRegistry
+from advanced_omi_backend.services.interaction_modes.store import InteractionStore
+from advanced_omi_backend.services.response_coordinator import ResponseCoordinator
 from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
 from advanced_omi_backend.voice_protocol import VoiceCapabilities
 
@@ -38,17 +40,23 @@ def _interval(start_ms: float, end_ms: float) -> AudioInterval:
     )
 
 
-def _turn_fields(voice_session_id: str = "voice-1") -> dict:
+def _turn_fields(
+    voice_session_id: str = "voice-1",
+    *,
+    turn_id: str = "turn-1",
+    start_ms: int = 200,
+    end_ms: int = 1000,
+) -> dict:
     return {
-        "turn_id": "turn-1",
+        "turn_id": turn_id,
         "turn_revision": "0",
         "voice_session_id": voice_session_id,
         "audio_session_id": "audio-1",
         "capture_epoch": "4",
         "start_sequence": "5",
         "end_sequence": "25",
-        "started_at_ms": "200",
-        "ended_at_ms": "1000",
+        "started_at_ms": str(start_ms),
+        "ended_at_ms": str(end_ms),
         "sample_rate": "16000",
         "channels": "1",
         "sample_width": "2",
@@ -202,8 +210,51 @@ async def test_real_committed_router_validates_binding_and_enqueues_complete_tur
     raw = entries[0][1][b"input"]
     item = InteractionInput.from_dict(json.loads(raw))
     assert item.text == "add milk"
+    assert item.response_generation == 1
     assert item.audio_interval.voice_session_id == voice_id
     assert item.audio_interval.capture_epoch == 4
+
+    duplicate = await router.route(_turn_fields(voice_id))
+    assert not duplicate.accepted
+    assert duplicate.reason == "episode_already_claimed"
+    assert (
+        await ResponseCoordinator(redis_client, voice_coordinator).current_generation(
+            "user-1", "client-1"
+        )
+        == 1
+    )
+    active = await InteractionStore(redis_client).get_active("user-1", "client-1")
+    await InteractionStore(redis_client).end(active, reason="test_complete")
+
+    command_dispatcher = AsyncMock()
+    ordinary_router = CommittedTurnRouter(
+        redis_client,
+        InteractionRegistry(),
+        transcript_assembler=CommittedTranscriptAssembler(
+            redis_client,
+            exact_transcriber=AsyncMock(return_value="turn on the lights"),
+            watermark_wait_seconds=0,
+        ),
+        command_dispatcher=command_dispatcher,
+    )
+    ordinary_fields = _turn_fields(
+        voice_id,
+        turn_id="turn-2",
+        start_ms=2_000,
+        end_ms=2_800,
+    )
+
+    ordinary = await ordinary_router.route(ordinary_fields)
+
+    assert ordinary.accepted and ordinary.reason == "ordinary_command"
+    dispatched_turn = CommittedAudioTurn.from_fields(ordinary_fields)
+    command_dispatcher.assert_awaited_once_with(
+        dispatched_turn,
+        "turn on the lights",
+        "user-1",
+        "client-1",
+        2,
+    )
 
 
 async def test_committed_router_rejects_stale_voice_binding_before_transcription():

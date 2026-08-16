@@ -30,7 +30,15 @@ from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.plugins.router import PluginRouter
 from advanced_omi_backend.redis_keys import ClientId, SessionId, device_downlink_channel
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
-from advanced_omi_backend.services.tts_client import synthesize_speech
+from advanced_omi_backend.services.response_coordinator import (
+    ResponseCoordinator,
+    StaleResponse,
+)
+from advanced_omi_backend.services.response_delivery import (
+    deliver_text_response,
+    deliver_wav_response,
+)
+from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
 from advanced_omi_backend.services.wakeword.timing import WakeTimer
 
 logger = logging.getLogger(__name__)
@@ -134,26 +142,42 @@ _TONE_GENERATORS = {
 
 
 async def play_tone_on_device(
-    redis_client: redis.Redis, client_id: ClientId, tone: str = "thinking"
+    redis_client: redis.Redis,
+    client_id: ClientId,
+    session_id: SessionId,
+    tone: str = "thinking",
+    *,
+    generation: int | None = None,
+    turn_id: str | None = None,
+    turn_revision: int = 0,
 ) -> None:
-    """Play a short notification tone on the device via its downlink channel.
-
-    Uses the same inline ``play-audio`` path as :func:`speak_on_device`, so every
-    client type (HAVPE relay, phone, web UI) plays it. Best-effort; never raises.
-    """
+    """Play a bound notification tone through the response coordinator."""
     if not isinstance(client_id, ClientId):
         raise TypeError("play_tone_on_device requires ClientId")
+    if not isinstance(session_id, SessionId):
+        raise TypeError("play_tone_on_device requires SessionId")
     generator = _TONE_GENERATORS.get(tone)
     if generator is None:
         logger.debug(f"Unknown tone '{tone}'; not playing")
         return
-    audio_b64 = generator()
-    if not audio_b64:
+    encoded = generator()
+    if not encoded:
         return
-    msg = {"type": "play-audio", "data": {"audio_b64": audio_b64, "format": "wav"}}
+
+    async def load_tone() -> bytes:
+        return base64.b64decode(encoded)
+
     try:
-        await redis_client.publish(
-            str(device_downlink_channel(client_id)), json.dumps(msg)
+        await deliver_wav_response(
+            redis_client,
+            client_id,
+            session_id,
+            load_tone,
+            kind="tone",
+            generation=generation,
+            turn_id=turn_id,
+            turn_revision=turn_revision,
+            barge_in_allowed=False,
         )
         logger.info(f"🔔 Sent '{tone}' tone to device {client_id}")
     except Exception as e:  # noqa: BLE001 - tone output is best-effort
@@ -204,10 +228,6 @@ def _ctx_key(session_id: str | SessionId) -> str:
     return f"followup:ctx:{session_id}"
 
 
-def _mute_key(session_id: str | SessionId) -> str:
-    return f"followup:mute:{session_id}"
-
-
 async def open_followup_window(
     redis_client: redis.Redis, session_id: str | SessionId, command: str
 ) -> None:
@@ -241,26 +261,6 @@ async def clear_followup_window(
     if not session_id:
         return
     await redis_client.delete(_ctx_key(session_id))
-
-
-async def is_muted(redis_client: redis.Redis, session_id: str | SessionId) -> bool:
-    """True while the device is (likely) still playing our spoken reply.
-
-    Guards against the device mic capturing the assistant's own TTS reply and
-    the streaming transcript treating it as a follow-up.
-    """
-    if not session_id:
-        return False
-    return bool(await redis_client.exists(_mute_key(session_id)))
-
-
-async def _set_mute(
-    redis_client: redis.Redis, session_id: str | SessionId, secs: float
-) -> None:
-    if not session_id or secs <= 0:
-        return
-    # Redis EX is integer seconds; round up so short replies still get a floor.
-    await redis_client.set(_mute_key(session_id), "1", ex=max(1, int(secs + 0.999)))
 
 
 async def get_active_conversation_id(
@@ -297,47 +297,26 @@ async def speak_on_device(
     session_id: SessionId,
     text: str,
     timer: Optional[WakeTimer] = None,
+    *,
+    generation: int | None = None,
+    turn_id: str | None = None,
+    turn_revision: int = 0,
 ) -> None:
-    """Synthesize ``text`` and push it to the device via its downlink channel.
-
-    Also opens a short mute window so we don't transcribe our own reply as a
-    follow-up. The device can't reach the backend, so the relay serves the audio
-    bytes on the LAN. When ``timer`` is given, records the synthesis duration, the
-    downlink moment, and the estimated playback length.
-    """
+    """Synthesize and deliver one fully bound coordinated response."""
     if not isinstance(client_id, ClientId):
         raise TypeError("speak_on_device requires ClientId")
     if not isinstance(session_id, SessionId):
         raise TypeError("speak_on_device requires SessionId")
-    if not text:
-        return
-    _tts_start = time.perf_counter()
-    audio = await synthesize_speech(text)
-    if timer is not None:
-        timer.tts_ms = (time.perf_counter() - _tts_start) * 1000.0
-    if not audio:
-        return
-    # Mute follow-up capture for roughly as long as the reply plays (~2.5 wps).
-    play_secs = max(1.5, min(8.0, len(text.split()) * 0.4))
-    if timer is not None:
-        timer.est_play_secs = play_secs
-    await _set_mute(redis_client, session_id, play_secs)
-    msg = {
-        "type": "play-audio",
-        "data": {
-            "audio_b64": base64.b64encode(audio).decode("ascii"),
-            "format": "wav",
-        },
-    }
-    try:
-        await redis_client.publish(
-            str(device_downlink_channel(client_id)), json.dumps(msg)
-        )
-        if timer is not None:
-            timer.mark_downlink()
-        logger.info(f"🔊 Sent TTS reply ({len(audio)}B) to device {client_id}")
-    except Exception as e:  # noqa: BLE001 - speech output is best-effort
-        logger.debug(f"Failed to publish TTS downlink for {client_id}: {e}")
+    await deliver_text_response(
+        redis_client,
+        client_id,
+        session_id,
+        text,
+        generation=generation,
+        turn_id=turn_id,
+        turn_revision=turn_revision,
+        timer=timer,
+    )
 
 
 async def execute_voice_command(
@@ -359,6 +338,9 @@ async def execute_voice_command(
     capture_secs: Optional[float] = None,
     asr_ms: Optional[float] = None,
     quiet: bool = False,
+    response_generation: int | None = None,
+    response_turn_id: str | None = None,
+    response_turn_revision: int = 0,
 ) -> str:
     """Dispatch a voice command, speak the reply, emit SSE, and manage the window.
 
@@ -389,6 +371,18 @@ async def execute_voice_command(
         capture_secs=capture_secs,
         asr_ms=asr_ms,
     )
+    responses = ResponseCoordinator(redis_client, VoiceSessionCoordinator(redis_client))
+    if response_generation is not None:
+        try:
+            await responses.assert_generation(
+                user_id, client_id_value, response_generation
+            )
+        except StaleResponse:
+            return ""
+    capture_view = await SessionStore(redis_client).read(session_id_value)
+    allow_handoff_tone = bool(
+        capture_view is not None and not capture_view.voice_session_id
+    )
     # Play the handoff "thinking" tone at most once per command — the instant the
     # first handler declines (should_continue / None result) and another handler
     # is still queued to run.
@@ -400,9 +394,21 @@ async def execute_voice_command(
         nonlocal handoff_tone_sent
         timer.record_plugin(plugin_id, duration_ms, result)
         declined = result is None or getattr(result, "should_continue", False)
-        if declined and not is_last and not handoff_tone_sent:
+        if response_generation is not None:
+            await responses.assert_generation(
+                user_id, client_id_value, response_generation
+            )
+        if declined and not is_last and not handoff_tone_sent and allow_handoff_tone:
             handoff_tone_sent = True
-            await play_tone_on_device(redis_client, client_id, "thinking")
+            await play_tone_on_device(
+                redis_client,
+                client_id,
+                session_id,
+                "thinking",
+                generation=response_generation,
+                turn_id=response_turn_id,
+                turn_revision=response_turn_revision,
+            )
 
     data: dict[str, Any] = {
         "command": command,
@@ -436,24 +442,36 @@ async def execute_voice_command(
         )
     try:
         _dispatch_start = time.perf_counter()
-        results = await plugin_router.dispatch_event(
-            event=PluginEvent.WAKE_WORD_DETECTED,
-            user_id=user_id,
-            data=data,
-            metadata={
-                "client_id": client_id_value,
-                "session_id": session_id_value,
-                "conversation_id": conversation_id,
-                "command": command,
-                "wakeword": wakeword,
-                "asr_status": asr_status,
-                "has_speech": has_speech,
-                "score": score,
-                "reason": reason,
-                "source": source,
-            },
-            on_plugin_done=_on_plugin_done,
-        )
+        try:
+            results = await plugin_router.dispatch_event(
+                event=PluginEvent.WAKE_WORD_DETECTED,
+                user_id=user_id,
+                data=data,
+                metadata={
+                    "client_id": client_id_value,
+                    "session_id": session_id_value,
+                    "conversation_id": conversation_id,
+                    "command": command,
+                    "wakeword": wakeword,
+                    "asr_status": asr_status,
+                    "has_speech": has_speech,
+                    "score": score,
+                    "reason": reason,
+                    "source": source,
+                },
+                on_plugin_done=_on_plugin_done,
+            )
+            if response_generation is not None:
+                await responses.assert_generation(
+                    user_id, client_id_value, response_generation
+                )
+        except StaleResponse:
+            logger.info(
+                "Suppressed superseded voice command for %s generation %s",
+                client_id_value,
+                response_generation,
+            )
+            return ""
         timer.dispatch_ms = (time.perf_counter() - _dispatch_start) * 1000.0
 
         reply = (
@@ -476,7 +494,16 @@ async def execute_voice_command(
         )
 
         if reply and not quiet:
-            await speak_on_device(redis_client, client_id, session_id, reply, timer)
+            await speak_on_device(
+                redis_client,
+                client_id,
+                session_id,
+                reply,
+                timer,
+                generation=response_generation,
+                turn_id=response_turn_id,
+                turn_revision=response_turn_revision,
+            )
 
         # Only arm follow-ups when the command actually did something.
         if acted:

@@ -32,7 +32,6 @@ from advanced_omi_backend.services.wakeword.executor import (
     execute_voice_command,
     get_active_conversation_id,
     get_followup_ctx,
-    is_muted,
 )
 
 logger = logging.getLogger(__name__)
@@ -183,10 +182,6 @@ async def maybe_handle_followup(
     ctx = await get_followup_ctx(redis_client, session_id)
     if not ctx:
         return False
-    if await is_muted(redis_client, session_id):
-        logger.debug("Follow-up muted (TTS playing) for %s", session_id)
-        return False
-
     last_command = ctx.get("command", "")
     text_norm = _normalize(text)
     last_norm = _normalize(last_command)

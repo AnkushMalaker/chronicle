@@ -68,6 +68,7 @@ class InteractionInput:
     text: str
     source: InteractionSource
     received_at: float
+    response_generation: int
     activation_phrase: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -99,6 +100,9 @@ class InteractionSession:
     audio_session_id: str
     capture_epoch: int
     voice_session_id: Optional[str]
+    response_generation: int
+    response_turn_id: str
+    response_turn_revision: int
     phase: str
     plugin_state: dict[str, Any]
     started_at: float

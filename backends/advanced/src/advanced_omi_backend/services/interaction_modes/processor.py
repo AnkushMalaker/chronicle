@@ -14,6 +14,11 @@ from advanced_omi_backend.observability.tracing import (
     set_span_io,
 )
 from advanced_omi_backend.plugins.router import PluginRouter
+from advanced_omi_backend.services.response_coordinator import (
+    ResponseCoordinator,
+    StaleResponse,
+)
+from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
 
 from .contracts import (
     InteractionContext,
@@ -28,6 +33,10 @@ LOCK_SECONDS = 120
 
 class InteractionBusyError(RuntimeError):
     """Another worker currently owns this interaction's serial transition."""
+
+
+class StaleInteractionTurn(RuntimeError):
+    """The turn was cooperatively cancelled before an external-effect fence."""
 
 
 @dataclass
@@ -119,12 +128,44 @@ class InteractionProcessor:
         session.audio_session_id = item.audio_session_id
         session.capture_epoch = item.audio_interval.capture_epoch
         session.voice_session_id = item.audio_interval.voice_session_id
+        session.response_generation = item.response_generation
+        session.response_turn_id = item.audio_interval.turn_id or item.input_id
+        session.response_turn_revision = item.audio_interval.turn_revision
+        responses = ResponseCoordinator(self.redis, VoiceSessionCoordinator(self.redis))
+        try:
+            await responses.assert_generation(
+                session.user_id,
+                session.client_id,
+                item.response_generation,
+            )
+        except StaleResponse:
+            await self.store.mark_processed(item.input_id)
+            return InteractionDispatch(
+                session=session,
+                reply=None,
+                lifecycle="superseded",
+                event_data={"response_suppressed": True},
+            )
+
+        effect_fenced = False
 
         async def checkpoint() -> None:
             # Deliberately does not mark this input processed: the external
             # effect still has to finish. A replay sees the checkpointed
             # phase/state and can reconcile without repeating unsafe intent.
+            nonlocal effect_fenced
+            try:
+                await responses.assert_generation(
+                    session.user_id,
+                    session.client_id,
+                    item.response_generation,
+                )
+            except StaleResponse as error:
+                raise StaleInteractionTurn(
+                    "turn superseded before irreversible effect"
+                ) from error
             await self.store.save(session)
+            effect_fenced = True
 
         context = InteractionContext(
             session=session,
@@ -132,13 +173,40 @@ class InteractionProcessor:
             services=self.router._services,
             checkpoint=checkpoint,
         )
-        if item.kind == "start":
-            result = await plugin.on_interaction_start(context)
-            lifecycle = "started"
-        else:
-            result = await plugin.on_interaction_turn(context)
-            lifecycle = "updated"
+        try:
+            if item.kind == "start":
+                result = await plugin.on_interaction_start(context)
+                lifecycle = "started"
+            else:
+                result = await plugin.on_interaction_turn(context)
+                lifecycle = "updated"
+        except StaleInteractionTurn:
+            await self.store.mark_processed(item.input_id)
+            return InteractionDispatch(
+                session=session,
+                reply=None,
+                lifecycle="superseded",
+                event_data={"response_suppressed": True},
+            )
         result = result or InteractionResult()
+
+        stale_after_await = False
+        try:
+            await responses.assert_generation(
+                session.user_id,
+                session.client_id,
+                item.response_generation,
+            )
+        except StaleResponse:
+            stale_after_await = True
+        if stale_after_await and not effect_fenced:
+            await self.store.mark_processed(item.input_id)
+            return InteractionDispatch(
+                session=session,
+                reply=None,
+                lifecycle="superseded",
+                event_data={"response_suppressed": True},
+            )
 
         if result.phase is not None:
             session.phase = result.phase
@@ -161,9 +229,12 @@ class InteractionProcessor:
 
         return InteractionDispatch(
             session=session,
-            reply=result.reply,
+            reply=None if stale_after_await else result.reply,
             lifecycle=lifecycle,
-            event_data=result.event_data,
+            event_data={
+                **result.event_data,
+                **({"response_suppressed": True} if stale_after_await else {}),
+            },
         )
 
     async def expire_due(

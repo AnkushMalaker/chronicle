@@ -182,6 +182,9 @@ def _session(*, phase="starting", state=None, user_id="user-1"):
         audio_session_id="audio-1",
         capture_epoch=0,
         voice_session_id=None,
+        response_generation=1,
+        response_turn_id="turn-1",
+        response_turn_revision=0,
         phase=phase,
         plugin_state=state or {},
         started_at=now,
@@ -219,6 +222,7 @@ def _context(
         text=text,
         source="streaming",
         received_at=time.time(),
+        response_generation=session.response_generation,
     )
     return InteractionContext(
         session=session,

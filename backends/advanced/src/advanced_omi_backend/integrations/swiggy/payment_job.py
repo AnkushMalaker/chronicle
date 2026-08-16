@@ -225,5 +225,8 @@ async def monitor_instamart_payment_job(
         ClientId.from_value(client_id),
         SessionId.from_value(audio_session_id),
         reply,
+        generation=session.response_generation if session is not None else None,
+        turn_id=session.response_turn_id if session is not None else None,
+        turn_revision=(session.response_turn_revision if session is not None else 0),
     )
     return {"status": status, "reason": reason, "order_id": order_id}

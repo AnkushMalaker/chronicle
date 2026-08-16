@@ -16,6 +16,7 @@ from advanced_omi_backend.observability.otel_setup import force_flush_otel, init
 from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
 from advanced_omi_backend.redis_keys import ClientId, SessionId
 from advanced_omi_backend.services.interaction_modes.committed_turns import (
+    CommittedAudioTurn,
     CommittedTurnRouter,
 )
 from advanced_omi_backend.services.interaction_modes.contracts import InteractionInput
@@ -31,7 +32,11 @@ from advanced_omi_backend.services.plugin_service import (
     initialize_plugins,
     run_plugin_recovery,
 )
-from advanced_omi_backend.services.wakeword.executor import publish_sse, speak_on_device
+from advanced_omi_backend.services.wakeword.executor import (
+    execute_voice_command,
+    publish_sse,
+    speak_on_device,
+)
 
 GROUP_NAME = "interaction-mode"
 CONSUMER_NAME = "interaction-mode-worker"
@@ -47,11 +52,37 @@ logger = logging.getLogger(__name__)
 class InteractionModeWorker:
     def __init__(self, redis_client, plugin_router):
         self.redis = redis_client
+        self.plugin_router = plugin_router
         self.processor = InteractionProcessor(redis_client, plugin_router)
         self.turn_router = CommittedTurnRouter(
-            redis_client, plugin_router.interaction_registry
+            redis_client,
+            plugin_router.interaction_registry,
+            command_dispatcher=self._dispatch_committed_command,
         )
         self.running = False
+
+    async def _dispatch_committed_command(
+        self,
+        turn: CommittedAudioTurn,
+        text: str,
+        user_id: str,
+        client_id: str,
+        generation: int,
+    ) -> None:
+        await execute_voice_command(
+            self.redis,
+            self.plugin_router,
+            user_id=user_id,
+            session_id=SessionId.from_value(turn.interval.audio_session_id),
+            client_id=ClientId.from_value(client_id),
+            command=text,
+            source="committed",
+            asr_status="committed_exact",
+            capture_secs=(turn.interval.end_ms - turn.interval.start_ms) / 1000,
+            response_generation=generation,
+            response_turn_id=turn.interval.turn_id or str(turn.start_sequence),
+            response_turn_revision=turn.interval.turn_revision,
+        )
 
     async def stop(self) -> None:
         self.running = False
@@ -213,6 +244,9 @@ class InteractionModeWorker:
                 ClientId.from_value(session.client_id),
                 SessionId.from_value(session.audio_session_id),
                 dispatch.reply,
+                generation=session.response_generation,
+                turn_id=session.response_turn_id,
+                turn_revision=session.response_turn_revision,
             )
 
 

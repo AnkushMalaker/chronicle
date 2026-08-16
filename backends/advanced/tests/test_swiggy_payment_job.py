@@ -52,6 +52,9 @@ async def _seed_payment_session(redis_client):
         audio_session_id="audio-1",
         capture_epoch=0,
         voice_session_id=None,
+        response_generation=1,
+        response_turn_id="turn-1",
+        response_turn_revision=0,
         phase="awaiting_payment",
         plugin_state={"order_id": "order-1", "payment_status": "pending"},
         started_at=now,
@@ -71,8 +74,8 @@ async def test_payment_job_confirms_once_and_ends_the_mode(monkeypatch):
     spoken = []
     published = []
 
-    async def capture_speech(redis, client_id, session_id, text):
-        spoken.append(text)
+    async def capture_speech(redis, client_id, session_id, text, **binding):
+        spoken.append((text, binding))
 
     async def capture_sse(redis, user_id, event_type, data):
         published.append((event_type, data))
@@ -102,7 +105,11 @@ async def test_payment_job_confirms_once_and_ends_the_mode(monkeypatch):
     assert ended.status == "ended"
     assert ended.end_reason == "payment_success"
     assert result["reason"] == "payment_success"
-    assert spoken and published[0][0] == "interaction.ended"
+    assert spoken[0] == (
+        "Payment succeeded. Your Instamart order is confirmed.",
+        {"generation": 1, "turn_id": "turn-1", "turn_revision": 0},
+    )
+    assert published[0][0] == "interaction.ended"
 
 
 async def test_payment_job_surfaces_monitor_failure_and_ends_uncertain_mode(
@@ -116,8 +123,8 @@ async def test_payment_job_surfaces_monitor_failure_and_ends_uncertain_mode(
     )
     spoken = []
 
-    async def capture_speech(redis, client_id, session_id, text):
-        spoken.append(text)
+    async def capture_speech(redis, client_id, session_id, text, **binding):
+        spoken.append((text, binding))
 
     async def ignore_sse(redis, user_id, event_type, data):
         return None
@@ -142,4 +149,5 @@ async def test_payment_job_surfaces_monitor_failure_and_ends_uncertain_mode(
     assert result["reason"] == "payment_monitor_error"
     assert ended.status == "ended"
     assert ended.end_reason == "payment_monitor_error"
-    assert "check the swiggy app" in spoken[0].lower()
+    assert "check the swiggy app" in spoken[0][0].lower()
+    assert spoken[0][1]["generation"] == 1

@@ -32,9 +32,11 @@ from advanced_omi_backend.services.interaction_modes.ingress import INPUT_STREAM
 from advanced_omi_backend.services.interaction_modes.processor import (
     InteractionProcessor,
 )
+from advanced_omi_backend.services.response_coordinator import ResponseCoordinator
 from advanced_omi_backend.services.transcription.streaming_consumer import (
     StreamingTranscriptionConsumer,
 )
+from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
 from advanced_omi_backend.services.wakeword.dispatcher import WakeWordDispatcher
 from advanced_omi_backend.workers import interaction_mode_worker
 from advanced_omi_backend.workers.interaction_mode_worker import InteractionModeWorker
@@ -520,6 +522,131 @@ async def test_worker_recovers_an_input_stranded_in_another_consumer(monkeypatch
     session = await InteractionStore(redis_client).get_active("user-1", "device-1")
     assert session.phase == "shopping"
     assert session.plugin_state == {"first_request": "add milk"}
+
+
+async def test_worker_delivers_reply_with_committed_generation_binding(monkeypatch):
+    redis_client = fake_aioredis.FakeRedis(decode_responses=True)
+    router = PluginRouter()
+    router.register_plugin("swiggy_instamart", _ModePlugin())
+    ingress = InteractionIngress(redis_client, router.interaction_registry)
+    await ingress.submit(
+        user_id="user-1",
+        client_id="device-1",
+        audio_interval=_interval(),
+        text="order swiggy add milk",
+        source="streaming",
+    )
+    dispatch = await InteractionProcessor(redis_client, router).process(
+        await _read_input(redis_client)
+    )
+    speech = AsyncMock()
+    monkeypatch.setattr(interaction_mode_worker, "speak_on_device", speech)
+    monkeypatch.setattr(interaction_mode_worker, "publish_sse", AsyncMock())
+
+    await InteractionModeWorker(redis_client, router)._deliver(dispatch)
+
+    speech.assert_awaited_once_with(
+        redis_client,
+        interaction_mode_worker.ClientId.from_value("device-1"),
+        interaction_mode_worker.SessionId.from_value("audio-1"),
+        "Started",
+        generation=dispatch.session.response_generation,
+        turn_id=dispatch.session.response_turn_id,
+        turn_revision=dispatch.session.response_turn_revision,
+    )
+
+
+async def test_worker_routes_ordinary_committed_turn_through_voice_executor(
+    monkeypatch,
+):
+    redis_client = fake_aioredis.FakeRedis(decode_responses=True)
+    router = PluginRouter()
+    execute = AsyncMock(return_value="done")
+    monkeypatch.setattr(interaction_mode_worker, "execute_voice_command", execute)
+    turn = interaction_mode_worker.CommittedAudioTurn(
+        interval=AudioInterval(
+            audio_session_id="audio-1",
+            capture_epoch=3,
+            start_ms=100,
+            end_ms=900,
+            voice_session_id="voice-1",
+            turn_id="turn-1",
+        ),
+        start_sequence=2,
+        end_sequence=10,
+        pcm=b"\x00\x00" * 6_400,
+        sample_rate=16_000,
+        channels=1,
+        sample_width=2,
+    )
+
+    await InteractionModeWorker(redis_client, router)._dispatch_committed_command(
+        turn,
+        "turn on the lights",
+        "user-1",
+        "device-1",
+        4,
+    )
+
+    execute.assert_awaited_once_with(
+        redis_client,
+        router,
+        user_id="user-1",
+        session_id=interaction_mode_worker.SessionId.from_value("audio-1"),
+        client_id=interaction_mode_worker.ClientId.from_value("device-1"),
+        command="turn on the lights",
+        source="committed",
+        asr_status="committed_exact",
+        capture_secs=0.8,
+        response_generation=4,
+        response_turn_id="turn-1",
+        response_turn_revision=0,
+    )
+
+
+async def test_effect_fence_finishes_mutation_but_suppresses_stale_speech():
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class _FencedPlugin(_ModePlugin):
+        async def on_interaction_start(self, context):
+            context.session.plugin_state = {"intent": "checkout"}
+            await context.checkpoint()
+            entered.set()
+            await release.wait()
+            return InteractionResult(
+                reply="Order placed",
+                phase="finished",
+                plugin_state={"order": "committed"},
+                end=True,
+                end_reason="completed",
+            )
+
+    redis_client = fake_aioredis.FakeRedis(decode_responses=True)
+    router = PluginRouter()
+    router.register_plugin("swiggy_instamart", _FencedPlugin())
+    await InteractionIngress(redis_client, router.interaction_registry).submit(
+        user_id="user-1",
+        client_id="device-1",
+        audio_interval=_interval(),
+        text="order swiggy checkout",
+        source="streaming",
+    )
+    item = await _read_input(redis_client)
+    task = asyncio.create_task(InteractionProcessor(redis_client, router).process(item))
+    await entered.wait()
+    await ResponseCoordinator(
+        redis_client, VoiceSessionCoordinator(redis_client)
+    ).begin_turn("user-1", "device-1")
+    release.set()
+
+    dispatch = await task
+    stored = await InteractionStore(redis_client).get(item.interaction_id)
+
+    assert dispatch.reply is None
+    assert dispatch.event_data["response_suppressed"] is True
+    assert stored.plugin_state == {"order": "committed"}
+    assert stored.status == "ended"
 
 
 async def test_worker_main_initializes_otel_before_plugins(monkeypatch):

@@ -137,8 +137,15 @@ async def test_phone_playback_event_enters_response_coordinator_through_handler(
         client_state=state,
         audio_stream_producer=producer,
     )
+    duplicate = await websocket_controller._handle_phone_voice_event(
+        payload=event,
+        client_state=state,
+        audio_stream_producer=producer,
+    )
 
     assert result.state == "playing"
+    assert duplicate is None
+    assert (await responses.get(response.response_id)).state == "playing"
 
 
 async def test_old_phone_activation_returns_upgrade_boundary_without_ending_capture():
