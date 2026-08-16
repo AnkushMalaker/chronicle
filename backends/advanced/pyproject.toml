@@ -136,6 +136,7 @@ dev = [
     "pre-commit-uv>=4.1.4",
 ]
 test = [
+    "hypothesis>=6.138.0",
     "pytest>=8.4.1",
     "pytest-asyncio>=1.0.0",
     "pytest-spec>=3.2.0",

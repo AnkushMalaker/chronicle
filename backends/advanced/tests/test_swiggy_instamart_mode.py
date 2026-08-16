@@ -11,16 +11,24 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fakeredis import aioredis as fake_aioredis
 
 from advanced_omi_backend import llm_client
 from advanced_omi_backend.integrations.swiggy import Bucket, SwiggyError
+from advanced_omi_backend.plugins.router import PluginRouter
 from advanced_omi_backend.services.interaction_modes import (
     AudioInterval,
     InteractionContext,
     InteractionInput,
     InteractionRegistry,
     InteractionSession,
+    InteractionStore,
 )
+from advanced_omi_backend.services.interaction_modes.processor import (
+    InteractionProcessor,
+)
+from advanced_omi_backend.services.response_coordinator import ResponseCoordinator
+from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[3] / "plugins"
 sys.path.insert(0, str(PLUGIN_ROOT)) if str(PLUGIN_ROOT) not in sys.path else None
@@ -159,6 +167,7 @@ class _FakeServices:
 def _plugin(fake: _FakeSwiggy, **config_overrides) -> SwiggyInstamartPlugin:
     config = {
         "enabled": True,
+        "modes": ["swiggy_order"],
         "linked_user_id": "user-1",
         "token_directory": "/private/swiggy",
         "search_samples": 1,
@@ -221,7 +230,7 @@ def _context(
             voice_session_id=session.voice_session_id,
         ),
         text=text,
-        source="streaming",
+        source="committed",
         received_at=time.time(),
         response_generation=session.response_generation,
     )
@@ -238,6 +247,21 @@ def _apply(session, result):
         session.phase = result.phase
     if result.plugin_state is not None:
         session.plugin_state = result.plugin_state
+
+
+async def _runtime_for_session(plugin, session, services=None):
+    redis_client = fake_aioredis.FakeRedis(decode_responses=True)
+    router = PluginRouter()
+    router.register_plugin("swiggy_instamart", plugin)
+    router.set_services(services)
+    responses = ResponseCoordinator(
+        redis_client,
+        VoiceSessionCoordinator(redis_client),
+    )
+    generation = await responses.begin_turn(session.user_id, session.client_id)
+    session.response_generation = generation
+    assert await InteractionStore(redis_client).create(session)
+    return redis_client, InteractionProcessor(redis_client, router), responses
 
 
 class _ToolChatOperation:
@@ -746,6 +770,166 @@ async def test_complete_then_separate_confirm_is_only_checkout_path(monkeypatch)
     assert confirmed.event_data["payment_url"].startswith("https://")
     assert services.calls[0][0:2] == ("hermes", "notify")
     assert checkout_checkpoints == [checkout_index]
+
+
+async def test_interruption_during_search_discards_uncommitted_candidates(monkeypatch):
+    fake = _FakeSwiggy()
+    plugin = _plugin(fake)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    candidate = {
+        "name": "Toned Milk",
+        "brand": "Amul",
+        "spin_id": "milk-spin",
+        "sku_id": "milk-sku",
+        "variant": "1 litre",
+        "price": 62,
+    }
+
+    async def slow_candidates(_state, _query):
+        entered.set()
+        await release.wait()
+        return [candidate]
+
+    monkeypatch.setattr(plugin, "_find_candidates", slow_candidates)
+    session = _session(
+        phase="shopping",
+        state={
+            "selected_address": {"id": "home-id", "label": "Home"},
+            "candidates": [],
+        },
+    )
+    redis_client, processor, responses = await _runtime_for_session(plugin, session)
+    item = _context(session, "add milk").input
+    task = asyncio.create_task(processor.process(item))
+    await entered.wait()
+
+    await responses.begin_turn(session.user_id, session.client_id, reason="barge_in")
+    release.set()
+    dispatch = await task
+    stored = await InteractionStore(redis_client).get(session.interaction_id)
+
+    assert dispatch.lifecycle == "superseded"
+    assert dispatch.reply is None
+    assert stored.phase == "shopping"
+    assert stored.plugin_state["candidates"] == []
+    assert "candidate_query" not in stored.plugin_state
+    assert not any(name == "update_cart" for name, _ in fake.calls)
+
+
+async def test_interruption_during_cart_write_finishes_once_and_reconciles_state(
+    monkeypatch,
+):
+    fake = _FakeSwiggy()
+    plugin = _plugin(fake)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_call = fake.call
+
+    async def slow_cart_write(server, tool, **arguments):
+        if tool == "update_cart":
+            entered.set()
+            await release.wait()
+        return await original_call(server, tool, **arguments)
+
+    monkeypatch.setattr(fake, "call", slow_cart_write)
+    session = _session(
+        phase="shopping",
+        state={
+            "selected_address": {"id": "home-id", "label": "Home"},
+            "candidates": [
+                {
+                    "name": "Toned Milk",
+                    "brand": "Amul",
+                    "spin_id": "milk-spin",
+                    "sku_id": "milk-sku",
+                    "variant": "1 litre",
+                    "price": 62,
+                }
+            ],
+            "candidate_quantity": 1,
+            "pending_collections": [],
+        },
+    )
+    redis_client, processor, responses = await _runtime_for_session(plugin, session)
+    item = _context(session, "first").input
+    task = asyncio.create_task(processor.process(item))
+    await entered.wait()
+
+    await responses.begin_turn(session.user_id, session.client_id, reason="barge_in")
+    release.set()
+    dispatch = await task
+    stored = await InteractionStore(redis_client).get(session.interaction_id)
+
+    assert dispatch.reply is None
+    assert dispatch.event_data["response_suppressed"] is True
+    assert stored.phase == "shopping"
+    assert "pending_cart_update" not in stored.plugin_state
+    assert [name for name, _ in fake.calls].count("update_cart") == 1
+    assert await processor.process(item) is None
+    assert [name for name, _ in fake.calls].count("update_cart") == 1
+
+
+async def test_interruption_during_checkout_finishes_once_without_replay(monkeypatch):
+    fake = _FakeSwiggy()
+    fake.cart = {
+        "items": [
+            {
+                "spinId": "milk-spin",
+                "skuId": "milk-sku",
+                "displayName": "Toned Milk",
+                "quantity": 1,
+            }
+        ],
+        "cartTotal": 62,
+    }
+    plugin = _plugin(fake)
+    services = _FakeServices()
+    session = _session(
+        phase="shopping",
+        state={"selected_address": {"id": "home-id", "label": "Home"}},
+    )
+    reviewed = await plugin._review(dict(session.plugin_state))
+    _apply(session, reviewed)
+    fake.calls.clear()
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_call = fake.call
+
+    async def slow_checkout(server, tool, **arguments):
+        if tool == "checkout":
+            entered.set()
+            await release.wait()
+        return await original_call(server, tool, **arguments)
+
+    monkeypatch.setattr(fake, "call", slow_checkout)
+    monkeypatch.setattr(
+        plugin_module,
+        "enqueue_instamart_payment_monitor",
+        lambda **_kwargs: "payment-job-1",
+    )
+    redis_client, processor, responses = await _runtime_for_session(
+        plugin,
+        session,
+        services,
+    )
+    item = _context(session, "confirm order", services=services).input
+    task = asyncio.create_task(processor.process(item))
+    await entered.wait()
+
+    await responses.begin_turn(session.user_id, session.client_id, reason="barge_in")
+    release.set()
+    dispatch = await task
+    stored = await InteractionStore(redis_client).get(session.interaction_id)
+
+    assert dispatch.reply is None
+    assert dispatch.event_data["response_suppressed"] is True
+    assert stored.phase == "awaiting_payment"
+    assert stored.plugin_state["order_id"] == "order-1"
+    assert [name for name, _ in fake.calls].count("checkout") == 1
+    assert await processor.process(item) is None
+    assert [name for name, _ in fake.calls].count("checkout") == 1
 
 
 async def test_agent_can_interpret_natural_completion_as_review_without_checkout(
