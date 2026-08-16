@@ -9,7 +9,6 @@ const USER_ID_KEY = 'USER_ID_KEY';
 const AUTH_EMAIL_KEY = 'AUTH_EMAIL_KEY';
 const SERVICE_MANAGER_URL_KEY = 'SERVICE_MANAGER_URL_KEY';
 const AUTO_RECONNECT_ENABLED_KEY = 'AUTO_RECONNECT_ENABLED_KEY';
-const MIC_CAPTURE_PROFILE_KEY = 'MIC_CAPTURE_PROFILE_KEY';
 const THEME_PREFERENCE_KEY = 'THEME_PREFERENCE_KEY';
 // SecureStore keys must be alphanumeric + ._- (no other punctuation).
 const AUTH_PASSWORD_KEY = 'AUTH_PASSWORD_KEY';
@@ -244,30 +243,6 @@ export const getAutoReconnectEnabled = async (): Promise<boolean> => {
   } catch (error) {
     console.error('[Storage] Error retrieving auto-reconnect preference:', error);
     return true;
-  }
-};
-
-// Phone-mic capture profile (iOS): 'far-field' (default) records with the
-// Measurement audio-session mode — Apple's voice processing (AGC/noise
-// suppression) off, best for whole-room ambient capture; 'voice' keeps the
-// default iOS processing, better for close-talking dictation.
-export type MicCaptureProfile = 'far-field' | 'voice';
-
-export const saveMicCaptureProfile = async (profile: MicCaptureProfile): Promise<void> => {
-  try {
-    await AsyncStorage.setItem(MIC_CAPTURE_PROFILE_KEY, profile);
-  } catch (error) {
-    console.error('[Storage] Error saving mic capture profile:', error);
-  }
-};
-
-export const getMicCaptureProfile = async (): Promise<MicCaptureProfile> => {
-  try {
-    const v = await AsyncStorage.getItem(MIC_CAPTURE_PROFILE_KEY);
-    return v === 'voice' ? 'voice' : 'far-field'; // default far-field
-  } catch (error) {
-    console.error('[Storage] Error retrieving mic capture profile:', error);
-    return 'far-field';
   }
 };
 

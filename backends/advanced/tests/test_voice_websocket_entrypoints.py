@@ -255,3 +255,51 @@ async def test_resume_rotates_binding_and_publishes_new_start_after_capture_bind
     assert payload["type"] == "voice-session.start"
     assert payload["audio_session_id"] == "audio-2"
     assert payload["capture_epoch"] == 5
+
+
+async def test_rejected_resume_explicitly_requests_a_fresh_capture():
+    redis_client = fake_aioredis.FakeRedis(decode_responses=False)
+    coordinator = VoiceSessionCoordinator(redis_client)
+    previous = await coordinator.start(
+        user_id="user-1",
+        client_id="client-1",
+        audio_session_id="audio-1",
+        capture_epoch=4,
+        socket_id="socket-1",
+        advertised_protocol=1,
+    )
+    await coordinator.disconnect(
+        voice_session_id=previous.session.voice_session_id,
+        socket_id="socket-1",
+    )
+    state = ClientState("client-1", "user-1")
+    state.socket_id = "socket-2"
+    state.stream_session_id = "audio-2"
+    state.capture_epoch = 5
+    producer = SimpleNamespace(redis_client=redis_client)
+    channel = str(device_downlink_channel(ClientId.from_value("client-1")))
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(channel)
+    await pubsub.get_message(timeout=1)
+
+    result = await websocket_controller._handle_phone_voice_event(
+        payload={
+            "type": "voice-session.resume",
+            "protocol": 1,
+            "event_id": "00000000-0000-4000-8000-000000000100",
+            "client_id": "client-1",
+            "sent_at": "2026-08-16T12:00:00Z",
+            "previous_voice_session_id": previous.session.voice_session_id,
+            "previous_capture_epoch": 4,
+            "resume_token": "wrong-" + previous.resume_token,
+            "last_response_generation": 0,
+        },
+        client_state=state,
+        audio_stream_producer=producer,
+    )
+    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
+    payload = json.loads(message["data"])
+
+    assert result is None
+    assert payload["error"] == "resume_rejected"
+    assert (await coordinator.get_active("user-1", "client-1")).state == "reconnecting"

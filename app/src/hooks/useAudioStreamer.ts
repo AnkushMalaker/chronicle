@@ -4,10 +4,21 @@ import { AppState, PermissionsAndroid, Platform } from 'react-native';
 import notifee, { AndroidImportance } from '@notifee/react-native';
 import NetInfo from '@react-native-community/netinfo';
 import { refreshToken } from '../services/auth';
-import { playDownlinkAudio } from '../utils/audioPlayback';
-import { shouldForwardCapturedAudio } from '../utils/audioPlaybackGate';
 import { durableAudioSpool, SpoolPacket } from '../services/durableAudioSpool';
 import { useConnectionLog, ConnectionEventType, ConnectionEvent } from '../contexts/ConnectionLogContext';
+import {
+  addPlaybackStateListener,
+  addRouteChangeListener,
+  cancelResponse,
+  scheduleResponse,
+  stopVoiceSession,
+} from '../../modules/chronicle-duplex-audio';
+import {
+  PhoneDuplexController,
+  type PhoneCaptureBinding,
+  type PhoneResumeProof,
+} from '../protocol/phoneDuplexController';
+import type { VoiceCapabilities } from '../protocol/voiceProtocol';
 
 interface UseAudioStreamerOptions {
   /** Called when a new JWT token is obtained via auto-re-login */
@@ -20,10 +31,19 @@ interface UseAudioStreamer {
   isStreaming: boolean;
   isConnecting: boolean;
   error: string | null;
-  startStreaming: (url: string) => Promise<void>;
+  startStreaming: (url: string, config?: StreamStartConfig) => Promise<void>;
   getWebSocketReadyState: () => number | undefined;
-  stopStreaming: () => void;
+  stopStreaming: () => Promise<void>;
   sendAudio: (audioBytes: Uint8Array, durable?: boolean) => void;
+}
+
+export interface StreamStartConfig {
+  phoneVoice?: {
+    captureEpoch: number;
+    capabilities: VoiceCapabilities;
+    restartCapture: () => Promise<NonNullable<StreamStartConfig['phoneVoice']>>;
+    stopCapture: () => Promise<void>;
+  };
 }
 
 // Wyoming Protocol Types
@@ -35,7 +55,7 @@ interface WyomingEvent {
 }
 
 // Audio format constants (matching OMI device format)
-const AUDIO_FORMAT = {
+const AMBIENT_AUDIO_FORMAT = {
   rate: 16000,
   width: 2,
   channels: 1,
@@ -49,6 +69,34 @@ const AUDIO_FORMAT = {
   },
   voice_session_id: null,
 };
+
+function phoneAudioFormat(
+  config: NonNullable<StreamStartConfig['phoneVoice']>,
+  voiceSessionId: string | null = null
+) {
+  const { capabilities, captureEpoch } = config;
+  const processingProfile = capabilities.mode === 'duplex_full'
+    ? 'duplex_aec'
+    : capabilities.mode === 'duplex_isolated'
+      ? 'duplex_isolated'
+      : 'half_duplex';
+  const effect = (value: VoiceCapabilities['aec']) => ({
+    reporting: 'reported',
+    requested: value.requested,
+    available: value.available,
+    enabled: value.enabled,
+  });
+  return {
+    ...AMBIENT_AUDIO_FORMAT,
+    capture_epoch: captureEpoch,
+    processing_profile: processingProfile,
+    effects: {
+      aec: effect(capabilities.aec),
+      noise_suppression: effect(capabilities.noise_suppression),
+    },
+    voice_session_id: voiceSessionId,
+  };
+}
 
 /** -------------------- Foreground Service helpers (NEW) -------------------- */
 
@@ -124,6 +172,13 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   const pendingPacketsRef = useRef<Map<string, SpoolPacket>>(new Map());
   const drainingSpoolRef = useRef<boolean>(false);
   const deferredLivePacketsRef = useRef<SpoolPacket[]>([]);
+  const activeAudioFormatRef = useRef<Record<string, unknown>>(AMBIENT_AUDIO_FORMAT);
+  const streamConfigRef = useRef<StreamStartConfig | undefined>(undefined);
+  const duplexControllerRef = useRef<PhoneDuplexController | null>(null);
+  const duplexResumeRef = useRef<PhoneResumeProof | null>(null);
+  const duplexUnsupportedRef = useRef(false);
+  const duplexSubscriptionsRef = useRef<Array<{ remove: () => void }>>([]);
+  const protocolHandshakeTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // backoff: 3s, 6s, 12s, ... capped at 30s; up to 10 attempts before showing an error notification
   const reconnectAttemptsRef = useRef<number>(0);
@@ -134,6 +189,23 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
 
   // Track if we received an auth error so onclose doesn't blindly reconnect
   const authFailedRef = useRef<boolean>(false);
+
+  const clearDuplexSocketState = useCallback(async (preserveResume = true) => {
+    if (protocolHandshakeTimerRef.current) {
+      clearTimeout(protocolHandshakeTimerRef.current);
+      protocolHandshakeTimerRef.current = null;
+    }
+    duplexSubscriptionsRef.current.forEach((subscription) => subscription.remove());
+    duplexSubscriptionsRef.current = [];
+    const controller = duplexControllerRef.current;
+    duplexControllerRef.current = null;
+    if (preserveResume && controller?.resumeProof) {
+      duplexResumeRef.current = controller.resumeProof;
+    } else if (!preserveResume) {
+      duplexResumeRef.current = null;
+    }
+    await controller?.close();
+  }, []);
 
   // User preference: when false, connect once (no auto-reconnect on drop).
   const autoReconnectEnabledRef = useRef<boolean>(options?.autoReconnectEnabled ?? true);
@@ -238,7 +310,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
         {
           type: 'audio-chunk',
           data: {
-            ...AUDIO_FORMAT,
+            ...activeAudioFormatRef.current,
             spool_segment_id: packet.segmentId,
             spool_sequence: packet.sequence,
             captured_at_ms: packet.capturedAtMs,
@@ -265,6 +337,8 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   const stopStreaming = useCallback(async () => {
     manuallyStoppedRef.current = true;
     durableAudioSpool.close();
+    await duplexControllerRef.current?.stopNativeSession();
+    await clearDuplexSocketState(false);
 
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -291,8 +365,11 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
 
     setStateSafe(setIsStreaming, false);
     setStateSafe(setIsConnecting, false);
+    activeAudioFormatRef.current = AMBIENT_AUDIO_FORMAT;
+    streamConfigRef.current = undefined;
+    duplexUnsupportedRef.current = false;
     await stopForegroundServiceNotification();
-  }, [sendWyomingEvent, setStateSafe]);
+  }, [clearDuplexSocketState, sendWyomingEvent, setStateSafe]);
 
   // Reconnect (persistent): exponential backoff capped at MAX_RECONNECT_MS, and
   // we NEVER permanently give up — giving up would also disable the NetInfo and
@@ -341,7 +418,10 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   }, [notifyInfo, setStateSafe, logEvent]);
 
   // Start (CHANGED): start/refresh FGS before connecting; remove Alerts; set heartbeat
-  const startStreaming = useCallback(async (url: string): Promise<void> => {
+  const startStreaming = useCallback(async (
+    url: string,
+    config?: StreamStartConfig
+  ): Promise<void> => {
     const trimmed = (url || '').trim();
     if (!trimmed) {
       const errorMsg = 'WebSocket URL is required.';
@@ -349,7 +429,19 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
       return Promise.reject(new Error(errorMsg));
     }
 
+    let requestedConfig = config ?? streamConfigRef.current;
+    if (requestedConfig?.phoneVoice && duplexResumeRef.current) {
+      const restarted = await requestedConfig.phoneVoice.restartCapture();
+      requestedConfig = { phoneVoice: restarted };
+    }
     currentUrlRef.current = trimmed;
+    streamConfigRef.current = requestedConfig;
+    activeAudioFormatRef.current = requestedConfig?.phoneVoice
+      ? phoneAudioFormat(
+          requestedConfig.phoneVoice,
+          duplexResumeRef.current?.previousVoiceSessionId ?? null
+        )
+      : AMBIENT_AUDIO_FORMAT;
     manuallyStoppedRef.current = false;
     authFailedRef.current = false;
 
@@ -372,6 +464,13 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
 
     console.log(`[AudioStreamer] Initializing WebSocket: ${trimmed}`);
     if (websocketRef.current) await stopStreaming(); // close any existing
+    streamConfigRef.current = requestedConfig;
+    activeAudioFormatRef.current = requestedConfig?.phoneVoice
+      ? phoneAudioFormat(
+          requestedConfig.phoneVoice,
+          duplexResumeRef.current?.previousVoiceSessionId ?? null
+        )
+      : AMBIENT_AUDIO_FORMAT;
 
     setStateSafe(setIsConnecting, true);
     setStateSafe(setError, null);
@@ -381,6 +480,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     return new Promise<void>((resolve, reject) => {
       try {
         const ws = new WebSocket(trimmed);
+        ws.binaryType = 'arraybuffer';
 
         ws.onopen = async () => {
           console.log('[AudioStreamer] WebSocket open');
@@ -392,6 +492,60 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           setStateSafe(setIsConnecting, false);
           setStateSafe(setIsStreaming, true);
           setStateSafe(setError, null);
+
+          const phoneVoice = streamConfigRef.current?.phoneVoice;
+          if (phoneVoice) {
+            const controller = new PhoneDuplexController({
+              capabilities: phoneVoice.capabilities,
+              captureEpoch: phoneVoice.captureEpoch,
+              native: { scheduleResponse, cancelResponse, stopVoiceSession },
+              resumeProof: duplexResumeRef.current,
+              restartCapture: phoneVoice.restartCapture,
+              replaceAudioSession: async (
+                binding: PhoneCaptureBinding,
+                voiceSessionId: string
+              ) => {
+                if (ws.readyState !== WebSocket.OPEN) {
+                  throw new Error('route changed after socket closed');
+                }
+                await sendWyomingEvent({
+                  type: 'audio-stop',
+                  data: { timestamp: Date.now(), reason: 'profile_transition' },
+                });
+                const nextPhoneVoice = {
+                  ...binding,
+                  restartCapture: phoneVoice.restartCapture,
+                  stopCapture: phoneVoice.stopCapture,
+                };
+                streamConfigRef.current = { phoneVoice: nextPhoneVoice };
+                activeAudioFormatRef.current = phoneAudioFormat(
+                  nextPhoneVoice,
+                  voiceSessionId
+                );
+                await sendWyomingEvent({
+                  type: 'audio-start',
+                  data: activeAudioFormatRef.current,
+                });
+              },
+              send: async (voiceEvent) => {
+                if (ws.readyState !== WebSocket.OPEN) return;
+                ws.send(`${JSON.stringify(voiceEvent)}\n`);
+              },
+            });
+            duplexControllerRef.current = controller;
+            duplexSubscriptionsRef.current = [
+              addPlaybackStateListener((state) => {
+                controller.nativePlaybackChanged(state).catch((cause) =>
+                  console.error('[AudioStreamer] Playback ACK failed:', cause)
+                );
+              }),
+              addRouteChangeListener((change) => {
+                controller.nativeRouteChanged(change).catch((cause) =>
+                  console.error('[AudioStreamer] Route update failed:', cause)
+                );
+              }),
+            ];
+          }
 
           // Start heartbeat. Each tick also checks for a half-open (zombie)
           // socket: if the backend hasn't ponged within 2 heartbeats the TCP
@@ -413,11 +567,25 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           }, HEARTBEAT_MS);
 
           try {
-            const audioStartEvent: WyomingEvent = { type: 'audio-start', data: AUDIO_FORMAT };
+            const audioStartEvent: WyomingEvent = {
+              type: 'audio-start',
+              data: activeAudioFormatRef.current,
+            };
             console.log('[AudioStreamer] Sending audio-start event');
             await sendWyomingEvent(audioStartEvent);
             await drainDurableSpool();
             console.log('[AudioStreamer] ✅ audio-start sent successfully');
+            if (duplexControllerRef.current) {
+              protocolHandshakeTimerRef.current = setTimeout(() => {
+                const controller = duplexControllerRef.current;
+                if (!controller || controller.protocolHandshakeComplete) return;
+                setStateSafe(setError, 'server_upgrade_required');
+                duplexUnsupportedRef.current = true;
+                duplexResumeRef.current = null;
+                phoneVoice?.stopCapture().catch(() => undefined);
+                try { ws.close(1000, 'server-upgrade-required'); } catch {}
+              }, 3_000);
+            }
           } catch (e) {
             console.error('[AudioStreamer] audio-start failed:', e);
           }
@@ -425,8 +593,20 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           resolve();
         };
 
-        ws.onmessage = (event) => {
+        ws.onmessage = async (event) => {
           // Parse server messages to detect auth errors
+          if (typeof event.data !== 'string') {
+            try {
+              const binary = event.data instanceof ArrayBuffer
+                ? event.data
+                : new Uint8Array(event.data);
+              await duplexControllerRef.current?.receiveBinary(binary);
+            } catch (cause) {
+              console.error('[AudioStreamer] Rejected binary response:', cause);
+              setStateSafe(setError, 'Invalid duplex response from backend.');
+            }
+            return;
+          }
           try {
             const msg = JSON.parse(event.data);
             // Heartbeat reply — proves the socket is alive end-to-end.
@@ -451,18 +631,54 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
               setStateSafe(setError, msg.message || 'Session expired. Re-authenticating...');
               return;
             }
-            // Backend→device downlink: play synthesized audio (e.g. TTS reply)
-            // out of the phone speaker, just like the HAVPE relay does on-device.
-            if (msg.type === 'play-audio' && msg.data) {
-              playDownlinkAudio(msg.data).catch((e) =>
-                console.warn('[AudioStreamer] Failed to play downlink audio:', e)
-              );
+            if (msg.type === 'error' && msg.error === 'client_upgrade_required') {
+              setStateSafe(setError, 'client_upgrade_required');
               return;
             }
-          } catch {
-            // Not JSON, that's fine (e.g. binary messages)
+            if (msg.type === 'error' && msg.error === 'resume_rejected') {
+              const controller = duplexControllerRef.current;
+              const phoneVoice = streamConfigRef.current?.phoneVoice;
+              if (!controller || !phoneVoice) {
+                throw new Error('resume rejection has no phone capture to replace');
+              }
+              const replacement = await phoneVoice.restartCapture();
+              controller.prepareFreshCapture(replacement);
+              duplexResumeRef.current = null;
+              await sendWyomingEvent({
+                type: 'audio-stop',
+                data: { timestamp: Date.now(), reason: 'resume_rejected' },
+              });
+              streamConfigRef.current = { phoneVoice: replacement };
+              activeAudioFormatRef.current = phoneAudioFormat(replacement);
+              await sendWyomingEvent({
+                type: 'audio-start',
+                data: activeAudioFormatRef.current,
+              });
+              return;
+            }
+            if (
+              msg.type === 'audio-session.started'
+              || msg.type === 'voice-session.start'
+              || msg.type === 'voice-session.stop'
+              || msg.type === 'response.audio'
+              || msg.type === 'response.cancel'
+            ) {
+              const controller = duplexControllerRef.current;
+              if (!controller) {
+                throw new Error('server sent duplex event to a non-phone transport');
+              }
+              await controller.receiveControl(msg);
+              duplexResumeRef.current = controller.resumeProof;
+              if (controller.protocolHandshakeComplete && protocolHandshakeTimerRef.current) {
+                clearTimeout(protocolHandshakeTimerRef.current);
+                protocolHandshakeTimerRef.current = null;
+              }
+              return;
+            }
+          } catch (cause) {
+            console.error('[AudioStreamer] Rejected control message:', cause);
           }
-          console.log('[AudioStreamer] Message:', typeof event.data === 'string' ? event.data.substring(0, 200) : '(binary)');
+          console.log('[AudioStreamer] Message:', event.data.substring(0, 200));
         };
 
         ws.onerror = (e) => {
@@ -473,6 +689,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           setStateSafe(setIsConnecting, false);
           setStateSafe(setIsStreaming, false);
           if (websocketRef.current === ws) websocketRef.current = null;
+          clearDuplexSocketState(true).catch(() => undefined);
           reject(new Error(msg));
         };
 
@@ -485,6 +702,10 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           setStateSafe(setIsStreaming, false);
 
           if (websocketRef.current === ws) websocketRef.current = null;
+
+          clearDuplexSocketState(true).catch((cause) =>
+            console.error('[AudioStreamer] Failed to fence duplex socket:', cause)
+          );
 
           // Auth failure: try re-login instead of blind reconnect
           if (authFailedRef.current && !manuallyStoppedRef.current && autoReconnectEnabledRef.current) {
@@ -511,7 +732,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
             return;
           }
 
-          if (!isManual && !manuallyStoppedRef.current) {
+          if (!isManual && !manuallyStoppedRef.current && !duplexUnsupportedRef.current) {
             if (autoReconnectEnabledRef.current) {
               setStateSafe(setError, 'Connection closed; attempting to reconnect.');
               attemptReconnect();
@@ -530,14 +751,10 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
         reject(new Error(msg));
       }
     });
-  }, [attemptReconnect, attemptReLogin, drainDurableSpool, notifyInfo, sendWyomingEvent, setStateSafe, stopStreaming, logEvent]);
+  }, [attemptReconnect, attemptReLogin, clearDuplexSocketState, drainDurableSpool, notifyInfo, sendWyomingEvent, setStateSafe, stopStreaming, logEvent]);
 
   const sendAudio = useCallback(async (audioBytes: Uint8Array, durable = true) => {
-    // Keep capture and the socket running, but never uplink audio heard from our
-    // own speaker. Playback owns a duration-bounded gate: native completion releases
-    // it promptly, while the media duration prevents a missing callback from muting
-    // the user for the rest of the interaction.
-    if (!shouldForwardCapturedAudio(audioBytes.length)) return;
+    if (!audioBytes.length) return;
 
     if (durable) {
       const packet = durableAudioSpool.append(audioBytes);
@@ -551,7 +768,10 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     if (websocketRef.current && websocketRef.current.readyState === WebSocket.OPEN) {
       try {
         console.log(`[AudioStreamer] 📤 Sending audio chunk: ${audioBytes.length} bytes`);
-        const audioChunkEvent: WyomingEvent = { type: 'audio-chunk', data: AUDIO_FORMAT };
+        const audioChunkEvent: WyomingEvent = {
+          type: 'audio-chunk',
+          data: activeAudioFormatRef.current,
+        };
         await sendWyomingEvent(audioChunkEvent, audioBytes);
       } catch (e) {
         const msg = (e as any).message || 'Error sending audio data.';

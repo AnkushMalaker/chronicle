@@ -21,6 +21,10 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Chronicle uses the camera to scan QR codes for backend connection setup.",
         "NSMicrophoneUsageDescription": "Chronicle needs access to your microphone to stream audio to the backend for processing.",
+        "UIBackgroundModes": [
+          "audio",
+          "processing"
+        ],
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true,
           "NSAllowsLocalNetworking": true
@@ -57,22 +61,6 @@
     },
     "plugins": [
       [
-        "@siteed/expo-audio-studio",
-        {
-          "enablePhoneStateHandling": true,
-          "enableNotifications": true,
-          "enableBackgroundAudio": true,
-          "enableDeviceDetection": true,
-          "iosBackgroundModes": {
-            "useAudio": true,
-            "useProcessing": true
-          },
-          "iosConfig": {
-            "microphoneUsageDescription": "We use the mic for live audio streaming"
-          }
-        }
-      ],
-      [
         "react-native-ble-plx",
         {
           "isBackgroundEnabled": true,
@@ -96,7 +84,6 @@
           }
         }
       ],
-      "expo-audio",
       [
         "expo-build-properties",
         {

@@ -1,28 +1,20 @@
-// usePhoneAudioRecorder.ts
-import { useState, useRef, useCallback, useEffect } from 'react';
-import { Alert, Platform } from 'react-native';
-import {
-  useAudioRecorder,
-  AudioRecording,
-  AudioAnalysis,
-  ExpoAudioStreamModule,
-} from '@siteed/expo-audio-studio';
-import type { AudioDataEvent } from '@siteed/expo-audio-studio';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { PermissionsAndroid, Platform } from 'react-native';
 // @ts-ignore - no type declarations available
 import base64 from 'react-native-base64';
+
 import {
-  applyFarFieldTuning,
-  getMicrophoneModeInfo,
-  showMicrophoneModePicker,
-} from '../../modules/chronicle-mic-control';
-import type { MicCaptureProfile } from '../utils/storage';
+  addPcmFrameListener,
+  startVoiceSession,
+  stopVoiceSession,
+} from '../../modules/chronicle-duplex-audio';
+import type { VoiceCapabilities } from '../protocol/voiceProtocol';
 
-
-interface StartRecordingOptions {
-  /** Specific input device to record from. Omit/undefined to use the system default mic. */
-  deviceId?: string;
-  /** iOS mic processing: 'far-field' (raw, Measurement mode) or 'voice' (default processing). */
-  captureProfile?: MicCaptureProfile;
+export interface PhoneCaptureSession {
+  captureEpoch: number;
+  capabilities: VoiceCapabilities;
+  restartCapture: () => Promise<PhoneCaptureSession>;
+  stopCapture: () => Promise<void>;
 }
 
 interface UsePhoneAudioRecorder {
@@ -31,283 +23,125 @@ interface UsePhoneAudioRecorder {
   error: string | null;
   audioLevel: number;
   startRecording: (
-    onAudioData: (pcmBuffer: Uint8Array) => void,
-    options?: StartRecordingOptions
-  ) => Promise<void>;
+    onAudioData: (pcmBuffer: Uint8Array) => void
+  ) => Promise<PhoneCaptureSession>;
   stopRecording: () => Promise<void>;
 }
 
-// Audio format constants matching backend expectations
-const RECORDING_CONFIG = {
-  sampleRate: 16000 as const,      // 16kHz for backend compatibility
-  channels: 1 as const,            // Mono
-  encoding: 'pcm_16bit' as const,  // 16-bit PCM
-  interval: 100,                   // Send audio every 100ms
-  intervalAnalysis: 100,           // Analysis every 100ms
-};
+function decodeBase64(value: string): Uint8Array {
+  const binary = base64.decode(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function rmsPcm16(bytes: Uint8Array): number {
+  if (bytes.length < 2) return 0;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let sum = 0;
+  let samples = 0;
+  for (let offset = 0; offset + 1 < bytes.length; offset += 2) {
+    const value = view.getInt16(offset, true) / 32_768;
+    sum += value * value;
+    samples += 1;
+  }
+  return samples ? Math.sqrt(sum / samples) : 0;
+}
 
 export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
-  const [isInitializing, setIsInitializing] = useState<boolean>(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [audioLevel, setAudioLevel] = useState<number>(0);
-
+  const [audioLevel, setAudioLevel] = useState(0);
+  const mountedRef = useRef(true);
+  const captureEpochRef = useRef(0);
+  const frameSubscriptionRef = useRef<{ remove: () => void } | null>(null);
   const onAudioDataRef = useRef<((pcmBuffer: Uint8Array) => void) | null>(null);
-  const mountedRef = useRef<boolean>(true);
 
-  // Use the expo-audio-studio hook
-  const {
-    startRecording: startRecorderInternal,
-    stopRecording: stopRecorderInternal,
-    isRecording,
-    pauseRecording,
-    resumeRecording,
-    analysisData,
-  } = useAudioRecorder();
-
-  // Convert AudioDataEvent to PCM buffer
-  const processAudioDataEvent = useCallback((event: AudioDataEvent): Uint8Array | null => {
-    try {
-      const audioData = event.data;
-      console.log('[PhoneAudioRecorder] processAudioDataEvent called, data type:', typeof audioData);
-
-      if (typeof audioData === 'string') {
-        // Base64 encoded data (native platforms) - decode using react-native-base64
-        console.log('[PhoneAudioRecorder] Decoding Base64 string, length:', audioData.length);
-        const binaryString = base64.decode(audioData);
-        console.log('[PhoneAudioRecorder] Decoded to binary string, length:', binaryString.length);
-
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
-        }
-        console.log('[PhoneAudioRecorder] Created Uint8Array, length:', bytes.length);
-        return bytes;
-      } else if (audioData instanceof Float32Array) {
-        // Float32Array (web platform) - convert to 16-bit PCM
-        const int16Buffer = new Int16Array(audioData.length);
-        for (let i = 0; i < audioData.length; i++) {
-          // Convert float32 (-1 to 1) to int16 (-32768 to 32767)
-          const s = Math.max(-1, Math.min(1, audioData[i]));
-          int16Buffer[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-        }
-        // Convert Int16Array to Uint8Array (little-endian)
-        const buffer = new ArrayBuffer(int16Buffer.length * 2);
-        const view = new DataView(buffer);
-        for (let i = 0; i < int16Buffer.length; i++) {
-          view.setInt16(i * 2, int16Buffer[i], true); // little-endian
-        }
-        return new Uint8Array(buffer);
-      }
-      return null;
-    } catch (error) {
-      console.error('[PhoneAudioRecorder] Audio conversion error:', error);
-      return null;
+  const markCaptureStopped = useCallback(() => {
+    frameSubscriptionRef.current?.remove();
+    frameSubscriptionRef.current = null;
+    onAudioDataRef.current = null;
+    if (mountedRef.current) {
+      setIsRecording(false);
+      setIsInitializing(false);
+      setAudioLevel(0);
     }
   }, []);
 
-  // Safe state setter
-  const setStateSafe = useCallback(<T,>(setter: (v: T) => void, val: T) => {
-    if (mountedRef.current) setter(val);
-  }, []);
-
-  // Check and request microphone permissions
-  const checkPermissions = useCallback(async (): Promise<boolean> => {
+  const stopRecording = useCallback(async () => {
     try {
-      const { granted } = await ExpoAudioStreamModule.getPermissionsAsync();
-      if (granted) {
-        return true;
-      }
-
-      const { granted: newGranted } = await ExpoAudioStreamModule.requestPermissionsAsync();
-      if (!newGranted) {
-        Alert.alert(
-          'Microphone Permission Required',
-          'Please enable microphone access in your device settings to use phone audio streaming.',
-          [{ text: 'OK' }]
-        );
-        return false;
-      }
-      return true;
-    } catch (error) {
-      console.error('[PhoneAudioRecorder] Permission check error:', error);
-      return false;
+      await stopVoiceSession();
+    } finally {
+      markCaptureStopped();
     }
-  }, []);
+  }, [markCaptureStopped]);
 
-  // Start recording from phone microphone - EXACT 2025 guide pattern
+  const startNativeCapture = useCallback(async (): Promise<PhoneCaptureSession> => {
+    const captureEpoch = captureEpochRef.current + 1;
+    captureEpochRef.current = captureEpoch;
+    const capabilities = await startVoiceSession({ captureEpoch });
+    return {
+      captureEpoch,
+      capabilities,
+      restartCapture: startNativeCapture,
+      stopCapture: stopRecording,
+    };
+  }, [stopRecording]);
+
   const startRecording = useCallback(async (
-    onAudioData: (pcmBuffer: Uint8Array) => void,
-    options?: StartRecordingOptions
-  ): Promise<void> => {
-    if (isRecording) {
-      console.log('[PhoneAudioRecorder] Already recording, stopping first...');
-      await stopRecording();
+    onAudioData: (pcmBuffer: Uint8Array) => void
+  ): Promise<PhoneCaptureSession> => {
+    if (isRecording) await stopRecording();
+    if (mountedRef.current) {
+      setIsInitializing(true);
+      setError(null);
     }
-
-    setStateSafe(setIsInitializing, true);
-    setStateSafe(setError, null);
-    onAudioDataRef.current = onAudioData;
-
-    try {
-      // EXACT permission check from guide
-      const { granted } = await ExpoAudioStreamModule.requestPermissionsAsync();
-      if (!granted) {
+    if (Platform.OS === 'android') {
+      const permission = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO
+      );
+      if (permission !== PermissionsAndroid.RESULTS.GRANTED) {
         throw new Error('Microphone permission denied');
       }
-
-      const captureProfile: MicCaptureProfile = options?.captureProfile ?? 'far-field';
-
-      console.log(
-        '[PhoneAudioRecorder] Starting audio recording...',
-        options?.deviceId ? `deviceId=${options.deviceId}` : 'deviceId=default',
-        `profile=${captureProfile}`
-      );
-
-      // EXACT config from 2025 guide + processing for audio levels
-      const config = {
-        interval: 100,
-        sampleRate: 16000 as const,
-        channels: 1 as const,
-        encoding: "pcm_16bit" as const,
-        enableProcessing: true,        // Enable audio analysis for live RMS
-        intervalAnalysis: 500,         // Analysis every 500ms
-        // Route to the chosen input device (e.g. a Bluetooth headset mic). When the
-        // device drops mid-stream, fall back to the default mic instead of stopping.
-        ...(options?.deviceId ? { deviceId: options.deviceId } : {}),
-        deviceDisconnectionBehavior: 'fallback' as const,
-        // iOS requires PlayAndRecord + AllowBluetooth for the OS to route input to a
-        // Bluetooth (HFP/SCO) headset mic; without it iOS keeps the built-in mic.
-        // Mode selects Apple's input processing: 'Measurement' strips the voice
-        // processing (AGC/noise suppression) that attenuates distant or quiet
-        // speakers — what Chronicle wants for whole-room capture. 'Default'
-        // keeps iOS processing for close-talking use.
-        ios: {
-          audioSession: {
-            category: 'PlayAndRecord' as const,
-            mode: (captureProfile === 'voice' ? 'Default' : 'Measurement') as 'Default' | 'Measurement',
-            categoryOptions: ['AllowBluetooth', 'DefaultToSpeaker'] as ('AllowBluetooth' | 'DefaultToSpeaker')[],
-          },
-        },
-        onAudioStream: async (event: AudioDataEvent) => {
-          // EXACT payload handling from guide
-          const payload = typeof event.data === "string"
-            ? event.data
-            : Buffer.from(event.data as unknown as ArrayBuffer).toString("base64");
-
-          // Convert to our expected format
-          if (onAudioDataRef.current && mountedRef.current) {
-            const pcmBuffer = processAudioDataEvent(event);
-            if (pcmBuffer && pcmBuffer.length > 0) {
-              onAudioDataRef.current(pcmBuffer);
-            }
-          }
-        }
-      };
-
-      const result = await startRecorderInternal(config);
-
-      if (!result) {
-        throw new Error('Failed to start recording');
-      }
-
-      if (Platform.OS === 'ios') {
-        // Both calls are best-effort: the session is now active, so tuning can
-        // apply, but a failure should never take down the recording itself.
-        if (captureProfile === 'far-field') {
-          const tuning = await applyFarFieldTuning();
-          console.log('[PhoneAudioRecorder] Far-field tuning:', JSON.stringify(tuning));
-        }
-        // The system Mic Mode is user-controlled and persists per app; Voice
-        // Isolation suppresses every voice except the nearest one, which
-        // silently ruins room capture. Apps can't change it — only surface it.
-        const micModes = await getMicrophoneModeInfo();
-        if (micModes?.active === 'voiceIsolation') {
-          Alert.alert(
-            'Voice Isolation is on',
-            'iOS is filtering out all voices except the one closest to the phone, so Chronicle will miss other speakers. Switch the mic mode to Standard or Wide Spectrum.',
-            [
-              { text: 'Ignore', style: 'cancel' },
-              { text: 'Change Mic Mode', onPress: () => { showMicrophoneModePicker(); } },
-            ]
-          );
-        }
-      }
-
-      setStateSafe(setIsInitializing, false);
-      console.log('[PhoneAudioRecorder] Recording started successfully');
-
-    } catch (error) {
-      const errorMessage = (error as any).message || 'Failed to start recording';
-      console.error('[PhoneAudioRecorder] Start recording error:', errorMessage);
-      setStateSafe(setError, errorMessage);
-      setStateSafe(setIsInitializing, false);
-      onAudioDataRef.current = null;
-
-      throw new Error(errorMessage);
     }
-  }, [isRecording, startRecorderInternal, processAudioDataEvent, setStateSafe]);
-
-  // Stop recording
-  const stopRecording = useCallback(async (): Promise<void> => {
-    console.log('[PhoneAudioRecorder] Stopping recording...');
-
-    // Early return if not recording
-    if (!isRecording) {
-      console.log('[PhoneAudioRecorder] Not recording, nothing to stop');
-      onAudioDataRef.current = null;
-      setStateSafe(setAudioLevel, 0);
-      setStateSafe(setIsInitializing, false);
-      return;
-    }
-
-    onAudioDataRef.current = null;
-    setStateSafe(setAudioLevel, 0);
 
     try {
-      const result = await stopRecorderInternal();
-      console.log('[PhoneAudioRecorder] Recording stopped');
-    } catch (error) {
-      // Only log error if it's not about recording being inactive
-      const errorMessage = (error as any).message || '';
-      if (!errorMessage.includes('Recording is not active') && !errorMessage.includes('not active')) {
-        console.error('[PhoneAudioRecorder] Stop recording error:', error);
-        setStateSafe(setError, 'Failed to stop recording');
-      } else {
-        console.log('[PhoneAudioRecorder] Recording was already inactive');
+      onAudioDataRef.current = onAudioData;
+      frameSubscriptionRef.current = addPcmFrameListener((frame) => {
+        if (!mountedRef.current || frame.captureEpoch !== captureEpochRef.current) return;
+        const pcm = decodeBase64(frame.pcmBase64);
+        if (!pcm.length) return;
+        setAudioLevel(rmsPcm16(pcm));
+        onAudioDataRef.current?.(pcm);
+      });
+      const capture = await startNativeCapture();
+      if (mountedRef.current) {
+        setIsRecording(true);
+        setIsInitializing(false);
       }
-    }
-
-    setStateSafe(setIsInitializing, false);
-  }, [isRecording, stopRecorderInternal, setStateSafe]);
-
-  // Update audio level from analysis data
-  useEffect(() => {
-    if (analysisData?.dataPoints && analysisData.dataPoints.length > 0 && mountedRef.current) {
-      const latestDataPoint = analysisData.dataPoints[analysisData.dataPoints.length - 1];
-      const liveRMS = latestDataPoint.rms;
-      setStateSafe(setAudioLevel, liveRMS);
-    }
-  }, [analysisData, setStateSafe]);
-
-  // Cleanup on unmount - NO dependencies so it only runs on true unmount
-  useEffect(() => {
-    return () => {
-      mountedRef.current = false;
-      console.log('[PhoneAudioRecorder] Component unmounting, setting mountedRef to false');
-    };
-  }, []); // Empty dependency array - only runs on mount/unmount
-
-  // Separate effect for stopping recording when needed
-  useEffect(() => {
-    return () => {
-      // Stop recording if active when dependencies change
-      if (isRecording) {
-        stopRecorderInternal().catch(err =>
-          console.error('[PhoneAudioRecorder] Cleanup stop error:', err)
-        );
+      return capture;
+    } catch (cause) {
+      frameSubscriptionRef.current?.remove();
+      frameSubscriptionRef.current = null;
+      const message = cause instanceof Error ? cause.message : 'Failed to start duplex audio';
+      if (mountedRef.current) {
+        setError(message);
+        setIsInitializing(false);
+        setIsRecording(false);
       }
-    };
-  }, [isRecording, stopRecorderInternal]);
+      throw cause;
+    }
+  }, [isRecording, startNativeCapture, stopRecording]);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    frameSubscriptionRef.current?.remove();
+    frameSubscriptionRef.current = null;
+    stopVoiceSession().catch(() => undefined);
+  }, []);
 
   return {
     isRecording,

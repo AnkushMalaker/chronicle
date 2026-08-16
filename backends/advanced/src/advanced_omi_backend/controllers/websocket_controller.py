@@ -83,6 +83,7 @@ from advanced_omi_backend.services.voice_events import VoiceEventDeduplicator
 from advanced_omi_backend.services.voice_frames import VoiceFramePublisher
 from advanced_omi_backend.services.voice_sessions import (
     ClientUpgradeRequired,
+    StaleVoiceBinding,
     VoiceSessionCoordinator,
 )
 from advanced_omi_backend.services.wakeword.followup import handle_dial_followup
@@ -348,17 +349,34 @@ async def _handle_phone_voice_event(
     if isinstance(event, VoiceSessionResume):
         if not client_state.stream_session_id:
             raise ValueError("voice resume requires the new capture session")
-        resumed = await voice_sessions.resume(
-            previous_voice_session_id=event.previous_voice_session_id,
-            previous_capture_epoch=event.previous_capture_epoch,
-            resume_token=event.resume_token,
-            new_audio_session_id=client_state.stream_session_id,
-            new_capture_epoch=client_state.capture_epoch,
-            new_socket_id=client_state.socket_id,
-            last_response_generation=event.last_response_generation,
-            user_id=client_state.user_id,
-            client_id=client_state.client_id,
-        )
+        try:
+            resumed = await voice_sessions.resume(
+                previous_voice_session_id=event.previous_voice_session_id,
+                previous_capture_epoch=event.previous_capture_epoch,
+                resume_token=event.resume_token,
+                new_audio_session_id=client_state.stream_session_id,
+                new_capture_epoch=client_state.capture_epoch,
+                new_socket_id=client_state.socket_id,
+                last_response_generation=event.last_response_generation,
+                user_id=client_state.user_id,
+                client_id=client_state.client_id,
+            )
+        except StaleVoiceBinding:
+            await audio_stream_producer.redis_client.publish(
+                str(
+                    device_downlink_channel(ClientId.from_value(client_state.client_id))
+                ),
+                json.dumps(
+                    {
+                        "type": "error",
+                        "error": "resume_rejected",
+                        "message": "Resume proof expired; start a fresh capture.",
+                        "code": 409,
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+            return None
         await _publish_voice_session_start(
             started=resumed,
             client_state=client_state,

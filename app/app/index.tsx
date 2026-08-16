@@ -17,11 +17,9 @@ import { useAudioStreamingOrchestrator } from '@/hooks/useAudioStreamingOrchestr
 import { useAudioListener } from '@/hooks/useAudioListener';
 import { useAudioStreamer } from '@/hooks/useAudioStreamer';
 import { usePhoneAudioRecorder } from '@/hooks/usePhoneAudioRecorder';
-import { usePhoneAudioDevices } from '@/hooks/usePhoneAudioDevices';
 import { useBatteryMonitor } from '@/hooks/useBatteryMonitor';
 import { useBackendHealth, isNotConfigured } from '@/hooks/useBackendHealth';
-import { saveLastConnectedDeviceId, saveMicCaptureProfile, getMicCaptureProfile } from '@/utils/storage';
-import type { MicCaptureProfile } from '@/utils/storage';
+import { saveLastConnectedDeviceId } from '@/utils/storage';
 
 // Components
 import BluetoothStatusBanner from '@/components/BluetoothStatusBanner';
@@ -29,7 +27,6 @@ import ScanControls from '@/components/ScanControls';
 import DeviceListItem from '@/components/DeviceListItem';
 import DeviceDetails from '@/components/DeviceDetails';
 import PhoneAudioButton from '@/components/PhoneAudioButton';
-import PhoneAudioMicPicker from '@/components/PhoneAudioMicPicker';
 
 export default function App() {
   const t = useTheme();
@@ -59,17 +56,6 @@ export default function App() {
     },
   });
   const phoneAudioRecorder = usePhoneAudioRecorder();
-  const phoneAudioDevices = usePhoneAudioDevices();
-
-  // iOS mic processing profile for phone-mic capture (persisted).
-  const [micCaptureProfile, setMicCaptureProfile] = useState<MicCaptureProfile>('far-field');
-  useEffect(() => {
-    getMicCaptureProfile().then(setMicCaptureProfile);
-  }, []);
-  const handleSelectCaptureProfile = useCallback((profile: MicCaptureProfile) => {
-    setMicCaptureProfile(profile);
-    saveMicCaptureProfile(profile);
-  }, []);
 
   const { isListeningAudio: isOmiAudioListenerActive, audioPacketsReceived, startAudioListener: originalStartAudioListener, stopAudioListener: originalStopAudioListener, isRetrying: isAudioListenerRetrying, retryAttempts: audioListenerRetryAttempts } = useAudioListener(omiConnection, () => !!deviceConnection.connectedDeviceId);
 
@@ -159,8 +145,6 @@ export default function App() {
     phoneAudioRecorder,
     originalStartAudioListener,
     originalStopAudioListener,
-    resolvePhoneInputDeviceId: phoneAudioDevices.resolveEffectiveDeviceId,
-    phoneCaptureProfile: micCaptureProfile,
     settings,
   });
 
@@ -204,12 +188,11 @@ export default function App() {
       await Promise.all([
         checkBackendHealth(false),
         deviceConnection.connectedDeviceId ? batteryMonitor.refreshBattery() : Promise.resolve(),
-        phoneAudioDevices.refresh().then(() => {}, () => {}),
       ]);
     } finally {
       setRefreshing(false);
     }
-  }, [checkBackendHealth, deviceConnection.connectedDeviceId, batteryMonitor.refreshBattery, phoneAudioDevices.refresh]);
+  }, [checkBackendHealth, deviceConnection.connectedDeviceId, batteryMonitor.refreshBattery]);
 
   const bluetoothReady = bluetoothState === BluetoothState.PoweredOn && permissionGranted;
   // A fresh install points at localhost (the phone itself), which can never be a
@@ -342,20 +325,6 @@ export default function App() {
                 error={phoneAudioRecorder.error}
                 onPress={orchestrator.handleTogglePhoneAudio}
               />
-
-              {!deviceConnection.connectedDeviceId && !deviceConnection.isConnecting && (
-                <PhoneAudioMicPicker
-                  devices={phoneAudioDevices.devices}
-                  selectedDeviceId={phoneAudioDevices.selectedDeviceId}
-                  effectiveDevice={phoneAudioDevices.effectiveDevice}
-                  loading={phoneAudioDevices.loading}
-                  disabled={phoneAudioRecorder.isRecording || orchestrator.isPhoneAudioMode}
-                  onSelect={phoneAudioDevices.setSelectedDeviceId}
-                  onRefresh={phoneAudioDevices.refresh}
-                  captureProfile={micCaptureProfile}
-                  onSelectCaptureProfile={handleSelectCaptureProfile}
-                />
-              )}
             </>
           )}
 

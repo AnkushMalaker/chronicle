@@ -2,7 +2,8 @@ import { useState, useCallback } from 'react';
 import { Alert } from 'react-native';
 import { OmiConnection } from 'friend-lite-react-native';
 import { AppSettings } from './useAppSettings';
-import type { MicCaptureProfile } from '../utils/storage';
+import type { StreamStartConfig } from './useAudioStreamer';
+import type { PhoneCaptureSession } from './usePhoneAudioRecorder';
 
 interface OrchestratorParams {
   omiConnection: OmiConnection;
@@ -11,25 +12,20 @@ interface OrchestratorParams {
   };
   audioStreamer: {
     isStreaming: boolean;
-    startStreaming: (url: string) => Promise<void>;
-    stopStreaming: () => void;
+    startStreaming: (url: string, config?: StreamStartConfig) => Promise<void>;
+    stopStreaming: () => Promise<void>;
     sendAudio: (audioBytes: Uint8Array, durable?: boolean) => void;
     getWebSocketReadyState: () => number | undefined;
   };
   phoneAudioRecorder: {
     isRecording: boolean;
     startRecording: (
-      onData: (pcmBuffer: Uint8Array) => Promise<void>,
-      options?: { deviceId?: string; captureProfile?: MicCaptureProfile }
-    ) => Promise<void>;
+      onData: (pcmBuffer: Uint8Array) => Promise<void>
+    ) => Promise<PhoneCaptureSession>;
     stopRecording: () => Promise<void>;
   };
   originalStartAudioListener: (onAudioData: (bytes: Uint8Array) => void) => Promise<void>;
   originalStopAudioListener: () => Promise<void>;
-  /** Resolves which input device to record from (undefined = system default mic). */
-  resolvePhoneInputDeviceId?: () => Promise<string | undefined>;
-  /** iOS mic processing profile to record with (default 'far-field'). */
-  phoneCaptureProfile?: MicCaptureProfile;
   settings: AppSettings;
 }
 
@@ -48,8 +44,6 @@ export const useAudioStreamingOrchestrator = ({
   phoneAudioRecorder,
   originalStartAudioListener,
   originalStopAudioListener,
-  resolvePhoneInputDeviceId,
-  phoneCaptureProfile,
   settings,
 }: OrchestratorParams): AudioOrchestrator => {
   const [isPhoneAudioMode, setIsPhoneAudioMode] = useState<boolean>(false);
@@ -126,7 +120,7 @@ export const useAudioStreamingOrchestrator = ({
 
   const handleStopAudioListeningAndStreaming = useCallback(async () => {
     await originalStopAudioListener();
-    audioStreamer.stopStreaming();
+    await audioStreamer.stopStreaming();
   }, [originalStopAudioListener, audioStreamer]);
 
   const handleStartPhoneAudioStreaming = useCallback(async () => {
@@ -137,15 +131,13 @@ export const useAudioStreamingOrchestrator = ({
 
     try {
       const finalUrl = buildPhoneWebSocketUrl(settings.webSocketUrl);
-      // Resolve the input device (auto-prefers Bluetooth headset mic) before recording.
-      const deviceId = resolvePhoneInputDeviceId ? await resolvePhoneInputDeviceId() : undefined;
-      await audioStreamer.startStreaming(finalUrl);
-      await phoneAudioRecorder.startRecording(async (pcmBuffer) => {
+      const capture = await phoneAudioRecorder.startRecording(async (pcmBuffer) => {
         const wsReady = audioStreamer.getWebSocketReadyState();
         if (wsReady === WebSocket.OPEN && pcmBuffer.length > 0) {
           await audioStreamer.sendAudio(pcmBuffer, false);
         }
-      }, { deviceId, captureProfile: phoneCaptureProfile });
+      });
+      await audioStreamer.startStreaming(finalUrl, { phoneVoice: capture });
       setIsPhoneAudioMode(true);
     } catch (error) {
       Alert.alert('Error', 'Could not start phone audio streaming.');
@@ -153,11 +145,11 @@ export const useAudioStreamingOrchestrator = ({
       if (phoneAudioRecorder.isRecording) await phoneAudioRecorder.stopRecording();
       setIsPhoneAudioMode(false);
     }
-  }, [audioStreamer, phoneAudioRecorder, settings.webSocketUrl, buildPhoneWebSocketUrl, resolvePhoneInputDeviceId, phoneCaptureProfile]);
+  }, [audioStreamer, phoneAudioRecorder, settings.webSocketUrl, buildPhoneWebSocketUrl]);
 
   const handleStopPhoneAudioStreaming = useCallback(async () => {
+    await audioStreamer.stopStreaming();
     await phoneAudioRecorder.stopRecording();
-    audioStreamer.stopStreaming();
     setIsPhoneAudioMode(false);
   }, [phoneAudioRecorder, audioStreamer]);
 

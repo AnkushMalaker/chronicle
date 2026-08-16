@@ -1,0 +1,10 @@
+{
+  "platforms": ["ios", "android"],
+  "ios": {
+    "modules": ["ChronicleDuplexAudioModule"]
+  },
+  "android": {
+    "modules": ["com.chronicle.duplexaudio.ChronicleDuplexAudioModule"],
+    "packageImportPath": "com.chronicle.duplexaudio"
+  }
+}
