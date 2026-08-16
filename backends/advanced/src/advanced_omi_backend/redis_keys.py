@@ -142,6 +142,51 @@ def device_downlink_channel(client_id: ClientId) -> DeviceDownlinkChannel:
     return DeviceDownlinkChannel.from_value(f"device:downlink:{client_id}")
 
 
+# --- interactive voice and coordinated responses ---
+
+
+def active_voice_session(user_id: str | UserId, client_id: str | ClientId) -> str:
+    """Pointer to the sole non-ended voice session for one authenticated device."""
+
+    return f"voice:active:{_identity_value(user_id)}:{_identity_value(client_id)}"
+
+
+def voice_session(voice_session_id: str) -> str:
+    """Hash containing one version-one voice-session state machine."""
+
+    return f"voice:session:{voice_session_id}"
+
+
+def response_generation(user_id: str | UserId, client_id: str | ClientId) -> str:
+    """Client-wide monotonic output generation shared by every response producer."""
+
+    return (
+        f"voice:response:generation:{_identity_value(user_id)}:"
+        f"{_identity_value(client_id)}"
+    )
+
+
+def current_response(user_id: str | UserId, client_id: str | ClientId) -> str:
+    """Pointer to the current coordinated response for one authenticated device."""
+
+    return (
+        f"voice:response:current:{_identity_value(user_id)}:"
+        f"{_identity_value(client_id)}"
+    )
+
+
+def voice_response(response_id: str) -> str:
+    """Hash containing one response lifecycle record."""
+
+    return f"voice:response:{response_id}"
+
+
+def voice_response_media(response_id: str) -> str:
+    """Short-lived binary WAV body referenced by a ``response.audio`` header."""
+
+    return f"voice:response:media:{response_id}"
+
+
 def timeline_evidence_revision(user_id: str | UserId) -> str:
     """Per-user monotonic evidence-revision counter (INCR) for dirty-range fencing."""
     return f"timeline:evidence_revision:{_identity_value(user_id)}"

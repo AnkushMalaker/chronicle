@@ -25,6 +25,7 @@ class ClientState:
 
     # Liveness flag, flipped by disconnect().
     connected: bool = True
+    socket_id: str = ""
 
     # Wall-clock time of the last inbound WebSocket message, stamped via touch().
     # Drives the idle read-timeout reaper and the Network page's "last seen" / honest

@@ -49,7 +49,11 @@ from advanced_omi_backend.models.audio_capture import (
 from advanced_omi_backend.models.conversation import create_conversation
 from advanced_omi_backend.plugins.events import BUTTON_STATE_TO_EVENT, ButtonState
 from advanced_omi_backend.redis_factory import create_async_redis
-from advanced_omi_backend.redis_keys import ClientId, device_downlink_channel
+from advanced_omi_backend.redis_keys import (
+    ClientId,
+    device_downlink_channel,
+    voice_response_media,
+)
 from advanced_omi_backend.services.audio_claims import apply_audio_ranges
 from advanced_omi_backend.services.audio_stream.durability import (
     AUDIO_PERSISTENCE_GROUP,
@@ -69,14 +73,27 @@ from advanced_omi_backend.services.device_audio import (
 )
 from advanced_omi_backend.services.observability import record_event_sync
 from advanced_omi_backend.services.plugin_service import get_plugin_router
+from advanced_omi_backend.services.response_coordinator import ResponseCoordinator
 from advanced_omi_backend.services.sse_publisher import publish_sse_event_async
 from advanced_omi_backend.services.transcription import is_transcription_available
+from advanced_omi_backend.services.voice_sessions import (
+    ClientUpgradeRequired,
+    VoiceSessionCoordinator,
+)
 from advanced_omi_backend.services.wakeword.followup import handle_dial_followup
 from advanced_omi_backend.users import register_client_to_user, touch_client_last_seen
 from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
 from advanced_omi_backend.voice_protocol import (
     VOICE_DUPLEX_PROTOCOL,
     AudioSessionStarted,
+    ResponseAudio,
+    ResponsePlayback,
+    VoiceSessionCapabilitiesChanged,
+    VoiceSessionReady,
+    VoiceSessionResume,
+    VoiceSessionStart,
+    VoiceSessionStopped,
+    parse_voice_protocol_event,
 )
 from advanced_omi_backend.workers.transcription_jobs import transcribe_full_audio_job
 
@@ -161,6 +178,177 @@ def _get_client_setup_lock(client_id: str) -> asyncio.Lock:
     return lock
 
 
+async def _forward_interactive_downlink(
+    *,
+    websocket: WebSocket,
+    redis_client,
+    voice_sessions: VoiceSessionCoordinator,
+    payload: dict,
+    user_id: str,
+    client_id: str,
+    socket_id: str,
+) -> bool:
+    """Forward one strictly validated event only to its current bound socket."""
+
+    event = parse_voice_protocol_event(payload)
+    if event.client_id != client_id or not hasattr(event, "voice_session_id"):
+        return False
+    require_ready = isinstance(event, ResponseAudio)
+    if not await voice_sessions.binding_matches(
+        user_id=user_id,
+        client_id=client_id,
+        audio_session_id=event.audio_session_id,
+        voice_session_id=event.voice_session_id,
+        capture_epoch=event.capture_epoch,
+        socket_id=socket_id,
+        require_ready=require_ready,
+    ):
+        logger.info(
+            "Dropped stale interactive downlink %s for %s",
+            event.type,
+            client_id,
+        )
+        return False
+    await websocket.send_json(event.model_dump(mode="json", exclude_none=False))
+    if isinstance(event, ResponseAudio):
+        wav = await redis_client.get(voice_response_media(event.response_id))
+        if wav is None or len(wav) != event.byte_length:
+            raise RuntimeError(
+                f"Response media missing or wrong length for {event.response_id}"
+            )
+        if isinstance(wav, str):
+            raise RuntimeError("Response media Redis client decoded binary WAV")
+        await websocket.send_bytes(wav)
+    return True
+
+
+async def request_voice_session_start(
+    *,
+    client_state,
+    audio_stream_producer,
+) -> object | None:
+    """Activate protocol-v1 voice or return the explicit old-client boundary."""
+
+    client_id = client_state.client_id
+    user_id = client_state.user_id
+    if not client_state.stream_session_id:
+        raise RuntimeError("interactive voice requires an active capture session")
+    coordinator = VoiceSessionCoordinator(audio_stream_producer.redis_client)
+    try:
+        started = await coordinator.start(
+            user_id=user_id,
+            client_id=client_id,
+            audio_session_id=client_state.stream_session_id,
+            capture_epoch=client_state.capture_epoch,
+            socket_id=client_state.socket_id,
+            advertised_protocol=client_state.voice_duplex_protocol,
+        )
+    except ClientUpgradeRequired:
+        error = {
+            "type": "error",
+            "error": "client_upgrade_required",
+            "message": "Update Chronicle to use interactive voice.",
+            "code": 426,
+        }
+        await audio_stream_producer.redis_client.publish(
+            str(device_downlink_channel(ClientId.from_value(client_id))),
+            json.dumps(error, separators=(",", ":")),
+        )
+        return None
+    event = VoiceSessionStart(
+        type="voice-session.start",
+        event_id=uuid.uuid4(),
+        client_id=client_id,
+        audio_session_id=started.session.audio_session_id,
+        voice_session_id=started.session.voice_session_id,
+        capture_epoch=started.session.capture_epoch,
+        sent_at=datetime.now(timezone.utc),
+        resume_token=started.resume_token,
+        response_generation=started.session.generation,
+        readiness_deadline_ms=2000,
+    )
+    await audio_stream_producer.redis_client.publish(
+        str(device_downlink_channel(ClientId.from_value(client_id))),
+        json.dumps(event.model_dump(mode="json"), separators=(",", ":")),
+    )
+    return started
+
+
+async def _handle_phone_voice_event(
+    *,
+    payload: dict,
+    client_state,
+    audio_stream_producer,
+) -> object:
+    """Apply one phone→server event through the production coordinators."""
+
+    event = parse_voice_protocol_event(payload)
+    if event.client_id != client_state.client_id:
+        raise ValueError("voice event client_id does not match authenticated socket")
+    voice_sessions = VoiceSessionCoordinator(audio_stream_producer.redis_client)
+    responses = ResponseCoordinator(audio_stream_producer.redis_client, voice_sessions)
+    common = {
+        "user_id": client_state.user_id,
+        "client_id": client_state.client_id,
+        "socket_id": client_state.socket_id,
+    }
+    if isinstance(event, VoiceSessionReady):
+        return await voice_sessions.ready(
+            voice_session_id=event.voice_session_id,
+            audio_session_id=event.audio_session_id,
+            capture_epoch=event.capture_epoch,
+            capabilities=event.capabilities,
+            **common,
+        )
+    if isinstance(event, VoiceSessionCapabilitiesChanged):
+        return await voice_sessions.capabilities_changed(
+            voice_session_id=event.voice_session_id,
+            audio_session_id=event.audio_session_id,
+            capture_epoch=event.capture_epoch,
+            capabilities=event.capabilities,
+            reason=event.reason,
+            **common,
+        )
+    if isinstance(event, VoiceSessionResume):
+        if not client_state.stream_session_id:
+            raise ValueError("voice resume requires the new capture session")
+        return await voice_sessions.resume(
+            previous_voice_session_id=event.previous_voice_session_id,
+            previous_capture_epoch=event.previous_capture_epoch,
+            resume_token=event.resume_token,
+            new_audio_session_id=client_state.stream_session_id,
+            new_capture_epoch=client_state.capture_epoch,
+            new_socket_id=client_state.socket_id,
+            last_response_generation=event.last_response_generation,
+            user_id=client_state.user_id,
+            client_id=client_state.client_id,
+        )
+    if isinstance(event, VoiceSessionStopped):
+        return await voice_sessions.end(
+            voice_session_id=event.voice_session_id,
+            audio_session_id=event.audio_session_id,
+            capture_epoch=event.capture_epoch,
+            reason=(
+                "user_requested"
+                if event.restoration_succeeded
+                else "capture_restore_failed"
+            ),
+            **common,
+        )
+    if isinstance(event, ResponsePlayback):
+        return await responses.playback(
+            response_id=event.response_id,
+            generation=event.generation,
+            state=event.state,
+            audio_session_id=event.audio_session_id,
+            voice_session_id=event.voice_session_id,
+            capture_epoch=event.capture_epoch,
+            monotonic_timestamp_ms=event.monotonic_timestamp_ms,
+            **common,
+        )
+    raise ValueError(f"Event {event.type} is not valid phone-to-server traffic")
+
+
 async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) -> None:
     """
     Subscribe to interim transcription results from Redis Pub/Sub and forward to client WebSocket.
@@ -179,7 +367,7 @@ async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) ->
     """
     try:
         # Create Redis client for Pub/Sub
-        redis_client = create_async_redis(decode_responses=True)
+        redis_client = create_async_redis(decode_responses=False)
 
         # Create Pub/Sub instance
         pubsub = redis_client.pubsub()
@@ -264,7 +452,10 @@ async def subscribe_to_interim_results(websocket: WebSocket, session_id: str) ->
 
 
 async def subscribe_to_device_downlink(
-    websocket: WebSocket, client_id: ClientId
+    websocket: WebSocket,
+    client_id: ClientId,
+    user_id: str,
+    socket_id: str,
 ) -> None:
     """Forward backend→device control messages from Redis Pub/Sub to the device WebSocket.
 
@@ -285,6 +476,7 @@ async def subscribe_to_device_downlink(
 
     try:
         redis_client = create_async_redis(decode_responses=True)
+        voice_sessions = VoiceSessionCoordinator(redis_client)
         pubsub = redis_client.pubsub()
         await pubsub.subscribe(channel)
         logger.info(
@@ -316,7 +508,24 @@ async def subscribe_to_device_downlink(
                     # disconnect); sending after close raises the ASGI websocket.send error.
                     if websocket.client_state != WebSocketState.CONNECTED:
                         break
-                    if msg_type == "stop-audio":
+                    if msg_type in {
+                        "voice-session.start",
+                        "voice-session.stop",
+                        "response.audio",
+                        "response.cancel",
+                    }:
+                        forwarded = await _forward_interactive_downlink(
+                            websocket=websocket,
+                            redis_client=redis_client,
+                            voice_sessions=voice_sessions,
+                            payload=payload,
+                            user_id=user_id,
+                            client_id=client_id_value,
+                            socket_id=socket_id,
+                        )
+                        if not forwarded:
+                            continue
+                    elif msg_type == "stop-audio":
                         # Barge-in: stop whatever TTS is playing on the device. For
                         # Opus clients this cancels the in-flight stream + flushes the
                         # device; for others there's nothing streaming to cancel, so
@@ -688,6 +897,7 @@ async def _setup_websocket_connection(
 
     # Create client state
     client_state = await create_client_state(client_id, user, device_name)
+    client_state.socket_id = f"ws-{uuid.uuid4()}"
 
     return client_id, client_state, user
 
@@ -760,7 +970,7 @@ async def _initialize_streaming_session(
 
     # Initialize session tracking in Redis (SINGLE SOURCE OF TRUTH for session metadata)
     # This includes user_email, connection info, audio format, chunk counters, job IDs, etc.
-    connection_id = f"ws_{client_id}_{int(time.time())}"
+    connection_id = client_state.socket_id
     await audio_stream_producer.init_session(
         session_id=session_id,
         user_id=user_id,
@@ -1752,6 +1962,8 @@ async def _websocket_session(ws, token, device_name, connection_type):
     pending_connections.add(pending_client_id)
 
     client_id = None
+    client_state = None
+    audio_stream_producer = None
     interim_holder = [None]  # mutable so inner loop can update
     downlink_task = None
 
@@ -1769,7 +1981,12 @@ async def _websocket_session(ws, token, device_name, connection_type):
 
         # Forward backend→device control messages (tones, TTS) for this device.
         downlink_task = asyncio.create_task(
-            subscribe_to_device_downlink(ws, ClientId.from_value(client_id))
+            subscribe_to_device_downlink(
+                ws,
+                ClientId.from_value(client_id),
+                user.user_id,
+                client_state.socket_id,
+            )
         )
 
         yield (client_id, client_state, user, audio_stream_producer, interim_holder)
@@ -1796,6 +2013,29 @@ async def _websocket_session(ws, token, device_name, connection_type):
             metadata={"connection_type": connection_type},
         )
     finally:
+        if client_state is not None and audio_stream_producer is not None:
+            try:
+                voice_sessions = VoiceSessionCoordinator(
+                    audio_stream_producer.redis_client
+                )
+                active_voice = await voice_sessions.get_active(
+                    client_state.user_id, client_state.client_id
+                )
+                if (
+                    active_voice is not None
+                    and active_voice.socket_id == client_state.socket_id
+                ):
+                    await voice_sessions.disconnect(
+                        voice_session_id=active_voice.voice_session_id,
+                        socket_id=client_state.socket_id,
+                    )
+            except Exception as voice_error:
+                application_logger.error(
+                    "Failed to fence voice session on socket cleanup for %s: %s",
+                    client_id,
+                    voice_error,
+                    exc_info=True,
+                )
         if downlink_task and not downlink_task.done():
             downlink_task.cancel()
             try:
@@ -2059,6 +2299,20 @@ async def handle_pcm_websocket(
                         )
                         continue
 
+                    elif header["type"] in {
+                        "voice-session.ready",
+                        "voice-session.capabilities-changed",
+                        "voice-session.resume",
+                        "voice-session.stopped",
+                        "response.playback",
+                    }:
+                        await _handle_phone_voice_event(
+                            payload=header,
+                            client_state=client_state,
+                            audio_stream_producer=audio_stream_producer,
+                        )
+                        continue
+
                     else:
                         application_logger.debug(
                             f"Ignoring Wyoming control event type '{header['type']}' for {client_id}"
@@ -2110,6 +2364,19 @@ async def handle_pcm_websocket(
                                 elif control_header.get("type") == "audio-start":
                                     application_logger.info(
                                         f"🔄 Ignoring duplicate audio-start message during streaming for {client_id}"
+                                    )
+                                    continue
+                                elif control_header.get("type") in {
+                                    "voice-session.ready",
+                                    "voice-session.capabilities-changed",
+                                    "voice-session.resume",
+                                    "voice-session.stopped",
+                                    "response.playback",
+                                }:
+                                    await _handle_phone_voice_event(
+                                        payload=control_header,
+                                        client_state=client_state,
+                                        audio_stream_producer=audio_stream_producer,
                                     )
                                     continue
                                 elif control_header.get("type") == "audio-chunk":
