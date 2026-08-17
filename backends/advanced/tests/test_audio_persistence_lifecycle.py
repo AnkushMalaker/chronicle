@@ -83,6 +83,7 @@ class _PersistedCapture:
     capture_session_id = "session-1"
     user_id = "user-1"
     client_id = "client-1"
+    time_basis = "received"
     status = "active"
     ended_at = None
 

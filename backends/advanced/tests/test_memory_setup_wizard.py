@@ -90,6 +90,13 @@ def test_rerun_preserves_explicit_write_recovery_backend(init_module, recovery):
         init_module,
         {
             "defaults": {"llm": "muse-glimmer-llm"},
+            "models": [
+                {
+                    "name": "muse-glimmer-llm",
+                    "model_type": "llm",
+                    "api_family": "openai",
+                }
+            ],
             "memory": {
                 "agents": {
                     "write": {"backend": "pi", "recovery_backend": recovery},
