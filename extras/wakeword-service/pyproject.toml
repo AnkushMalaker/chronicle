@@ -33,8 +33,8 @@ testpaths = ["tests"]
 # time (vendor_models.sh) so the runtime never depends on a PyPI re-bundle.
 
 [tool.black]
-line-length = 100
+line-length = 88
 
 [tool.isort]
 profile = "black"
-line_length = 100
+line_length = 88

@@ -55,14 +55,18 @@ async def test_active_consumer_publishes_only_committed_turns():
         model_factory=FakeModels,
         monotonic_ms=clock,
     )
-    for sequence, pcm in enumerate([b"speech-1", b"speech-2", b"silence", b"silence", b"silence"]):
+    for sequence, pcm in enumerate(
+        [b"speech-1", b"speech-2", b"silence", b"silence", b"silence"]
+    ):
         await consumer.handle_frame(_fields(sequence, pcm))
 
     assert all(stream != COMMITTED_TURNS_STREAM for stream, _, _ in redis.added)
     clock.now_ms += 2_000
     await consumer.flush_due()
 
-    committed = [fields for stream, fields, _ in redis.added if stream == COMMITTED_TURNS_STREAM]
+    committed = [
+        fields for stream, fields, _ in redis.added if stream == COMMITTED_TURNS_STREAM
+    ]
     assert len(committed) == 1
     assert committed[0]["voice_session_id"] == "voice-1"
     assert committed[0]["audio_session_id"] == "audio-1"
