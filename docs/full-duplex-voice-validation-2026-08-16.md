@@ -5,7 +5,7 @@
 **AVAILABLE AUTOMATED GATES GREEN — NOT CUTOVER-READY.**
 
 The implementation candidate is commit
-`4e27b7e7f02f25aaeb9d98c364f30ab5db3263c2` on
+`19bedc4a07b3e9292b6dd62d2722409d3c426099` on
 `feature/full-duplex-voice-cutover`. This report is the only change after that
 candidate revision.
 
@@ -23,7 +23,7 @@ backfill apply, app release, live Swiggy request, or payment was performed.
 | Item | Value |
 | --- | --- |
 | Branch | `feature/full-duplex-voice-cutover` |
-| Implementation candidate | `4e27b7e7f02f25aaeb9d98c364f30ab5db3263c2` |
+| Implementation candidate | `19bedc4a07b3e9292b6dd62d2722409d3c426099` |
 | Base lineage | `dev`, with curated source changes committed at `210e0c73` |
 | Host | `Kraken` |
 | OS | Linux 6.6.87.2 WSL2, x86_64 |
