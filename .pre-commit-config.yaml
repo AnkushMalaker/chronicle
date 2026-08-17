@@ -29,6 +29,8 @@ repos:
             "black",
             "-p",
             "simple_speaker_recognition",
+            "-p",
+            "turn_segmenter",
           ]
         exclude: \.venv/
 
