@@ -7,10 +7,11 @@ import mimetypes
 import sqlite3
 import time
 import wave
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 
@@ -65,14 +66,26 @@ class Checkpoints:
         temporary.replace(self.path)
 
 
-def open_screenpipe_db(path: Path) -> sqlite3.Connection:
-    """Open the live WAL database without ever requesting a write lock."""
+@contextmanager
+def open_screenpipe_db(path: Path) -> Iterator[sqlite3.Connection]:
+    """Open the live WAL database without ever requesting a write lock.
+
+    A context manager rather than a bare connection because `sqlite3.Connection`
+    is *itself* one — and its `__exit__` only ends a transaction, it does not
+    close. Handing the raw connection to `with` therefore leaks two descriptors
+    (the database and its WAL) per call, which the polling loop repeats until
+    the process hits its descriptor limit and every subsequent operation,
+    including the HTTP upload, fails with `Too many open files`.
+    """
     uri = f"file:{path.resolve()}?mode=ro"
     connection = sqlite3.connect(uri, uri=True, timeout=5)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA query_only=ON")
-    connection.execute("PRAGMA busy_timeout=5000")
-    return connection
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA busy_timeout=5000")
+        yield connection
+    finally:
+        connection.close()
 
 
 def table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
