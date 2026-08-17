@@ -5,13 +5,13 @@
 **AVAILABLE AUTOMATED GATES GREEN — NOT CUTOVER-READY.**
 
 The implementation candidate is commit
-`678e9027685d8ebb2912cf0776378849c250bfb8` on
+`02b7a3b89d22b097935fb60fb86dec59f4d918a0` on
 `feature/full-duplex-voice-cutover`. This report is the only change after that
 candidate revision.
 
 The Linux/WSL2 host used for validation has no local Apple or Android native build
 toolchain and no required physical phones or acoustic replay rig. EAS subsequently
-compiled the production iOS archive and submitted build 58 to App Store Connect, but
+compiled the production iOS archive and submitted build 59 to App Store Connect, but
 the standalone Swift tests, Android unit/instrumentation tests, physical-route tests,
 and automated acoustic gates were not run. The branch must not be merged, deployed,
 released, or described as cutover-ready until those gates pass and this report is
@@ -25,7 +25,7 @@ backfill apply, app release, live Swiggy request, or payment was performed.
 | Item | Value |
 | --- | --- |
 | Branch | `feature/full-duplex-voice-cutover` |
-| Implementation candidate | `678e9027685d8ebb2912cf0776378849c250bfb8` |
+| Implementation candidate | `02b7a3b89d22b097935fb60fb86dec59f4d918a0` |
 | Base lineage | `dev`, with curated source changes committed at `210e0c73` |
 | Host | `Kraken` |
 | OS | Linux 6.6.87.2 WSL2, x86_64 |
@@ -146,6 +146,21 @@ candidate `678e9027` only by this validation report. EAS submission
 then uploaded the binary successfully to App Store Connect. Apple reported that the
 binary was processing; processing and TestFlight installation are not evidence for
 the outstanding physical-device or acoustic gates.
+
+Candidate `02b7a3b8` adds one user-facing status line under the phone audio meter,
+driven by the existing native playback lifecycle: `Listening`, `Chronicle speaking`,
+`Speech interrupted`, `Response complete`, or `Playback failed`. It exposes no route,
+AEC, or duplex terminology. The status mapping was added through the public app test
+entry point, followed by passing reruns of `npm run test:phone-duplex`,
+`npm run test:voice-protocol`, `npm run typecheck`, and `npm run check:theme`.
+
+GitHub Actions run
+[`32043466407`](https://github.com/SimpleOpenSoftware/chronicle/actions/runs/32043466407)
+completed successfully from exact candidate `02b7a3b8`. EAS build
+[`beb6d39c-2f78-4b80-ae3c-ede9963b4a30`](https://expo.dev/accounts/cupbearer5517/projects/friend-lite-app/builds/beb6d39c-2f78-4b80-ae3c-ede9963b4a30)
+compiled app version 1.12.0, build number 59. EAS submission
+[`89b237b2-55bf-4260-ad50-b58c1e604a88`](https://expo.dev/accounts/cupbearer5517/projects/friend-lite-app/submissions/89b237b2-55bf-4260-ad50-b58c1e604a88)
+uploaded it successfully to App Store Connect, where Apple began processing it.
 
 ## Attempts and resolved failures
 
