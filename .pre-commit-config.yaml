@@ -17,11 +17,20 @@ repos:
     rev: 26.5.1
     hooks:
       - id: black
+        name: black (default projects)
+        language_version: python3.12
+        exclude: (\.venv/|^extras/wakeword-service/)
+      - id: black
+        name: black (wakeword service)
+        args: ["--config", "extras/wakeword-service/pyproject.toml"]
+        language_version: python3.12
+        files: ^extras/wakeword-service/
         exclude: \.venv/
   - repo: https://github.com/PyCQA/isort
     rev: 5.13.2
     hooks:
       - id: isort
+        name: isort (default projects)
         args:
           [
             "--profile",
@@ -29,6 +38,11 @@ repos:
             "-p",
             "simple_speaker_recognition",
           ]
+        exclude: (\.venv/|^extras/wakeword-service/)
+      - id: isort
+        name: isort (wakeword service)
+        args: ["--settings-path", "extras/wakeword-service/pyproject.toml"]
+        files: ^extras/wakeword-service/
         exclude: \.venv/
 
   # File hygiene
