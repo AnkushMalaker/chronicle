@@ -6,15 +6,18 @@ This module contains jobs related to audio file processing and cropping.
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
 
 from bson import Binary
 from pymongo.errors import DuplicateKeyError
 from rq import get_current_job
 
+from advanced_omi_backend.models.audio_capture import (
+    CAPTURE_CONTINUITY_TOLERANCE_SECONDS,
+    AudioCaptureSession,
+)
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
-from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
 from advanced_omi_backend.services.audio_stream.durability import (
     AUDIO_PERSISTENCE_GROUP,
@@ -27,10 +30,7 @@ from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
 )
-from advanced_omi_backend.utils.audio_chunk_utils import (
-    encode_pcm_to_opus,
-    get_resume_position,
-)
+from advanced_omi_backend.utils.audio_chunk_utils import encode_pcm_to_opus
 from advanced_omi_backend.utils.job_utils import check_job_alive
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ class AudioPersistenceError(RuntimeError):
 
 
 class AudioPersistenceInvariantError(AudioPersistenceError):
-    """The configured lifecycle cannot provide a durable owner for raw audio."""
+    """Capture identity/provenance cannot prove a safe Mongo commit."""
 
 
 def _message_id_text(message_id: bytes | str) -> str:
@@ -71,6 +71,18 @@ def _captured_at_from_fields(fields: dict, message_id: str) -> datetime | None:
         except (TypeError, ValueError, OverflowError):
             logger.warning("Invalid captured_at on Redis audio message %s", message_id)
     return _captured_at(message_id)
+
+
+def _time_basis_from_fields(fields: dict) -> str:
+    raw = fields.get(b"time_basis") or fields.get("time_basis")
+    if raw is None:
+        return "received"
+    value = raw.decode() if isinstance(raw, bytes) else str(raw)
+    if value not in {"recorded", "received"}:
+        raise AudioPersistenceInvariantError(
+            f"Invalid WAL capture time basis {value!r}"
+        )
+    return value
 
 
 @async_job(redis=True, beanie=True)
@@ -112,13 +124,33 @@ async def audio_streaming_persistence_job(
     start_time = time.time()
     max_runtime = 86340
     current_job = get_current_job()
-    seen_conversations: set[str] = set()
-    conversation_positions: dict[str, tuple[int, float]] = {}
+
+    capture = await AudioCaptureSession.find_one(
+        AudioCaptureSession.capture_session_id == session_id
+    )
+    if capture is None:
+        raise AudioPersistenceInvariantError(
+            f"Capture session {session_id} does not exist in MongoDB"
+        )
+    if capture.user_id != user_id or capture.client_id != client_id:
+        raise AudioPersistenceInvariantError(
+            f"Capture session {session_id} identity does not match persistence job"
+        )
+
+    last_chunk = (
+        await AudioChunkDocument.find(
+            AudioChunkDocument.capture_session_id == session_id
+        )
+        .sort("-sequence")
+        .first_or_none()
+    )
+    next_sequence = last_chunk.sequence + 1 if last_chunk is not None else 0
 
     pcm_buffer = bytearray()
     pcm_message_ids: list[bytes | str] = []
-    pcm_conversation_id: str | None = None
     pcm_captured_at: datetime | None = None
+    pcm_time_basis: str | None = None
+    observed_time_basis: str | None = None
     total_pcm_bytes = 0
     total_compressed_bytes = 0
     total_mongo_chunks_written = 0
@@ -134,12 +166,15 @@ async def audio_streaming_persistence_job(
         existing,
         source_ids: list[str],
         original_size: int,
-        conversation_id: str,
     ) -> None:
-        if existing.conversation_id != conversation_id:
+        if existing.capture_session_id != session_id:
             raise AudioPersistenceInvariantError(
                 f"Committed chunk {source_ids[0]} belongs to "
-                f"{existing.conversation_id}, not WAL owner {conversation_id}"
+                f"capture {existing.capture_session_id}, not {session_id}"
+            )
+        if existing.user_id != user_id or existing.capture_source_id != client_id:
+            raise AudioPersistenceInvariantError(
+                f"Committed chunk {source_ids[0]} has different capture identity"
             )
         if list(existing.source_message_ids) != source_ids:
             raise AudioPersistenceInvariantError(
@@ -153,15 +188,12 @@ async def audio_streaming_persistence_job(
 
     async def commit_and_ack_buffer() -> None:
         """Commit the local PCM buffer, then ACK exactly its source messages."""
-        nonlocal pcm_buffer, pcm_message_ids, pcm_conversation_id, pcm_captured_at
+        nonlocal pcm_buffer, pcm_message_ids, pcm_captured_at, pcm_time_basis
+        nonlocal next_sequence
         nonlocal total_pcm_bytes, total_compressed_bytes, total_mongo_chunks_written
 
         if not pcm_buffer:
             return
-        if not pcm_conversation_id:
-            raise AudioPersistenceInvariantError(
-                "PCM reached persistence without a conversation owner"
-            )
         if not pcm_message_ids:
             raise AudioPersistenceInvariantError(
                 "PCM buffer has no Redis source-message provenance"
@@ -169,17 +201,15 @@ async def audio_streaming_persistence_job(
 
         source_ids = [_message_id_text(message_id) for message_id in pcm_message_ids]
         original_size = len(pcm_buffer)
-        chunk_index, chunk_start_time = conversation_positions.get(
-            pcm_conversation_id, (None, None)
-        )
-        if chunk_index is None or chunk_start_time is None:
-            chunk_index, chunk_start_time = await get_resume_position(
-                pcm_conversation_id
-            )
         existing = await find_existing_chunk(source_ids)
         inserted = False
 
         if existing is None:
+            captured_at = pcm_captured_at or _captured_at(source_ids[0])
+            if captured_at is None:
+                raise AudioPersistenceInvariantError(
+                    f"WAL chunk {source_ids[0]} has no absolute capture time"
+                )
             opus_data = await encode_pcm_to_opus(
                 pcm_data=bytes(pcm_buffer),
                 sample_rate=sample_rate,
@@ -187,17 +217,16 @@ async def audio_streaming_persistence_job(
                 bitrate=24,
             )
             duration = original_size / bytes_per_second
-            end_time = chunk_start_time + duration
             candidate = AudioChunkDocument(
-                conversation_id=pcm_conversation_id,
-                chunk_index=chunk_index,
+                user_id=user_id,
+                capture_source_id=client_id,
+                capture_session_id=session_id,
+                sequence=next_sequence,
                 audio_data=Binary(opus_data),
                 original_size=original_size,
                 compressed_size=len(opus_data),
-                start_time=chunk_start_time,
-                end_time=end_time,
                 duration=duration,
-                captured_at=pcm_captured_at or _captured_at(source_ids[0]),
+                captured_at=captured_at,
                 sample_rate=sample_rate,
                 channels=channels,
                 source_stream=audio_stream_name,
@@ -214,32 +243,7 @@ async def audio_streaming_persistence_job(
                 if existing is None:
                     raise
 
-        validate_existing_chunk(
-            existing, source_ids, original_size, pcm_conversation_id
-        )
-
-        conversation = await Conversation.find_one(
-            Conversation.conversation_id == existing.conversation_id
-        )
-        if conversation is None:
-            raise AudioPersistenceInvariantError(
-                f"WAL owner {existing.conversation_id} does not exist in MongoDB"
-            )
-        if conversation.source_session_id != session_id:
-            raise AudioPersistenceInvariantError(
-                f"WAL owner {existing.conversation_id} belongs to session "
-                f"{conversation.source_session_id}, not {session_id}"
-            )
-        conversation.audio_chunks_count = max(
-            conversation.audio_chunks_count or 0, existing.chunk_index + 1
-        )
-        conversation.audio_total_duration = max(
-            conversation.audio_total_duration or 0.0, existing.end_time
-        )
-        conversation.audio_compression_ratio = (
-            existing.compressed_size / existing.original_size
-        )
-        await conversation.save()
+        validate_existing_chunk(existing, source_ids, original_size)
 
         await redis_client.xack(audio_stream_name, audio_group_name, *pcm_message_ids)
 
@@ -248,18 +252,16 @@ async def audio_streaming_persistence_job(
             total_compressed_bytes += existing.compressed_size
             total_mongo_chunks_written += 1
 
-        conversation_positions[pcm_conversation_id] = (
-            max(chunk_index, existing.chunk_index + 1),
-            max(chunk_start_time, existing.end_time),
-        )
+        next_sequence = max(next_sequence, existing.sequence + 1)
         pcm_buffer = bytearray()
         pcm_message_ids = []
-        pcm_conversation_id = None
         pcm_captured_at = None
+        pcm_time_basis = None
 
     async def process_messages(messages) -> bytes | str | None:
         """Move delivered entries to Mongo or leave them pending on any error."""
-        nonlocal end_signal_received, pcm_conversation_id, pcm_captured_at
+        nonlocal end_signal_received, pcm_captured_at, pcm_time_basis
+        nonlocal observed_time_basis
         last_message_id = None
         for _stream_name, stream_messages in messages:
             for message_id, fields in stream_messages:
@@ -276,28 +278,74 @@ async def audio_streaming_persistence_job(
                 is_terminal = chunk_id == "END" or bool(
                     fields.get(b"end_marker") or fields.get("end_marker")
                 )
-                raw_conversation_id = fields.get(b"conversation_id") or fields.get(
-                    "conversation_id"
+                raw_capture_id = fields.get(b"capture_session_id") or fields.get(
+                    "capture_session_id"
                 )
-                if not raw_conversation_id:
+                if not raw_capture_id:
                     raise AudioPersistenceInvariantError(
-                        f"Redis WAL entry {_message_id_text(message_id)} has no owner"
+                        f"Redis WAL entry {_message_id_text(message_id)} has no capture id"
                     )
-                conversation_id = (
-                    raw_conversation_id.decode()
-                    if isinstance(raw_conversation_id, bytes)
-                    else str(raw_conversation_id)
+                capture_id = (
+                    raw_capture_id.decode()
+                    if isinstance(raw_capture_id, bytes)
+                    else str(raw_capture_id)
                 )
+                if capture_id != session_id:
+                    raise AudioPersistenceInvariantError(
+                        f"Redis WAL entry {_message_id_text(message_id)} belongs to "
+                        f"capture {capture_id}, not {session_id}"
+                    )
 
                 if audio_data:
-                    if pcm_conversation_id and pcm_conversation_id != conversation_id:
-                        await commit_and_ack_buffer()
-                    if pcm_conversation_id is None:
-                        pcm_conversation_id = conversation_id
-                        pcm_captured_at = _captured_at_from_fields(
-                            fields, _message_id_text(message_id)
+                    message_captured_at = _captured_at_from_fields(
+                        fields, _message_id_text(message_id)
+                    )
+                    if message_captured_at is None:
+                        raise AudioPersistenceInvariantError(
+                            f"WAL chunk {_message_id_text(message_id)} has no absolute capture time"
                         )
-                        seen_conversations.add(conversation_id)
+                    message_time_basis = _time_basis_from_fields(fields)
+                    if observed_time_basis is None:
+                        observed_time_basis = message_time_basis
+                        if capture.time_basis != message_time_basis:
+                            # Persist this before the first audio document can become
+                            # claimable. A field-level update avoids racing a later
+                            # capture status/finalization update with a stale document.
+                            await capture.set({"time_basis": message_time_basis})
+                            capture.time_basis = message_time_basis
+                    elif observed_time_basis != message_time_basis:
+                        raise AudioPersistenceInvariantError(
+                            f"Capture {session_id} mixes {observed_time_basis} and "
+                            f"{message_time_basis} time bases"
+                        )
+
+                    if pcm_buffer:
+                        if pcm_captured_at is None or pcm_time_basis is None:
+                            raise AudioPersistenceInvariantError(
+                                "Buffered PCM has no capture-time provenance"
+                            )
+                        expected_at = pcm_captured_at + timedelta(
+                            seconds=len(pcm_buffer) / bytes_per_second
+                        )
+                        discontinuity_seconds = (
+                            message_captured_at - expected_at
+                        ).total_seconds()
+                        if (
+                            abs(discontinuity_seconds)
+                            > CAPTURE_CONTINUITY_TOLERANCE_SECONDS
+                        ):
+                            logger.info(
+                                "Splitting capture %s before WAL message %s at "
+                                "%+.3fs timestamp discontinuity",
+                                session_id,
+                                _message_id_text(message_id),
+                                discontinuity_seconds,
+                            )
+                            await commit_and_ack_buffer()
+
+                    if not pcm_buffer:
+                        pcm_captured_at = message_captured_at
+                        pcm_time_basis = message_time_basis
                     pcm_buffer.extend(audio_data)
                     pcm_message_ids.append(message_id)
                     if len(pcm_buffer) >= chunk_size_bytes:
@@ -392,6 +440,21 @@ async def audio_streaming_persistence_job(
         total_compressed_bytes / total_pcm_bytes if total_pcm_bytes else 0.0
     )
 
+    capture.status = "complete"
+    if capture.ended_at is None:
+        final_chunk = (
+            await AudioChunkDocument.find(
+                AudioChunkDocument.capture_session_id == session_id
+            )
+            .sort("-sequence")
+            .first_or_none()
+        )
+        if final_chunk is not None:
+            capture.ended_at = final_chunk.captured_at + timedelta(
+                seconds=final_chunk.duration
+            )
+    await capture.save()
+
     await redis_client.delete(f"audio_persistence:session:{session_id}")
     logger.info(
         f"🎵 Durable audio persistence complete for session {session_id}: "
@@ -400,7 +463,7 @@ async def audio_streaming_persistence_job(
     )
     return {
         "session_id": session_id,
-        "conversation_count": len(seen_conversations),
+        "capture_session_id": session_id,
         "total_mongo_chunks": total_mongo_chunks_written,
         "total_pcm_bytes": total_pcm_bytes,
         "total_compressed_bytes": total_compressed_bytes,

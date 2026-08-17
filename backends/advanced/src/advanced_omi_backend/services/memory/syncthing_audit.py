@@ -42,6 +42,7 @@ _SINCE_KEY = "memory_audit:syncthing:since"
 _POLL_TIMEOUT = 60
 # Backoff after an error before retrying the poll loop.
 _ERROR_BACKOFF = 15
+_ROOT_HUB_NOTES = frozenset({"People.md", "Conversations.md", "Topics.md"})
 
 
 def vault_sync_configured() -> bool:
@@ -53,7 +54,7 @@ def _is_scaffold(item: str) -> bool:
     parts = item.split("/")
     if parts[0] in ("Templates",) or parts[0].startswith("."):
         return True
-    if len(parts) == 1:  # root-level hub note (e.g. People.md) or .base
+    if len(parts) == 1 and item in _ROOT_HUB_NOTES:
         return True
     return False
 

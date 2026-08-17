@@ -48,9 +48,9 @@ class PluginServices:
         Signals the open_conversation_job to close the current conversation
         and trigger post-processing. The session stays active for new conversations.
 
-        Only succeeds when open_conversation_job is actively running and polling
-        (indicated by the conversation:current:{session_id} Redis key). During
-        speech detection phase, no conversation is open — the flag would go unread.
+        Only succeeds when ``open_conversation_job`` has registered an active semantic
+        Conversation in the capture session state. During speech detection no
+        Conversation is open, so a close request would go unread.
 
         Args:
             session_id: The immutable streaming recording-session ID
@@ -60,11 +60,10 @@ class PluginServices:
             True if the close request was set successfully, False if no
             conversation is currently open for this session
         """
-        # Gate: only set the flag when open_conversation_job is running and will read it.
-        # The conversation:current key is set right before the polling loop starts.
+        # Gate on the typed session-state pointer set immediately before monitoring.
         conversation_id = await SessionStore(
             self._async_redis
-        ).get_current_conversation_id(session_id)
+        ).get_active_conversation_id(session_id)
         if not conversation_id:
             logger.warning(
                 f"No open conversation for session {session_id} — close request ignored"
@@ -93,7 +92,7 @@ class PluginServices:
         # Look up current conversation_id from Redis
         conversation_id = await SessionStore(
             self._async_redis
-        ).get_current_conversation_id(session_id)
+        ).get_active_conversation_id(session_id)
         if not conversation_id:
             logger.warning(f"No current conversation for session {session_id}")
             return False

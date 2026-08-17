@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -18,6 +19,16 @@ from advanced_omi_backend.users import User
 
 _DAILY_LIMIT = 12
 _BURST_GAP = timedelta(minutes=15)
+
+
+@dataclass
+class _ConversationWindow:
+    """A projected conversation, satisfying ``device_context.ConversationWindow``."""
+
+    user_id: str
+    conversation_id: str
+    created_at: datetime
+    audio_total_duration: float | None = None
 
 
 def _settings() -> tuple[str, str] | None:
@@ -169,11 +180,26 @@ async def scan_immich_memories() -> dict[str, Any]:
         request_conversation_context_jobs,
     )
 
-    conversations = await Conversation.find(
-        Conversation.user_id == user_id,
-        Conversation.created_at >= since,
-        Conversation.deleted == False,  # noqa: E712
-    ).to_list()
+    # The linker needs a window and an owner, not the recordings themselves. This
+    # scan covers 48 hours, which is 69 conversations and 63 MB of transcript here;
+    # hydrating that on the cron's loop stalled the backend for 1.7 seconds.
+    conversations = [
+        _ConversationWindow(**row)
+        async for row in Conversation.get_pymongo_collection().find(
+            {
+                "user_id": user_id,
+                "created_at": {"$gte": since},
+                "deleted": {"$ne": True},
+            },
+            {
+                "_id": 0,
+                "user_id": 1,
+                "conversation_id": 1,
+                "created_at": 1,
+                "audio_total_duration": 1,
+            },
+        )
+    ]
     for conversation in conversations:
         await request_conversation_context_jobs(conversation)
     if accepted:

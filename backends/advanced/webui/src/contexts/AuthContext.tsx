@@ -1,16 +1,9 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
-import { authApi } from '../services/api'
+import { authApi, type CurrentUser } from '../services/api'
 import { getStorageKey } from '../utils/storage'
 
-interface User {
-  id: string
-  name: string
-  email: string
-  is_superuser: boolean
-}
-
 interface AuthContextType {
-  user: User | null
+  user: CurrentUser | null
   token: string | null
   login: (email: string, password: string) => Promise<{success: boolean, error?: string, errorType?: string}>
   logout: () => void
@@ -21,7 +14,7 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null)
+  const [user, setUser] = useState<CurrentUser | null>(null)
   const [token, setToken] = useState<string | null>(localStorage.getItem(getStorageKey('token')))
   const [isLoading, setIsLoading] = useState(true)
 

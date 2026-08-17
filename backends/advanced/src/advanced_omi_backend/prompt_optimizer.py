@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # prompt used to do the rewriting.
 ANNOTATION_PROMPT_MAP = {
     AnnotationType.TITLE: {
-        "target_prompt": "conversation.title_summary",
+        "target_prompt": "conversation.title",
         "optimizer_prompt": "prompt_optimization.title_optimizer",
     },
     AnnotationType.MEMORY: {
@@ -43,7 +43,7 @@ async def get_user_prompt(
     found, etc.) so callers always get a usable prompt string.
 
     Args:
-        prompt_id: Dotted prompt identifier (e.g. "conversation.title_summary")
+        prompt_id: Dotted prompt identifier (e.g. "conversation.title")
         user_id: Optional user ID for per-user override lookup
         **variables: Template variables to compile into the prompt
 

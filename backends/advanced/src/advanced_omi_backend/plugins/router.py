@@ -13,6 +13,7 @@ import time
 from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional
 
 from advanced_omi_backend.redis_factory import create_sync_redis
+from advanced_omi_backend.services.interaction_modes.registry import InteractionRegistry
 from advanced_omi_backend.services.observability import record_event_sync
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
 
@@ -179,6 +180,7 @@ class PluginRouter:
     def __init__(self):
         self.plugins: Dict[str, BasePlugin] = {}
         self.plugin_health: Dict[str, PluginHealth] = {}
+        self.interaction_registry = InteractionRegistry()
         # Index plugins by event for fast lookup
         self._plugins_by_event: Dict[str, List[str]] = {}
         self._services = None
@@ -196,6 +198,31 @@ class PluginRouter:
 
     def register_plugin(self, plugin_id: str, plugin: BasePlugin):
         """Register a plugin with the router"""
+        configured_modes = plugin.config.get("modes") or []
+        if not isinstance(configured_modes, list) or not all(
+            isinstance(value, str) and value.strip() for value in configured_modes
+        ):
+            raise ValueError(
+                f"plugin '{plugin_id}' modes must be a list of non-empty mode IDs"
+            )
+        configured_mode_ids = set(configured_modes)
+        declared_mode_ids = {
+            definition.mode_id for definition in plugin.INTERACTION_MODES
+        }
+        unknown_mode_ids = configured_mode_ids - declared_mode_ids
+        if unknown_mode_ids:
+            unknown = ", ".join(sorted(unknown_mode_ids))
+            raise ValueError(
+                f"plugin '{plugin_id}' config enables undeclared interaction mode(s): {unknown}"
+            )
+        enabled_modes = tuple(
+            definition
+            for definition in plugin.INTERACTION_MODES
+            if definition.mode_id in configured_mode_ids
+        )
+        for definition in enabled_modes:
+            self.interaction_registry.register(plugin_id, definition)
+
         self.plugins[plugin_id] = plugin
         self.plugin_health[plugin_id] = PluginHealth(plugin_id)
 
@@ -205,7 +232,11 @@ class PluginRouter:
                 self._plugins_by_event[event] = []
             self._plugins_by_event[event].append(plugin_id)
 
-        logger.info(f"Registered plugin '{plugin_id}' for events: {plugin.events}")
+        mode_ids = [definition.mode_id for definition in enabled_modes]
+        logger.info(
+            f"Registered plugin '{plugin_id}' for events: {plugin.events}; "
+            f"interaction modes: {mode_ids}"
+        )
 
     def mark_plugin_initialized(self, plugin_id: str) -> None:
         """Mark a plugin as successfully initialized."""
@@ -698,6 +729,13 @@ class PluginRouter:
 
             for w in words:
                 normalised = w.strip().lower()
+                if normalised and normalised not in seen:
+                    seen.add(normalised)
+                    result.append(normalised)
+
+        for _owner, definition in self.interaction_registry.modes.values():
+            for phrase in definition.activation_phrases:
+                normalised = phrase.strip().lower()
                 if normalised and normalised not in seen:
                     seen.add(normalised)
                     result.append(normalised)

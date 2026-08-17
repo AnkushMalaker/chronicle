@@ -1,5 +1,7 @@
-"""Completion guarantees for the agentic memory provider."""
+"""Completion guarantees for shared LLM-backed agents."""
 
+import asyncio
+import html
 from types import SimpleNamespace
 
 import httpx
@@ -37,6 +39,15 @@ class _Completions:
         if self.error:
             raise self.error
         return self.result
+
+
+class _NeverCompletions:
+    def __init__(self):
+        self.calls = 0
+
+    async def create(self, **_kwargs):
+        self.calls += 1
+        await asyncio.Event().wait()
 
 
 class _Operation:
@@ -78,8 +89,8 @@ async def test_tool_chat_uses_configured_fallback_on_context_overflow(monkeypatc
     primary = _Operation(primary_calls, "local")
     fallback = _Operation(fallback_calls, "fallback")
     registry = SimpleNamespace(
-        get_llm_operation=lambda _name: primary,
-        get_fallback_llm_operation=lambda _name, primary: fallback,
+        get_llm_operation=lambda _name, **_kwargs: primary,
+        get_fallback_llm_operation=lambda _name, primary, **_kwargs: fallback,
     )
     monkeypatch.setattr(llm_client, "get_models_registry", lambda: registry)
 
@@ -89,6 +100,40 @@ async def test_tool_chat_uses_configured_fallback_on_context_overflow(monkeypatc
     )
 
     assert result is expected
+    assert primary_calls.calls == 1
+    assert fallback_calls.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_chat_falls_back_when_latency_sensitive_primary_never_returns(
+    monkeypatch,
+):
+    primary_calls = _NeverCompletions()
+    expected = SimpleNamespace(choices=[])
+    fallback_calls = _Completions(result=expected)
+    primary = _Operation(primary_calls, "local")
+    fallback = _Operation(fallback_calls, "fallback")
+    resolved_default_types = []
+
+    def get_operation(_name, *, default_model_type="llm"):
+        resolved_default_types.append(default_model_type)
+        return primary
+
+    registry = SimpleNamespace(
+        get_llm_operation=get_operation,
+        get_fallback_llm_operation=lambda _name, primary, default_model_type: fallback,
+    )
+    monkeypatch.setattr(llm_client, "get_models_registry", lambda: registry)
+
+    result = await llm_client.async_chat_with_tools(
+        [{"role": "user", "content": "find paneer"}],
+        operation="plugin_assistant",
+        default_model_type="fast_llm",
+        timeout_seconds=0.01,
+    )
+
+    assert result is expected
+    assert resolved_default_types == ["fast_llm"]
     assert primary_calls.calls == 1
     assert fallback_calls.calls == 1
 
@@ -927,3 +972,31 @@ def test_source_fallback_preserves_short_transcript(tmp_path):
         title="Hermes Discussion",
     )
     assert "why does it only work during the demo" in note.read_text(encoding="utf-8")
+
+
+def test_source_fallback_losslessly_encodes_fenced_code_and_escaped_newline(tmp_path):
+    note = tmp_path / "conversation.md"
+    source = "User supplied ```r value <- 'first\\nsecond' ``` in the transcript."
+    title = "Code ``` title\\nmarker"
+    write_source_fallback_conversation_note(
+        note,
+        transcript=source,
+        conversation_id="conversation-code",
+        date="2026-08-16T00:00:00+00:00",
+        duration_minutes=None,
+        title=title,
+    )
+
+    canonicalize_conversation_note(
+        note,
+        conversation_id="conversation-code",
+        date="2026-08-16T00:00:00+00:00",
+        duration_minutes=None,
+        title=title,
+    )
+
+    content = note.read_text(encoding="utf-8")
+    assert "```" not in content
+    assert "\\n" not in content
+    assert source in html.unescape(content)
+    assert title in html.unescape(content)

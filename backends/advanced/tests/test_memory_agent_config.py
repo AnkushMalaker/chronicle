@@ -5,7 +5,11 @@ from types import SimpleNamespace
 import pytest
 
 from advanced_omi_backend.services.memory import config as memory_config
-from advanced_omi_backend.services.memory.agent import pi_agent
+from advanced_omi_backend.services.memory.agent import codex_agent, pi_agent
+from advanced_omi_backend.services.memory.agent.memory_agent import (
+    DEFAULT_AGENT_SYSTEM_PROMPT,
+    build_write_task,
+)
 from advanced_omi_backend.services.memory.config import MemoryConfig
 from advanced_omi_backend.services.memory.providers.chronicle import MemoryService
 
@@ -45,6 +49,62 @@ def test_memory_config_selects_pi_independently_for_write_and_search(monkeypatch
     assert config.search_agent_backend == "pi"
 
 
+def test_memory_config_loads_consecutive_pi_call_guard(monkeypatch):
+    registry = _registry(
+        {
+            "provider": "chronicle",
+            "agents": {
+                "write": {
+                    "backend": "pi",
+                    "recovery_backend": None,
+                    "max_consecutive_identical_tool_calls": "2",
+                },
+                "search": {"backend": "direct"},
+            },
+        }
+    )
+    monkeypatch.setattr(memory_config, "get_models_registry", lambda: registry)
+
+    config = memory_config.build_memory_config_from_env()
+
+    assert config.write_max_consecutive_identical_tool_calls == 2
+
+
+@pytest.mark.parametrize("value", [0, -1, False, 1.5, "not-an-int"])
+def test_memory_config_rejects_invalid_consecutive_pi_call_guard(monkeypatch, value):
+    registry = _registry(
+        {
+            "provider": "chronicle",
+            "agents": {
+                "write": {
+                    "backend": "pi",
+                    "max_consecutive_identical_tool_calls": value,
+                }
+            },
+        }
+    )
+    monkeypatch.setattr(memory_config, "get_models_registry", lambda: registry)
+
+    with pytest.raises(ValueError, match="max_consecutive_identical_tool_calls"):
+        memory_config.build_memory_config_from_env()
+
+
+def test_memory_service_passes_consecutive_guard_only_to_pi(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        pi_agent, "pi_executor_available", lambda: (True, "/usr/local/bin/pi")
+    )
+    service = MemoryService(
+        MemoryConfig(
+            write_agent_backend="pi",
+            write_max_consecutive_identical_tool_calls=2,
+        )
+    )
+
+    agent = service._write_agent_instance(pi_agent.PiMemoryAgent, tmp_path / "vault")
+
+    assert agent.max_identical_tool_calls == 2
+
+
 def test_memory_config_rejects_codex_for_search(monkeypatch):
     registry = _registry(
         {
@@ -76,6 +136,36 @@ def test_memory_config_allows_disabling_write_recovery(monkeypatch):
     config = memory_config.build_memory_config_from_env()
 
     assert config.write_recovery_backend is None
+
+
+def test_all_write_prompts_forbid_about_mentions_duplication():
+    for prompt in (
+        DEFAULT_AGENT_SYSTEM_PROMPT,
+        codex_agent.DEFAULT_CODEX_AGENT_SYSTEM_PROMPT,
+    ):
+        normalized = " ".join(prompt.split())
+        assert "About` is for stable/current facts" in prompt
+        assert "same proposition in both" in prompt
+        assert "routine/background appearances" in prompt
+        assert "vault owner's own Person note is not a diary" in normalized
+        assert "one canonical Topic" in prompt
+
+
+def test_day_task_says_chronicle_owns_the_concise_episode_index():
+    task = build_write_task(
+        "Local day with one episode.",
+        "2026-08-10",
+        date="2026-08-10T00:00:00+00:00",
+        record="day",
+    )
+
+    assert "Chronicle has already installed" in task
+    assert "Do NOT create, rewrite, expand, or read" in task
+    assert "record only what was genuinely new, decided, or" in task
+    assert "owner's own Person note is not a second Daily note" in task
+    assert "high bar for creating a new semantic note" in task
+    assert "Never create an empty or" in task
+    assert "may not invent a new organic category" in task
 
 
 @pytest.mark.parametrize("legacy_key", ["agent_executor", "codex", "pi"])

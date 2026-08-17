@@ -5,16 +5,16 @@ This module contains jobs related to conversation management and updates.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Sequence
 
 from omegaconf import OmegaConf
-from pymongo import UpdateOne
 from rq import get_current_job
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
@@ -40,10 +40,16 @@ from advanced_omi_backend.observability.otel_setup import (
     traced_job,
 )
 from advanced_omi_backend.plugins.events import PluginEvent
+from advanced_omi_backend.services.audio_claims import (
+    apply_audio_ranges,
+    claim_capture_window,
+    clip_audio_ranges,
+    merge_audio_ranges,
+    resolve_conversation_audio,
+)
 from advanced_omi_backend.services.audio_stream import TranscriptionResultsAggregator
 from advanced_omi_backend.services.audio_stream.conversation_lifecycle import (
-    ensure_active_session_placeholder,
-    rotate_active_session_placeholder,
+    materialize_detected_conversation,
 )
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
@@ -57,13 +63,16 @@ from advanced_omi_backend.services.plugin_service import (
     dispatch_plugin_event,
     get_plugin_router,
 )
+from advanced_omi_backend.services.processing_artifacts import (
+    persist_conversation_revision,
+    persist_transcript_artifact,
+)
 from advanced_omi_backend.services.sse_publisher import (
     publish_sse_event,
     publish_sse_event_throttled,
 )
 from advanced_omi_backend.utils.audio_chunk_utils import (
     invalidate_conversation_audio_caches,
-    wait_for_audio_chunks,
 )
 from advanced_omi_backend.utils.audio_trim import (
     TrimPlan,
@@ -89,33 +98,6 @@ from advanced_omi_backend.utils.vad_analysis import analyze_conversation_audio
 logger = logging.getLogger(__name__)
 
 
-def _renumber(chunks: list[dict]) -> list[UpdateOne]:
-    """Pack ``chunks`` (in order) onto a contiguous timeline starting at zero.
-
-    ``captured_at`` is deliberately absent from the ``$set``: it is the chunk's own
-    identity in time and must survive every renumbering, which is what lets trimmed
-    audio keep its provenance without a separate record of where it came from.
-    """
-    operations = []
-    cursor = 0.0
-    for position, chunk in enumerate(chunks):
-        duration = float(chunk["end_time"]) - float(chunk["start_time"])
-        operations.append(
-            UpdateOne(
-                {"_id": chunk["_id"]},
-                {
-                    "$set": {
-                        "chunk_index": position,
-                        "start_time": round(cursor, 3),
-                        "end_time": round(cursor + duration, 3),
-                    }
-                },
-            )
-        )
-        cursor += duration
-    return operations
-
-
 async def trim_silence(
     conversation_id: str,
     speech_regions: Sequence[tuple[float, float]],
@@ -125,42 +107,21 @@ async def trim_silence(
     min_saving_seconds: float = 60.0,
     reason: str = "silence_trim",
 ) -> TrimPlan | None:
-    """Move a conversation's silent stretches onto a soft-deleted remnant.
-
-    Leading silence is the special case where the only cut run is at the front; the
-    same operation handles interior silence, which is where continuous capture puts
-    nearly all of it. The visible conversation keeps only the audio around speech and
-    is renumbered to be contiguous, so playback and reconstruction (which read chunks
-    ordered by ``chunk_index``) need no knowledge that a trim happened.
-
-    The active transcript is re-timed through the same map, so segment and word
-    timestamps still address the audio they name.
-
-    Returns the applied plan, or None when nothing was worth trimming.
-
-    Crash-safe ordering matches data_audit's split: create the remnant first, move
-    chunks, mutate the conversation last. A crash mid-way leaves audio reachable from
-    one conversation or the other, never from neither.
-    """
-    documents = (
-        await AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == conversation_id,
-            AudioChunkDocument.deleted == False,  # noqa: E712 — Beanie needs ==
-        )
-        .sort("+chunk_index")
-        .to_list()
+    """Trim the semantic claim while leaving every capture chunk untouched."""
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
     )
-    if not documents:
+    if conversation is None or conversation.deleted or not conversation.audio_ranges:
         return None
+    resolved = await resolve_conversation_audio(conversation_id)
     chunks = [
         {
-            "_id": c.id,
-            "chunk_index": c.chunk_index,
-            "start_time": c.start_time,
-            "end_time": c.end_time,
-            "duration": c.duration,
+            "chunk_index": index,
+            "start_time": item.conversation_start_seconds,
+            "end_time": item.conversation_start_seconds + item.duration_seconds,
+            "duration": item.duration_seconds,
         }
-        for c in documents
+        for index, item in enumerate(resolved)
     ]
 
     plan = plan_silence_trim(
@@ -173,55 +134,11 @@ async def trim_silence(
     if not plan.trims:
         return None
 
-    conversation = await Conversation.find_one(
-        Conversation.conversation_id == conversation_id
-    )
-    if conversation is None or conversation.deleted:
-        return None
-
-    by_index = {int(c["chunk_index"]): c for c in chunks}
-    kept = [by_index[i] for i in plan.keep]
-    dropped = [by_index[i] for i in plan.drop]
-    now = datetime.now(timezone.utc)
-
-    # 1) Remnant holding the silence. It is soft-deleted, so it stays out of every
-    #    user-facing list while the audio remains addressable and restorable.
-    remnant = create_conversation(
-        user_id=conversation.user_id,
-        client_id=conversation.client_id,
-        title="Trimmed silence",
-    )
-    remnant.deleted = True
-    remnant.deletion_reason = reason
-    remnant.deleted_at = now
-    remnant.derived_from = Conversation.DerivedFrom(
-        operation=reason,
-        source_conversation_ids=[conversation_id],
-        time_range=[
-            float(dropped[0]["start_time"]),
-            float(dropped[-1]["end_time"]),
-        ],
-        performed_at=now,
-        performed_by="system",
-    )
-    remnant.audio_chunks_count = len(dropped)
-    remnant.audio_total_duration = round(plan.dropped_seconds, 2)
-    await remnant.insert()
-
-    collection = AudioChunkDocument.get_pymongo_collection()
-    # 2) Hand the silence to the remnant and pack both sides onto their own contiguous
-    #    timelines. Per-chunk updates because each lands at a different position.
-    await collection.bulk_write(
-        [
-            UpdateOne(
-                {"_id": chunk["_id"]},
-                {"$set": {"conversation_id": remnant.conversation_id}},
-            )
-            for chunk in dropped
-        ]
-        + _renumber(dropped)
-        + _renumber(kept)
-    )
+    kept_groups = [
+        await clip_audio_ranges(conversation.audio_ranges, old_start, old_end)
+        for old_start, old_end, _new_start in plan.regions
+    ]
+    kept_ranges = merge_audio_ranges(kept_groups)
 
     # 3) Re-time every transcript version onto the trimmed timeline.
     #
@@ -235,61 +152,59 @@ async def trim_silence(
         version.words = remap_words(version.words or [], plan.regions)
         version.transcript = build_transcript_text(version.segments)
 
-    # 4) Mutate the conversation last.
-    conversation.audio_chunks_count = len(kept)
-    conversation.audio_total_duration = round(plan.kept_seconds, 2)
-    # Both caches are keyed to the pre-trim audio and would now describe a timeline
-    # that no longer exists.
+    await apply_audio_ranges(conversation, kept_ranges, save=False)
     conversation.vad_analysis = None
+
+    # Transcript/diarization artifacts remain immutable evidence over the original
+    # capture. The user-facing fusion is a derived projection, so trimming must write
+    # a new standalone revision instead of leaving the active pointer on timings from
+    # the pre-trim claim.
+    active_version = conversation.active_transcript
+    if active_version is not None:
+        projection = {
+            "operation": "silence_trim",
+            "reason": reason,
+            "regions": [list(region) for region in plan.regions],
+            "audio_ranges": [
+                audio_range.model_dump(mode="json") for audio_range in kept_ranges
+            ],
+        }
+        active_version.metadata = dict(active_version.metadata)
+        active_version.metadata["audio_projection"] = projection
+        projection_digest = hashlib.sha256(
+            json.dumps(projection, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        transcript_artifact_id = active_version.metadata.get("transcript_artifact_id")
+        diarization_artifact_id = active_version.metadata.get("diarization_artifact_id")
+        await persist_conversation_revision(
+            conversation,
+            active_version,
+            retry_key=(
+                f"silence-trim-projection:{conversation_id}:"
+                f"{active_version.version_id}:{projection_digest}"
+            ),
+            transcript_artifact_ids=(
+                [str(transcript_artifact_id)] if transcript_artifact_id else []
+            ),
+            diarization_artifact_ids=(
+                [str(diarization_artifact_id)] if diarization_artifact_id else []
+            ),
+        )
     await conversation.save()
     await invalidate_conversation_audio_caches(conversation_id)
 
     logger.info(
-        f"✂️ Trimmed {len(dropped)} silent chunks ({plan.dropped_seconds:.0f}s of "
-        f"{plan.dropped_seconds + plan.kept_seconds:.0f}s) off conversation "
-        f"{conversation_id[:12]} → soft-deleted remnant "
-        f"{remnant.conversation_id[:12]} (audio kept in Mongo)"
+        f"✂️ Removed {plan.dropped_seconds:.0f}s of long silence from semantic claim "
+        f"{conversation_id[:12]}; capture chunks remain unchanged"
     )
     return plan
-
-
-async def _wait_for_chunk_count_stable(
-    conversation_id: str,
-    *,
-    settle_seconds: float = 1.5,
-    timeout_seconds: float = 10.0,
-) -> None:
-    """Block until a conversation's audio-chunk count stops growing.
-
-    The leading-silence trim re-indexes the surviving chunks, so it must run only
-    after the persistence consumer has drained — otherwise a late-arriving chunk
-    (written with its pre-trim index) would corrupt the sequence. By finalize the
-    persistence side has rotated away, but this closes the brief flush-race.
-    """
-    deadline = time.time() + timeout_seconds
-    last = None
-    stable_start = time.time()
-    while time.time() < deadline:
-        count = await AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == conversation_id,
-            AudioChunkDocument.deleted == False,  # noqa: E712 — Beanie needs ==
-        ).count()
-        if count != last:
-            last = count
-            stable_start = time.time()
-        elif time.time() - stable_start >= settle_seconds:
-            return
-        await asyncio.sleep(0.5)
 
 
 async def maybe_trim_silence(conversation_id: str) -> TrimPlan | None:
     """Trim a finalized conversation's silence, best-effort.
 
-    Two populations need this and they need the same thing. An ``always_persist``
-    placeholder records from session start, so a pause before the user speaks lands as
-    leading silence. Continuous capture records regardless of whether anything is
-    happening, so its silence is mostly interior — on this deployment's ScreenPipe
-    corpus, three quarters of all stored audio.
+    Continuous capture records regardless of whether anything is happening, so its
+    semantic claims may include long leading or interior silence.
 
     Speech regions come from VAD over the audio (``analyze_conversation_audio``) rather
     than from transcript word timings: the streaming transcript times words relative to
@@ -320,8 +235,6 @@ async def maybe_trim_silence(conversation_id: str) -> TrimPlan | None:
         if total_duration < min_run:
             return None
 
-        await _wait_for_chunk_count_stable(conversation_id)
-
         analysis = await analyze_conversation_audio(conversation_id)
         regions = [
             (float(start), float(end))
@@ -344,12 +257,52 @@ async def maybe_trim_silence(conversation_id: str) -> TrimPlan | None:
         return None
 
 
+async def _claim_persisted_capture(
+    conversation: Conversation,
+    capture_session_id: str,
+    ended_at: datetime,
+    *,
+    max_wait_seconds: float = 30.0,
+) -> bool:
+    """Wait for persistence to reach the semantic end, then attach its claim."""
+    deadline = time.time() + max_wait_seconds
+    latest = None
+    while time.time() < deadline:
+        latest = (
+            await AudioChunkDocument.find(
+                AudioChunkDocument.capture_session_id == capture_session_id,
+                AudioChunkDocument.deleted == False,  # noqa: E712 - Beanie expression
+            )
+            .sort("-sequence")
+            .first_or_none()
+        )
+        if latest is not None:
+            latest_end = latest.captured_at + timedelta(seconds=latest.duration)
+            if latest_end.tzinfo is None:
+                latest_end = latest_end.replace(tzinfo=timezone.utc)
+            if latest_end >= ended_at - timedelta(milliseconds=250):
+                break
+        await asyncio.sleep(0.5)
+    if latest is None:
+        return False
+
+    latest_end = latest.captured_at + timedelta(seconds=latest.duration)
+    if latest_end.tzinfo is None:
+        latest_end = latest_end.replace(tzinfo=timezone.utc)
+    audio_ranges = await claim_capture_window(
+        capture_session_id,
+        conversation.started_at,
+        min(ended_at, latest_end),
+    )
+    await apply_audio_ranges(conversation, audio_ranges)
+    return True
+
+
 def should_discard_unbacked_conversation(has_meaningful_transcript: bool) -> bool:
     """Decide whether a conversation with no persisted audio should be discarded.
 
-    A conversation whose audio chunks never landed (e.g. a mid-session reconnect
-    routed the audio to the session's always_persist placeholder under a different
-    conversation_id) is discarded ONLY if it carries no meaningful transcript.
+    A conversation whose capture chunks never landed is discarded only if it carries
+    no meaningful transcript.
     Losing a real transcript is worse than keeping an audio-less conversation, so a
     transcript-bearing conversation is salvaged, not deleted.
     """
@@ -408,22 +361,6 @@ async def handle_end_of_conversation(
     except Exception as cleanup_error:
         logger.warning(f"⚠️ Error during stream cleanup: {cleanup_error}")
 
-    # Delete the conversation:current signal so audio persistence knows conversation ended.
-    # May already be deleted by open_conversation_job for close_requested/timeout cases
-    # (early delete to stop audio persistence writing to the closed conversation).
-    # Redis DEL on a non-existent key is a no-op.
-    async with store.conversation_create_lock(session_id):
-        assignment_cleared = await store.clear_current_conversation(
-            session_id, expected_id=conversation_id
-        )
-    if assignment_cleared:
-        logger.info(f"🧹 Cleared conversation assignment for session {session_id[:12]}")
-    else:
-        logger.info(
-            f"🧹 Conversation assignment for session {session_id[:12]} had already "
-            "moved; preserving its successor"
-        )
-
     # Update conversation in database with end reason and completion time
     conversation = await Conversation.find_one(
         Conversation.conversation_id == conversation_id
@@ -445,6 +382,8 @@ async def handle_end_of_conversation(
         logger.warning(
             f"⚠️ Conversation {conversation_id} not found for end reason tracking"
         )
+
+    await store.clear_active_conversation(session_id, expected_id=conversation_id)
 
     # Increment conversation count for this session
     conversation_count = await store.increment_conversation_count(session_id)
@@ -470,21 +409,6 @@ async def handle_end_of_conversation(
                 f"ws_connected={ws_connected}, completion_reason={completion_reason} "
                 f"— not restarting speech detection."
             )
-
-        if should_restart and conversation and conversation.always_persist:
-            assignment = await ensure_active_session_placeholder(
-                store,
-                session_id=session_id,
-                user_id=user_id,
-                client_id=client_id,
-            )
-            if assignment is None:
-                # The session crossed into finalizing after our first status read.
-                # Do not start another listener or create an ownerless placeholder.
-                should_restart = False
-                status, ws_connected, completion_reason = (
-                    await store.get_status_ws_reason(session_id)
-                )
 
         if should_restart:
             # Session still active - enqueue new speech detection for next conversation.
@@ -741,44 +665,32 @@ async def _initialize_conversation(
     user_id: str,
     client_id: str,
     speech_job_id: str,
+    speech_detected_at: float,
     current_job,
     redis_client,
 ) -> str:
-    """Create or reuse a conversation for this session.
-
-    Checks for an existing placeholder conversation in Redis. If found and valid,
-    reuses it. Otherwise creates a new conversation. Attaches session markers,
-    links job metadata, and signals audio persistence to rotate files.
+    """Materialize a detected Conversation without affecting capture persistence.
 
     Returns:
         conversation_id of the created/reused conversation.
     """
     store = SessionStore(redis_client)
-    assignment = await ensure_active_session_placeholder(
-        store,
-        session_id=session_id,
+    materialized = await materialize_detected_conversation(
+        capture_session_id=session_id,
         user_id=user_id,
         client_id=client_id,
+        speech_detected_at=speech_detected_at,
     )
-    if assignment is None:
+    conversation = materialized.conversation
+    conversation_id = conversation.conversation_id
+    if not await store.set_active_conversation(session_id, conversation_id):
+        active_id = await store.get_active_conversation_id(session_id)
         raise RuntimeError(
-            f"Session {session_id} has no active durable conversation assignment"
+            f"Session {session_id} cannot activate conversation {conversation_id}; "
+            f"status is not active or {active_id!r} is already open"
         )
 
-    conversation_id = assignment.conversation_id
-    conversation = await Conversation.find_one(
-        Conversation.conversation_id == conversation_id
-    )
-    if conversation is None:
-        raise RuntimeError(
-            f"Assigned conversation {conversation_id} disappeared during initialization"
-        )
-    conversation_created = assignment.created
-    conversation.title = TITLE_NOT_GENERATED
-    conversation.summary = "Transcribing audio..."
-    await conversation.save()
-
-    if conversation_created:
+    if materialized.created:
         logger.info(
             f"✅ Created streaming conversation {conversation_id} for session {session_id}"
         )
@@ -835,10 +747,6 @@ async def _initialize_conversation(
             )
         else:
             raise
-
-    logger.info(
-        f"🔄 Signaled audio persistence to rotate file for conversation {conversation_id[:12]}"
-    )
 
     return conversation_id
 
@@ -1533,18 +1441,28 @@ async def _save_streaming_transcript(
     )
     version.diarization_source = diarization_source
 
-    # Update placeholder conversation if it exists
-    if (
-        getattr(conversation, "always_persist", False)
-        and getattr(conversation, "processing_status", None)
-        == Conversation.ConversationStatus.ACTIVE.value
-    ):
-        # Status stays active; the finalizer reconciles it to completed once the
-        # post-conversation chain reaches its terminal job.
-        logger.info(
-            f"📝 Placeholder conversation {conversation_id} has transcript, "
-            f"waiting for title/summary generation"
-        )
+    transcript_artifact = await persist_transcript_artifact(
+        user_id=str(conversation.user_id),
+        audio_ranges=conversation.audio_ranges,
+        retry_key=f"streaming-transcription:{conversation_id}:{version_id}",
+        provider=provider,
+        model=model,
+        transcript=transcript_text,
+        words=words_data,
+        segments=segments_data,
+        raw_response={
+            "source": "streaming",
+            "mode": mode,
+            "chunk_count": final_transcript.get("chunk_count", 0),
+        },
+    )
+    version.metadata["transcript_artifact_id"] = transcript_artifact.artifact_id
+    await persist_conversation_revision(
+        conversation,
+        version,
+        retry_key=f"streaming-projection:{conversation_id}:{version_id}",
+        transcript_artifact_ids=[transcript_artifact.artifact_id],
+    )
 
     # Save conversation with streaming transcript
     await conversation.save()
@@ -1697,6 +1615,7 @@ async def open_conversation_job(
         user_id=user_id,
         client_id=client_id,
         speech_job_id=speech_job_id,
+        speech_detected_at=speech_detected_at,
         current_job=current_job,
         redis_client=redis_client,
     )
@@ -1712,28 +1631,6 @@ async def open_conversation_job(
     )
 
     await _monitor_conversation_loop(state, aggregator, current_job, redis_client)
-
-    # When the session stays active, rotate ownership before post-processing. The
-    # compare-and-swap has no ownerless interval: producer XADD observes either the
-    # closing conversation or its fresh successor. Every WAL entry therefore keeps
-    # a durable, immutable owner even if this worker crashes during phases 4-7.
-    if state.timeout_triggered:
-        store = SessionStore(redis_client)
-        successor = await rotate_active_session_placeholder(
-            store,
-            session_id=session_id,
-            expected_conversation_id=conversation_id,
-            user_id=user_id,
-            client_id=client_id,
-        )
-        if (
-            successor is None
-            and await store.get_status(session_id) == SessionStatus.ACTIVE
-        ):
-            raise RuntimeError(
-                f"Active session {session_id} could not rotate durable audio owner"
-            )
-        logger.info(f"🔄 Rotated durable audio owner after {conversation_id[:12]}")
 
     logger.info(
         f"✅ Conversation {conversation_id} updates complete, checking for meaningful speech..."
@@ -1806,17 +1703,24 @@ async def open_conversation_job(
                     f"(waited {max_wait_streaming}s), proceeding with available transcript"
                 )
 
-        # Phase 5: Wait for audio chunks in MongoDB
-        chunks_ready = await wait_for_audio_chunks(
-            conversation_id=conversation_id, max_wait_seconds=30, min_chunks=1
+        # Phase 5: Claim the persisted capture interval. This changes only the
+        # semantic object; the underlying capture chunks are never reassigned.
+        conversation = await Conversation.find_one(
+            Conversation.conversation_id == conversation_id
+        )
+        if conversation is None:
+            raise RuntimeError(f"Conversation {conversation_id} disappeared")
+        claim_end = datetime.now(timezone.utc)
+        chunks_ready = await _claim_persisted_capture(
+            conversation,
+            session_id,
+            claim_end,
+            max_wait_seconds=30,
         )
 
         if not chunks_ready:
-            # The audio chunks never landed under this conversation_id. This is
-            # usually a mid-session reconnect that routed the audio to the session's
-            # always_persist placeholder under a different id. Decide salvage-vs-discard
-            # by whether a real transcript exists: losing a real transcript is worse
-            # than keeping an audio-less conversation.
+            # The capture never reached Mongo. Preserve a real transcript, but do not
+            # fabricate an audio claim.
             salvage_conv = await Conversation.find_one(
                 Conversation.conversation_id == conversation_id
             )
@@ -1850,8 +1754,8 @@ async def open_conversation_job(
                 # post-conversation chain (batch re-transcribe would raise without audio).
                 logger.warning(
                     f"🛟 No audio persisted for conversation {conversation_id[:12]} but it "
-                    f"has a real transcript — keeping it (audio likely routed to the "
-                    f"session placeholder on reconnect) instead of discarding"
+                    f"has a real transcript — keeping it as an audio-less semantic "
+                    f"record instead of discarding it"
                 )
                 try:
                     await _save_streaming_transcript(

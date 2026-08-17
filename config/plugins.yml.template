@@ -40,6 +40,19 @@ plugins:
     #    HA_TOKEN=your-long-lived-token-here
 
   # ========================================
+  # Swiggy Instamart Voice Order Mode
+  # ========================================
+  # Requires one linked Chronicle user and private OAuth artifacts configured
+  # through plugins/swiggy_instamart/config.yml and backends/advanced/.env.
+  swiggy_instamart:
+    enabled: false
+    modes:
+      - swiggy_order
+    events: []
+    condition:
+      type: always
+
+  # ========================================
   # Email Summarizer Plugin (Community)
   # ========================================
   # Automatically sends email summaries when conversations complete

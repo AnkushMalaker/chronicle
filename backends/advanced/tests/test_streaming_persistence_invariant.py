@@ -148,6 +148,34 @@ async def test_active_stream_periodically_ensures_persistence(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_pcm_mobile_capture_timestamp_reaches_the_audio_wal(monkeypatch):
+    state = ClientState("client-1", "user-1")
+    state.stream_session_id = "session-1"
+    state.last_persistence_healthcheck = 10.0
+    producer = AsyncMock()
+    monkeypatch.setattr(websocket_controller.time, "monotonic", lambda: 10.0)
+
+    await websocket_controller._handle_streaming_mode_audio(
+        state,
+        producer,
+        b"audio",
+        {
+            "rate": 16000,
+            "channels": 1,
+            "width": 2,
+            "captured_at_ms": 1_770_000_000_125,
+        },
+        "user-1",
+        "user@example.com",
+        "client-1",
+    )
+
+    assert (
+        producer.add_audio_chunk.await_args.kwargs["captured_at"] == 1_770_000_000.125
+    )
+
+
+@pytest.mark.asyncio
 async def test_stream_fails_closed_before_publish_when_persistence_is_unavailable(
     monkeypatch,
 ):
@@ -176,15 +204,14 @@ async def test_stream_fails_closed_before_publish_when_persistence_is_unavailabl
 
 
 @pytest.mark.asyncio
-async def test_connect_assigns_durable_owner_before_enqueuing_workers(monkeypatch):
+async def test_connect_initializes_capture_before_enqueuing_workers(monkeypatch):
     state = ClientState("client-1", "user-1")
     state.client_id = "client-1"
     producer = AsyncMock()
     transitions = []
 
-    async def assign_owner(*args, **kwargs):
-        transitions.append("owner_assigned")
-        return SimpleNamespace(conversation_id="conversation-1")
+    async def initialize_capture(*args, **kwargs):
+        transitions.append("capture_initialized")
 
     def start_jobs(**kwargs):
         transitions.append("workers_live")
@@ -193,9 +220,7 @@ async def test_connect_assigns_durable_owner_before_enqueuing_workers(monkeypatc
     model = SimpleNamespace(model_provider="deepgram", name="stt")
     registry = SimpleNamespace(get_default=lambda model_type: model)
     monkeypatch.setattr(websocket_controller, "get_models_registry", lambda: registry)
-    monkeypatch.setattr(
-        websocket_controller, "ensure_active_session_placeholder", assign_owner
-    )
+    producer.init_session.side_effect = initialize_capture
     monkeypatch.setattr(websocket_controller, "start_streaming_jobs", start_jobs)
     monkeypatch.setattr(websocket_controller, "publish_sse_event_async", _ignore_sse)
     monkeypatch.setattr(
@@ -213,7 +238,7 @@ async def test_connect_assigns_durable_owner_before_enqueuing_workers(monkeypatc
         {"rate": 16000, "channels": 1, "width": 2},
     )
 
-    assert transitions == ["owner_assigned", "workers_live"]
+    assert transitions == ["capture_initialized", "workers_live"]
     producer.update_session_job_ids.assert_awaited_once_with(
         session_id="client-1-capture1",
         speech_detection_job_id="speech-1",
@@ -222,22 +247,22 @@ async def test_connect_assigns_durable_owner_before_enqueuing_workers(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_connect_rejects_ingress_when_owner_assignment_fails(monkeypatch):
+async def test_connect_rejects_ingress_when_capture_initialization_fails(monkeypatch):
     state = ClientState("client-1", "user-1")
     state.client_id = "client-1"
     producer = AsyncMock()
-    started = AsyncMock()
+    started = []
     model = SimpleNamespace(model_provider="deepgram", name="stt")
     registry = SimpleNamespace(get_default=lambda model_type: model)
     monkeypatch.setattr(websocket_controller, "get_models_registry", lambda: registry)
+    producer.init_session.side_effect = RuntimeError("capture init failed")
     monkeypatch.setattr(
         websocket_controller,
-        "ensure_active_session_placeholder",
-        AsyncMock(return_value=None),
+        "start_streaming_jobs",
+        lambda **kwargs: started.append(kwargs),
     )
-    monkeypatch.setattr(websocket_controller, "start_streaming_jobs", started)
 
-    with pytest.raises(RuntimeError, match="durable audio owner"):
+    with pytest.raises(RuntimeError, match="capture init failed"):
         await websocket_controller._initialize_streaming_session(
             state,
             producer,
@@ -247,7 +272,7 @@ async def test_connect_rejects_ingress_when_owner_assignment_fails(monkeypatch):
             {"rate": 16000, "channels": 1, "width": 2},
         )
 
-    started.assert_not_awaited()
+    assert started == []
 
 
 @pytest.mark.asyncio
@@ -261,11 +286,6 @@ async def test_reconnect_uses_a_distinct_capture_session_and_wal(monkeypatch):
     model = SimpleNamespace(model_provider="deepgram", name="stt")
     registry = SimpleNamespace(get_default=lambda model_type: model)
     monkeypatch.setattr(websocket_controller, "get_models_registry", lambda: registry)
-    monkeypatch.setattr(
-        websocket_controller,
-        "ensure_active_session_placeholder",
-        AsyncMock(return_value=SimpleNamespace(conversation_id="conversation-1")),
-    )
     monkeypatch.setattr(
         websocket_controller,
         "start_streaming_jobs",

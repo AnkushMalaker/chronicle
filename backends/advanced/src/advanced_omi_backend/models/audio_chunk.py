@@ -2,8 +2,8 @@
 Audio chunk models for MongoDB-based audio storage.
 
 This module contains the AudioChunkDocument model for storing Opus-compressed
-audio chunks in MongoDB. Each chunk represents a 10-second segment of audio
-from a conversation.
+audio chunks in MongoDB. Each chunk represents a 10-second segment from a
+technical capture session; semantic recordings reference chunks by ID.
 """
 
 from datetime import datetime, timezone
@@ -41,7 +41,9 @@ class AudioChunkDocument(Document):
 
     Audio chunks are stored in Opus-compressed format for ~94% storage reduction
     compared to raw PCM. Chunks are sequentially numbered and can be reconstructed
-    into complete WAV files for playback or batch processing.
+    into complete WAV files for playback or batch processing. Chunk identity is
+    capture-owned and never changes when a conversation is split, merged, trimmed,
+    or deleted.
 
     Storage Format:
     - Encoding: Opus (24kbps VBR, optimized for speech)
@@ -50,23 +52,31 @@ class AudioChunkDocument(Document):
     - Compression Ratio: ~0.047 (94% reduction)
 
     Indexes:
-    - (conversation_id, chunk_index): Primary query pattern for reconstruction
-    - conversation_id: Conversation lookup and counting
+    - (capture_session_id, sequence): Ordered ingest/recovery
+    - (user_id, capture_source_id, captured_at): Absolute-range discovery
     - created_at: Maintenance and cleanup operations
     """
 
     # Pydantic v2 configuration
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    # Primary identifiers
-    conversation_id: Indexed(str) = Field(
-        description="Parent conversation ID (UUID format)"
+    # Capture identity. None of these fields is conversation-relative.
+    user_id: Indexed(str) = Field(description="User who owns this audio evidence")
+    capture_source_id: Indexed(str) = Field(
+        description="Stable device/channel identity"
     )
-    chunk_index: int = Field(description="Sequential chunk number (0-based)", ge=0)
+    capture_session_id: Indexed(str) = Field(
+        description="Technical ingest/recovery attempt"
+    )
+    sequence: int = Field(description="Order within capture_session_id", ge=0)
 
     # Audio data
     audio_data: bytes = Field(
         description="Opus-encoded audio bytes (stored as BSON Binary in MongoDB)"
+    )
+    content_sha256: Optional[str] = Field(
+        default=None,
+        description="SHA-256 of these encoded bytes for integrity; not a dedupe key",
     )
 
     # Size tracking
@@ -77,15 +87,6 @@ class AudioChunkDocument(Document):
         description="Opus-encoded size in bytes (after compression)", gt=0
     )
 
-    # Time boundaries, relative to whichever conversation currently owns the chunk.
-    # These are a VIEW, not identity: split, merge and silence trimming all renumber
-    # and re-base them. Use ``captured_at`` for anything that must survive that.
-    start_time: float = Field(
-        description="Start time in seconds from conversation start", ge=0.0
-    )
-    end_time: float = Field(
-        description="End time in seconds from conversation start", gt=0.0
-    )
     duration: float = Field(
         description="Chunk duration in seconds (typically 10.0)", gt=0.0
     )
@@ -95,8 +96,7 @@ class AudioChunkDocument(Document):
     # what makes a conversation a *claim over an interval* rather than a container.
     # Without it a chunk's time is defined by its parent, so re-bounding a recording
     # means rewriting every chunk and trimmed audio loses all provenance.
-    captured_at: Optional[datetime] = Field(
-        default=None,
+    captured_at: datetime = Field(
         description="Absolute UTC time this chunk's audio was captured (immutable)",
     )
 
@@ -141,6 +141,10 @@ class AudioChunkDocument(Document):
     deleted_at: Optional[datetime] = Field(
         default=None, description="When the chunk was marked as deleted"
     )
+    deletion_reason: Optional[str] = Field(
+        default=None,
+        description="Why raw evidence was disabled; independent of Conversation deletion",
+    )
 
     @field_serializer("audio_data")
     def serialize_audio_data(self, v: bytes) -> Binary:
@@ -160,17 +164,18 @@ class AudioChunkDocument(Document):
         name = "audio_chunks"
 
         indexes = [
-            # Primary query: Retrieve chunks in order for a conversation
-            [("conversation_id", 1), ("chunk_index", 1)],
-            # Conversation lookup and counting
-            "conversation_id",
+            IndexModel(
+                [("capture_session_id", 1), ("sequence", 1)],
+                unique=True,
+                name="unique_capture_sequence",
+            ),
             # Maintenance queries (cleanup, monitoring)
             "created_at",
             # Soft delete filtering
             "deleted",
             # "what audio exists for this stretch of wall-clock time", independent of
             # which conversation currently claims it.
-            "captured_at",
+            [("user_id", 1), ("capture_source_id", 1), ("captured_at", 1)],
             # At-least-once delivery without duplicate Mongo audio. The partial
             # filter keeps imported/pre-WAL chunks with missing or null IDs out.
             IndexModel(
@@ -199,8 +204,8 @@ class AudioChunkDocument(Document):
     def __repr__(self) -> str:
         """Human-readable representation."""
         return (
-            f"AudioChunk(conversation={self.conversation_id[:8]}..., "
-            f"index={self.chunk_index}, "
+            f"AudioChunk(capture={self.capture_session_id[:8]}..., "
+            f"sequence={self.sequence}, "
             f"duration={self.duration:.1f}s, "
             f"compression={self.compression_ratio:.3f})"
         )

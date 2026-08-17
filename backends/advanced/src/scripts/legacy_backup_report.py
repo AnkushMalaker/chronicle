@@ -50,7 +50,7 @@ def _row(record: LegacyConversation) -> dict[str, Any]:
         "segments": len((record.active_version or {}).get("segments") or []),
         "provider": (record.active_version or {}).get("provider"),
         "diarized": bool((record.active_version or {}).get("diarization_source")),
-        "chunks": len(record.chunks),
+        "audio_files": len(record.audio_paths()),
         "audio_duration": round(record.audio_duration, 1),
         "has_audio": record.has_audio,
         "audio_source": (
@@ -60,7 +60,6 @@ def _row(record: LegacyConversation) -> dict[str, Any]:
         ),
         "audio_backup": record.audio_backup or record.legacy_wav_backup,
         "document_backup": record.document_backup,
-        "chunks_backup": record.chunks_backup,
         "legacy_wav_captured_at": (
             record.legacy_wav_captured_at.isoformat()
             if record.legacy_wav_captured_at
@@ -124,7 +123,6 @@ async def main() -> None:
     for backup in backups:
         counts = {
             "conversations": len(backup.conversations()),
-            "chunk_rows": len(backup.chunk_rows()),
             "audio_dirs": len(backup.audio_dirs()),
             "legacy_wavs": len(backup.legacy_wavs()),
         }

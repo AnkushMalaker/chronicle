@@ -151,6 +151,14 @@ class Settings(BaseSettings):
             )
 
         if (
+            "diarize_concurrent_chunks" not in kwargs
+            and "DIARIZE_CONCURRENT_CHUNKS" not in os.environ
+        ):
+            kwargs["diarize_concurrent_chunks"] = root_config.get(
+                "diarize_concurrent_chunks", 1
+            )
+
+        if (
             "diarize_chunk_overlap" not in kwargs
             and "DIARIZE_CHUNK_OVERLAP" not in os.environ
         ):

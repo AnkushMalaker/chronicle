@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from advanced_omi_backend.config import CleanupSettings, get_cleanup_settings
-from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
 from advanced_omi_backend.models.waveform import WaveformData
@@ -56,12 +55,6 @@ async def purge_old_deleted_conversations(
         conversation_id = conversation.conversation_id
 
         if not dry_run:
-            # Hard delete chunks
-            chunk_result = await AudioChunkDocument.find(
-                AudioChunkDocument.conversation_id == conversation_id
-            ).delete()
-            purged_chunks += chunk_result.deleted_count
-
             # Hard delete waveforms
             waveform_result = await WaveformData.find(
                 WaveformData.conversation_id == conversation_id
@@ -74,16 +67,10 @@ async def purge_old_deleted_conversations(
 
             logger.info(
                 f"Purged conversation {conversation_id} "
-                f"(deleted {chunk_result.deleted_count} chunks, "
-                f"{waveform_result.deleted_count} waveforms)"
+                f"(preserved capture chunks, {waveform_result.deleted_count} waveforms)"
             )
         else:
             # Dry run - just count
-            chunk_count = await AudioChunkDocument.find(
-                AudioChunkDocument.conversation_id == conversation_id
-            ).count()
-            purged_chunks += chunk_count
-
             waveform_count = await WaveformData.find(
                 WaveformData.conversation_id == conversation_id
             ).count()
@@ -93,7 +80,7 @@ async def purge_old_deleted_conversations(
 
             logger.info(
                 f"[DRY RUN] Would purge conversation {conversation_id} "
-                f"(with {chunk_count} chunks, {waveform_count} waveforms)"
+                f"(preserving capture chunks, {waveform_count} waveforms)"
             )
 
     logger.info(

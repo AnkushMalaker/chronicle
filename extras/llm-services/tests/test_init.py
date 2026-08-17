@@ -39,7 +39,7 @@ class _ConfigManager:
             "defaults": {},
             "models": [
                 {
-                    "name": "muse-glimmer-llm",
+                    "name": "qwen3.8-llm",
                     "model_type": "llm",
                     "api_family": "openai",
                     "model_name": "stale-model-id",
@@ -58,13 +58,13 @@ class _ConfigManager:
     def sync_models_from_defaults(self, names):
         self.synced.extend(names)
         canonical = {
-            "muse-glimmer-llm": {
-                "name": "muse-glimmer-llm",
-                "description": "Muse Glimmer",
+            "qwen3.8-llm": {
+                "name": "qwen3.8-llm",
+                "description": "Qwen3.8",
                 "model_type": "llm",
                 "model_provider": "llamacpp",
                 "api_family": "openai",
-                "model_name": "meta-models/Muse-Glimmer-30B-GGUF:muse-glimmer-30B-kquant-17gb.gguf",
+                "model_name": "unsloth/Qwen3.8-27B-GGUF:Qwen3.8-27B-UD-Q4_K_XL.gguf",
                 "model_params": {"max_tokens": 2000},
             },
             "llamacpp-llm": {
@@ -101,37 +101,35 @@ class _ConfigManager:
         self.saved = deepcopy(config)
 
 
-def test_muse_selection_syncs_registry_entry_and_exact_upstream_identity(
+def test_qwen38_selection_syncs_registry_entry_and_exact_upstream_identity(
     init_module, monkeypatch
 ):
     _ConfigManager.instances.clear()
     monkeypatch.setattr(init_module, "ConfigManager", _ConfigManager)
     setup = object.__new__(init_module.LLMServicesSetup)
     setup.console = _Console()
-    muse_repo = "meta-models/Muse-Glimmer-30B-GGUF"
-    muse = init_module.LLM_MODELS[muse_repo]
+    qwen_repo = "unsloth/Qwen3.8-27B-GGUF"
+    qwen = init_module.LLM_MODELS[qwen_repo]
 
-    setup.update_config_yml(muse_repo, muse)
+    setup.update_config_yml(qwen_repo, qwen)
 
     manager = _ConfigManager.instances[-1]
-    assert manager.synced == ["muse-glimmer-llm", "llamacpp-embed"]
+    assert manager.synced == ["qwen3.8-llm", "llamacpp-embed"]
     assert manager.updated_defaults == {
-        "llm": "muse-glimmer-llm",
+        "llm": "qwen3.8-llm",
         "embedding": "llamacpp-embed",
     }
     selected = next(
-        model
-        for model in manager.config["models"]
-        if model["name"] == "muse-glimmer-llm"
+        model for model in manager.config["models"] if model["name"] == "qwen3.8-llm"
     )
     assert selected["model_name"] == (
-        "meta-models/Muse-Glimmer-30B-GGUF:" "muse-glimmer-30B-kquant-17gb.gguf"
+        "unsloth/Qwen3.8-27B-GGUF:" "Qwen3.8-27B-UD-Q4_K_XL.gguf"
     )
-    assert selected["context_window"] == 131072
+    assert selected["context_window"] == 98304
     assert selected["thinking"] is True
 
 
-def test_root_wizard_pi_flow_reconciles_to_concrete_muse_contract(
+def test_root_wizard_pi_flow_reconciles_to_concrete_qwen38_contract(
     init_module, monkeypatch
 ):
     """Backend-first setup is reconciled after the local model is selected."""
@@ -157,23 +155,23 @@ def test_root_wizard_pi_flow_reconciles_to_concrete_muse_contract(
     monkeypatch.setattr(init_module, "ConfigManager", _ConfigManager)
     setup = object.__new__(init_module.LLMServicesSetup)
     setup.console = _Console()
-    muse = init_module.LLM_MODELS[init_module.MUSE_GLIMMER_REPO]
+    qwen = init_module.LLM_MODELS[init_module.QWEN38_REPO]
 
-    setup.update_config_yml(init_module.MUSE_GLIMMER_REPO, muse)
+    setup.update_config_yml(init_module.QWEN38_REPO, qwen)
 
     config = _ConfigManager.instances[-1].config
-    assert config["defaults"]["llm"] == "muse-glimmer-llm"
+    assert config["defaults"]["llm"] == "qwen3.8-llm"
     selected = next(
-        model for model in config["models"] if model["name"] == "muse-glimmer-llm"
+        model for model in config["models"] if model["name"] == "qwen3.8-llm"
     )
     assert selected["model_name"] == (
-        "meta-models/Muse-Glimmer-30B-GGUF:" "muse-glimmer-30B-kquant-17gb.gguf"
+        "unsloth/Qwen3.8-27B-GGUF:" "Qwen3.8-27B-UD-Q4_K_XL.gguf"
     )
-    assert selected["context_window"] == 131072
+    assert selected["context_window"] == 98304
     pi = config["memory"]["backends"]["pi"]
     assert pi == {
-        "model": "muse-glimmer-llm",
-        "context_window": 131072,
+        "model": "qwen3.8-llm",
+        "context_window": 98304,
         "max_tokens": 4096,
     }
 
@@ -203,8 +201,8 @@ def test_reconciliation_preserves_explicit_external_pi_model(init_module, monkey
     setup.console = _Console()
 
     setup.update_config_yml(
-        init_module.MUSE_GLIMMER_REPO,
-        init_module.LLM_MODELS[init_module.MUSE_GLIMMER_REPO],
+        init_module.QWEN38_REPO,
+        init_module.LLM_MODELS[init_module.QWEN38_REPO],
     )
 
     pi = _ConfigManager.instances[-1].config["memory"]["backends"]["pi"]
@@ -293,17 +291,17 @@ def test_registry_sync_failure_is_fatal(init_module, monkeypatch):
 
     with pytest.raises(ValueError, match="Could not sync required model"):
         setup.update_config_yml(
-            init_module.MUSE_GLIMMER_REPO,
-            init_module.LLM_MODELS[init_module.MUSE_GLIMMER_REPO],
+            init_module.QWEN38_REPO,
+            init_module.LLM_MODELS[init_module.QWEN38_REPO],
         )
 
 
-def test_rerun_defaults_to_current_muse_model(init_module):
+def test_rerun_defaults_to_current_qwen38_model(init_module):
     setup = object.__new__(init_module.LLMServicesSetup)
     setup.console = _Console()
     setup.args = SimpleNamespace(llm_model=None, ctx_size=None)
     setup.read_existing_env_value = lambda key: (
-        "meta-models/Muse-Glimmer-30B-GGUF" if key == "LLM_HF_REPO" else None
+        "unsloth/Qwen3.8-27B-GGUF" if key == "LLM_HF_REPO" else None
     )
     selected_defaults = []
 
@@ -316,15 +314,15 @@ def test_rerun_defaults_to_current_muse_model(init_module):
     repo, info = setup.select_llm_model()
 
     assert selected_defaults == ["3"]
-    assert repo == init_module.MUSE_GLIMMER_REPO
-    assert info["ctx_size"] == 131072
+    assert repo == init_module.QWEN38_REPO
+    assert info["ctx_size"] == 98304
 
 
 def test_noninteractive_model_gpu_and_context_arguments_are_honored(init_module):
     setup = object.__new__(init_module.LLMServicesSetup)
     setup.console = _Console()
     setup.args = SimpleNamespace(
-        llm_model="meta-models/Muse-Glimmer-30B-GGUF",
+        llm_model="unsloth/Qwen3.8-27B-GGUF",
         embed_model="nomic-ai/nomic-embed-text-v1.5-GGUF:Q8_0",
         n_gpu_layers="42",
         ctx_size="49152",
@@ -336,7 +334,7 @@ def test_noninteractive_model_gpu_and_context_arguments_are_honored(init_module)
     embed_repo, embed = setup.select_embed_model()
     setup.setup_gpu_config()
 
-    assert llm_repo == init_module.MUSE_GLIMMER_REPO
+    assert llm_repo == init_module.QWEN38_REPO
     assert llm["ctx_size"] == 49152
     assert embed_repo == "nomic-ai/nomic-embed-text-v1.5-GGUF"
     assert embed["dimensions"] == 768
@@ -395,8 +393,8 @@ def test_network_contract_rejects_persisted_tailnet_bind(init_module):
         setup.configure_network_contract()
 
 
-def test_muse_uses_multimodal_dflash_server_profile(init_module):
-    repo = init_module.MUSE_GLIMMER_REPO
+def test_qwen38_uses_multimodal_mtp_server_profile(init_module):
+    repo = init_module.QWEN38_REPO
 
     profile = init_module.LLMServicesSetup._server_profile(
         repo, init_module.LLM_MODELS[repo]
@@ -410,15 +408,12 @@ def test_muse_uses_multimodal_dflash_server_profile(init_module):
         "LLAMA_ARG_CACHE_TYPE_V": "q8_0",
         "LLAMA_ARG_MMPROJ_AUTO": "true",
         "LLAMA_ARG_THINK_BUDGET": "-1",
-        "LLAMA_ARG_REASONING": "on",
-        "LLAMA_ARG_SPEC_TYPE": "draft-dflash",
-        "LLAMA_ARG_SPEC_DRAFT_MODEL": "/cache/dflash-kquant.gguf",
+        "LLAMA_ARG_REASONING": "auto",
+        "LLAMA_ARG_SPEC_TYPE": "draft-mtp",
+        "LLAMA_ARG_SPEC_DRAFT_MODEL": "",
         "LLAMA_ARG_SPEC_DRAFT_N_MAX": "4",
         "LLAMA_ARG_FIT": "off",
-        "LLAMA_DRAFT_MODEL_URL": (
-            "https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF/"
-            "resolve/main/dflash-kquant.gguf"
-        ),
+        "LLAMA_DRAFT_MODEL_URL": "",
     }
 
 
@@ -446,14 +441,14 @@ def test_non_qwen_profile_restores_safe_llamacpp_defaults(init_module):
     }
 
 
-def test_generate_env_file_writes_muse_server_profile(
+def test_generate_env_file_writes_qwen38_server_profile(
     init_module, monkeypatch, tmp_path
 ):
     setup = object.__new__(init_module.LLMServicesSetup)
     setup.console = _Console()
     setup.config = init_module.LLMServicesSetup._server_profile(
-        init_module.MUSE_GLIMMER_REPO,
-        init_module.LLM_MODELS[init_module.MUSE_GLIMMER_REPO],
+        init_module.QWEN38_REPO,
+        init_module.LLM_MODELS[init_module.QWEN38_REPO],
     )
     monkeypatch.setattr(init_module, "SERVICE_DIR", tmp_path)
     setup.backup_existing_env = lambda: None
@@ -467,9 +462,9 @@ def test_generate_env_file_writes_muse_server_profile(
     assert env["LLAMA_ARG_CACHE_TYPE_K"] == "q8_0"
     assert env["LLAMA_ARG_CACHE_TYPE_V"] == "q8_0"
     assert env["LLAMA_ARG_MMPROJ_AUTO"] == "true"
-    assert env["LLAMA_ARG_REASONING"] == "on"
-    assert env["LLAMA_ARG_SPEC_TYPE"] == "draft-dflash"
-    assert env["LLAMA_ARG_SPEC_DRAFT_MODEL"] == "/cache/dflash-kquant.gguf"
+    assert env["LLAMA_ARG_REASONING"] == "auto"
+    assert env["LLAMA_ARG_SPEC_TYPE"] == "draft-mtp"
+    assert env["LLAMA_ARG_SPEC_DRAFT_MODEL"] == ""
 
 
 def test_compose_forwards_server_profile_with_safe_defaults(init_module):
@@ -493,7 +488,7 @@ def test_compose_forwards_server_profile_with_safe_defaults(init_module):
     )
     assert environment["LLAMA_ARG_FIT"] == "${LLAMA_ARG_FIT:-on}"
     assert compose["services"]["llama-cpp-llm"]["image"] == (
-        "localhost/chronicle-llama-cpp:muse-glimmer-62bf73d"
+        "localhost/chronicle-llama-cpp:qwen3.8-6b4344e"
     )
     assert compose["services"]["llama-cpp-embed"]["image"] == (
         "ghcr.io/ggml-org/llama.cpp:server-cuda-b10290"
@@ -515,7 +510,7 @@ def test_compose_forwards_server_profile_with_safe_defaults(init_module):
     )
     defaults = yaml.safe_load(defaults_path.read_text(encoding="utf-8"))
     models = {model["name"]: model for model in defaults["models"]}
-    for name in ("llamacpp-llm", "muse-glimmer-llm"):
+    for name in ("llamacpp-llm", "qwen3.8-llm"):
         assert models[name]["discovery_default"] == "http://llama-cpp-llm:8080/v1"
         assert models[name]["api_key"] == "${oc.env:LLAMA_API_KEY,no-key}"
     assert models["llamacpp-embed"]["model_url"] == ("http://llama-cpp-embed:8080/v1")

@@ -11,11 +11,16 @@ import argparse
 import asyncio
 import logging
 import os
-from typing import Optional
+from typing import Iterator, Optional
 
 import uvicorn
 from common.base_service import BaseASRService, create_asr_app
-from common.response_models import TranscriptionResult
+from common.response_models import (
+    TranscriptionProgressEvent,
+    TranscriptionResult,
+    TranscriptionResultEvent,
+    TranscriptionStreamEvent,
+)
 from providers.granite.transcriber import DEFAULT_MODEL, GraniteTranscriber
 
 logger = logging.getLogger(__name__)
@@ -77,7 +82,7 @@ class GraniteService(BaseASRService):
         context_info: Optional[str] = None,
         prompt: Optional[str] = None,
         **kwargs,
-    ):
+    ) -> Iterator[TranscriptionStreamEvent]:
         """Yield progress counters then the final result for long audio.
 
         Delegates to the transcriber's batched generator (run synchronously via
@@ -96,9 +101,9 @@ class GraniteService(BaseASRService):
             prompt_override=prompt,
         ):
             if event["type"] == "result":
-                yield {"type": "result", **event["result"].to_dict()}
+                yield TranscriptionResultEvent.from_result(event["result"])
             else:
-                yield event
+                yield TranscriptionProgressEvent.model_validate(event)
 
     def get_supported_languages(self) -> Optional[list[str]]:
         # Granite Speech 4.1 supports English, French, German, Spanish, Portuguese.

@@ -3,14 +3,22 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
+import advanced_omi_backend.services.device_audio_ingest as device_audio_ingest
 import advanced_omi_backend.utils.vad_analysis as vad_analysis
+from advanced_omi_backend.models.audio_capture import AudioRangeRef
 from advanced_omi_backend.services.device_audio_ingest import (
+    _ingest_segment,
     _profile_wav,
+    _Segment,
     audio_stream_key,
     group_audio_sessions,
 )
-from advanced_omi_backend.utils.vad_analysis import SpeechDetectionReason
+from advanced_omi_backend.utils.vad_analysis import (
+    AudioEvidenceProfile,
+    SpeechDetectionReason,
+)
 
 
 def item(
@@ -209,3 +217,202 @@ def test_profile_wav_reports_decode_failure(tmp_path):
 
     assert result.scored is False
     assert result.reason is SpeechDetectionReason.WAV_DECODE_FAILED
+
+
+@pytest.mark.asyncio
+async def test_no_speech_keeps_raw_capture_without_materializing_conversation(
+    monkeypatch,
+):
+    """VAD filters semantic Conversations, never the underlying capture evidence."""
+
+    class PendingQuery:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def sort(self, *_args):
+            return self
+
+        async def to_list(self):
+            return self.rows
+
+    class PendingItem:
+        user_id = "507f1f77bcf86cd799439011"
+        source_id = "rainbow"
+        source_item_id = "audio-1"
+        kind = "audio"
+        state = "received"
+        captured_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ended_at = captured_at + timedelta(seconds=30)
+        metadata = {"direction": "input"}
+        deleted = False
+
+        async def delete(self):
+            self.deleted = True
+
+    pending = PendingItem()
+    events = []
+    captured_range = AudioRangeRef(
+        capture_source_id="rainbow:input",
+        time_basis="recorded",
+        chunk_ids=["507f1f77bcf86cd799439012"],
+        capture_session_ids=["screenpipe-capture"],
+        started_at=pending.captured_at,
+        ended_at=pending.ended_at,
+    )
+    profile = AudioEvidenceProfile(
+        scored=True,
+        reason=SpeechDetectionReason.NO_SPEECH,
+        bucket_seconds=10.0,
+        speech_seconds=0.0,
+        longest_no_speech_seconds=30.0,
+        acoustic_active_seconds=0.0,
+        acoustic_quiet_seconds=30.0,
+        speech_fraction=[0.0, 0.0, 0.0],
+        acoustic_active_fraction=[0.0, 0.0, 0.0],
+        rms_dbfs=[-90.0, -90.0, -90.0],
+        peak_dbfs=[-90.0, -90.0, -90.0],
+        provider="fixture",
+        frame_hop_ms=16.0,
+    )
+
+    class DeviceInputFixture:
+        kind = "kind"
+        state = "state"
+
+        @staticmethod
+        def find(*_args, **_kwargs):
+            return PendingQuery([pending])
+
+    class UserFixture:
+        @staticmethod
+        async def get(_user_id):
+            return SimpleNamespace(user_id=pending.user_id, id=pending.user_id)
+
+    monkeypatch.setattr(device_audio_ingest, "DeviceInputItem", DeviceInputFixture)
+    monkeypatch.setattr(device_audio_ingest, "User", UserFixture)
+
+    async def mix(*_args):
+        events.append("mix")
+
+    async def persist(*_args):
+        events.append("capture")
+        return SimpleNamespace(audio_range=captured_range)
+
+    def profile_wav(_path):
+        events.append("vad")
+        return profile
+
+    spans = []
+
+    async def save_span(*_args, **kwargs):
+        spans.append(kwargs)
+        return SimpleNamespace()
+
+    async def unexpected_ingest(*_args, **_kwargs):
+        raise AssertionError("silence must not materialize a Conversation")
+
+    monkeypatch.setattr(device_audio_ingest, "_mix_session", mix)
+    monkeypatch.setattr(device_audio_ingest, "_persist_capture_window", persist)
+    monkeypatch.setattr(device_audio_ingest, "_profile_wav", profile_wav)
+    monkeypatch.setattr(device_audio_ingest, "_save_evidence_span", save_span)
+    monkeypatch.setattr(device_audio_ingest, "_ingest_segment", unexpected_ingest)
+    monkeypatch.setattr(
+        device_audio_ingest, "require_speech_for_transcription", lambda: True
+    )
+
+    result = await device_audio_ingest.process_device_audio()
+
+    assert events == ["mix", "capture", "vad"]
+    assert spans == [{"state": "no_speech", "audio_ranges": [captured_range]}]
+    assert pending.deleted is True
+    assert result["processed_sessions"] == 0
+    assert result["rejected_no_speech"] == 1
+
+
+@pytest.mark.asyncio
+async def test_speech_materializes_a_visible_conversation_claim(monkeypatch, tmp_path):
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    source_item = SimpleNamespace(
+        source_item_id="audio-1",
+        user_id="user-1",
+        source_id="rainbow",
+        captured_at=started_at,
+        ended_at=started_at + timedelta(seconds=30),
+        metadata={"direction": "input"},
+    )
+    profile = AudioEvidenceProfile(
+        scored=True,
+        reason=SpeechDetectionReason.SPEECH_DETECTED,
+        bucket_seconds=10.0,
+        speech_seconds=30.0,
+        longest_no_speech_seconds=0.0,
+        acoustic_active_seconds=30.0,
+        acoustic_quiet_seconds=0.0,
+        speech_fraction=[1.0, 1.0, 1.0],
+        acoustic_active_fraction=[1.0, 1.0, 1.0],
+        rms_dbfs=[-20.0, -20.0, -20.0],
+        peak_dbfs=[-5.0, -5.0, -5.0],
+        provider="fixture",
+        frame_hop_ms=16.0,
+    )
+    segment = _Segment(
+        items=[source_item],
+        path=tmp_path / "segment.wav",
+        started_at=started_at,
+        ended_at=started_at + timedelta(seconds=30),
+        profile=profile,
+    )
+    audio_range = AudioRangeRef(
+        capture_source_id="rainbow:input",
+        time_basis="recorded",
+        chunk_ids=["507f1f77bcf86cd799439012"],
+        started_at=segment.started_at,
+        ended_at=segment.ended_at,
+    )
+    received = {}
+
+    async def materialize(_user, _audio_range, **kwargs):
+        received.update(kwargs)
+        return SimpleNamespace(conversation_id="conversation-1")
+
+    async def save_span(*_args, **_kwargs):
+        return SimpleNamespace()
+
+    class EmptyQuery:
+        async def to_list(self):
+            return []
+
+    class Expression:
+        def __eq__(self, _other):
+            return self
+
+        def __le__(self, _other):
+            return self
+
+    class DeviceInputFixture:
+        user_id = Expression()
+        source_id = Expression()
+        kind = Expression()
+        captured_at = Expression()
+
+        @staticmethod
+        def find(*_args, **_kwargs):
+            return EmptyQuery()
+
+    monkeypatch.setattr(
+        device_audio_ingest, "materialize_and_process_audio_claim", materialize
+    )
+    monkeypatch.setattr(device_audio_ingest, "_save_evidence_span", save_span)
+    monkeypatch.setattr(device_audio_ingest, "DeviceInputItem", DeviceInputFixture)
+
+    conversation_id = await _ingest_segment(
+        SimpleNamespace(id="user-1"),
+        "rainbow",
+        "input",
+        segment,
+        audio_range,
+    )
+
+    assert conversation_id == "conversation-1"
+    assert received["data_purpose"] == "conversation"
+    assert received["memory_excluded"] is True

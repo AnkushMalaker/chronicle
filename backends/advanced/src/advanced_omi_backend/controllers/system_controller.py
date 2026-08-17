@@ -547,10 +547,15 @@ async def save_diarization_settings_controller(settings: dict):
 
             # Type validation for known keys only
             if key in ["min_speakers", "max_speakers"]:
-                if not isinstance(value, int) or value < 1 or value > 20:
+                if value is not None and (
+                    not isinstance(value, int) or value < 1 or value > 20
+                ):
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Invalid value for {key}: must be integer 1-20",
+                        detail=(
+                            f"Invalid value for {key}: must be null (automatic) "
+                            "or an integer 1-20"
+                        ),
                     )
             elif key == "diarization_source":
                 if not isinstance(value, str) or value not in ["pyannote", "provider"]:
@@ -1138,6 +1143,12 @@ def _validate_memory_mapping(memory_section: dict) -> None:
         )
     if search_backend not in _MEMORY_SEARCH_BACKENDS:
         raise ValueError(f"Unsupported memory search backend: {search_backend}")
+    if write.get("max_consecutive_identical_tool_calls") not in (None, ""):
+        _positive_memory_int(
+            write.get("max_consecutive_identical_tool_calls"),
+            field="memory.agents.write.max_consecutive_identical_tool_calls",
+            default=2,
+        )
 
     if "codex" in {write_backend, recovery_backend}:
         codex = backends.get("codex")
@@ -2324,7 +2335,7 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
     """Update plugin configuration from structured JSON (form data).
 
     Updates the three-file plugin architecture:
-    1. config/plugins.yml - Orchestration (enabled, events, condition)
+    1. config/plugins.yml - Orchestration (enabled, events, condition, priority, modes)
     2. plugins/{plugin_id}/config.yml - Settings with ${ENV_VAR} references
     3. backends/advanced/.env - Actual secret values
 
@@ -2359,11 +2370,22 @@ async def update_plugin_config_structured(plugin_id: str, config: dict) -> dict:
 
             # Update orchestration config
             orchestration = config["orchestration"]
-            plugins_data["plugins"][plugin_id] = {
+            existing_orchestration = plugins_data["plugins"].get(plugin_id) or {}
+            updated_orchestration = {
                 "enabled": orchestration.get("enabled", False),
                 "events": orchestration.get("events", []),
                 "condition": orchestration.get("condition", {"type": "always"}),
             }
+            # The current admin form may not render these fields yet. Preserve
+            # existing values unless the caller explicitly sends replacements,
+            # otherwise toggling a plugin would silently destroy its route order
+            # or disable its interaction worker declaration.
+            for key in ("priority", "modes"):
+                if key in orchestration:
+                    updated_orchestration[key] = orchestration[key]
+                elif key in existing_orchestration:
+                    updated_orchestration[key] = existing_orchestration[key]
+            plugins_data["plugins"][plugin_id] = updated_orchestration
 
             # Create backup
             if plugins_yml_path.exists():

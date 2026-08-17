@@ -37,7 +37,9 @@ it's debuggable (you can open it in Obsidian) and portable.
 Post-transcription flow (`controllers/queue_controller.py:489` → RQ chain):
 
 ```
-recognise_speakers_job → process_memory_job → generate_title_summary_job → dispatch_complete
+recognise_speakers_job → process_memory_job → generate_title_job
+                                              → generate_short_summary_job
+                                              → generate_detailed_summary_job → dispatch_complete
                               │
                               ▼  memory_jobs.py:135 → memory_service.add_memory()
                          providers/chronicle.py:325
@@ -267,7 +269,8 @@ duration_minutes: <n>
 ### Action Items
 ```
 
-**Person note** `People/<name>.md` (NEW — minted/located on speaker identification):
+**Person note** `People/<name>.md` (created only when there is durable knowledge to
+record; speaker identification alone does not mint a profile):
 
 ```yaml
 ---
@@ -287,7 +290,8 @@ updated: <iso>
 
 Ship into vault root (and a `Templates/Bases/` for editing). Minimum set:
 
-- `People.base` — `categories.contains(link("People"))` → "everyone I've talked to".
+- `People.base` — `categories.contains(link("People"))` → people with durable semantic
+  profiles. The speaker enrollment/gallery API is the separate voice roster.
 - `Conversations.base` with views:
   - `All` (sorted by date)
   - `Person` — filter `list(people).contains(this)` → embedded in each person note.
@@ -300,20 +304,16 @@ These are static templates we write once per user vault (or seed a shared `Templ
 
 ### 6.3 People upsert in the memory job
 
-Extend `process_memory_job` / `add_memory()`:
+The active transcript keeps every recognized speaker label, independently of the
+vault. Conversation notes may link identified people, and Timeline episodes carry
+recognized names as entities, without requiring a corresponding person note.
 
-1. After parsing the doc, for each identified person (from speaker recognition first;
-   LLM-extracted `### People` is **deferred** per the kickoff decision — identity
-   resolution/merging is its own problem):
-   - `VaultCLI.create("People/<name>")` (idempotent).
-   - Append the speaker label to that note's `aliases`.
-2. Set the conversation note's `people:` property to the resolved `[[links]]`.
-3. On **speaker reprocess** (rename "Speaker 0" → real name): if `People/Alice` does not
-   exist, `VaultCLI.rename("People/Speaker 0", "People/Alice")` renames + fixes all
-   backlinks in one shot (verified non-destructive). If `People/Alice` already exists
-   (merge), do it in Python: backlink-rewrite + dedup the `people:` lists + merge bodies +
-   delete the source — because `move` onto an existing target clobbers it and duplicates
-   the link (spike §5.1). Either way this replaces today's full-document LLM regeneration.
+The memory agent creates `People/<name>.md` only when the source establishes durable
+identity, relationship, work, preference, constraint, responsibility, or another
+reusable fact. Routine appearances and a bare name remain in transcript/timeline
+evidence; an unresolved wikilink is preferable to a placeholder profile. Speaker
+reprocessing may rename or merge an existing real person note and its backlinks, but
+must never create a note for `Unknown Speaker N`.
 
 > Identity resolution (is "John" the same as "John Smith"?) is explicitly **out of scope
 > for v1** — design the property/link/base layer so it *works* with whatever names exist,

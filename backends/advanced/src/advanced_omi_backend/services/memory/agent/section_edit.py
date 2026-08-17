@@ -8,8 +8,9 @@ targets a note's *structure*: a ``## Heading`` or an Obsidian block reference
 
 Why this exists
 ---------------
-The memory agent's dominant edit is "append a genuinely-new bullet under ``## About``
-and a dated line under ``## Mentions``" (see the agent system prompt). Expressed as an
+The memory agent's dominant edit is a small append under one semantic section (see the
+agent system prompt). A stable fact belongs under ``## About``; a compact source pointer
+may belong under ``## Mentions``, but the same proposition never belongs in both. As an
 ``old_text`` edit, the model must paste the section's current tail verbatim as an
 anchor — so when two same-user memory runs interleave, the anchor it read is no longer
 present and the edit fails, forcing a read-retry loop (the root cause documented in the

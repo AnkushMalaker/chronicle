@@ -1,11 +1,9 @@
 """The no-data-loss guard for conversations whose audio never persisted.
 
-When a conversation's audio chunks are missing at finalize (e.g. a mid-session
-reconnect routed the audio to the session's always_persist placeholder under a
-different conversation_id), the conversation must NOT be discarded if it carries a
-real transcript — losing a real transcript is worse than keeping an audio-less
-conversation. Only a genuinely empty conversation (no meaningful transcript) is
-discarded.
+When a Conversation's capture claim cannot be attached at finalize, it must NOT be
+discarded if it carries a real transcript. Losing a real transcript is worse than
+keeping an audio-less semantic record. Only a genuinely empty Conversation (no
+meaningful transcript) is discarded.
 """
 
 import pytest

@@ -1,3 +1,4 @@
+import threading
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -11,8 +12,11 @@ from advanced_omi_backend.services.timeline.evidence import (
     _coalesce_application_evidence,
     _device_items,
     _transcript_item,
+    _transcript_items,
+    _window_items,
     day_bounds,
 )
+from advanced_omi_backend.services.transcript_time import AnchorMap, ChunkAnchor
 
 
 def test_local_day_bounds_respect_non_utc_timezone():
@@ -316,6 +320,82 @@ def test_transcript_bounds_come_from_capture_time_not_record_creation():
     assert item.metadata["conversation_id"] == "conv-1"
 
 
+def test_timestamped_transcript_blocks_give_the_agent_real_internal_cut_points():
+    captured = datetime(2026, 8, 6, 9, 0, tzinfo=timezone.utc)
+    segments = [
+        SimpleNamespace(
+            start=0.0,
+            end=60.0,
+            text="First topic",
+            speaker="Speaker 1",
+            identified_as="Ankush",
+            segment_type="speech",
+        ),
+        SimpleNamespace(
+            start=120.0,
+            end=180.0,
+            text="Still first topic",
+            speaker="Speaker 2",
+            identified_as="Aryan",
+            segment_type="speech",
+        ),
+        SimpleNamespace(
+            start=360.0,
+            end=420.0,
+            text="New topic after a real gap",
+            speaker="Speaker 1",
+            identified_as="Ankush",
+            segment_type="speech",
+        ),
+    ]
+    version = SimpleNamespace(version_id="speaker-v2", segments=segments)
+    conversation = SimpleNamespace(
+        conversation_id="conv-long",
+        transcript="fallback",
+        external_source_id="screenpipe:host:input:stream",
+        active_transcript=version,
+        segments=segments,
+    )
+    anchors = AnchorMap(
+        conversation_id="conv-long",
+        anchors=[ChunkAnchor(0.0, 600.0, captured)],
+    )
+
+    items = _transcript_items(
+        conversation,
+        (captured, captured + timedelta(minutes=10)),
+        anchors,
+    )
+
+    assert len(items) == 2
+    assert [(item.started_at, item.ended_at) for item in items] == [
+        (captured, captured + timedelta(minutes=3)),
+        (captured + timedelta(minutes=6), captured + timedelta(minutes=7)),
+    ]
+    assert "Ankush: First topic" in items[0].excerpt
+    assert "Aryan: Still first topic" in items[0].excerpt
+    assert all(item.metadata["conversation_id"] == "conv-long" for item in items)
+    assert [item.metadata["segment_count"] for item in items] == [2, 1]
+
+
+def test_coverage_windows_skip_hours_with_no_evidence():
+    started = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    evidence_item = TimelineEvidenceItem(
+        evidence_id="one-event",
+        kind="observation",
+        started_at=started + timedelta(hours=12),
+        ended_at=started + timedelta(hours=12, minutes=25),
+        role="application_state",
+    )
+
+    windows = _window_items(
+        started, started + timedelta(days=1), 20, 3, [evidence_item]
+    )
+
+    assert len(windows) == 2
+    assert all(window.evidence_ids == ["one-event"] for window in windows)
+
+
 class _FakeAggregateCollection:
     def __init__(self, rows):
         self.rows = rows
@@ -332,35 +412,105 @@ class _FakeAggregateCollection:
         return _Cursor()
 
 
+class _FakeFindCollection:
+    def __init__(self, rows):
+        self.rows = rows
+        self.query = None
+
+    def find(self, query):
+        self.query = query
+        rows = self.rows
+
+        class _Cursor:
+            async def to_list(self, length=None):
+                return list(rows)
+
+        return _Cursor()
+
+
 @pytest.mark.asyncio
-async def test_audio_bounds_are_taken_from_captured_at_across_every_source(monkeypatch):
-    day_start = datetime(2026, 8, 6, tzinfo=timezone.utc)
-    day_end = day_start + timedelta(days=1)
-    collection = _FakeAggregateCollection(
-        [
-            {
-                "_id": "screen-capture",
-                "started_at": day_start + timedelta(hours=1),
-                "ended_at": day_start + timedelta(hours=1, seconds=10),
-            },
-            {
-                "_id": "phone-recording",
-                "started_at": day_start + timedelta(hours=5),
-                "ended_at": day_start + timedelta(hours=5, seconds=10),
-            },
-        ]
+async def test_large_device_rows_are_parsed_off_the_backend_event_loop(monkeypatch):
+    collection = _FakeFindCollection([{"_id": "one"}, {"_id": "two"}])
+    main_thread = threading.get_ident()
+    parser_threads = []
+
+    monkeypatch.setattr(
+        evidence.DeviceInputItem,
+        "get_pymongo_collection",
+        classmethod(lambda cls: collection),
     )
     monkeypatch.setattr(
-        evidence.AudioChunkDocument,
+        evidence.DeviceInputItem,
+        "model_validate",
+        classmethod(
+            lambda cls, row: parser_threads.append(threading.get_ident())
+            or SimpleNamespace(id=row["_id"])
+        ),
+    )
+
+    rows = await evidence._device_input_rows(
+        "user",
+        datetime(2026, 8, 6, tzinfo=timezone.utc),
+        datetime(2026, 8, 7, tzinfo=timezone.utc),
+    )
+
+    assert [row.id for row in rows] == ["one", "two"]
+    assert parser_threads and all(thread != main_thread for thread in parser_threads)
+    assert collection.query["user_id"] == "user"
+
+
+@pytest.mark.asyncio
+async def test_audio_bounds_are_taken_from_semantic_range_claims(monkeypatch):
+    day_start = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    day_end = day_start + timedelta(days=1)
+    rows = [
+        {
+            "conversation_id": "screen-capture",
+            "audio_ranges": [
+                {
+                    "started_at": day_start + timedelta(hours=1),
+                    "ended_at": day_start + timedelta(hours=1, seconds=10),
+                    "time_basis": "received",
+                }
+            ],
+        },
+        {
+            "conversation_id": "phone-recording",
+            "audio_ranges": [
+                {
+                    "started_at": day_start + timedelta(hours=5),
+                    "ended_at": day_start + timedelta(hours=5, seconds=10),
+                    "time_basis": "recorded",
+                }
+            ],
+        },
+    ]
+
+    class Collection:
+        query = None
+
+        def find(self, query, projection):
+            self.query = query
+
+            class Cursor:
+                async def to_list(self, length=None):
+                    return rows
+
+            return Cursor()
+
+    collection = Collection()
+    monkeypatch.setattr(
+        evidence.Conversation,
         "get_pymongo_collection",
         classmethod(lambda cls: collection),
     )
 
-    bounds = await evidence._conversation_audio_bounds(day_start, day_end)
+    bounds = await evidence._conversation_audio_bounds("user", day_start, day_end)
 
     assert set(bounds) == {"screen-capture", "phone-recording"}
     assert bounds["phone-recording"][0] == day_start + timedelta(hours=5)
-    # Selection is on capture time only; nothing keys on external_source_type,
-    # so a wearable and a screen recorder are treated identically.
-    match_stage = collection.pipeline[0]["$match"]
-    assert set(match_stage) == {"captured_at", "deleted"}
+    # Selection is on claim time only; source type never changes the rule.
+    assert collection.query["user_id"] == "user"
+    assert collection.query["audio_ranges"]["$elemMatch"]["time_basis"] == {
+        "$ne": "unknown"
+    }

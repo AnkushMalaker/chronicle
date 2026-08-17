@@ -98,7 +98,7 @@ models:
     thinking: true
     capabilities: [vision]
     model_name: unsloth/Qwen3.8-27B-GGUF:Qwen3.8-27B-UD-Q4_K_XL.gguf
-    context_window: 131072
+    context_window: 98304
     # Served by the same llama.cpp container as llamacpp-llm above, which hosts one
     # model at a time. The 17.9GB target plus its ~0.9GB vision projector and Q8 KV
     # cache are the validated 24GB-GPU profile.
@@ -622,11 +622,22 @@ memory:
       # model id, base URL, and API key, then writes an isolated Pi models.json.
       model: qwen3.8-llm
       timeout_seconds: 900
-      context_window: 131072
+      context_window: 98304
       # Keep most of the window for Pi's system prompt, tool schemas, transcript,
-      # and multi-round tool results. The local Qwen setup serves the 131K profile.
+      # and multi-round tool results. The local Qwen setup serves the 98K profile.
       max_tokens: 4096
       thinking: high
+  # Private agent-owned state learned from Pi's inference traces. This is stored
+  # outside the semantic vault: active AGENTS.md guidance is injected once per run;
+  # generated skill/scripts remain inert candidates; AGENTS.md candidates require
+  # explicit evaluation evidence, review, and promotion before production loads them.
+  operating_memory:
+    # Shadow mode records candidates for isolated replay and never changes active
+    # guidance. Switch to active only after explicit candidate review/promotion.
+    mode: shadow
+    operation_threshold: 25
+    max_traces_per_user: 20
+    artifact_scan_limit: 2000
   extraction:
     enabled: true
     prompt: |
@@ -726,6 +737,10 @@ llm_operations:
   memory_search:
     reasoning_effort: high
     max_tokens: 8000
+  memory_harness_optimization:
+    temperature: 0.0
+    reasoning_effort: high
+    max_tokens: 4096
   conversation_title:
     temperature: 0.3
     reasoning_effort: none
@@ -932,6 +947,14 @@ manual_memories:
       timeout_seconds: 300
 
 cron_jobs:
+  pi_operating_memory_threshold:
+    description: "Optimize Pi operating memory after enough new inference traces"
+    enabled: true
+    schedule: "15 * * * *"
+  pi_operating_memory_daily:
+    description: "Daily backstop for Pi operating-memory optimization"
+    enabled: true
+    schedule: "30 4 * * *"
   speaker_finetuning:
     description: "Process speaker diarization annotations and send to speaker recognition service for training"
     enabled: false

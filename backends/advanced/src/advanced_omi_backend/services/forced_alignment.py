@@ -4,10 +4,11 @@ Some ASR/diarization providers (e.g. VibeVoice) emit segment-level timestamps an
 text but no per-word timing. Word timings are required to re-attach transcript text
 to freshly re-diarized speaker boundaries (the pyannote "Path A" speaker pipeline).
 
-This calls the running ASR service's ``/align`` endpoint (MMS_FA forced aligner),
-sending the full conversation audio + segment {start, end, text}, and returns
-word dicts with absolute timestamps. Returns [] on any failure so callers can fall
-back to segment-level identification.
+This calls a configured Chronicle ASR service that explicitly advertises the
+``forced_alignment`` capability, using its ``/align`` endpoint (MMS_FA forced aligner).
+It sends the full conversation audio plus segment {start, end, text} and returns word
+dicts with absolute timestamps. Returns [] on failure so callers can persist an
+explicitly marked segment-clock estimate instead.
 """
 
 import json
@@ -28,6 +29,8 @@ def _align_url() -> str:
     registry = get_models_registry()
     model = registry.get_default("stt") if registry else None
     if not model:
+        return ""
+    if "forced_alignment" not in model.capabilities:
         return ""
     base = model.resolved_url()
     if not base:

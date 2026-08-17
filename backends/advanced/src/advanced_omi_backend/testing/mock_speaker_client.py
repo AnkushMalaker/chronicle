@@ -112,6 +112,7 @@ class MockSpeakerRecognitionClient:
         backend_token: str,
         transcript_data: Dict,
         user_id: Optional[str] = None,
+        audio_ranges: Optional[list[tuple[float, float]]] = None,
     ) -> Dict:
         """
         Return pre-computed mock segments for known test audio files.

@@ -181,7 +181,8 @@ def load_plugin_config(
     Configuration is loaded and merged in this order:
     1. Plugin-specific config.yml (non-secret settings)
     2. Expand environment variables from .env (secrets)
-    3. Merge orchestration settings from config/plugins.yml (enabled, events, condition)
+    3. Merge orchestration settings from config/plugins.yml
+       (enabled, events, condition, priority, modes)
 
     Args:
         plugin_id: Plugin identifier (e.g., 'email_summarizer')
@@ -232,11 +233,19 @@ def load_plugin_config(
     config["enabled"] = orchestration_config.get("enabled", False)
     config["events"] = orchestration_config.get("events", [])
     config["condition"] = orchestration_config.get("condition", {"type": "always"})
+    config["priority"] = orchestration_config.get("priority", 100)
+    config["modes"] = orchestration_config.get("modes", [])
 
     # config/plugins.yml is orchestration-only; plugin settings live in the
     # plugin's own config.yml. Warn about extra keys instead of silently
     # dropping them (e.g. an `actions:` block that never takes effect).
-    ignored_keys = set(orchestration_config) - {"enabled", "events", "condition"}
+    ignored_keys = set(orchestration_config) - {
+        "enabled",
+        "events",
+        "condition",
+        "priority",
+        "modes",
+    }
     if ignored_keys:
         logger.warning(
             f"Plugin '{plugin_id}': ignoring non-orchestration key(s) "
@@ -581,6 +590,8 @@ def get_plugin_metadata(
             "enabled": orchestration_config.get("enabled", False),
             "events": orchestration_config.get("events", []),
             "condition": orchestration_config.get("condition", {"type": "always"}),
+            "priority": orchestration_config.get("priority", 100),
+            "modes": orchestration_config.get("modes", []),
         },
     }
     if health_error:

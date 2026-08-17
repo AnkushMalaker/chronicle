@@ -12,9 +12,14 @@ import tempfile
 import time
 import wave
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Iterator, Optional
 
-from common.response_models import HealthResponse, InfoResponse, TranscriptionResult
+from common.response_models import (
+    HealthResponse,
+    InfoResponse,
+    TranscriptionResult,
+    TranscriptionStreamEvent,
+)
 from common.system_event_reporter import install_system_event_reporter
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -123,15 +128,20 @@ class BaseASRService(ABC):
         """
         return False
 
-    def transcribe_with_progress(self, audio_file_path: str, context_info=None):
+    def transcribe_with_progress(
+        self,
+        audio_file_path: str,
+        context_info: Optional[str] = None,
+        prompt: Optional[str] = None,
+    ) -> Iterator[TranscriptionStreamEvent]:
         """Generator that yields progress counters then a final result.
 
         Only called when ``supports_batch_progress()`` returns True.
         Subclasses that support batch progress must override this.
 
         Yields:
-            {"type": "progress", "current": i, "total": n}
-            {"type": "result", ...}  (TranscriptionResult.to_dict())
+            TranscriptionProgressEvent
+            TranscriptionResultEvent
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement transcribe_with_progress"
@@ -324,7 +334,12 @@ def create_asr_app(service: BaseASRService) -> FastAPI:
                                 )
                                 if event is _GEN_DONE:
                                     break
-                                yield json.dumps(event) + "\n"
+                                yield (
+                                    json.dumps(
+                                        event.model_dump(mode="json", exclude_none=True)
+                                    )
+                                    + "\n"
+                                )
                         finally:
                             try:
                                 os.unlink(tmp_filename)

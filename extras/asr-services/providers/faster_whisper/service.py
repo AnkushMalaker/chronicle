@@ -40,7 +40,10 @@ class FasterWhisperService(BaseASRService):
 
         # Configuration from environment
         self.vad_filter = os.getenv("VAD_FILTER", "true").lower() == "true"
-        self.language = os.getenv("LANGUAGE", None)
+        configured_language = os.getenv("LANGUAGE")
+        self.language = (
+            configured_language.strip() if configured_language else None
+        ) or None
 
     @property
     def provider_name(self) -> str:
@@ -74,7 +77,11 @@ class FasterWhisperService(BaseASRService):
 
             logger.info("Model warmed up successfully")
         except Exception as e:
-            logger.warning(f"Warmup failed (non-critical): {e}")
+            # Loading CTranslate2 weights does not prove CUDA inference can resolve
+            # cuBLAS/cuDNN.  A service that swallows this failure advertises healthy
+            # and only 500s on the first real recording, so fail startup instead.
+            logger.exception("Faster-whisper inference warmup failed")
+            raise RuntimeError("Faster-whisper inference warmup failed") from e
 
     async def transcribe(
         self,

@@ -8,6 +8,7 @@ tracking as the direct executor.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -28,6 +29,10 @@ from advanced_omi_backend.model_registry import (
     AppModels,
     ResolvedLLMOperation,
     get_models_registry,
+)
+from advanced_omi_backend.services.inference_artifacts import (
+    canonical_hash,
+    persist_inference_run,
 )
 
 from ..telemetry import (
@@ -51,9 +56,16 @@ from .memory_agent import (
     VaultSearchResult,
     _get_prompt,
     _search_final_synthesis_prompt,
+    allow_new_categories,
     build_write_task,
     forbidden_folders,
+    immutable_sections,
     required_notes,
+)
+from .operating_memory import (
+    RECALL_OPERATING_MEMORY_SCHEMA,
+    OperatingMemoryStore,
+    VaultWithOperatingMemoryTools,
 )
 from .vault_skill import write_skill
 from .vault_tools import (
@@ -87,6 +99,25 @@ if not _READ_ONLY_VAULT_TOOLS < _ALL_VAULT_TOOLS:
 # verify_vault only reads; it is absent from the search agent's set because a read-only
 # retrieval run has nothing to verify, not because it mutates.
 _MUTATING_VAULT_TOOLS = _ALL_VAULT_TOOLS - _READ_ONLY_VAULT_TOOLS - {"verify_vault"}
+
+
+def _apply_operating_guidance(
+    system_prompt: str, operating_store: OperatingMemoryStore
+) -> str:
+    """Append one stable, versioned guidance snapshot for the lifetime of a Pi run."""
+
+    operating_guidance = operating_store.read_agents()
+    if not operating_guidance:
+        return system_prompt
+    return (
+        f"{system_prompt}\n\n"
+        "# Learned operating guidance\n"
+        "This versioned guidance was learned from prior Chronicle Pi traces. "
+        "Treat it as reusable heuristics, not fixed file routing; current vault "
+        "evidence wins when it disagrees.\n\n"
+        f"{operating_guidance}"
+    )
+
 
 # Pi keeps `--no-builtin-tools`. Its native `read` looked like the obvious fix for our
 # unbounded read_note, but in the pinned 0.83.0 `resolveReadPathAsync` only resolves the
@@ -164,6 +195,7 @@ class _PiRuntimeConfig:
     timeout_seconds: int
     reasoning: bool
     temperature: float
+    seed: Optional[int] = None
     input_modalities: List[str] = field(default_factory=lambda: ["text"])
     system_prompt_prefix: str = ""
     compat: Dict[str, Any] = field(default_factory=dict)
@@ -179,6 +211,14 @@ class _PiEventResult:
     fatal_errors: List[str] = field(default_factory=list)
     truncated: bool = False
     agent_ended: bool = False
+    terminated_after_tool: bool = False
+    # Retained for the durable inference audit. These are deliberately excluded
+    # from MemoryAgentResult and logs because the JSONL/tool stream can contain private
+    # transcript and vault content.
+    stdout: str = ""
+    stderr: str = ""
+    returncode: Optional[int] = None
+    terminated_by_chronicle: bool = False
 
 
 def _pi_settings(registry: AppModels) -> Dict[str, Any]:
@@ -210,6 +250,22 @@ def _positive_int(value: Any, *, name: str, default: int) -> int:
         ) from exc
     if parsed <= 0:
         raise PiExecutorError(f"memory.backends.pi.{name} must be a positive integer")
+    return parsed
+
+
+def _optional_seed(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        raise PiExecutorError("memory.backends.pi.seed must be a non-negative integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise PiExecutorError(
+            "memory.backends.pi.seed must be a non-negative integer"
+        ) from exc
+    if parsed < 0:
+        raise PiExecutorError("memory.backends.pi.seed must be a non-negative integer")
     return parsed
 
 
@@ -387,6 +443,7 @@ def _resolve_pi_config(
         ),
         reasoning=bool(model_def.thinking),
         temperature=resolved.temperature,
+        seed=_optional_seed(settings.get("seed", model_params.get("seed"))),
         input_modalities=input_modalities,
         system_prompt_prefix=prefix.strip(),
         compat=_pi_model_compat(model_def, resolved, settings),
@@ -421,22 +478,46 @@ class _VaultToolGateway:
         on_limit: Optional[Callable[[], None]] = None,
         required_notes: Sequence[str] = (),
         forbidden_folders: Sequence[str] = (),
+        immutable_sections: Sequence[tuple[str, str]] = (),
+        allow_new_categories: bool = True,
         user_id: str = "",
+        tool_handler: Any = None,
+        terminate_on_verified: bool = False,
+        max_identical_tool_calls: Optional[int] = None,
     ):
-        self.tools = VaultTools(
+        self.tools = tool_handler or VaultTools(
             vault_root,
             trace_context=current_otel_context(),
             required_notes=required_notes,
             forbidden_folders=forbidden_folders,
+            immutable_sections=immutable_sections,
+            allow_new_categories=allow_new_categories,
             user_id=user_id,
         )
         self.schemas = list(schemas)
         self.allowed_names = {
             str(schema.get("function", {}).get("name", "")) for schema in self.schemas
         }
+        self.mutating_names = frozenset(
+            getattr(self.tools, "mutating_tools", _MUTATING_VAULT_TOOLS)
+        )
         self.token = secrets.token_urlsafe(32)
+        self.terminate_on_verified = bool(terminate_on_verified)
+        self.max_identical_tool_calls = (
+            _positive_run_limit(
+                max_identical_tool_calls,
+                name="Pi max_identical_tool_calls",
+            )
+            if max_identical_tool_calls is not None
+            else None
+        )
+        self.terminal_completion = False
+        self.required_notes = tuple(required_notes)
         self.errors: List[str] = []
         self.read_notes: Dict[str, str] = {}
+        self._read_window_hashes: Dict[tuple[str, str], str] = {}
+        self._previous_tool_signature: Optional[str] = None
+        self._consecutive_identical_call_count = 0
         self.call_count = 0
         self.max_tool_calls = max_tool_calls
         self.limit_error: Optional[str] = None
@@ -519,7 +600,11 @@ class _VaultToolGateway:
                 except _PiLimitExceeded as exc:
                     self._send_json(429, {"error": str(exc)})
                     return
-                self._send_json(200, {"result": result})
+                terminate = gateway.should_terminate(name, result)
+                response_payload: Dict[str, Any] = {"result": result}
+                if terminate:
+                    response_payload["terminate"] = True
+                self._send_json(200, response_payload)
 
             def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
                 body = json.dumps(payload).encode("utf-8")
@@ -654,14 +739,52 @@ class _VaultToolGateway:
             else:
                 # Authorized calls count even if VaultTools rejects their arguments.
                 self.call_count += 1
+                signature = canonical_hash({"name": name, "arguments": arguments})
+                if signature == self._previous_tool_signature:
+                    self._consecutive_identical_call_count += 1
+                else:
+                    self._previous_tool_signature = signature
+                    self._consecutive_identical_call_count = 1
+                if (
+                    self.max_identical_tool_calls is not None
+                    and self._consecutive_identical_call_count
+                    > self.max_identical_tool_calls
+                ):
+                    limit_error = (
+                        "Pi repeated an identical tool call consecutively more than "
+                        f"{self.max_identical_tool_calls} times"
+                    )
         if limit_error is not None:
             # This call passed the admission check above, so preserve its limit
             # outcome if shutdown starts between releasing the lock and recording it.
             self.set_limit(limit_error, admitted=True)
             raise _PiLimitExceeded(limit_error)
-        if name in _MUTATING_VAULT_TOOLS:
+        if name in self.mutating_names:
             return self._dispatch_serialized_mutation(name, arguments)
         return self._execute_tool(name, arguments)
+
+    def should_terminate(self, name: str, result: str) -> bool:
+        """Return true only for a successful final verification with its record present."""
+
+        if (
+            not self.terminate_on_verified
+            or name != "verify_vault"
+            or result != "Vault verification passed: no problems found."
+        ):
+            return False
+        touched = bool(getattr(self.tools, "touched", ()))
+        required_present = not self.required_notes or all(
+            (self.tools.root / relative).is_file() for relative in self.required_notes
+        )
+        # A successful no-op verification can be legitimate, but it is not a safe
+        # terminal signal: the model may have verified before doing the requested work.
+        if not touched or not required_present:
+            return False
+        with self._state_lock:
+            if self._state_frozen:
+                return False
+            self.terminal_completion = True
+        return True
 
     def _execute_tool(
         self,
@@ -687,9 +810,32 @@ class _VaultToolGateway:
 
         if name == "read_note":
             path = str(arguments.get("path", "?"))
+            window_key = (
+                path,
+                canonical_hash(
+                    {
+                        "offset": arguments.get("offset"),
+                        "limit": arguments.get("limit"),
+                        "char_offset": arguments.get("char_offset"),
+                    }
+                ),
+            )
+            result_hash = canonical_hash(result)[:12]
+            repeated = False
             with self._state_lock:
                 if not self._state_frozen:
                     self.read_notes[path] = result
+                    repeated = (
+                        not bool(arguments.get("refresh", False))
+                        and self._read_window_hashes.get(window_key) == result_hash
+                    )
+                    self._read_window_hashes[window_key] = result_hash
+            if repeated:
+                return (
+                    f"[unchanged read_note window {result_hash}; content already "
+                    "returned earlier in this Pi run. Pass refresh=true only if you "
+                    "need the same bytes repeated.]"
+                )
         return result
 
     def _dispatch_serialized_mutation(
@@ -703,7 +849,12 @@ class _VaultToolGateway:
             # Keep error capture inside the mutation gate too. Shutdown therefore
             # cannot observe a completed mutation without its corresponding audit
             # error, even when it marked the gateway closed while the tool ran.
-            return self._execute_tool(name, arguments)
+            result = self._execute_tool(name, arguments)
+            if not result.lstrip().startswith("Error:"):
+                with self._state_lock:
+                    self._previous_tool_signature = None
+                    self._consecutive_identical_call_count = 0
+            return result
 
 
 def _extension_source(
@@ -712,6 +863,7 @@ def _extension_source(
     gateway_url: str,
     token: str,
     temperature: float = 0.2,
+    seed: Optional[int] = None,
     max_tool_rounds: int = MAX_TOOL_ROUNDS,
     max_tool_calls: int = MAX_PI_WRITE_TOOL_CALLS,
 ) -> str:
@@ -723,6 +875,7 @@ const limitUrl = {json.dumps(gateway_url.removesuffix("/tool") + "/limit")};
 const bearerToken = {json.dumps(token)};
 const toolDefinitions = {json.dumps(tool_defs, separators=(",", ":"))};
 const temperature = {json.dumps(temperature)};
+const seed = {json.dumps(seed)};
 const maxToolRounds = {max_tool_rounds};
 const maxToolCalls = {max_tool_calls};
 
@@ -735,6 +888,7 @@ export default function (pi) {{
   pi.on("before_provider_request", (event) => ({{
     ...event.payload,
     temperature,
+    ...(seed === null ? {{}} : {{ seed }}),
   }}));
 
   pi.on("turn_start", () => {{
@@ -809,6 +963,7 @@ export default function (pi) {{
         return {{
           content: [{{ type: "text", text: payload.result }}],
           details: {{}},
+          terminate: payload.terminate === true,
         }};
       }},
     }});
@@ -992,15 +1147,25 @@ def _usage(message: Dict[str, Any]) -> Dict[str, int]:
     return parsed
 
 
-def _parse_events(stdout: str) -> _PiEventResult:
+def _parse_events(stdout: str, *, allow_terminal_tool: bool = False) -> _PiEventResult:
     """Parse Pi's JSONL contract, preserving protocol and agent failures."""
     parsed = _PiEventResult()
     assistant_messages: List[Dict[str, Any]] = []
     pending_retry_errors: List[str] = []
+    last_assistant_stop_reason = ""
 
-    for line_number, raw_line in enumerate(stdout.splitlines(), start=1):
+    # JSONL records are delimited by LF, not by every Unicode character that
+    # ``str.splitlines`` considers a line boundary. Pi's JSON serializer may emit
+    # U+2028 inside a valid JSON string; splitting there corrupts otherwise valid
+    # message and agent_end events.
+    for line_number, raw_line in enumerate(stdout.split("\n"), start=1):
         line = raw_line.strip()
         if not line:
+            continue
+        # Pi 0.83 emits cumulative message snapshots. ``message_end`` carries the
+        # authoritative complete message, so parsing every intermediate snapshot is
+        # both redundant and disproportionately expensive for long runs.
+        if '"type":"message_update"' in line[:80]:
             continue
         try:
             event = json.loads(line)
@@ -1036,6 +1201,7 @@ def _parse_events(stdout: str) -> _PiEventResult:
                 parsed.summary = text
             error_message = message.get("errorMessage")
             stop_reason = str(message.get("stopReason") or "").lower()
+            last_assistant_stop_reason = stop_reason
             if stop_reason == "error":
                 pending_retry_errors.append(
                     f"Pi assistant error: "
@@ -1045,9 +1211,7 @@ def _parse_events(stdout: str) -> _PiEventResult:
                 parsed.fatal_errors.append(
                     f"Pi assistant error: {_event_error(error_message)}"
                 )
-            if stop_reason == "length":
-                parsed.truncated = True
-            elif stop_reason == "aborted":
+            if stop_reason == "aborted":
                 parsed.fatal_errors.append(
                     f"Pi assistant stopped with reason {stop_reason!r}"
                 )
@@ -1090,10 +1254,36 @@ def _parse_events(stdout: str) -> _PiEventResult:
 
     if not parsed.agent_ended:
         parsed.fatal_errors.append("Pi JSONL stream ended without agent_end")
+    # A length-limited tool call can be rejected and retried successfully in a later
+    # turn. Only the final assistant stop is evidence that the run ended incomplete.
+    parsed.truncated = last_assistant_stop_reason == "length"
     parsed.fatal_errors.extend(pending_retry_errors)
-    if not parsed.summary and not parsed.truncated:
+    if not parsed.summary and not parsed.truncated and not allow_terminal_tool:
         parsed.fatal_errors.append("Pi completed without a final assistant message")
     return parsed
+
+
+def _compact_artifact_stdout(stdout: str) -> tuple[str, dict[str, Any]]:
+    """Drop cumulative Pi message snapshots while retaining complete operations."""
+
+    kept: list[str] = []
+    dropped = 0
+    records = stdout.split("\n")
+    for index, line in enumerate(records):
+        terminator = "\n" if index < len(records) - 1 else ""
+        if '"type":"message_update"' in line[:80]:
+            dropped += 1
+            continue
+        kept.append(line + terminator)
+    if not dropped:
+        return stdout, {}
+    compact = "".join(kept)
+    return compact, {
+        "raw_stdout_sha256": hashlib.sha256(stdout.encode()).hexdigest(),
+        "raw_stdout_chars": len(stdout),
+        "stored_stdout_chars": len(compact),
+        "dropped_cumulative_message_updates": dropped,
+    }
 
 
 def _positive_run_limit(value: Any, *, name: str) -> int:
@@ -1197,7 +1387,14 @@ async def _invoke_pi(
     max_tool_calls: int = MAX_PI_WRITE_TOOL_CALLS,
     required_notes: Sequence[str] = (),
     forbidden_folders: Sequence[str] = (),
+    immutable_sections: Sequence[tuple[str, str]] = (),
+    allow_new_categories: bool = True,
     user_id: str = "",
+    load_vault_skill: bool = True,
+    telemetry_attributes: Optional[Dict[str, Any]] = None,
+    tool_handler: Any = None,
+    terminate_on_verified: bool = False,
+    max_identical_tool_calls: Optional[int] = None,
 ) -> tuple[_PiEventResult, _VaultToolGateway]:
     """Run Pi and preserve gateway audit state for every post-start failure."""
     started_ns = time.time_ns()
@@ -1209,10 +1406,15 @@ async def _invoke_pi(
         vault_root,
         schemas,
         max_tool_calls=max_tool_calls,
+        max_identical_tool_calls=max_identical_tool_calls,
         on_limit=lambda: loop.call_soon_threadsafe(limit_signal.set),
         required_notes=required_notes,
         forbidden_folders=forbidden_folders,
+        immutable_sections=immutable_sections,
+        allow_new_categories=allow_new_categories,
         user_id=user_id,
+        tool_handler=tool_handler,
+        terminate_on_verified=terminate_on_verified,
     )
     events: Optional[_PiEventResult] = None
     redaction_values = [
@@ -1232,6 +1434,7 @@ async def _invoke_pi(
                     gateway_url=gateway.url,
                     token=gateway.token,
                     temperature=config.temperature,
+                    seed=config.seed,
                     max_tool_rounds=max_tool_rounds,
                     max_tool_calls=max_tool_calls,
                 ),
@@ -1273,7 +1476,7 @@ async def _invoke_pi(
                 "--no-themes",
                 "--no-builtin-tools",
             ]
-            if schemas:
+            if schemas and load_vault_skill:
                 # The vault's shape travels as a skill rather than more system prompt,
                 # so it is generated from the same templates the vault is scaffolded
                 # from and cannot drift from what verify_vault enforces.
@@ -1281,7 +1484,7 @@ async def _invoke_pi(
                 skill_path.chmod(0o600)
                 command.extend(["--skill", str(skill_path)])
             else:
-                # Final synthesis: no tools, and nothing to teach.
+                # Final synthesis and non-vault agents have nothing to teach here.
                 command.append("--no-skills")
             command.extend(["-e", str(extension_path)])
             if schemas:
@@ -1370,7 +1573,17 @@ async def _invoke_pi(
             elif redacted_stderr:
                 logger.warning("Pi stderr: %s", redacted_stderr)
 
-            events = _parse_events(stdout)
+            events = _parse_events(
+                stdout, allow_terminal_tool=gateway.terminal_completion
+            )
+            if gateway.terminal_completion:
+                events.terminated_after_tool = True
+                if not events.summary:
+                    events.summary = "Vault changes verified."
+            events.stdout = stdout
+            events.stderr = stderr
+            events.returncode = process.returncode
+            events.terminated_by_chronicle = terminated_by_chronicle
             if gateway.limit_error and gateway.limit_error not in failures:
                 failures.append(gateway.limit_error)
             events.fatal_errors.extend(failures)
@@ -1411,11 +1624,13 @@ async def _invoke_pi(
             "chronicle.memory.rounds": events.rounds,
             "chronicle.memory.tool_calls": max(events.tool_calls, gateway.call_count),
             "gen_ai.request.temperature": config.temperature,
+            **({"gen_ai.request.seed": config.seed} if config.seed is not None else {}),
             "gen_ai.request.max_tokens": config.max_tokens,
             "chronicle.memory.pi.context_window": config.context_window,
             "chronicle.memory.pi.thinking": config.thinking,
             "chronicle.memory.truncated": events.truncated,
             "chronicle.memory.error_count": len(events.errors),
+            **(telemetry_attributes or {}),
         },
     )
     return events, gateway
@@ -1430,11 +1645,33 @@ class PiMemoryAgent:
         operation: str = "memory_write",
         *,
         force_fallback: bool = False,
+        terminate_on_verified: bool = False,
+        max_tool_rounds: Optional[int] = None,
+        max_identical_tool_calls: Optional[int] = None,
     ):
         self.root = Path(vault_root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.operation = operation
         self.force_fallback = force_fallback
+        self.terminate_on_verified = bool(terminate_on_verified)
+        if max_tool_rounds is None:
+            self.max_tool_rounds = MAX_TOOL_ROUNDS
+            # Resolve this at construction time so deployments and tests can tune the
+            # independent hard call ceiling without also changing the round ceiling.
+            self.max_tool_calls = MAX_PI_WRITE_TOOL_CALLS
+        else:
+            self.max_tool_rounds = _positive_run_limit(
+                max_tool_rounds, name="Pi max_tool_rounds"
+            )
+            self.max_tool_calls = self.max_tool_rounds * 4
+        self.max_identical_tool_calls = (
+            _positive_run_limit(
+                max_identical_tool_calls,
+                name="Pi max_identical_tool_calls",
+            )
+            if max_identical_tool_calls is not None
+            else None
+        )
 
     async def run(
         self,
@@ -1453,6 +1690,9 @@ class PiMemoryAgent:
         system_prompt = await _get_prompt(
             AGENT_SYSTEM_PROMPT_ID, DEFAULT_AGENT_SYSTEM_PROMPT, vault_summary
         )
+        user_id = self.root.name
+        operating_store = OperatingMemoryStore(user_id)
+        system_prompt = _apply_operating_guidance(system_prompt, operating_store)
         task = build_write_task(
             transcript,
             conversation_id,
@@ -1488,16 +1728,38 @@ class PiMemoryAgent:
                     "guidance": text_payload(guidance),
                 },
             )
+            vault_tools = VaultTools(
+                self.root,
+                trace_context=current_otel_context(),
+                required_notes=required_notes(record, conversation_id),
+                forbidden_folders=forbidden_folders(record),
+                immutable_sections=immutable_sections(record),
+                allow_new_categories=allow_new_categories(record),
+                user_id=user_id,
+            )
+            schemas = list(VAULT_TOOL_SCHEMAS)
+            tool_handler: Any = vault_tools
+            if operating_store.has_active_skills():
+                schemas.append(RECALL_OPERATING_MEMORY_SCHEMA)
+                tool_handler = VaultWithOperatingMemoryTools(
+                    vault_tools, operating_store
+                )
             events, gateway = await _invoke_pi(
                 self.root,
                 prompt=task,
                 system_prompt=system_prompt,
-                schemas=VAULT_TOOL_SCHEMAS,
+                schemas=schemas,
                 config=config,
-                max_tool_rounds=MAX_TOOL_ROUNDS,
-                max_tool_calls=MAX_PI_WRITE_TOOL_CALLS,
+                max_tool_rounds=self.max_tool_rounds,
+                max_tool_calls=self.max_tool_calls,
+                max_identical_tool_calls=self.max_identical_tool_calls,
                 required_notes=required_notes(record, conversation_id),
                 forbidden_folders=forbidden_folders(record),
+                immutable_sections=immutable_sections(record),
+                allow_new_categories=allow_new_categories(record),
+                user_id=user_id,
+                tool_handler=tool_handler,
+                terminate_on_verified=self.terminate_on_verified,
             )
             result = MemoryAgentResult(
                 conversation_id=conversation_id,
@@ -1511,6 +1773,61 @@ class PiMemoryAgent:
                 truncated=events.truncated,
                 verified=gateway.tools.verified,
             )
+            try:
+                artifact_stdout, stdout_compaction = _compact_artifact_stdout(
+                    events.stdout
+                )
+                await asyncio.to_thread(
+                    persist_inference_run,
+                    operation="pi_memory",
+                    request={
+                        "system_prompt": system_prompt,
+                        "prompt": task,
+                        "conversation_id": conversation_id,
+                        "user_id": user_id,
+                        "record": record,
+                        "vault_before_sha256": canonical_hash(gateway.tools.baseline()),
+                        "operation": self.operation,
+                        "model": config.model,
+                        "provider": config.provider,
+                        "thinking": config.thinking,
+                        "temperature": config.temperature,
+                        "seed": config.seed,
+                        "context_window": config.context_window,
+                        "max_tokens": config.max_tokens,
+                        "max_tool_rounds": self.max_tool_rounds,
+                        "max_tool_calls": self.max_tool_calls,
+                        "max_identical_tool_calls": self.max_identical_tool_calls,
+                    },
+                    stdout=artifact_stdout,
+                    stderr=events.stderr,
+                    result={
+                        "summary": result.summary,
+                        "touched": result.touched,
+                        "removed": result.removed,
+                        "errors": result.errors,
+                        "usage": result.usage,
+                        "rounds": result.rounds,
+                        "tool_calls": result.tool_calls,
+                        "truncated": result.truncated,
+                        "verified": result.verified,
+                    },
+                    metadata={
+                        "returncode": events.returncode,
+                        "terminated_by_chronicle": events.terminated_by_chronicle,
+                        **(
+                            {"terminated_after_tool": True}
+                            if events.terminated_after_tool
+                            else {}
+                        ),
+                        **stdout_compaction,
+                    },
+                    reusable=False,
+                )
+            except Exception:
+                # The inference has already run and may have mutated the vault. An
+                # unavailable audit volume must not trigger a second attempt.
+                logger.exception("Failed to persist Pi inference artifact")
             set_safe_span_attributes(
                 span,
                 {
@@ -1564,6 +1881,9 @@ async def _search_vault_with_pi_impl(
     system_prompt = await _get_prompt(
         "memory.search_system", SEARCH_SYSTEM_PROMPT, vault_summary
     )
+    resolved_user_id = user_id or root.name
+    operating_store = OperatingMemoryStore(resolved_user_id)
+    system_prompt = _apply_operating_guidance(system_prompt, operating_store)
     prompt = (
         f"{query}\n\n"
         f"Use at most {max_rounds} tool rounds. Return the answer when you have enough evidence."
@@ -1576,7 +1896,7 @@ async def _search_vault_with_pi_impl(
         config=config,
         max_tool_rounds=max_rounds,
         max_tool_calls=max_rounds * _PI_TOOL_CALLS_PER_SEARCH_ROUND,
-        user_id=user_id,
+        user_id=resolved_user_id,
     )
     answer = PI_SEARCH_FAILURE_ANSWER if events.truncated else events.summary
     rounds = events.rounds
@@ -1584,6 +1904,7 @@ async def _search_vault_with_pi_impl(
     errors = list(events.errors)
     warnings: List[str] = []
     final_synthesis_used = False
+    final_events: Optional[_PiEventResult] = None
 
     # Pi's extension must abort an attempted tool turn beyond the hard cap so a
     # poorly behaved model cannot keep reading indefinitely. If it had already read
@@ -1636,7 +1957,7 @@ async def _search_vault_with_pi_impl(
                         retained_errors.append(error)
                 errors = retained_errors
 
-    return VaultSearchResult(
+    result = VaultSearchResult(
         answer=answer,
         notes=[
             {"path": path, "content": content}
@@ -1650,6 +1971,63 @@ async def _search_vault_with_pi_impl(
         final_synthesis_used=final_synthesis_used,
         truncated=answer.strip() == PI_SEARCH_FAILURE_ANSWER,
     )
+    try:
+        combined_stdout = events.stdout
+        combined_stderr = events.stderr
+        if final_events is not None:
+            combined_stdout = "\n".join(
+                part for part in (combined_stdout, final_events.stdout) if part
+            )
+            combined_stderr = "\n".join(
+                part for part in (combined_stderr, final_events.stderr) if part
+            )
+        artifact_stdout, stdout_compaction = _compact_artifact_stdout(combined_stdout)
+        await asyncio.to_thread(
+            persist_inference_run,
+            operation="pi_memory_search",
+            request={
+                "system_prompt": system_prompt,
+                "prompt": prompt,
+                "query": query,
+                "user_id": resolved_user_id,
+                "operation": operation,
+                "record": "search",
+                "model": config.model,
+                "provider": config.provider,
+                "thinking": config.thinking,
+                "temperature": config.temperature,
+                "context_window": config.context_window,
+                "max_tokens": config.max_tokens,
+                "max_tool_rounds": max_rounds,
+                "max_tool_calls": max_rounds * _PI_TOOL_CALLS_PER_SEARCH_ROUND,
+            },
+            stdout=artifact_stdout,
+            stderr=combined_stderr,
+            result={
+                "summary": result.answer,
+                "read_paths": [note["path"] for note in result.notes],
+                "touched": [],
+                "removed": [],
+                "errors": result.errors,
+                "warnings": result.warnings,
+                "usage": result.usage,
+                "rounds": result.rounds,
+                "tool_calls": result.tool_calls,
+                "truncated": result.truncated,
+                "verified": None,
+            },
+            metadata={
+                "returncode": events.returncode,
+                "final_synthesis_used": result.final_synthesis_used,
+                **stdout_compaction,
+            },
+            reusable=False,
+        )
+    except Exception:
+        # Retrieval already completed. Artifact storage must not turn a valid answer
+        # into a user-visible failure or cause the model call to be repeated.
+        logger.exception("Failed to persist Pi search inference artifact")
+    return result
 
 
 async def search_vault_with_pi(

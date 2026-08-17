@@ -13,10 +13,18 @@ resolution from ScreenPipe without mirroring its frame database.
 
 ## Audio storage and cadence
 
-ScreenPipe's approximately 30-second audio files are transport and retry units. The
-backend continues to assemble them into bounded compute spans (normally up to 30
-minutes, or up to two hours for a collector-supplied meeting interval). Before clearing
-the staged media bytes, Chronicle stores one `AudioEvidenceSpan` for the assembled span.
+ScreenPipe's approximately 30-second audio files are transport/staging units. The
+backend assembles at most two hours of one input/output stream as a compute window and
+persists the complete mixed window to capture-owned `AudioChunkDocument`s before VAD.
+The deterministic capture ID makes a retry converge on the same documents.
+
+Definitive silence remains durable capture evidence and produces no Conversation.
+Speech-bearing windows are cut only at suitable quiet seams when possible. Each
+resulting detected Conversation claims the relevant absolute range from the already
+persisted capture and is visible on Recordings; no audio is copied or reparented.
+
+`AudioEvidenceSpan` stores the compute profile and the corresponding `AudioRangeRef`.
+It is evidence about capture, not an audio owner or user-facing boundary.
 
 Each span contains parallel 10-second arrays for:
 
@@ -30,10 +38,10 @@ evidence broker can slice or aggregate them without creating one MongoDB documen
 10-second bucket. A loud instrumental soundtrack can therefore be non-speech but
 acoustically active.
 
-After the durable span is written, Chronicle deletes its processed `DeviceInputItem`
-audio staging rows. The span's source-item list is also the replay tombstone, so a reset
-collector checkpoint cannot reinsert an already compacted chunk. Non-audio observations
-remain in `DeviceInputItem`.
+After raw capture, evidence span, and any semantic materialization succeed, Chronicle
+deletes the processed `DeviceInputItem` audio staging rows. On a bounded failure it
+retains or retries staging while the deterministic capture prevents duplicate audio.
+Non-audio observations remain in `DeviceInputItem`.
 
 The timeline scheduler runs every four hours by default (`cron_jobs.timeline_analysis`).
 This cadence makes a changed day available promptly; it is not an episode boundary.
@@ -44,45 +52,26 @@ previous day.
 
 ## Evidence and agent execution
 
-For one IANA-local day, the evidence broker combines audio profiles, absolute-timestamped
-ScreenPipe transcripts, observations, meeting markers, Immich candidates, images, and
+For one IANA-local day, the evidence broker combines audio profiles, wall-clock-anchored
+speaker transcripts, observations, meeting markers, Immich candidates, images, and
 explicit capture gaps. System output is attributed as `media_content`; microphone input
 remains `uncertain` unless stronger speaker evidence is available.
 
-Evidence is organized into overlapping 60-minute coverage windows by default. One
-file-backed Codex run reads every window, keeps bounded intermediate notes, and returns
-an open-vocabulary episode set. Windows guarantee traversal and may be merged across;
-episodes may overlap. The backend rejects a complete result if it omits a window,
-invents evidence, uses implausible timestamps, or leaves assertions ungrounded.
+The segmentation task carries the local calendar date, IANA timezone, and exact UTC
+start/end instants for that day. Evidence timestamps remain UTC, so an event whose UTC
+calendar date is the previous day can still belong to the requested local day. Agents
+must use the supplied bounds and must not filter evidence by the timestamp's date text.
 
-### The workspace must stay small enough to read
+Transcript segments become bounded timestamped blocks, and screen observations become
+five-minute transition bundles. Every original evidence ID is then assigned exactly
+once to chronological context blocks. Sparse blocks pass through; a separate local
+agent condenses dense blocks while retaining exact ranges and original IDs. The final
+agent can merge or split across those blocks into an open-vocabulary episode set.
+Coverage windows are validation aids only and are never treated as semantic boundaries
+or repeated model input.
 
-Segmentation silently returned nothing on whole days for a long time. The cause was
-workspace size, not the model: on one real day the agent was handed **19.6 MB across
-113 files**. Two leaks, both invisible because `max_text_chars_per_window` — the only
-size control — governed just 12% of the payload:
-
-1. **`manifest.json` was written in full**, 7.3 MB, with every evidence item's
-   untruncated excerpt. Only the per-window files were capped. It is now a day header
-   (~330 bytes); the prompt directs the agent to `windows/` regardless.
-2. **`metadata` was unbounded — 71% of every window file.** `_transcript_item` embedded
-   a `segments` array duplicating the transcript with per-segment timestamps (119 KB for
-   a single conversation); `_audio_item` embedded five per-10-second numeric series;
-   observations carried `sample_fingerprints` and `frame_candidates`.
-
-`write_workspace` now drops known-bulk keys and applies a 2000-char backstop to any
-value not on that list. `_transcript_item` emits a speaker-attributed excerpt
-(`daksh: …`) instead of a parallel segments blob — smaller *and* more useful, since it
-is how the agent learns who spoke. Net: 19.6 MB → 9.4 MB, and the JSON specifically
-12.5 MB → 2.3 MB.
-
-`window_minutes` moved 20 → 60 (85 → 26 windows/day) with `max_text_chars_per_window`
-raised to 60000 to compensate. Window size is a capacity knob, not a semantic one — the
-prompt treats windows as coverage units that must never become episode boundaries.
-
-**If full days stop resolving, measure the workspace before suspecting the model.**
-Build one with `write_workspace` and check total bytes and the largest window file;
-window *count* is a weak proxy, since payload size is what actually varies.
+The full shaping algorithm, storage split and rebuild contract are specified in
+[Memory segmentation and storage](memory-segmentation-storage.md).
 
 ### A malformed episode is dropped, not fatal
 
@@ -139,10 +128,12 @@ Older generations remain available for audit but are not returned by the default
 
 ## Open question: full regeneration vs. incremental append
 
-Every run regenerates the whole day from scratch. The previous generation is passed to
-the agent only as advisory revision context (`_existing_payload`); nothing accumulates,
-and the agent is free to ignore it — which it largely does. The only additive path is a
-human-confirmed episode, which is pinned and carried forward verbatim.
+Every run regenerates the whole day from scratch. Routine scheduled analysis passes the
+previous generation only as advisory revision context (`_existing_payload`); nothing
+accumulates, and the agent is free to ignore it. An explicit rebuild deliberately omits
+unconfirmed prior episodes so recovered or corrected evidence is decided cleanly rather
+than anchored to stale output. Human-confirmed episodes are always pinned and carried
+forward verbatim.
 
 Two consequences, both unmeasured:
 
@@ -157,7 +148,7 @@ the previous generation invites it to inherit that generation's mistakes — a
 misattributed participant or a wrong boundary can be copied forward and then look
 corroborated by its own repetition. Full regeneration at least re-derives from evidence
 each time. Nobody has measured whether the revision context helps continuity more than
-it entrenches error; it is currently supplied unconditionally.
+it entrenches error; explicit rebuilds now provide the clean-slate comparison path.
 
 **Worth benchmarking** before committing to either shape: full regeneration versus an
 append/edit model that adds new observations onto the existing day.
@@ -224,60 +215,38 @@ The UI shows its confirmed badge on `confirmed_at` for the same reason.
 
 ## Recordings and memory
 
-Continuous ScreenPipe input and output are capture evidence. They are transcribed for
-timeline use but are created with `data_purpose=capture_evidence` and
-`memory_excluded=true`; speaker recognition still runs (the agent cannot name who was
-present without it), while title/summary, memory, and conversation-complete plugin jobs
-are skipped. The default Recordings list and search exclude them — on
-`data_purpose != "capture_evidence"`, not on transport — but the recordings themselves
-stay fully openable, and an episode links to each one it cites. Genuine browser,
-wearable, uploaded, and live-recorded recordings are unchanged.
+ScreenPipe capture is persisted before VAD. Raw capture sessions and silent/no-speech
+evidence remain hidden capture evidence and do not create a Conversation. When VAD and
+STT identify a speech-bearing interval, Chronicle creates a detected Conversation whose
+`audio_ranges` clip the already-persisted capture. That Conversation is visible on the
+Recordings page immediately; its chunks are neither copied nor reassigned.
 
-### A conversational episode promotes the recordings it cites
+These detected Conversations keep `memory_excluded=true` with reason
+`timeline_day_memory_owns_continuous_capture`. Speaker recognition and the normal
+recording summaries can still run, but conversation-level vault ingestion is skipped so
+the same continuous evidence is not remembered once per arbitrary compute window.
 
-Fencing all ScreenPipe audio out of search is right for ambient capture and wrong for
-the subset that is an actual meeting: a standup or 1:1 captured this way was transcribed,
-stored, and then unfindable. Meeting detection catches only the case where an
-application takes the microphone, and the recorder's own `meetings` table does not exist
-on Linux at all.
-
-The segmentation agent is what can tell the two apart, because it already reads the
-speaker-attributed transcripts. `AgentEpisode.conversational` is its answer, and it is
-deliberately **factual** — did two or more people exchange speech — not a judgement about
-whether the episode mattered. `salience` carries that, and what is worth *remembering*
-stays the vault write agent's decision.
-
-After publishing, `_promote_conversational_recordings` moves every cited recording of a
-conversational episode from `capture_evidence` to `conversation`, clears
-`memory_excluded`, and enqueues title/summary so it is not left untitled. It does **not**
-enqueue memory: that comes from the day pass below.
-
-Promotion is one-way and idempotent — it only ever moves a recording *out* of
-capture evidence, and re-running finds nothing left to move. That matters because
-regeneration is non-deterministic: a later run that no longer calls the episode
-conversational must not re-hide a recording the user has already seen.
-
-Cited ids are the union of the agent's `related_conversation_ids` and the
-`conversation_id` recorded in each `evidence_refs[].metadata` at assembly time. The agent's
-list can omit or invent one; the assembly-time half cannot. Only ids resolving to a real
-capture-evidence recording are acted on, which discards anything invented.
+`AgentEpisode.conversational` remains a factual Timeline label: it says whether two or
+more people exchanged speech, not whether the episode was important. `salience` carries
+importance. Visibility is decided during speech-driven materialization, not repaired by
+a later Timeline promotion pass.
 
 ### The day, not the conversation, is the memory unit
 
-ScreenPipe audio is assembled into bounded compute spans — 30 minutes, or two hours given
-a collector meeting interval — so a 45-minute standup without meeting detection is
-*already* two recordings. Remembering per recording would inherit those arbitrary cuts
-forever. An episode carries the semantic bounds instead, so `episode_memory`
+ScreenPipe audio is profiled in capture windows capped at two hours. Detected
+Conversation claims prefer a quiet seam near 30 minutes, but may remain longer when
+speech is continuous; the two-hour bound is the unconditional safety cap. Remembering
+per Conversation would still inherit these operational bounds. An episode carries the
+semantic bounds instead, so `episode_memory`
 (`services/timeline/memory.py`) records a whole settled day of episodes in one vault
 write, and the recordings underneath are artifacts it cites.
 
 The record lands in `Daily/<local_date>.md` via `add_day_memory`, not under
 `Conversations/`, which stays one note per conversation. Durable People/Topic/Category
-edits are unchanged. Conversational episodes carry the speaker-labelled transcripts of
-their recordings, built with the same `build_memory_transcript` the conversation path
-uses; every episode carries its assertions with `role` and `confidence`, which is what
-keeps `media_content`, `application_state`, and `assistant_generated` claims from being
-recorded as facts about the user.
+edits are unchanged. The day digest contains bounded episode summaries, entities,
+attributes and assertions with `role` and `confidence`; it never contains the
+recordings' raw transcripts. Those roles keep `media_content`, `application_state`,
+and `assistant_generated` claims from being recorded as facts about the user.
 
 **Only a settled day is written, and only once.** A day is eligible when it is in the
 past, has an analysis, and its active run has been still for `settle_minutes`.

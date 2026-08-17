@@ -1,24 +1,16 @@
 name: Sync screenpipe fork
 
-# Keeps AnkushMalaker/screenpipe's two custom branches rebased, in order:
-#
-#   custom/linux-timeline-stability  ->  upstream screenpipe/screenpipe main
-#   chronicle                        ->  custom/linux-timeline-stability
-#
-# `chronicle` is the branch Chronicle actually consumes (it adds
-# /search?dedupe and /app-runs on top of the base branch's capture fixes), so
-# syncing only the base would leave the consumed branch to rot behind upstream.
-#
-# The two run as one matrix with max-parallel 1 so the stacked branch rebases
-# onto a base that was already pushed. If that ordering ever slipped, the
-# stacked rebase would simply find nothing to do and the next run would catch
-# up — it self-heals rather than corrupting anything.
+# Keeps AnkushMalaker/screenpipe's `chronicle` branch rebased directly onto
+# upstream screenpipe/screenpipe main. The branch carries Chronicle's complete
+# patch stack; the former `custom/linux-timeline-stability` base branch was
+# folded into it and deleted in August 2026.
 #
 # This lives in chronicle rather than in the fork itself for two reasons:
 # `schedule` only fires from a repo's default branch, so hosting it in the fork
 # would permanently diverge that fork's main from upstream; and GitHub disables
 # scheduled workflows in forked repositories, which would stop the sync
 # silently.
+# Maintenance and conflict-recovery runbook: docs/screenpipe-fork-sync.md.
 
 on:
   schedule:
@@ -46,27 +38,14 @@ env:
 
 jobs:
   rebase:
-    name: Rebase ${{ matrix.branch }} onto ${{ matrix.onto }}
+    name: Rebase chronicle onto upstream/main
     runs-on: ubuntu-latest
-    strategy:
-      # Sequential, base first: `chronicle` is stacked on the base branch and
-      # must rebase onto the version this run just pushed.
-      max-parallel: 1
-      # The stacked branch is still worth attempting if the base conflicted —
-      # it just rebases onto the unchanged base and no-ops.
-      fail-fast: false
-      matrix:
-        include:
-          - branch: custom/linux-timeline-stability
-            onto: upstream/main
-          - branch: chronicle
-            onto: origin/custom/linux-timeline-stability
     steps:
-      - name: Check out the fork's custom branch
+      - name: Check out the fork's Chronicle branch
         uses: actions/checkout@v4
         with:
           repository: ${{ env.FORK }}
-          ref: ${{ matrix.branch }}
+          ref: chronicle
           # Full history: a rebase needs the merge base with its target, which a
           # shallow clone does not have.
           fetch-depth: 0
@@ -78,14 +57,11 @@ jobs:
           git remote add upstream "$UPSTREAM"
           # Only main: upstream carries hundreds of agent/* branches.
           git fetch --no-tags upstream main
-          # The stacked branch rebases onto a sibling branch of the fork, which
-          # a single-ref checkout does not bring down.
-          git fetch --no-tags origin custom/linux-timeline-stability
 
       - name: Report divergence
         id: diverge
         env:
-          ONTO: ${{ matrix.onto }}
+          ONTO: upstream/main
         run: |
           base=$(git merge-base HEAD "$ONTO")
           behind=$(git rev-list --count "$base".."$ONTO")
@@ -98,7 +74,7 @@ jobs:
         id: rebase
         if: steps.diverge.outputs.behind != '0'
         env:
-          ONTO: ${{ matrix.onto }}
+          ONTO: upstream/main
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -116,7 +92,7 @@ jobs:
           (github.event_name == 'schedule' ||
            (inputs.push && inputs.push != 'false'))
         env:
-          BRANCH: ${{ matrix.branch }}
+          BRANCH: chronicle
         run: |
           # --force-with-lease, never plain --force: the rebase rewrote history,
           # but this still refuses if the branch moved since checkout (e.g. a
@@ -128,8 +104,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BEHIND: ${{ steps.diverge.outputs.behind }}
-          BRANCH: ${{ matrix.branch }}
-          ONTO: ${{ matrix.onto }}
+          BRANCH: chronicle
+          ONTO: upstream/main
         run: |
           title="screenpipe fork: $BRANCH needs manual conflict resolution"
           # Reuse one open issue rather than filing a new one every night.

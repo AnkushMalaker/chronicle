@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
+import logging
 import os
 import tarfile
 import uuid
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -26,6 +30,7 @@ from advanced_omi_backend.controllers.queue_controller import (
 )
 from advanced_omi_backend.services.data_archive import clear_vault_contents
 from advanced_omi_backend.services.memory.audit import MemoryCause, UpdateStrategy
+from advanced_omi_backend.services.memory.vault_scaffold import seed_vault_scaffold
 from advanced_omi_backend.services.timeline.timezone import canonical_timezone
 from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
 from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
@@ -35,8 +40,6 @@ MEMORY_REBUILD_JOB_TIMEOUT = 7200
 # One day = a segmentation agent run over the day's evidence plus a vault write agent
 # run; both are slow, and a dense day escalates the segmentation effort.
 TIMELINE_REBUILD_JOB_TIMEOUT = 10800
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +191,7 @@ async def build_rebuild_plan(
                 "transcript_versions.version_id": 1,
                 "transcript_versions.metadata": 1,
                 "memory_excluded": 1,
+                "audio_ranges.chunk_ids": 1,
             },
         )
         .sort([("user_id", 1), ("created_at", 1), ("conversation_id", 1)])
@@ -206,23 +210,12 @@ async def build_rebuild_plan(
                 ),
                 memory_excluded=document.get("memory_excluded", False) is True,
                 active_transcript_version_id=document["active_transcript_version"],
+                has_audio=any(
+                    audio_range.get("chunk_ids")
+                    for audio_range in document.get("audio_ranges", [])
+                ),
             )
         )
-    if from_stage in _DIARIZING_STAGES and conversations_list:
-        conversation_ids = [item.conversation_id for item in conversations_list]
-        audio_conversation_ids = set(
-            await database["audio_chunks"].distinct(
-                "conversation_id",
-                {
-                    "conversation_id": {"$in": conversation_ids},
-                    "deleted": {"$ne": True},
-                },
-            )
-        )
-        conversations_list = [
-            replace(item, has_audio=item.conversation_id in audio_conversation_ids)
-            for item in conversations_list
-        ]
     conversations = tuple(conversations_list)
     selected_users = tuple(sorted({item.user_id for item in conversations}))
     if requested_users:
@@ -252,18 +245,18 @@ async def build_timeline_days(
     ):
         zones[str(user["_id"])] = canonical_timezone(user.get("timezone") or "UTC")
 
-    owners: dict[str, str] = {}
-    cursor = database["conversations"].find(
+    capture_owners: dict[str, str] = {}
+    cursor = database["audio_capture_sessions"].find(
         {
-            "deleted": {"$ne": True},
-            "data_purpose": {"$ne": "annotation"},
             "user_id": {"$in": list(user_ids)},
+            "time_basis": {"$ne": "unknown"},
+            "data_purpose": {"$ne": "annotation"},
         },
-        projection={"conversation_id": 1, "user_id": 1},
+        projection={"capture_session_id": 1, "user_id": 1},
     )
     async for document in cursor:
-        owners[document["conversation_id"]] = str(document["user_id"])
-    if not owners:
+        capture_owners[document["capture_session_id"]] = str(document["user_id"])
+    if not capture_owners:
         return ()
 
     rows = (
@@ -272,16 +265,18 @@ async def build_timeline_days(
             [
                 {
                     "$match": {
-                        "conversation_id": {"$in": list(owners)},
+                        "capture_session_id": {"$in": list(capture_owners)},
                         "deleted": {"$ne": True},
                         "captured_at": {"$ne": None},
                     }
                 },
+                {"$sort": {"capture_session_id": 1, "captured_at": 1}},
                 {
                     "$group": {
-                        "_id": "$conversation_id",
+                        "_id": "$capture_session_id",
                         "first": {"$min": "$captured_at"},
-                        "last": {"$max": "$captured_at"},
+                        "last_start": {"$last": "$captured_at"},
+                        "last_duration": {"$last": "$duration"},
                     }
                 },
             ],
@@ -292,13 +287,16 @@ async def build_timeline_days(
 
     days: set[tuple[str, date, str]] = set()
     for row in rows:
-        user_id = owners.get(row["_id"])
+        user_id = capture_owners.get(row["_id"])
         if not user_id:
             continue
         zone_name = zones.get(user_id, "UTC")
         zone = ZoneInfo(zone_name)
         first = _local_date(row["first"], zone)
-        last = _local_date(row["last"], zone)
+        last = _local_date(
+            row["last_start"] + timedelta(seconds=float(row.get("last_duration") or 0)),
+            zone,
+        )
         current = first
         while current <= last:
             days.add((user_id, current, zone_name))
@@ -362,7 +360,12 @@ def _enqueue_timeline_rebuild(
         job_id=f"timeline_rebuild_{run_id}_{sequence}_{day.local_date.isoformat()}",
         description=f"Rebuild timeline for {day.local_date.isoformat()}",
         depends_on=dependency,
-        meta={"local_date": day.local_date.isoformat(), "trigger": "timeline_rebuild"},
+        meta={
+            "user_id": day.user_id,
+            "rebuild_run_id": run_id,
+            "local_date": day.local_date.isoformat(),
+            "trigger": "timeline_rebuild",
+        },
     )
 
 
@@ -387,7 +390,14 @@ async def _reset_active_versions_to_asr(
             )
 
 
-def _active_rebuild_jobs(conversation_ids: set[str]) -> list[str]:
+def _active_rebuild_jobs(conversation_ids: set[str], user_ids: set[str]) -> list[str]:
+    """Return queued work that can mutate the evidence or vault being rebuilt.
+
+    Conversation jobs identify their target in ``meta.conversation_id``. Timeline
+    jobs are user/day scoped, and their first positional argument is the user ID, so
+    inspect that job contract as well as metadata before clearing derived state. This
+    prevents any already-queued day job from writing into a newly cleared vault.
+    """
     job_ids: set[str] = set()
     for queue in (transcription_queue, memory_queue, default_queue):
         job_ids.update(queue.get_job_ids())
@@ -404,7 +414,17 @@ def _active_rebuild_jobs(conversation_ids: set[str]) -> list[str]:
             job = Job.fetch(job_id, connection=memory_queue.connection)
         except NoSuchJobError:
             continue
-        if (job.meta or {}).get("conversation_id") in conversation_ids:
+        meta = job.meta or {}
+        targets_conversation = meta.get("conversation_id") in conversation_ids
+        targets_user = meta.get("user_id") in user_ids
+        is_timeline_day_job = (
+            job.func_name
+            == "advanced_omi_backend.workers.timeline_jobs.rebuild_timeline_day_job"
+        )
+        positional_timeline_user = (
+            is_timeline_day_job and bool(job.args) and job.args[0] in user_ids
+        )
+        if targets_conversation or targets_user or positional_timeline_user:
             active.append(job_id)
     return sorted(active)
 
@@ -426,7 +446,10 @@ def _enqueue_speaker_rebuild(
         "",
         None,
         item.transcript_version_id,
-        job_timeout=1200,
+        # One job may contain many independently bounded 20-minute diarization
+        # passes (the corpus currently includes a ten-hour recording). Keep the RQ
+        # lifetime above the speaker client's finite one-hour request ceiling.
+        job_timeout=3900,
         result_ttl=JOB_RESULT_TTL,
         job_id=(f"speaker_rebuild_{run_id}_{sequence}_" f"{item.conversation_id[:12]}"),
         description=f"Rebuild speakers for {item.conversation_id[:8]}",
@@ -443,9 +466,14 @@ def _enqueue_speaker_rebuild(
     )
 
 
-def _backup_user_vaults(
-    data_dir: Path, user_ids: tuple[str, ...], backup_dir: Path
+def create_vault_backup(
+    data_dir: Path,
+    user_ids: tuple[str, ...],
+    backup_dir: Path,
+    *,
+    description: Optional[str] = None,
 ) -> Optional[Path]:
+    """Create a dated, self-describing backup of selected users' vaults."""
     vaults: list[Path] = []
     for root_name in VAULT_ROOTS:
         for user_id in user_ids:
@@ -459,10 +487,42 @@ def _backup_user_vaults(
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     final_path = backup_dir / f"memory_vault_{timestamp}.tar.gz"
     temp_path = final_path.with_name(f".{final_path.name}.partial-{os.getpid()}")
+    created_at = datetime.now(timezone.utc).isoformat()
+    files: dict[str, dict[str, Any]] = {}
+    for vault in vaults:
+        for path in sorted(vault.rglob("*")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            digest = hashlib.sha256()
+            size = 0
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                    size += len(chunk)
+            files[path.relative_to(data_dir).as_posix()] = {
+                "bytes": size,
+                "sha256": digest.hexdigest(),
+            }
+    manifest = {
+        "format": "chronicle-memory-vault-backup",
+        "schema_version": 1,
+        "created_at": created_at,
+        "description": description,
+        "user_ids": list(user_ids),
+        "vault_roots": list(VAULT_ROOTS),
+        "files": files,
+    }
+    manifest_bytes = json.dumps(
+        manifest, indent=2, sort_keys=True, ensure_ascii=False
+    ).encode("utf-8")
     try:
         with tarfile.open(temp_path, mode="w:gz") as archive:
             for vault in vaults:
                 archive.add(vault, arcname=vault.relative_to(data_dir).as_posix())
+            info = tarfile.TarInfo("manifest.json")
+            info.size = len(manifest_bytes)
+            info.mtime = int(datetime.now(timezone.utc).timestamp())
+            archive.addfile(info, io.BytesIO(manifest_bytes))
         temp_path.replace(final_path)
     except Exception:
         temp_path.unlink(missing_ok=True)
@@ -485,7 +545,7 @@ async def execute_memory_rebuild(
         raise MemoryRebuildError("No conversations with active transcripts matched")
 
     conversation_ids = {item.conversation_id for item in plan.conversations}
-    active_jobs = _active_rebuild_jobs(conversation_ids)
+    active_jobs = _active_rebuild_jobs(conversation_ids, set(plan.user_ids))
     if active_jobs:
         preview = ", ".join(active_jobs[:5])
         raise MemoryRebuildError(
@@ -496,17 +556,37 @@ async def execute_memory_rebuild(
 
     vault_backup = None
     if backup_dir is not None:
-        vault_backup = _backup_user_vaults(data_dir, plan.user_ids, backup_dir)
+        vault_backup = create_vault_backup(data_dir, plan.user_ids, backup_dir)
 
     deleted_files = 0
     for root_name in VAULT_ROOTS:
         for user_id in plan.user_ids:
-            deleted_files += clear_vault_contents(data_dir / root_name / user_id)
+            vault_root = data_dir / root_name / user_id
+            deleted_files += clear_vault_contents(vault_root)
+            seed_vault_scaffold(vault_root)
 
-    audit_result = await database["memory_audit"].delete_many(
-        {"user_id": {"$in": list(plan.user_ids)}}
+    # The audit ledger is append-only. A rebuild starts a new epoch instead of erasing
+    # the evidence needed to compare the old vault with the reconstruction.
+    run_id = uuid.uuid4().hex[:12]
+    await database["memory_audit"].insert_many(
+        [
+            {
+                "user_id": user_id,
+                "conversation_id": None,
+                "operation": "delete_all",
+                "note_path": None,
+                "cause": "memory_rebuild",
+                "strategy": None,
+                "provider": "chronicle",
+                "agent_mode": False,
+                "summary": f"Started sterile vault rebuild epoch {run_id}",
+                "extra": {"rebuild_epoch": run_id, "from_stage": from_stage.value},
+                "created_at": datetime.now(timezone.utc),
+            }
+            for user_id in plan.user_ids
+        ]
     )
-    deleted_audit_entries = int(audit_result.deleted_count)
+    deleted_audit_entries = 0
 
     if from_stage in TIMELINE_STAGES:
         diarize = from_stage is RebuildStage.TIMELINE
@@ -517,7 +597,6 @@ async def execute_memory_rebuild(
                 "No captured audio found for these users, so there are no days to "
                 "rebuild a timeline from"
             )
-        run_id = uuid.uuid4().hex[:12]
         # Speakers first, and the days wait for them: an episode's transcript is the
         # speaker-labelled one, so segmenting a day whose recordings are still raw ASR
         # decides its bounds -- and writes its memory -- from text with no speakers in it.
@@ -585,7 +664,6 @@ async def execute_memory_rebuild(
     if from_stage is RebuildStage.SPEAKERS:
         await _reset_active_versions_to_asr(database, plan.conversations)
 
-    run_id = uuid.uuid4().hex[:12]
     by_user: dict[str, list[RebuildConversation]] = defaultdict(list)
     for item in plan.conversations:
         by_user[item.user_id].append(item)

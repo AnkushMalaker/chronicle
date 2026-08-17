@@ -15,8 +15,7 @@ What it does per conversation, in order:
 2. Skip anything already live — matched on ``conversation_id``, so re-running is safe.
 3. Re-slice the concatenated WAVs into the 10-second chunks the metadata describes and
    re-encode each to Opus, which is the only form ``audio_chunks`` accepts.
-4. Anchor ``captured_at`` with the same ``resolve_anchor`` the backfill script uses, so
-   there is exactly one capture-time policy in the tree. A conversation it declines to
+4. Anchor ``captured_at`` with the one-time legacy-import policy. A conversation it declines to
    anchor is imported with null capture times and is therefore invisible to the
    timeline — deliberately, because a wrong anchor is worse than none.
 
@@ -32,23 +31,21 @@ import asyncio
 import logging
 import time
 from collections import Counter
-from dataclasses import dataclass, field
-from datetime import timedelta
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from backfill_chunk_capture_time import resolve_anchor
-
 from advanced_omi_backend.database import get_database
-from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import _ensure_beanie_initialized
+from advanced_omi_backend.services.audio_claims import apply_audio_ranges
+from advanced_omi_backend.services.corpus_reconciliation import load_manifest
 from advanced_omi_backend.services.legacy_backups import (
-    LegacyChunk,
     LegacyConversation,
     load_corpus,
+    resolve_legacy_capture_anchor,
 )
-from advanced_omi_backend.utils.audio_chunk_utils import encode_pcm_to_opus
+from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("import_legacy")
@@ -106,8 +103,8 @@ class Decision:
     action: str
     reason: str
     user_id: str
-    chunks: list[LegacyChunk] = field(default_factory=list)
     pcm_bytes: int = 0
+    transcript_record: LegacyConversation | None = None
 
     @property
     def conversation_id(self) -> str:
@@ -119,39 +116,12 @@ def _device(client_id: str) -> str:
     return parts[1] if len(parts) > 1 else ""
 
 
-def _synthetic_chunks(
-    record: LegacyConversation, pcm_bytes: int, sample_rate: int, channels: int
-) -> list[LegacyChunk]:
-    """Ten-second chunks for audio whose metadata rows did not survive."""
-    bytes_per_second = sample_rate * channels * 2
-    total = pcm_bytes / bytes_per_second if bytes_per_second else 0.0
-    chunks: list[LegacyChunk] = []
-    index = 0
-    start = 0.0
-    while start < total - 0.01:
-        duration = min(10.0, total - start)
-        chunks.append(
-            LegacyChunk(
-                conversation_id=record.conversation_id,
-                chunk_index=index,
-                start_time=start,
-                end_time=start + duration,
-                duration=duration,
-                original_size=int(duration * bytes_per_second),
-                compressed_size=0,
-                sample_rate=sample_rate,
-                channels=channels,
-                created_at=None,
-                has_speech=None,
-            )
-        )
-        index += 1
-        start += duration
-    return chunks
-
-
 def _conversation_document(
-    record: LegacyConversation, user_id: str, *, audio_present: bool
+    record: LegacyConversation,
+    user_id: str,
+    *,
+    audio_present: bool,
+    transcript_record: LegacyConversation | None = None,
 ) -> Conversation:
     """Map a legacy API dump onto the current model.
 
@@ -163,9 +133,17 @@ def _conversation_document(
     payload: dict[str, Any] = {
         key: value
         for key, value in record.document.items()
-        if key in Conversation.model_fields and key not in {"id", "revision_id"}
+        if key in Conversation.model_fields
+        and key not in {"id", "revision_id", "audio_ranges"}
     }
     payload["user_id"] = user_id
+    if transcript_record is not None and transcript_record is not record:
+        payload["transcript_versions"] = transcript_record.document.get(
+            "transcript_versions", []
+        )
+        payload["active_transcript_version"] = transcript_record.document.get(
+            "active_transcript_version"
+        )
     device = _device(record.client_id)
     if device in ANNOTATION_DEVICES:
         payload["data_purpose"] = "annotation"
@@ -180,46 +158,6 @@ def _conversation_document(
     return Conversation(**payload)
 
 
-async def _encode_chunks(
-    record: LegacyConversation,
-    chunks: list[LegacyChunk],
-    pcm: bytes,
-    sample_rate: int,
-    channels: int,
-    *,
-    concurrency: int,
-) -> list[AudioChunkDocument]:
-    bytes_per_second = sample_rate * channels * 2
-    semaphore = asyncio.Semaphore(concurrency)
-
-    async def build(chunk: LegacyChunk) -> AudioChunkDocument | None:
-        start = int(round(chunk.start_time * bytes_per_second))
-        stop = min(len(pcm), start + int(round(chunk.duration * bytes_per_second)))
-        window = pcm[start:stop]
-        if len(window) < bytes_per_second // 10:  # under 100ms of audio
-            return None
-        async with semaphore:
-            opus = await encode_pcm_to_opus(
-                window, sample_rate=sample_rate, channels=channels
-            )
-        return AudioChunkDocument(
-            conversation_id=record.conversation_id,
-            chunk_index=chunk.chunk_index,
-            audio_data=opus,
-            original_size=len(window),
-            compressed_size=len(opus),
-            start_time=chunk.start_time,
-            end_time=chunk.start_time + len(window) / bytes_per_second,
-            duration=len(window) / bytes_per_second,
-            sample_rate=sample_rate,
-            channels=channels,
-            created_at=chunk.created_at or record.created_at,
-        )
-
-    built = await asyncio.gather(*(build(chunk) for chunk in chunks))
-    return [document for document in built if document is not None]
-
-
 def _plan(
     corpus: Any,
     live_ids: set[str],
@@ -228,9 +166,26 @@ def _plan(
     include_empty: bool,
     require_audio: bool,
     known_users: set[str],
+    canonical_by_source: dict[str, str] | None = None,
+    transcript_source_by_canonical: dict[str, str] | None = None,
 ) -> list[Decision]:
+    canonical_by_source = canonical_by_source or {}
+    transcript_source_by_canonical = transcript_source_by_canonical or {}
     decisions: list[Decision] = []
     for record in corpus:
+        canonical_id = canonical_by_source.get(
+            record.conversation_id, record.conversation_id
+        )
+        if canonical_id != record.conversation_id:
+            decisions.append(
+                Decision(
+                    record,
+                    "skip",
+                    f"reconciled_duplicate:{canonical_id}",
+                    record.user_id,
+                )
+            )
+            continue
         if record.conversation_id in live_ids:
             decisions.append(Decision(record, "skip", "already_live", record.user_id))
             continue
@@ -247,8 +202,22 @@ def _plan(
         if require_audio and not record.has_audio:
             decisions.append(Decision(record, "skip", "no_audio", user_id))
             continue
+        transcript_source_id = transcript_source_by_canonical.get(
+            record.conversation_id
+        )
+        transcript_record = (
+            corpus.conversations.get(transcript_source_id)
+            if transcript_source_id
+            else None
+        )
         decisions.append(
-            Decision(record, "import", "ok", user_id, chunks=list(record.chunks))
+            Decision(
+                record,
+                "import",
+                "ok",
+                user_id,
+                transcript_record=transcript_record,
+            )
         )
     return decisions
 
@@ -275,10 +244,23 @@ async def main() -> None:
         help="only conversations whose audio survived (the ones that reach the timeline)",
     )
     parser.add_argument("--limit", type=int, default=0, help="0 = no limit")
-    parser.add_argument("--concurrency", type=int, default=8)
+    parser.add_argument(
+        "--reconciliation-manifest",
+        type=Path,
+        help="reviewed manifest; required for --apply",
+    )
     args = parser.parse_args()
 
     remap = dict(pair.split("=", 1) for pair in args.remap_user)
+    manifest = (
+        load_manifest(args.reconciliation_manifest)
+        if args.reconciliation_manifest
+        else None
+    )
+    if args.apply and manifest is None:
+        parser.error("--apply requires --reconciliation-manifest")
+    if args.apply and manifest and not manifest.get("activation_allowed"):
+        parser.error("reconciliation manifest has unresolved blockers")
 
     database = get_database()
     await database.command("ping")
@@ -300,6 +282,12 @@ async def main() -> None:
         include_empty=args.include_empty,
         require_audio=args.require_audio,
         known_users=known_users,
+        canonical_by_source=(manifest or {}).get("canonical_by_source"),
+        transcript_source_by_canonical={
+            decision["canonical_id"]: decision["selected_transcript_source_id"]
+            for decision in (manifest or {}).get("decisions", [])
+            if decision.get("selected_transcript_source_id")
+        },
     )
 
     skipped = Counter(d.reason for d in decisions if d.action == "skip")
@@ -331,6 +319,7 @@ async def main() -> None:
                 decision.record,
                 decision.user_id,
                 audio_present=decision.record.has_audio,
+                transcript_record=decision.transcript_record,
             )
         except Exception as error:  # noqa: BLE001 - reporting, not handling
             invalid[type(error).__name__ + ": " + str(error).split("\n")[0]] += 1
@@ -370,52 +359,58 @@ async def main() -> None:
                 pcm = b""
             spent["read_wav"] += time.monotonic() - mark
 
-        chunks = decision.chunks
-        if pcm and not chunks:
-            chunks = _synthetic_chunks(record, len(pcm), sample_rate, channels)
-            stats["chunks_synthesised"] += 1
-
-        documents: list[AudioChunkDocument] = []
-        if pcm:
-            mark = time.monotonic()
-            documents = await _encode_chunks(
-                record, chunks, pcm, sample_rate, channels, concurrency=args.concurrency
-            )
-            spent["encode_opus"] += time.monotonic() - mark
-            stats["audio_seconds"] += int(sum(d.duration for d in documents))
-
+        # Build the semantic document first so the shared anchoring policy can inspect
+        # its lineage/source. Raw audio is then imported as its own deterministic
+        # capture; the Conversation claims the returned range and never owns chunks.
         conversation = _conversation_document(
-            record, decision.user_id, audio_present=bool(documents)
+            record,
+            decision.user_id,
+            audio_present=bool(pcm),
+            transcript_record=decision.transcript_record,
         )
-        if documents:
-            conversation.audio_chunks_count = len(documents)
-            conversation.audio_total_duration = sum(d.duration for d in documents)
-            original = sum(d.original_size for d in documents)
-            conversation.audio_compression_ratio = (
-                sum(d.compressed_size for d in documents) / original
-                if original
-                else None
-            )
+        capture = None
+        if pcm:
+            # The legacy WAV filename is an epoch-millisecond capture time and the only
+            # surviving record of it; nothing inside Mongo can recover it later.
+            anchor, reason = resolve_legacy_capture_anchor(record)
+            anchors[reason] += 1
+            if anchor is None:
+                # The capture model requires an honest absolute identity. Import the
+                # transcript stub, but do not invent a wall-clock position for bytes
+                # whose capture time cannot be justified.
+                conversation = _conversation_document(
+                    record,
+                    decision.user_id,
+                    audio_present=False,
+                    transcript_record=decision.transcript_record,
+                )
+                conversation.archive_reason = "legacy_backup_audio_unanchored"
+                stats["audio_unanchored"] += 1
+            else:
+                mark = time.monotonic()
+                capture = await convert_audio_to_chunks(
+                    user_id=decision.user_id,
+                    capture_source_id=record.client_id or "legacy-import",
+                    audio_data=pcm,
+                    sample_rate=sample_rate,
+                    channels=channels,
+                    sample_width=2,
+                    captured_at=anchor,
+                    capture_session_id=f"legacy-{record.conversation_id}",
+                    origin="import",
+                    external_source_id=f"legacy-backup:{record.conversation_id}",
+                    data_purpose=conversation.data_purpose or "normal_capture",
+                )
+                spent["encode_opus"] += time.monotonic() - mark
+                await apply_audio_ranges(
+                    conversation, [capture.audio_range], save=False
+                )
+                stats["audio_seconds"] += int(capture.duration_seconds)
+                stats["chunks"] += capture.chunk_count
+
         mark = time.monotonic()
         await conversation.insert()
         imported.append(conversation)
-
-        if documents:
-            # The legacy WAV filename is an epoch-millisecond capture time and the only
-            # surviving record of it; nothing inside Mongo can recover it later.
-            anchor, reason = (
-                (record.legacy_wav_captured_at, "legacy_wav_filename")
-                if record.legacy_wav_captured_at
-                else await resolve_anchor(conversation, {}, {})
-            )
-            anchors[reason] += 1
-            if anchor is not None:
-                for document in documents:
-                    document.captured_at = anchor + timedelta(
-                        seconds=document.start_time
-                    )
-            await AudioChunkDocument.insert_many(documents)
-            stats["chunks"] += len(documents)
         spent["mongo_write"] += time.monotonic() - mark
         stats["conversations"] += 1
 

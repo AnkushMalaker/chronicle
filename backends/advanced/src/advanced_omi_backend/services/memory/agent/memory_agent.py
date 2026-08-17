@@ -39,11 +39,12 @@ from .vault_tools import (
 
 logger = logging.getLogger("memory_service.agent")
 
-# Audited long-form Qwen runs reached 24 productive rounds with a canonical note but
-# still had work in flight; another completed deliberately on round 23. Keep a finite
+# Audited long-form runs reached 34 productive rounds with required notes already
+# written but still had verification work in flight. A 32-round ceiling therefore
+# converts useful complex-day writes into partial failures. Keep a finite 48-round
 # ceiling with measured headroom, while the no-progress guard below still aborts a
 # genuinely stalled loop after three rounds.
-MAX_TOOL_ROUNDS = 32
+MAX_TOOL_ROUNDS = 48
 MAX_SEARCH_ROUNDS = 6
 SEARCH_TOOL_CALLS_PER_ROUND = 4
 MAX_FINAL_SEARCH_EVIDENCE_BYTES = 16_000
@@ -131,6 +132,10 @@ capture the new information. Never regenerate a whole note when an edit will do.
 
 Notes are aggregated by the `categories` property (a wikilink to the category hub, e.g.
 `categories: ["[[People]]"]`), NOT by folder — so always set `categories` correctly.
+Root-level `.md` files are category HUBS only: `Topics.md` is the Topics index, while
+topic content belongs at `Topics/<Topic>.md`. Never create an ordinary topic, person, or
+thing as `<Title>.md` at the vault root. Create a new organic hub only through
+`create_category`, which writes its template/base/hub bundle together.
 
 # Conventions (this vault follows the Kepano / "file over app" style)
 - Link profusely: every person, topic, and thing is a [[wikilink]]. An unresolved link
@@ -181,13 +186,27 @@ plausibly recur and matters.
    contents) to find a person/topic/fact. Reuse exact existing note names so links resolve.
 2. `write_note` the conversation note from the Conversation template; put every identified
    person in `people:` and every theme in `topics:` as [[wikilinks]].
-3. For each person/topic/thing: if its note exists, READ it then `edit_section` to add
-   genuinely new facts — `append` a bullet under `## About` and a dated line under
-   `## Mentions`. Otherwise `write_note` it from the matching template. `write_note` is
-   for CREATING a note — never use it (and never use overwrite) to "update" an existing
-   person/topic note, and never paste the template scaffold (`## About`/`## Conversations`/
-   `## Mentions`) into a note that already has it. Each section must appear exactly
-   once. Don't duplicate facts already present.
+3. For each person/topic/thing: if its note exists, READ it and add only durable new
+   knowledge. In a Person note, `## About` is for stable/current facts (identity,
+   relationship, work, enduring preferences), NEVER a dated activity log. `## Mentions`
+   is an optional compact source index: at most one short dated line per source/day when
+   the person played a meaningful role; skip routine/background appearances. NEVER put
+   the same proposition in both About and Mentions. The vault owner's own Person note is
+   not a diary: do not add a Mention merely because the owner spoke or worked that day.
+   The Daily episode index already records that chronology. Update the owner's `About`
+   only when the evidence establishes a durable identity, relationship, preference,
+   constraint, responsibility, or long-lived goal. For anyone else, a Mention is a
+   sparse relationship/source pointer, not an episode or day synopsis. Topic/category
+   `## About` sections likewise describe the recurring thing itself, not a chronology of
+   each day's discussion; do not create one for a one-off phrase, implementation detail,
+   or event unless it establishes durable state likely to matter across days. One fact
+   belongs to one canonical Topic note: do not create a narrower Topic whose About
+   bullets substantially repeat a broader Topic. Link related Topics instead.
+   Otherwise `write_note` a genuinely recurring entity from the matching template.
+   `write_note` is for CREATING a note — never use it (and never use overwrite) to
+   "update" an existing person/topic note, and never paste the template scaffold
+   (`## About`/`## Conversations`/`## Mentions`) into a note that already has it. Each
+   section must appear exactly once. Don't duplicate facts already present.
 4. `edit_section` targets a note's STRUCTURE, not a slice of its text: pass the section
    heading (e.g. `About`, `Mentions`) or a `^block-ref` as `target`, the new bullet
    line(s) as `text`, and an `operation` of append (default) / prepend / replace. Add
@@ -222,13 +241,14 @@ VERIFY_CAPABLE_BACKENDS = frozenset({"direct", "pi"})
 def required_notes(record: str, source_id: str) -> tuple[str, ...]:
     """Notes a write of this kind must produce, for ``verify_vault`` to check.
 
-    Only the day write has one. A conversation always yields its note — the
-    deterministic source-preserving fallback writes it even when the agent fails — so
-    there is nothing there for an agent to be reminded of. A day has no such artifact:
-    if the agent does not write it, nothing does.
+    Conversation and day record notes are both system-owned. A conversation has its
+    deterministic source-preserving fallback, while Chronicle installs the settled
+    day's canonical episode index before invoking the semantic agent. The model is
+    responsible only for durable People/Topic/category deltas, so no record note is a
+    required *agent mutation*.
     """
 
-    return (day_note_path(source_id),) if record == "day" else ()
+    return ()
 
 
 def forbidden_folders(record: str) -> tuple[str, ...]:
@@ -243,20 +263,65 @@ def forbidden_folders(record: str) -> tuple[str, ...]:
     return ("Conversations",) if record == "day" else ()
 
 
+def immutable_sections(record: str) -> tuple[tuple[str, str], ...]:
+    """Sections whose ownership belongs to a different record path.
+
+    Continuous-capture chronology is represented once by Timeline and Daily notes.
+    Day semantic writes may add durable facts to a Person's ``About`` section, but
+    never a second dated activity log under ``Mentions``.
+    """
+
+    return (("People", "Mentions"),) if record == "day" else ()
+
+
+def allow_new_categories(record: str) -> bool:
+    """Whether this write type may design a new vault category schema.
+
+    Automatic day ingestion records durable deltas into the settled vault ontology.
+    Minting a hub/template/Base bundle is a separate curation decision: otherwise a
+    single mentioned company or tool can reshape the whole vault stochastically.
+    """
+
+    return record != "day"
+
+
 _DAY_RECORD_REQUIREMENT = """\
 This is a DAY of captured activity, not a single conversation. It is already segmented
 into semantic episodes; each one names what happened, when, and the evidence behind it.
-Transcripts are supplied for the episodes where people actually conversed.
+Raw transcripts are intentionally not supplied or stored in the vault. Work only from
+the bounded episode summaries, entities, attributes, and role-labelled assertions.
 
-- Record the day at exactly `{note_path}`. Create it from the day's episodes if it does
-  not exist; otherwise `edit_section` to add only what is missing. NEVER write anything
-  under `Conversations/` for a day — that folder is one note per conversation.
-- Then update the People, Topics, and other category notes the day touches, exactly as
+- Chronicle has already installed the canonical, concise `## Episodes` index at
+  `{note_path}` from the active Timeline run. Do NOT create, rewrite, expand, or read
+  that index merely to repeat the supplied summaries. NEVER write anything under
+  `Conversations/` for a day — that folder is one note per conversation.
+- Update only the People, Topics, and other category notes the day touches, exactly as
   you would for a conversation: smallest edits, link profusely, never duplicate a fact
   the note already holds.
-- Be selective. A day contains far more than is worth remembering. Routine and
-  background episodes usually deserve at most a line in the day note and no durable note
-  of their own; record durable facts for what was genuinely new, decided, or learned.
+- Be selective. Routine and background episodes usually deserve no durable
+  People/Topic note of their own; record only what was genuinely new, decided, or
+  learned. It is valid to make no edits after verifying the vault when the day adds no
+  durable information.
+- Use a high bar for creating a new semantic note. A name or theme appearing in one
+  episode is not enough: the digest must establish reusable, durable facts that are
+  likely to be referenced across future days. A game played, vendor/tool mentioned,
+  one-off metric, implementation method, or episode title belongs only in the Daily
+  index unless the day establishes such lasting knowledge. Never create an empty or
+  placeholder-only Person/Topic note; an unresolved wikilink is preferable to a thin
+  note.
+- A DAY write may not invent a new organic category, hub, template, or Base. Category
+  schema design is a separate curated operation. You may update a note in an existing
+  category when the day adds durable facts; otherwise leave the entity in the Daily
+  index or as an unresolved wikilink.
+- The owner's own Person note is not a second Daily note. Do not append a dated roll-up
+  of what the owner discussed, built, or tested today. The episode index already records
+  that activity. Update the owner only for a genuinely durable personal fact, and place
+  that fact in `About`. A DAY write may not modify `## Mentions` for anyone: chronology
+  and source appearances belong to Daily/Timeline. If another person's relationship or
+  role was materially clarified, record only that durable fact in `## About`.
+- Keep one canonical Topic for one body of facts. Before creating a Topic, search the
+  existing Topic notes; update the existing note when a narrower name would repeat the
+  same About bullets.
 - An assertion's `role` tells you who a claim belongs to. `media_content`,
   `application_state`, and `assistant_generated` are NOT things the user said, did, or
   believes. Only `user_action`/`user_statement` support a fact about the user, and
@@ -484,6 +549,8 @@ class MemoryAgent:
         date = date or datetime.now(timezone.utc).isoformat()
         self.tools.required_notes = required_notes(record, conversation_id)
         self.tools.forbidden_folders = forbidden_folders(record)
+        self.tools.immutable_sections = immutable_sections(record)
+        self.tools.allow_new_categories = allow_new_categories(record)
         system_prompt = await _get_prompt(
             AGENT_SYSTEM_PROMPT_ID, DEFAULT_AGENT_SYSTEM_PROMPT, vault_summary
         )

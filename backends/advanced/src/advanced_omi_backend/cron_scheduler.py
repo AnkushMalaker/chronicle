@@ -22,6 +22,7 @@ from croniter import croniter
 
 from advanced_omi_backend.config_loader import load_config, save_config_section
 from advanced_omi_backend.redis_factory import create_async_redis
+from advanced_omi_backend.services.observability.loop_monitor import activity
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +250,11 @@ class CronScheduler:
         logger.info(f"Executing cron job '{job_id}'")
 
         try:
-            result = await func()
+            # Cron jobs are awaited on the API's own event loop, so a synchronous or
+            # CPU-bound step inside one stops the whole process. Name the job while it
+            # runs, so a stall the watchdog cannot attribute still says what caused it.
+            with activity(f"cron:{job_id}"):
+                result = await func()
             cfg.last_run = now
             cfg.next_run = croniter(cfg.schedule, now).get_next(datetime)
             await self._persist_state(job_id)

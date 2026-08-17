@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from beanie import init_beanie
 from motor.motor_asyncio import AsyncIOMotorClient
 
+from advanced_omi_backend.database import MONGODB_DATABASE
 from advanced_omi_backend.models.annotation import Annotation
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.user import User
@@ -55,7 +56,7 @@ async def init_db():
     try:
         client = AsyncIOMotorClient(MONGODB_URI)
         await init_beanie(
-            database=client.chronicle,
+            database=client[MONGODB_DATABASE],
             document_models=[Annotation, Conversation, User],
         )
         logger.info("✅ Database connection initialized")

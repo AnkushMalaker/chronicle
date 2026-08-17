@@ -14,6 +14,12 @@ Trigger types control when plugins execute:
 - conditional: Execute based on custom condition (future)
 """
 
+from advanced_omi_backend.services.interaction_modes import (
+    InteractionContext,
+    InteractionModeDefinition,
+    InteractionResult,
+)
+
 from .base import BasePlugin, PluginConnectivityError, PluginContext, PluginResult
 from .events import ButtonActionType, ButtonState, ConversationCloseReason, PluginEvent
 from .router import PluginRouter
@@ -30,4 +36,7 @@ __all__ = [
     "PluginResult",
     "PluginRouter",
     "PluginServices",
+    "InteractionContext",
+    "InteractionModeDefinition",
+    "InteractionResult",
 ]

@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List
 
+from advanced_omi_backend.constants import TITLE_NOT_GENERATED
 from advanced_omi_backend.llm_client import async_generate
 from advanced_omi_backend.models.annotation import (
     Annotation,
@@ -100,7 +101,7 @@ async def surface_error_suggestions():
 
                 seg_count = len(active_transcript.segments)
                 logger.info(
-                    f"  Analyzing '{conversation.title or 'Untitled'}' "
+                    f"  Analyzing '{conversation.title or TITLE_NOT_GENERATED}' "
                     f"({seg_count} segments, id={conversation.conversation_id[:8]}...)"
                 )
 
@@ -165,7 +166,7 @@ async def _analyze_transcript(conversation, transcript) -> list[dict]:
     registry = get_prompt_registry()
     prompt = await registry.get_prompt(
         PROMPT_ID,
-        title=conversation.title or "Untitled",
+        title=conversation.title or TITLE_NOT_GENERATED,
         segments_text=segments_text,
     )
 

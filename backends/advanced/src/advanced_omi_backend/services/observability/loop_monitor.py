@@ -21,9 +21,24 @@ on.
 sample itself — reads the loop thread's stack via :func:`sys._current_frames` while
 the stall is in progress. It samples repeatedly and reports the modal stack: one
 sample is suggestive, twenty identical ones are a diagnosis. This works precisely in
-the case that matters most, blocking socket I/O, because that releases the GIL. Its
-blind spot is a C extension that blocks *while holding* the GIL — then the watchdog
-cannot run either, and the stall is reported with its duration but no stack.
+the case that matters most, blocking socket I/O, because that releases the GIL.
+
+Two things defeat it, and both look the same — a stall with a real duration and no
+useful stack. A C extension that blocks *while holding* the GIL stops the watchdog
+too. And uvicorn runs on uvloop, whose ``run_until_complete`` is C, so whenever the
+loop thread is not inside a Python callback its deepest frame is ``runners.py`` and
+there is nothing below it to read. For both, :func:`activity` is the fallback: work
+marked with it is named in the report even when no frame can be sampled.
+
+**Was it just garbage collection?** A collection holds the GIL for its duration, so it
+is the one cause that defeats sampling *and* produces a plausible-looking stack — the
+frame where the loop happened to be suspended, which had nothing to do with it. A
+third mechanism therefore times collections directly through ``gc.callbacks``, and a
+stall overlapping one says so outright instead of blaming that frame.
+
+The stack that *is* captured keeps both ends (see :func:`_format_frames`). Reporting
+only the innermost frames named the blocking call but never the caller, which is
+usually the half that tells you what to change.
 
 Both measurements are sampled, so both are accurate only to within one tick
 (``TICK_SECONDS``). The lag reading *under*-reports — a block that begins partway
@@ -56,6 +71,7 @@ setting, not a steady-state one.
 """
 
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -65,6 +81,7 @@ import threading
 import time
 import traceback
 from collections import Counter, deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
@@ -87,10 +104,30 @@ DEFAULT_CRITICAL_SECONDS = 5.0
 STACK_SAMPLE_SECONDS = 0.05
 MAX_STACK_SAMPLES = 40
 STACK_DEPTH = 14
+# When a stack is deeper than that, the innermost frames alone say what blocked but
+# not who asked for it — the library internals crowd out the caller. Chronicle's own
+# frames are the actionable half (which cron job, which handler), so keep up to this
+# many of them from above the cut as well.
+STACK_CALLER_FRAMES = 6
+_APP_MARKER = "advanced_omi_backend"
 
 # Lag samples retained for the statistics endpoint (~5 minutes at TICK_SECONDS).
 WINDOW_SAMPLES = 1200
 RECENT_STALLS = 10
+
+# A garbage collection holds the GIL for its whole duration, so it stops the loop *and*
+# the watchdog thread that would otherwise sample it. It is therefore invisible to
+# every other mechanism here: a long collection surfaces as a stall whose modal stack
+# is wherever the loop happened to be suspended, which is actively misleading.
+# ``gc.callbacks`` is the only thing that can see it. Generation 2 walks the entire
+# heap, so on a large one it is the single most likely cause of a few-hundred-ms block
+# in code that is otherwise correctly asynchronous.
+#
+# The callback runs on whichever thread triggered the collection, but the pause blocks
+# the loop regardless of which that was, so every collection counts.
+GC_PAUSE_SAMPLES = 50
+# Below this a collection is noise against TICK_SECONDS and not worth retaining.
+GC_PAUSE_MIN_SECONDS = 0.02
 
 # A recurring stall is one incident that accrues occurrences, not one row per
 # occurrence. It is resolved after this long without a recurrence of that signature.
@@ -100,6 +137,37 @@ INCIDENT_RESOLVE_SECONDS = 900
 SNAPSHOT_KEY_PREFIX = "system:loopmon:"
 SNAPSHOT_INTERVAL_SECONDS = 15
 SNAPSHOT_TTL_SECONDS = 60
+
+
+# What the loop was asked to do, for the stalls the watchdog cannot attribute.
+#
+# Uvicorn runs on uvloop, whose ``run_until_complete`` is C, so a loop thread that is
+# not executing a Python callback has no frames below ``runners.py`` to sample. The
+# same blank is produced by a C extension blocking while it holds the GIL. Either way
+# the stall is real and the stack says nothing. Cron jobs run on this very loop, so
+# naming the one in flight is often the whole diagnosis.
+#
+# Written from the loop, read from the watchdog thread, so it is lock-guarded. Several
+# jobs can overlap, hence a set rather than a single value.
+_activity: set[str] = set()
+_activity_lock = threading.Lock()
+
+
+@contextmanager
+def activity(label: str):
+    """Mark work in flight on the loop, so a stall can name it without a stack."""
+    with _activity_lock:
+        _activity.add(label)
+    try:
+        yield
+    finally:
+        with _activity_lock:
+            _activity.discard(label)
+
+
+def _current_activity() -> tuple[str, ...]:
+    with _activity_lock:
+        return tuple(sorted(_activity))
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -124,12 +192,18 @@ class Stall:
     duration: float
     samples: int
     stack: tuple[str, ...]
+    activity: tuple[str, ...] = ()
 
     @property
     def signature(self) -> str:
         """The innermost frames, which is what identifies a recurring cause."""
         if not self.stack:
-            return "no-stack"
+            # Without a stack the work in flight is the only thing distinguishing one
+            # cause from another; collapsing them all onto "no-stack" would merge
+            # unrelated stalls into a single incident.
+            return (
+                f"no-stack:{','.join(self.activity)}" if self.activity else "no-stack"
+            )
         return " <- ".join(reversed(self.stack[-3:]))
 
     def as_dict(self) -> dict:
@@ -138,13 +212,31 @@ class Stall:
             "duration_ms": round(self.duration * 1000, 1),
             "stack_samples": self.samples,
             "stack": list(self.stack),
+            "activity": list(self.activity),
         }
+
+
+def _keep_both_ends(lines: list[str]) -> tuple[str, ...]:
+    """Trim a deep stack to its innermost frames plus the app frames above the cut.
+
+    The innermost frames name what is blocking. Keeping only those lost the caller on
+    every stall deeper than ``STACK_DEPTH`` — a blocking Redis read reported fourteen
+    frames of ``redis-py`` internals and never said which job made the call, which is
+    the half you act on.
+    """
+    if len(lines) <= STACK_DEPTH:
+        return tuple(lines)
+
+    tail = lines[-STACK_DEPTH:]
+    elided = lines[:-STACK_DEPTH]
+    callers = [line for line in elided if _APP_MARKER in line][-STACK_CALLER_FRAMES:]
+    return tuple(callers + [f"... {len(elided) - len(callers)} frames ..."] + tail)
 
 
 def _format_frames(frame) -> tuple[str, ...]:
     """Compact ``file:line in func`` lines, innermost last."""
-    summary = traceback.extract_stack(frame)[-STACK_DEPTH:]
-    return tuple(f"{f.filename}:{f.lineno} in {f.name}" for f in summary)
+    summary = traceback.extract_stack(frame)
+    return _keep_both_ends([f"{f.filename}:{f.lineno} in {f.name}" for f in summary])
 
 
 class LoopMonitor:
@@ -183,6 +275,47 @@ class LoopMonitor:
         # signature -> last time it was seen, for incident open/resolve transitions.
         self._open_incidents: dict[str, float] = {}
 
+        # (ended_at_monotonic, generation, duration) for recent non-trivial pauses.
+        self._gc_pauses: deque[tuple[float, int, float]] = deque(
+            maxlen=GC_PAUSE_SAMPLES
+        )
+        self._gc_started: Optional[float] = None
+        self._gc_registered = False
+
+    # ------------------------------------------------------------------ #
+    # Garbage collection
+    # ------------------------------------------------------------------ #
+
+    def _on_gc(self, phase: str, info: dict) -> None:
+        """Time each collection. Runs on whichever thread triggered it."""
+        if phase == "start":
+            self._gc_started = time.monotonic()
+            return
+        started = self._gc_started
+        self._gc_started = None
+        if started is None:
+            return
+        duration = time.monotonic() - started
+        if duration >= GC_PAUSE_MIN_SECONDS:
+            self._gc_pauses.append(
+                (time.monotonic(), int(info.get("generation", -1)), duration)
+            )
+
+    def _gc_pause_during(self, started_at: float, duration: float) -> Optional[tuple]:
+        """The longest collection overlapping a stall, if one explains it.
+
+        ``started_at`` is wall clock and the pauses are monotonic, so the window is
+        rebuilt from the stall's duration rather than compared across the two clocks.
+        """
+        now_mono, now_wall = time.monotonic(), time.time()
+        began = now_mono - (now_wall - started_at)
+        overlapping = [
+            (generation, pause)
+            for ended, generation, pause in self._gc_pauses
+            if ended >= began and ended - pause <= began + duration
+        ]
+        return max(overlapping, key=lambda row: row[1]) if overlapping else None
+
     # ------------------------------------------------------------------ #
     # Watchdog thread
     # ------------------------------------------------------------------ #
@@ -199,6 +332,7 @@ class LoopMonitor:
 
             # A stall is in progress. Sample until the loop turns again.
             began = self._last_tick
+            in_flight = _current_activity()
             samples: list[tuple[str, ...]] = []
             while not self._stop.is_set() and self._last_tick == began:
                 frames = sys._current_frames().get(self._loop_thread_id)
@@ -221,6 +355,7 @@ class LoopMonitor:
                     duration=duration,
                     samples=len(samples),
                     stack=modal,
+                    activity=in_flight or _current_activity(),
                 )
             )
 
@@ -232,6 +367,9 @@ class LoopMonitor:
         """Measure scheduling delay forever, reporting stalls as they end."""
         loop = asyncio.get_running_loop()
         self._loop_thread_id = threading.get_ident()
+
+        gc.callbacks.append(self._on_gc)
+        self._gc_registered = True
 
         if self.capture_stacks:
             self._watchdog = threading.Thread(
@@ -269,6 +407,7 @@ class LoopMonitor:
                             duration=lag,
                             samples=0,
                             stack=(),
+                            activity=_current_activity(),
                         )
                     )
 
@@ -285,6 +424,12 @@ class LoopMonitor:
             raise
         finally:
             self._stop.set()
+            if self._gc_registered:
+                try:
+                    gc.callbacks.remove(self._on_gc)
+                except ValueError:  # pragma: no cover — already gone
+                    pass
+                self._gc_registered = False
             if redis_client is not None:
                 try:
                     await redis_client.aclose()
@@ -317,6 +462,25 @@ class LoopMonitor:
             f"Everything on it — health checks, WebSocket reads, in-flight requests — "
             f"waited that long.\n\n"
         )
+        if stall.activity:
+            detail += f"In flight on the loop: {', '.join(stall.activity)}\n\n"
+        gc_pause = self._gc_pause_during(stall.started_at, stall.duration)
+        if gc_pause is not None:
+            generation, seconds = gc_pause
+            share = seconds / stall.duration if stall.duration > 0 else 0
+            detail += (
+                f"A generation-{generation} garbage collection ran for "
+                f"{seconds * 1000:.0f} ms inside this stall — {share:.0%} of it. "
+                f"A collection holds the GIL, so for that portion the stack below is "
+                f"only where the loop was suspended, not what blocked it.\n"
+            )
+            detail += (
+                "The rest is the code in that stack. Collection is triggered by "
+                "allocation, so a stall that is part GC usually means the same code "
+                "both allocated heavily and ran long.\n\n"
+                if share < 0.9
+                else "\n"
+            )
         if stall.stack:
             detail += (
                 f"Modal stack across {stall.samples} samples taken during the stall, "
@@ -337,13 +501,18 @@ class LoopMonitor:
             source=__name__,
             title=(
                 f"Event loop stalled {stall.duration:.1f}s in {self.process}"
-                + (f": {stall.stack[-1].rsplit('/', 1)[-1]}" if stall.stack else "")
+                + (
+                    f": {stall.stack[-1].rsplit('/', 1)[-1]}"
+                    if stall.stack
+                    else (f": {', '.join(stall.activity)}" if stall.activity else "")
+                )
             ),
             detail=detail,
             metadata={
                 "process": self.process,
                 "duration_ms": round(stall.duration * 1000, 1),
                 "stack_samples": stall.samples,
+                "activity": list(stall.activity),
             },
             incident_key=f"event-loop-stall:{self.process}:{signature}",
         )
@@ -389,6 +558,29 @@ class LoopMonitor:
             "lag_max_ms": _percentile(lags, 1.0),
             "stalls": self._stall_count,
             "recent_stalls": [s.as_dict() for s in reversed(self._recent)],
+            "gc": self._gc_stats(),
+        }
+
+    def _gc_stats(self) -> dict:
+        """Recent collection pauses, so GC can be ruled in or out rather than guessed."""
+        pauses = list(self._gc_pauses)
+        by_generation: dict[int, list[float]] = {}
+        for _ended, generation, seconds in pauses:
+            by_generation.setdefault(generation, []).append(seconds)
+        return {
+            "tracked_pauses": len(pauses),
+            "min_tracked_ms": round(GC_PAUSE_MIN_SECONDS * 1000),
+            "max_pause_ms": (
+                round(max(s for _e, _g, s in pauses) * 1000, 1) if pauses else None
+            ),
+            "by_generation": {
+                str(generation): {
+                    "count": len(values),
+                    "max_ms": round(max(values) * 1000, 1),
+                    "total_ms": round(sum(values) * 1000, 1),
+                }
+                for generation, values in sorted(by_generation.items())
+            },
         }
 
     async def _publish(self, redis_client) -> None:

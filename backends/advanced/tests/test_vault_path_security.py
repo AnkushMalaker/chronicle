@@ -167,7 +167,10 @@ def test_rename_rejects_symlink_in_backlink_scan(tmp_path):
 def test_valid_unicode_note_and_safe_audit_paths_are_preserved(tmp_path):
     tools = VaultTools(tmp_path / "vault")
 
-    tools.write_note("Topics/Café au lait.md", TOPIC_TEMPLATE)
+    tools.write_note(
+        "Topics/Café au lait.md",
+        TOPIC_TEMPLATE.replace("{{date}}", "2026-08-06"),
+    )
 
     assert tools.touched == {"Topics/Café au lait.md"}
     with pytest.raises(VaultToolError, match="Unsafe vault audit path"):

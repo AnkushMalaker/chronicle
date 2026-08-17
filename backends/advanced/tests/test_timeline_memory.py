@@ -1,4 +1,4 @@
-"""Settled-day episode memory: promotion, digest budgeting, and the write latch."""
+"""Settled-day episode memory: digest budgeting and the write latch."""
 
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -7,13 +7,12 @@ import pytest
 
 from advanced_omi_backend.models.timeline import TimelineAssertion, TimelineEvidenceRef
 from advanced_omi_backend.services.memory.base import DayWriteOutcome
-from advanced_omi_backend.services.timeline import discovery
 from advanced_omi_backend.services.timeline import memory as memory_module
 from advanced_omi_backend.services.timeline.memory import (
     _TERMINAL_MEMORY_STATES,
-    _cited_conversation_ids,
     _claim_query,
     build_day_digest,
+    build_day_index_digest,
 )
 
 DAY = date(2026, 8, 6)
@@ -71,17 +70,6 @@ def make_episode(
         related_conversation_ids=related_conversation_ids or [],
         assertions=assertions or [],
     )
-
-
-def test_cited_ids_union_agent_named_and_assembly_recorded():
-    episode = make_episode(
-        "e1",
-        hour=9,
-        related_conversation_ids=["agent-named"],
-        evidence_conversation_id="assembly-recorded",
-    )
-
-    assert _cited_conversation_ids(episode) == {"agent-named", "assembly-recorded"}
 
 
 def test_digest_never_copies_raw_transcript_evidence_into_the_vault_prompt():
@@ -197,6 +185,37 @@ def test_digest_reports_every_dropped_episode_rather_than_truncating_silently():
     assert len(dropped) == 4
 
 
+def test_day_index_keeps_every_range_when_semantic_digest_sheds_an_episode():
+    episodes = [
+        make_episode(
+            "conversation",
+            hour=9,
+            conversational=True,
+            title="Standup",
+            summary="important " * 100,
+        ),
+        make_episode(
+            "background",
+            hour=10,
+            salience="background",
+            title="Background playback",
+            summary="incidental " * 100,
+        ),
+    ]
+
+    semantic_digest, dropped = build_day_digest(episodes, DAY, ZONE, max_chars=1_500)
+    index_digest = build_day_index_digest(episodes, DAY, ZONE)
+
+    assert dropped == ["Background playback"]
+    assert "Background playback" not in semantic_digest
+    assert "14:30–15:00" in index_digest
+    assert "15:30–16:00" in index_digest
+    assert "Standup" in index_digest
+    assert "Background playback" in index_digest
+    assert "important important" not in index_digest
+    assert "incidental incidental" not in index_digest
+
+
 def test_claim_query_excludes_terminal_states_and_exhausted_attempts():
     day = SimpleNamespace(
         user_id="user-one", local_date=DAY, timezone=ZONE, active_run_id="run-one"
@@ -215,107 +234,6 @@ def test_claim_query_excludes_terminal_states_and_exhausted_attempts():
     assert states[0]["memory_state"] == {"$in": ["", None]}
     assert states[1]["memory_state"] == "claimed"
     assert "$lt" in states[1]["memory_claimed_at"]
-
-
-@pytest.mark.asyncio
-async def test_promotion_only_touches_cited_capture_evidence(monkeypatch):
-    """A conversational episode un-fences its recordings; other episodes do not."""
-
-    updated: dict = {}
-    enqueued: list[tuple[str, dict]] = []
-
-    class FakeCursor:
-        def __init__(self, documents):
-            self._documents = documents
-
-        def __aiter__(self):
-            async def generate():
-                for document in self._documents:
-                    yield document
-
-            return generate()
-
-    class FakeCollection:
-        def __init__(self):
-            self.queries = []
-
-        def find(self, query, _projection=None):
-            self.queries.append(query)
-            wanted = set(query["conversation_id"]["$in"])
-            # Only "screenpipe-meeting" is still capture evidence in this fixture.
-            return FakeCursor(
-                [{"conversation_id": "screenpipe-meeting"}]
-                if "screenpipe-meeting" in wanted
-                else []
-            )
-
-        async def update_many(self, query, update):
-            updated["query"] = query
-            updated["update"] = update
-
-    collection = FakeCollection()
-    monkeypatch.setattr(
-        discovery.Conversation, "get_pymongo_collection", lambda: collection
-    )
-    # This test is about which recordings promotion selects. Resolving a cited id to
-    # whatever is live now needs a real database and is covered by
-    # tests/test_recording_refs.py.
-    monkeypatch.setattr(discovery, "resolve_live_recordings", _identity)
-    monkeypatch.setattr(
-        discovery,
-        "enqueue_summary_job_bundle",
-        lambda conversation_id, **kwargs: enqueued.append((conversation_id, kwargs)),
-    )
-
-    promoted = await discovery._promote_conversational_recordings(
-        [
-            make_episode(
-                "meeting",
-                hour=9,
-                conversational=True,
-                evidence_conversation_id="screenpipe-meeting",
-            ),
-            make_episode("gaming", hour=11, evidence_conversation_id="ambient-noise"),
-        ]
-    )
-
-    assert promoted == ["screenpipe-meeting"]
-    # The non-conversational episode's recording is never even considered.
-    assert collection.queries[0]["conversation_id"]["$in"] == ["screenpipe-meeting"]
-    assert collection.queries[0]["data_purpose"] == "capture_evidence"
-    assert updated["update"]["$set"] == {
-        "data_purpose": "conversation",
-        "memory_excluded": False,
-        "memory_exclusion_reason": None,
-    }
-    # The complete summary bundle runs, but memory comes from the settled-day pass.
-    assert enqueued == [
-        (
-            "screenpipe-meeting",
-            {
-                "include_memory_context": False,
-                "meta": {
-                    "conversation_id": "screenpipe-meeting",
-                    "trigger": "timeline_promotion",
-                },
-            },
-        )
-    ]
-
-
-@pytest.mark.asyncio
-async def test_promotion_is_a_noop_without_a_conversational_episode(monkeypatch):
-    def explode():
-        raise AssertionError("must not query conversations")
-
-    monkeypatch.setattr(discovery.Conversation, "get_pymongo_collection", explode)
-
-    assert (
-        await discovery._promote_conversational_recordings(
-            [make_episode("gaming", hour=11, evidence_conversation_id="ambient")]
-        )
-        == []
-    )
 
 
 def test_digest_keeps_all_episode_summaries_when_they_fit():
@@ -373,10 +291,6 @@ def test_digest_drops_no_conversational_episode_when_summaries_exceed_budget():
 
     assert dropped == []
     assert "Standup" in digest and "One-on-one" in digest
-
-
-async def _identity(conversation_ids):
-    return set(conversation_ids)
 
 
 def test_partial_is_terminal_so_a_truncated_day_is_not_re_attempted():

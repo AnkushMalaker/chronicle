@@ -9,6 +9,7 @@ silently never surfaced. Verified against real MongoDB:
 """
 
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -16,6 +17,7 @@ import pytest_asyncio
 from beanie import init_beanie
 from motor.motor_asyncio import AsyncIOMotorClient
 
+from advanced_omi_backend.models.audio_capture import AudioRangeRef
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation, create_conversation
 from advanced_omi_backend.models.timeline import TimelineEvidenceRef
@@ -53,27 +55,51 @@ async def clean_db(init_db):
 
 
 async def _recording(
-    *, start=EPOCH, chunks=6, client_id=STREAM, deleted=False, reason=None
+    *,
+    start=EPOCH,
+    chunks=6,
+    client_id=STREAM,
+    deleted=False,
+    reason=None,
+    audio_range: AudioRangeRef | None = None,
 ):
-    conversation = create_conversation(user_id="u1", client_id=client_id)
-    conversation.created_at = start
-    conversation.audio_chunks_count = chunks
-    conversation.audio_total_duration = chunks * 10.0
+    if audio_range is None:
+        capture_id = f"capture-{uuid.uuid4()}"
+        documents = []
+        for index in range(chunks):
+            document = AudioChunkDocument(
+                user_id="u1",
+                capture_source_id=client_id,
+                capture_session_id=capture_id,
+                sequence=index,
+                audio_data=b"x",
+                original_size=1,
+                compressed_size=1,
+                duration=10.0,
+                captured_at=start + timedelta(seconds=index * 10.0),
+            )
+            await document.insert()
+            documents.append(document)
+        audio_range = AudioRangeRef(
+            capture_source_id=client_id,
+            time_basis="received",
+            capture_session_ids=[capture_id],
+            chunk_ids=[str(document.id) for document in documents],
+            started_at=start,
+            ended_at=start + timedelta(seconds=chunks * 10),
+        )
+    conversation = create_conversation(
+        user_id="u1",
+        client_id=client_id,
+        audio_ranges=[audio_range],
+        started_at=audio_range.started_at,
+        ended_at=audio_range.ended_at,
+    )
+    conversation.audio_chunks_count = len(audio_range.chunk_ids)
+    conversation.audio_total_duration = audio_range.duration_seconds
     conversation.deleted = deleted
     conversation.deletion_reason = reason
     await conversation.insert()
-    for index in range(chunks):
-        await AudioChunkDocument(
-            conversation_id=conversation.conversation_id,
-            chunk_index=index,
-            audio_data=b"x",
-            original_size=1,
-            compressed_size=1,
-            start_time=index * 10.0,
-            end_time=(index + 1) * 10.0,
-            duration=10.0,
-            captured_at=start + timedelta(seconds=index * 10.0),
-        ).insert()
     return conversation
 
 
@@ -100,7 +126,7 @@ async def test_a_deduped_twin_resolves_by_the_audio_it_covered(clean_db):
     """Dedup records no lineage — the surviving copy never knew about this one."""
 
     twin = await _recording(deleted=True, reason="duplicate_screenpipe_ingest_retry")
-    survivor = await _recording()
+    survivor = await _recording(audio_range=twin.audio_ranges[0])
 
     assert await resolve_live_recordings([twin.conversation_id]) == {
         survivor.conversation_id
@@ -148,25 +174,11 @@ async def test_episode_audio_range_survives_chunk_rebinding(clean_db):
     assert ranges[0].ended_at == EPOCH + timedelta(seconds=25)
     original_ids = ranges[0].chunk_ids
 
-    rebound = await _recording(start=EPOCH + timedelta(hours=1), chunks=1)
-    await AudioChunkDocument.get_pymongo_collection().update_many(
-        {
-            "_id": {
-                "$in": [
-                    chunk.id
-                    async for chunk in AudioChunkDocument.find(
-                        {"conversation_id": recording.conversation_id}
-                    )
-                ]
-            }
-        },
-        {"$set": {"conversation_id": rebound.conversation_id}},
-    )
+    rebound = await _recording(audio_range=recording.audio_ranges[0])
+    recording.deleted = True
+    recording.derived_into = [rebound.conversation_id]
+    await recording.save()
 
-    moved = await AudioChunkDocument.find(
-        {
-            "conversation_id": rebound.conversation_id,
-            "captured_at": {"$lt": EPOCH + timedelta(minutes=1)},
-        }
-    ).to_list()
-    assert sorted(str(chunk.id) for chunk in moved) == sorted(original_ids)
+    persisted = await AudioChunkDocument.find({}).to_list()
+    assert sorted(str(chunk.id) for chunk in persisted) == sorted(original_ids)
+    assert rebound.audio_ranges[0].chunk_ids == recording.audio_ranges[0].chunk_ids

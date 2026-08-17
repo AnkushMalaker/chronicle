@@ -34,6 +34,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.user import User
+from advanced_omi_backend.services.audio_claims import locate_conversation_audio_at
 from advanced_omi_backend.services.timeline.episode_bounds import (
     EPISODE_MIN_QUIET,
     BucketState,
@@ -72,25 +73,12 @@ async def _locate(when: datetime) -> Optional[dict[str, Any]]:
     trim that renumbered everything around it.
     """
 
-    moment = as_utc(when)
-    chunk = (
-        await AudioChunkDocument.find(
-            {
-                "captured_at": {"$lte": moment, "$gte": moment - timedelta(minutes=5)},
-                "deleted": {"$ne": True},
-            }
-        )
-        .sort("-captured_at")
-        .first_or_none()
-    )
-    if chunk is None or chunk.captured_at is None:
-        return None
-    into = (moment - as_utc(chunk.captured_at)).total_seconds()
-    if into > (chunk.duration or 10.0) + 1:
+    location = await locate_conversation_audio_at(when)
+    if location is None:
         return None
     return {
-        "conversation_id": chunk.conversation_id,
-        "offset": round(float(chunk.start_time) + into, 1),
+        "conversation_id": location.conversation_id,
+        "offset": round(location.offset_seconds, 1),
     }
 
 
@@ -571,7 +559,7 @@ async def main() -> None:
 
     zone = ZoneInfo(args.timezone)
     client = AsyncIOMotorClient(os.getenv("MONGODB_URI", "mongodb://mongo:27017"))
-    database = client.chronicle
+    database = client[os.getenv("MONGODB_DATABASE", "chronicle")]
     await init_beanie(
         database=database, document_models=[Conversation, AudioChunkDocument, User]
     )

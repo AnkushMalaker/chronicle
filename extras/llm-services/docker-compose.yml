@@ -1,22 +1,25 @@
 services:
   llama-cpp-llm:
-    # Muse Glimmer support merged after the currently published CUDA image. Build
-    # the exact upstream merge reproducibly until an equivalent image is tagged.
-    image: localhost/chronicle-llama-cpp:muse-glimmer-62bf73d
+    # Pin the day-zero Qwen3.8-capable upstream revision so a mutable image tag
+    # cannot silently change the production inference runtime.
+    image: localhost/chronicle-llama-cpp:qwen3.8-6b4344e
     build:
-      context: https://github.com/ggml-org/llama.cpp.git#62bf73d25c53b8161f8a22894d4f90c4aebbd7d0
+      context: https://github.com/ggml-org/llama.cpp.git#6b4344ecc7e6a493daba9681991852eb06bb3b33
       dockerfile: .devops/cuda.Dockerfile
       target: server
       args:
-        APP_VERSION: muse-glimmer-62bf73d
-        APP_REVISION: 62bf73d25c53b8161f8a22894d4f90c4aebbd7d0
+        APP_VERSION: qwen3.8-6b4344e
+        APP_REVISION: 6b4344ecc7e6a493daba9681991852eb06bb3b33
+        # Default to RTX 4090/Ada (compute capability 8.9), but keep other
+        # deployment GPUs configurable without editing this checked-in file.
+        CUDA_DOCKER_ARCH: "${CUDA_DOCKER_ARCH:-89}"
     ports:
       # Loopback is the safe default. Same-host Chronicle containers reach this
       # service directly as llama-cpp-llm:8080 on chronicle-network.
       - "${LLM_BIND_HOST:-127.0.0.1}:${LLM_PORT:-8083}:8080"
     volumes:
       - ./models:/models:ro
-      - ./cache:/cache
+      - ${LLM_CACHE_DIR:-./cache}:/cache
     environment:
       # HF download mode vs local-file mode are mutually exclusive: passing both
       # --hf-repo and --model makes llama.cpp use the model basename as the file to

@@ -24,12 +24,17 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Optional
+from typing import Iterator, Optional
 
 import requests
 import uvicorn
 from common.base_service import BaseASRService, create_asr_app
-from common.response_models import TranscriptionResult
+from common.response_models import (
+    TranscriptionProgressEvent,
+    TranscriptionResult,
+    TranscriptionResultEvent,
+    TranscriptionStreamEvent,
+)
 from providers.vibevoice.vllm_transcriber import VibeVoiceVllmTranscriber
 
 logger = logging.getLogger(__name__)
@@ -199,7 +204,7 @@ class VibeVoiceVllmService(BaseASRService):
 
     def transcribe_with_progress(
         self, audio_file_path: str, context_info=None, **kwargs
-    ):
+    ) -> Iterator[TranscriptionStreamEvent]:
         if kwargs:
             logger.warning(
                 f"transcribe_with_progress: ignoring unsupported kwargs: {list(kwargs.keys())}"
@@ -210,9 +215,9 @@ class VibeVoiceVllmService(BaseASRService):
             audio_file_path, hotwords=context_info
         ):
             if event["type"] == "result":
-                yield {"type": "result", **event["result"].to_dict()}
+                yield TranscriptionResultEvent.from_result(event["result"])
             else:
-                yield event
+                yield TranscriptionProgressEvent.model_validate(event)
 
 
 def main():

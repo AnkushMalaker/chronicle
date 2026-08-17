@@ -6,7 +6,6 @@ Covers the two things the facade exists to guarantee:
    hash write.
 """
 
-import asyncio
 import json
 
 import pytest
@@ -198,6 +197,7 @@ async def test_take_close_request_returns_then_clears():
     await store.init_session(
         "sess-1", user_id="u1", client_id="c1", stream_name="audio:stream:c1"
     )
+    await store.set_active_conversation("sess-1", "conversation-1")
     assert await store.request_close("sess-1", "user_requested") is True
 
     assert await store.take_close_request("sess-1") == "user_requested"
@@ -207,6 +207,15 @@ async def test_take_close_request_returns_then_clears():
 async def test_request_close_returns_false_when_missing():
     store = SessionStore(_fake_redis())
     assert await store.request_close("nope", "user_requested") is False
+
+
+async def test_request_close_returns_false_before_speech_materializes_conversation():
+    store = SessionStore(_fake_redis())
+    await store.init_session(
+        "sess-1", user_id="u1", client_id="c1", stream_name="audio:stream:c1"
+    )
+
+    assert await store.request_close("sess-1", "user_requested") is False
 
 
 async def test_get_audio_format_fallback_on_missing_and_garbage():
@@ -332,251 +341,69 @@ async def test_record_event_and_speaker_check():
 
 
 # --------------------------------------------------------------------------- #
-# Conversation pointer (conversation:current)
-#
-# The pointer has per-caller TTLs that used to be passed inline at ~11 sites
-# (86400 rotation / none for the always_persist placeholder / 3600 disconnect
-# backstop). These tests pin that behaviour now that it lives on the facade.
+# Active semantic Conversation (a field on the session hash)
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize("decode_responses", [False, True])
-async def test_set_current_conversation_default_ttl(decode_responses):
+async def test_active_conversation_lives_on_active_session_hash(decode_responses):
     client = _fake_redis(decode_responses)
     store = SessionStore(client)
-
-    await store.set_current_conversation("sess-1", "conv-A")
-
-    assert await store.get_current_conversation_id("sess-1") == "conv-A"
-    ttl = await client.ttl("conversation:current:sess-1")
-    assert 0 < ttl <= 86400  # rotation pointer carries the 24h TTL
-
-
-async def test_set_current_conversation_no_ttl_for_placeholder():
-    client = _fake_redis()
-    store = SessionStore(client)
-
-    await store.set_current_conversation("sess-1", "conv-A", ttl=None)
-
-    assert await store.get_current_conversation_id("sess-1") == "conv-A"
-    assert await client.ttl("conversation:current:sess-1") == -1  # persistent
-
-
-async def test_set_current_conversation_overwrites_on_rotation():
-    store = SessionStore(_fake_redis())
-    await store.set_current_conversation("sess-1", "conv-A")
-    await store.set_current_conversation("sess-1", "conv-B")
-    assert await store.get_current_conversation_id("sess-1") == "conv-B"
-
-
-async def test_assign_current_conversation_requires_active_unassigned_session():
-    store = SessionStore(_fake_redis())
     await store.init_session(
-        "sess-1", user_id="u1", client_id="c1", stream_name="audio:stream:c1"
+        "sess-1", user_id="u1", client_id="c1", stream_name="audio:stream:sess-1"
     )
 
-    assert (
-        await store.assign_current_conversation_if_active("sess-1", "conv-A", ttl=None)
-        is True
-    )
-    assert (
-        await store.assign_current_conversation_if_active("sess-1", "conv-B", ttl=None)
-        is False
-    )
-    assert await store.get_current_conversation_id("sess-1") == "conv-A"
+    assert await store.set_active_conversation("sess-1", "conv-A") is True
+    assert await store.get_active_conversation_id("sess-1") == "conv-A"
+    view = await store.read("sess-1")
+    assert view.active_conversation_id == "conv-A"
+    assert await client.exists("conversation:current:sess-1") == 0
 
 
-async def test_assign_current_conversation_rejects_finalizing_session():
-    store = SessionStore(_fake_redis())
-    await store.init_session(
-        "sess-1", user_id="u1", client_id="c1", stream_name="audio:stream:c1"
-    )
-    await store.mark_finalizing("sess-1", "websocket_disconnect")
-
-    assert (
-        await store.assign_current_conversation_if_active("sess-1", "conv-A", ttl=None)
-        is False
-    )
-    assert await store.get_current_conversation_id("sess-1") is None
-
-
-async def test_replace_current_conversation_is_atomic_for_active_session():
+async def test_active_conversation_cannot_replace_a_different_open_claim():
     store = SessionStore(_fake_redis())
     await store.init_session(
         "sess-1", user_id="u1", client_id="c1", stream_name="audio:stream:sess-1"
     )
-    await store.set_current_conversation("sess-1", "conv-A", ttl=None)
 
-    replaced = await store.replace_current_conversation_if_active(
-        "sess-1", "conv-A", "conv-B", ttl=None
+    assert await store.set_active_conversation("sess-1", "conv-A") is True
+    assert await store.set_active_conversation("sess-1", "conv-B") is False
+    assert await store.get_active_conversation_id("sess-1") == "conv-A"
+
+
+async def test_active_conversation_rejects_terminal_or_missing_session():
+    store = SessionStore(_fake_redis())
+
+    assert await store.set_active_conversation("missing", "conv-A") is False
+    await store.init_session(
+        "sess-1", user_id="u1", client_id="c1", stream_name="audio:stream:sess-1"
     )
+    await store.mark_finalizing("sess-1", "websocket_disconnect")
+    assert await store.set_active_conversation("sess-1", "conv-A") is False
+    assert await store.get_active_conversation_id("sess-1") is None
 
-    assert replaced is True
-    assert await store.get_current_conversation_id("sess-1") == "conv-B"
-    assert await store._redis.ttl("conversation:current:sess-1") == -1
 
-
-async def test_replace_current_conversation_rejects_wrong_owner_or_terminal_session():
+async def test_clear_active_conversation_preserves_a_newer_claim():
     store = SessionStore(_fake_redis())
     await store.init_session(
         "sess-1", user_id="u1", client_id="c1", stream_name="audio:stream:sess-1"
     )
-    await store.set_current_conversation("sess-1", "conv-A", ttl=None)
+    await store.set_active_conversation("sess-1", "conv-B")
 
-    assert (
-        await store.replace_current_conversation_if_active(
-            "sess-1", "other", "conv-B", ttl=None
-        )
-        is False
-    )
-    await store.mark_finalizing("sess-1", "websocket_disconnect")
-    assert (
-        await store.replace_current_conversation_if_active(
-            "sess-1", "conv-A", "conv-B", ttl=None
-        )
-        is False
-    )
-    assert await store.get_current_conversation_id("sess-1") == "conv-A"
-
-
-async def test_get_current_conversation_none_when_absent():
-    store = SessionStore(_fake_redis())
-    assert await store.get_current_conversation_id("sess-1") is None
-
-
-async def test_clear_current_conversation_is_noop_when_absent():
-    store = SessionStore(_fake_redis())
-    await store.clear_current_conversation("sess-1")  # must not raise
-    await store.set_current_conversation("sess-1", "conv-A")
-    await store.clear_current_conversation("sess-1")
-    assert await store.get_current_conversation_id("sess-1") is None
-
-
-async def test_clear_current_conversation_preserves_newer_assignment():
-    store = SessionStore(_fake_redis())
-    await store.set_current_conversation("sess-1", "conv-B")
-
-    cleared = await store.clear_current_conversation("sess-1", expected_id="conv-A")
+    cleared = await store.clear_active_conversation("sess-1", expected_id="conv-A")
 
     assert cleared is False
-    assert await store.get_current_conversation_id("sess-1") == "conv-B"
+    assert await store.get_active_conversation_id("sess-1") == "conv-B"
 
 
-async def test_clear_current_conversation_removes_expected_assignment():
+async def test_clear_active_conversation_removes_expected_claim():
     store = SessionStore(_fake_redis())
-    await store.set_current_conversation("sess-1", "conv-A")
+    await store.init_session(
+        "sess-1", user_id="u1", client_id="c1", stream_name="audio:stream:sess-1"
+    )
+    await store.set_active_conversation("sess-1", "conv-A")
 
-    cleared = await store.clear_current_conversation("sess-1", expected_id="conv-A")
+    cleared = await store.clear_active_conversation("sess-1", expected_id="conv-A")
 
     assert cleared is True
-    assert await store.get_current_conversation_id("sess-1") is None
-
-
-async def test_expire_current_conversation_only_when_present():
-    client = _fake_redis()
-    store = SessionStore(client)
-
-    assert await store.expire_current_conversation("sess-1", 3600) is False
-
-    await store.set_current_conversation("sess-1", "conv-A", ttl=None)
-    assert await store.expire_current_conversation("sess-1", 3600) is True
-    ttl = await client.ttl("conversation:current:sess-1")
-    assert 0 < ttl <= 3600
-
-
-# --------------------------------------------------------------------------- #
-# conversation_create_lock — the dual-creation guarantee
-#
-# This lock is the entire reason one streaming session can't produce two
-# conversations (the persistence job and open_conversation_job both run a
-# get→create→set on the pointer). These are its permanent regression tests.
-# --------------------------------------------------------------------------- #
-
-
-async def test_conversation_create_lock_is_mutually_exclusive():
-    """Two concurrent holders of the same session lock never overlap."""
-    store = SessionStore(_fake_redis())
-    inside = 0
-    max_concurrent = 0
-    order = []
-
-    async def worker(tag):
-        nonlocal inside, max_concurrent
-        async with store.conversation_create_lock("sess-1") as acquired:
-            assert acquired is True
-            inside += 1
-            max_concurrent = max(max_concurrent, inside)
-            order.append(f"enter-{tag}")
-            await asyncio.sleep(0.05)  # hold long enough for the other to contend
-            order.append(f"exit-{tag}")
-            inside -= 1
-
-    await asyncio.gather(worker("a"), worker("b"))
-
-    assert max_concurrent == 1  # serialized — never both inside the section
-    # whichever wins fully completes before the other enters (no interleave)
-    assert order in (
-        ["enter-a", "exit-a", "enter-b", "exit-b"],
-        ["enter-b", "exit-b", "enter-a", "exit-a"],
-    )
-
-
-async def test_conversation_create_lock_different_sessions_run_concurrently():
-    store = SessionStore(_fake_redis())
-    inside = 0
-    max_concurrent = 0
-
-    async def worker(sid):
-        nonlocal inside, max_concurrent
-        async with store.conversation_create_lock(sid):
-            inside += 1
-            max_concurrent = max(max_concurrent, inside)
-            await asyncio.sleep(0.05)
-            inside -= 1
-
-    await asyncio.gather(worker("sess-1"), worker("sess-2"))
-
-    assert max_concurrent == 2  # independent sessions don't block each other
-
-
-async def test_conversation_create_lock_fails_open_on_timeout():
-    """If the lock can't be acquired in time, the body still runs (yields False)."""
-    client = _fake_redis()
-    store = SessionStore(client)
-    # Pre-hold the lock so the contender can never acquire within wait_timeout.
-    await client.set("conversation:create_lock:sess-1", "1", ex=30)
-
-    ran = False
-    async with store.conversation_create_lock(
-        "sess-1", wait_timeout=0.2, poll=0.02
-    ) as acquired:
-        ran = True
-        assert acquired is False  # degraded to unlocked, not deadlocked
-
-    assert ran is True
-    # we never acquired, so the pre-existing lock is left untouched
-    assert await client.get("conversation:create_lock:sess-1") is not None
-
-
-async def test_conversation_create_lock_timeout_does_not_suppress_caller_error():
-    client = _fake_redis()
-    store = SessionStore(client)
-    await client.set("conversation:create_lock:sess-1", "1", ex=30)
-
-    with pytest.raises(RuntimeError, match="creation failed"):
-        async with store.conversation_create_lock(
-            "sess-1", wait_timeout=0.01, poll=0.001
-        ) as acquired:
-            assert acquired is False
-            raise RuntimeError("creation failed")
-
-
-async def test_conversation_create_lock_releases_on_exit():
-    client = _fake_redis()
-    store = SessionStore(client)
-
-    async with store.conversation_create_lock("sess-1") as acquired:
-        assert acquired is True
-        assert await client.get("conversation:create_lock:sess-1") is not None
-
-    assert await client.get("conversation:create_lock:sess-1") is None  # released
+    assert await store.get_active_conversation_id("sess-1") is None

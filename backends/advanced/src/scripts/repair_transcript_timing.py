@@ -2,9 +2,10 @@
 """Scan active transcript clocks and repair them against current conversation audio.
 
 Severe mismatches are quarantined on their existing version and retranscribed through
-the production Smallest.ai path. That path owns the content-hash response cache, so an
-identical paid request is reused rather than billed again. Provider tail overhangs of at
-most one second are clipped locally without another provider call.
+the configured batch STT path. An explicit ``--provider-model`` can select a local model
+without changing the deployment default. Every registry provider uses the content-hash
+response cache, so retries reuse identical results. Provider tail overhangs of at most
+one second are clipped locally without another provider call.
 
     python src/scripts/repair_transcript_timing.py          # scan only
     python src/scripts/repair_transcript_timing.py --apply  # repair
@@ -22,7 +23,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from advanced_omi_backend.database import get_database
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import _ensure_beanie_initialized
+from advanced_omi_backend.services.processing_artifacts import (
+    persist_timing_normalized_revision,
+)
 from advanced_omi_backend.services.transcript_integrity import (
     TranscriptTimingError,
     validate_and_normalize_transcript_timing,
@@ -44,6 +49,27 @@ def _active_version(document: dict[str, Any]) -> dict[str, Any] | None:
         (version for version in versions if version.get("version_id") == active_id),
         versions[-1] if versions else None,
     )
+
+
+def _speaker_source_version(document: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve an active speaker projection to the provider/timing source it copied."""
+
+    current = _active_version(document)
+    versions = {
+        version.get("version_id"): version
+        for version in document.get("transcript_versions") or []
+        if version.get("version_id")
+    }
+    seen: set[str] = set()
+    while current and (current.get("metadata") or {}).get("reprocessing_type") == (
+        "speaker_diarization"
+    ):
+        version_id = str(current.get("version_id") or "")
+        if not version_id or version_id in seen:
+            return None
+        seen.add(version_id)
+        current = versions.get((current.get("metadata") or {}).get("source_version_id"))
+    return current
 
 
 def _is_rate_limit(error: BaseException) -> bool:
@@ -74,7 +100,7 @@ async def _scan(database: Any, ids: list[str]) -> tuple[int, list[dict], list[di
     edge_overhangs: list[dict] = []
     async for document in cursor:
         scanned += 1
-        version = _active_version(document)
+        version = _speaker_source_version(document)
         if not version:
             continue
         segments = version.get("segments") or []
@@ -108,6 +134,7 @@ async def _scan(database: Any, ids: list[str]) -> tuple[int, list[dict], list[di
                     "conversation_id": document["conversation_id"],
                     "title": document.get("title") or "",
                     "version_id": version["version_id"],
+                    "duration": duration,
                     "segments": clean_segments,
                     "words": clean_words,
                 }
@@ -138,22 +165,25 @@ async def _mark_quarantined(database: Any, target: dict) -> None:
 
 
 async def _clip_edge_overhang(database: Any, target: dict) -> None:
-    validation = {
-        "status": "normalized_edge_overhang",
-        "tolerance_seconds": 1.0,
-        "normalized_at": datetime.now(timezone.utc),
-    }
-    await database["conversations"].update_one(
-        {"conversation_id": target["conversation_id"]},
-        {
-            "$set": {
-                "transcript_versions.$[version].segments": target["segments"],
-                "transcript_versions.$[version].words": target["words"],
-                "transcript_versions.$[version].metadata.timing_validation": validation,
-            }
-        },
-        array_filters=[{"version.version_id": target["version_id"]}],
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == target["conversation_id"]
     )
+    if conversation is None:
+        raise RuntimeError(f"Conversation {target['conversation_id']} disappeared")
+    source = conversation.get_transcript_version(target["version_id"])
+    if source is None:
+        raise RuntimeError(
+            f"Transcript version {target['version_id']} disappeared from "
+            f"{target['conversation_id']}"
+        )
+    await persist_timing_normalized_revision(
+        conversation,
+        source,
+        segments=target["segments"],
+        words=target["words"],
+        audio_duration=target["duration"],
+    )
+    await conversation.save()
 
 
 async def main() -> None:
@@ -161,6 +191,10 @@ async def main() -> None:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--conversation-id", action="append", default=[])
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument(
+        "--provider-model",
+        help="Configured STT model name (for example stt-faster-whisper)",
+    )
     args = parser.parse_args()
 
     database = get_database()
@@ -202,6 +236,7 @@ async def main() -> None:
                     target["conversation_id"],
                     str(uuid.uuid4()),
                     "repair_transcript_timing",
+                    provider_model_name=args.provider_model,
                 )
                 if result.get("skipped") and result.get("reason") == (
                     "empty_or_contentless_transcription"

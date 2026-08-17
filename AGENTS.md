@@ -13,6 +13,12 @@ This supports a comprehensive web dashboard for management.
 
 **❌ No Backward Compatibility**: Do NOT add backward compatibility code unless explicitly requested. This includes fallback logic, legacy field support, or compatibility layers. Always ask before adding backward compatibility - in most cases the answer is no during active development.
 
+## Local-Only Research Rule
+
+**Do not stage, commit, or push research or experimental material unless the user explicitly authorizes the exact paths.** Treat it as machine-local by default, even when it is untracked and appears useful.
+
+This includes research code and notes, datasets, recordings/media, model weights and checkpoints, archives, screenshots, logs, caches, benchmark/evaluation outputs, generated reports, backups, secrets, and machine-local configuration. In particular, do not add material from `experiments/`, `extras/ml-experiments/`, wake-word training/evaluation trees, or similar research directories while curating unrelated commits. Do not suggest bundling these files into a baseline or feature branch. Leave them untouched and untracked unless the user names the specific files to publish.
+
 ## Live Deployment Location
 
 A Chronicle deployment often runs on a **different machine** from the checkout you are
@@ -263,6 +269,15 @@ docker compose up kokoro-tts -d --build       # Kokoro-82M (<~1GB VRAM GPU/CPU, 
 
 ## Architecture Overview
 
+### Unknown speaker invariant
+
+`Unknown Speaker N` is a conversation-local diarization placeholder, not a globally
+stable speaker name. For example, `Unknown Speaker 1` in two conversations may describe
+different people. Never use the literal placeholder as a cross-conversation identity,
+filter option, enrollment name, or memory person. Corpus workflows must use a generic
+unknown category or the compound identity `(conversation_id, local_speaker_label)` until
+voice evidence and human review assign a real person.
+
 ### Key Components
 - **Audio Pipeline**: Real-time Opus/PCM → Application-level processing → Deepgram transcription → memory extraction
 - **Wyoming Protocol**: WebSocket communication uses Wyoming protocol (JSONL + binary) for structured audio sessions
@@ -273,7 +288,7 @@ docker compose up kokoro-tts -d --build       # Kokoro-82M (<~1GB VRAM GPU/CPU, 
 - **Memory System**: Single agentic Markdown vault — a tool-calling memory agent records conversations and surgically edits Obsidian-style People/Topic/Category notes; a read-only retrieval agent drives ripgrep over the vault to answer queries
 - **Authentication**: Email-based login with MongoDB ObjectId user system
 - **Client Management**: Auto-generated client IDs as `{user_id_suffix}-{device_name}`, centralized ClientManager
-- **Data Storage**: MongoDB (conversations, `audio_chunks`, chat, annotations), disk WAV files, and the Markdown vault (`data/conversation_docs/<user_id>/`) as the memory source of truth. An audio chunk's immutable `captured_at` is its wall-clock identity; its `conversation_id` and relative offsets are mutable operational grouping fields.
+- **Data Storage**: MongoDB (`audio_capture_sessions`, capture-owned `audio_chunks`, semantic conversations, processing artifacts, chat, annotations), disk media, and the Markdown vault (`data/conversation_docs/<user_id>/`) as the memory source of truth. An audio chunk's immutable `captured_at` is its wall-clock identity; Conversations reference chunks through absolute `AudioRangeRef` claims.
 - **Web Interface**: React-based web dashboard with authentication and real-time monitoring
 
 ### Service Dependencies
@@ -298,21 +313,23 @@ Optional:
 1. **Audio Ingestion**: OMI devices stream audio via WebSocket using Wyoming protocol with JWT auth
 2. **Wyoming Protocol Session Management**: Clients send audio-start/audio-stop events for session boundaries
 3. **Application-Level Processing**: Global queues and processors handle all audio/transcription/memory tasks
-4. **Speech-Driven Conversation Creation**: User-facing conversations only created when speech is detected
+4. **Speech-Driven Conversation Creation**: Continuous capture creates no user-facing row until speech is detected; deliberate recordings/uploads are visible immediately
 5. **Audio Evidence and Conversations**: Opus audio documents are persisted in `audio_chunks`; `captured_at` remains stable when chunks are split, merged, or trimmed. A conversation is the current semantic/operational claim over those documents, not their temporal identity.
 6. **Versioned Processing**: Transcript and memory versions tracked with active version pointers
 7. **Memory Processing**: A tool-calling memory agent records each conversation and surgically edits People/Topic/Category notes in the Markdown vault
 8. **Memory Storage**: Obsidian-style Markdown vault at `data/conversation_docs/<user_id>/` — the single source of truth, searched by a read-only retrieval agent via ripgrep
-9. **Audio Optimization**: Long silent runs are moved to hidden, soft-deleted remnant conversations; they are not immediately destroyed or re-encoded
+9. **Audio Optimization**: Long silent runs are removed from Conversation claims without moving, deleting, or re-encoding capture chunks
 10. **Task Tracking**: BackgroundTaskManager ensures proper cleanup of all async operations
 
 ### Speech-Driven Architecture
 
-**Core Principle**: User-visible conversations represent speech-bearing intervals. Capture and processing paths may create provisional or hidden conversation containers, but raw audio time identity belongs to each `AudioChunkDocument.captured_at`, not to the container.
+**Core Principle**: User-visible Conversations represent deliberate recordings or detected speech-bearing intervals. Continuous capture persists without a provisional Conversation; raw audio time identity belongs to each `AudioChunkDocument.captured_at`.
 
 **Storage Architecture**:
-- **`audio_chunks` Collection**: Stores ~10-second Opus documents. `captured_at` is immutable absolute UTC capture time; `conversation_id`, `chunk_index`, `start_time`, and `end_time` may be reassigned/rebased by split, merge, and silence-trim operations.
-- **`conversations` Collection**: Stores the current user-visible or processing grouping over audio documents, identified by `conversation_id`. A conversation ID is operational lineage, not durable temporal identity.
+- **`audio_capture_sessions` Collection**: Stores technical ingest/recovery attempts; a reconnect may create another session without defining a semantic boundary.
+- **`audio_chunks` Collection**: Stores ~10-second Opus evidence with capture source/session identity, immutable absolute UTC `captured_at`, and sequence. It has no Conversation owner or Conversation-relative coordinates.
+- **`conversations` Collection**: Stores user-visible semantic claims in `audio_ranges`; a Conversation ID is lineage, not durable audio identity.
+- **Processing artifact collections**: Store immutable transcript and diarization evidence over the same range claims; Conversation transcript revisions are derived projections.
 - **Timeline episode audio**: `TimelineEpisode.audio_ranges` is the authoritative semantic audio claim: stable chunk IDs plus absolute UTC bounds. `related_conversation_ids` remains evidence/lineage context only.
 - **Speech Detection**: Analyzes transcript content, duration, and meaningfulness before conversation creation
 - **Automatic Filtering**: No user-facing conversations for silence, noise, or brief audio without speech
@@ -321,17 +338,13 @@ Optional:
 
 After transcription, VAD-driven silence trimming keeps configurable context around
 speech and only cuts long silent runs (defaults: 5 seconds of padding, a 120-second
-minimum silent run, and at least 60 seconds saved). Trimming moves whole audio chunks
-to a new soft-deleted `Trimmed silence` remnant with `deletion_reason: silence_trim`;
-it does not delete or re-encode them. Every moved chunk retains its immutable
-`captured_at`, and the visible conversation and active transcript are re-timed.
+minimum silent run, and at least 60 seconds saved). Trimming edits the Conversation's
+range claims and writes a derived transcript revision. Capture chunks remain unchanged.
 
-Soft deletion is recoverable but is not permanent archival. The ordinary cleanup job
-can hard-delete a remnant and all of its chunks after the configured retention period.
-The default retention is 30 days and automatic cleanup is disabled by default
-(`backend.cleanup.auto_cleanup_enabled: false`). Administrators can preview or invoke
-the same purge through `POST /api/admin/cleanup?dry_run=true|false`. Enabling automatic
-cleanup opts the deployment into permanent deletion after the retention window.
+Conversation soft deletion and raw-audio retention are separate. The ordinary cleanup
+job may purge old semantic Conversations and their waveform cache, but preserves capture
+chunks. Raw deletion is disabled until an explicit capture-retention policy can prove
+that every Conversation, Timeline episode, artifact, and annotation claim is handled.
 
 **Benefits**:
 - Clean user experience with only meaningful conversations displayed

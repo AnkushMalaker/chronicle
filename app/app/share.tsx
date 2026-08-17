@@ -40,7 +40,7 @@ export default function ShareScreen() {
   }, [resetShareIntent, router]);
 
   // Nothing to confirm: the intent was consumed or arrived without an image.
-  // `isReady` is load-bearing on iOS — the deep link lands here before the
+  // `isReady` is required on iOS — the deep link lands here before the
   // native module has been read, so acting sooner bounces straight back home
   // on every share.
   useEffect(() => {

@@ -10,11 +10,15 @@ Also includes audio cropping operations that work with the Conversation model.
 import logging
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import UploadFile
 from fastapi.responses import JSONResponse
+from pymongo.errors import DuplicateKeyError
 from rq import Retry
+from rq.exceptions import NoSuchJobError
+from rq.job import Job
 
 from advanced_omi_backend.client_manager import generate_client_id
 from advanced_omi_backend.controllers.queue_controller import (
@@ -22,8 +26,10 @@ from advanced_omi_backend.controllers.queue_controller import (
     start_post_conversation_jobs,
     transcription_queue,
 )
-from advanced_omi_backend.models.conversation import create_conversation
+from advanced_omi_backend.models.audio_capture import AudioRangeRef
+from advanced_omi_backend.models.conversation import Conversation, create_conversation
 from advanced_omi_backend.models.user import User
+from advanced_omi_backend.services.audio_claims import apply_audio_ranges
 from advanced_omi_backend.services.transcription import is_transcription_available
 from advanced_omi_backend.utils.audio_chunk_utils import convert_audio_to_chunks
 from advanced_omi_backend.utils.audio_utils import (
@@ -39,6 +45,143 @@ logger = logging.getLogger(__name__)
 audio_logger = logging.getLogger("audio_processing")
 
 
+def _same_audio_claim(left: AudioRangeRef, right: AudioRangeRef) -> bool:
+    fields = (
+        "capture_source_id",
+        "time_basis",
+        "chunk_ids",
+        "started_at",
+        "ended_at",
+        "capture_session_ids",
+    )
+    return all(getattr(left, field) == getattr(right, field) for field in fields)
+
+
+def _batch_transcription_job(
+    conversation: Conversation,
+    version_id: str,
+    client_id: str,
+):
+    """Return the live deterministic transcript job, replacing a terminal failure."""
+    if not is_transcription_available(mode="batch"):
+        return None
+    job_id = f"transcribe_{conversation.conversation_id[:12]}"
+    try:
+        existing = Job.fetch(job_id, connection=transcription_queue.connection)
+        status = existing.get_status(refresh=True)
+        status = status.value if hasattr(status, "value") else str(status)
+        if status in {"queued", "started", "deferred", "scheduled"}:
+            return existing
+        if status == "finished" and conversation.has_meaningful_transcript:
+            return existing
+        existing.delete()
+    except NoSuchJobError:
+        pass
+
+    return transcription_queue.enqueue(
+        transcribe_full_audio_job,
+        conversation.conversation_id,
+        version_id,
+        "batch",
+        job_timeout=-1,
+        result_ttl=JOB_RESULT_TTL,
+        job_id=job_id,
+        retry=Retry(max=4, interval=[60, 300, 900, 1800]),
+        description=f"Transcribe uploaded file {conversation.conversation_id[:8]}",
+        meta={
+            "conversation_id": conversation.conversation_id,
+            "client_id": client_id,
+        },
+    )
+
+
+async def materialize_and_process_audio_claim(
+    user: User,
+    audio_range: AudioRangeRef,
+    *,
+    device_name: str,
+    title: str,
+    segmentation_key: str,
+    external_source_id: str,
+    external_source_type: str,
+    data_purpose: str = "conversation",
+    memory_excluded: bool = True,
+    memory_exclusion_reason: str = "continuous_capture",
+    skip_memory_extraction: bool = True,
+    skip_title_summary: bool = True,
+) -> Conversation:
+    """Idempotently materialize one detected Conversation over existing capture.
+
+    This is the semantic seam for continuous capture: no audio is uploaded or copied.
+    The Conversation only claims a range that already exists in ``audio_chunks``.
+    """
+    client_id = generate_client_id(user, device_name)
+    conversation = await Conversation.find_one(
+        Conversation.segmentation_key == segmentation_key
+    )
+    if conversation is None:
+        candidate = create_conversation(
+            user_id=user.user_id,
+            client_id=client_id,
+            title=title,
+            summary="Transcribing detected speech...",
+            external_source_id=external_source_id,
+            external_source_type=external_source_type,
+            data_purpose=data_purpose,
+            memory_excluded=memory_excluded,
+            memory_exclusion_reason=memory_exclusion_reason,
+            audio_ranges=[audio_range],
+            origin="detected",
+            started_at=audio_range.started_at,
+            ended_at=audio_range.ended_at,
+            segmentation_key=segmentation_key,
+        )
+        await apply_audio_ranges(candidate, [audio_range], save=False)
+        try:
+            await candidate.insert()
+            conversation = candidate
+        except DuplicateKeyError:
+            conversation = await Conversation.find_one(
+                Conversation.segmentation_key == segmentation_key
+            )
+            if conversation is None:
+                raise
+
+    if conversation.user_id != user.user_id:
+        raise ValueError(f"segmentation key {segmentation_key} belongs to another user")
+    if not conversation.audio_ranges:
+        await apply_audio_ranges(conversation, [audio_range])
+    elif len(conversation.audio_ranges) != 1 or not _same_audio_claim(
+        conversation.audio_ranges[0], audio_range
+    ):
+        raise ValueError(
+            f"segmentation key {segmentation_key} was reused for a different audio claim"
+        )
+
+    if conversation.processing_enqueued_at is None:
+        version_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"chronicle:transcript:{conversation.conversation_id}",
+            )
+        )
+        transcription_job = _batch_transcription_job(
+            conversation, version_id, client_id
+        )
+        start_post_conversation_jobs(
+            conversation_id=conversation.conversation_id,
+            user_id=user.user_id,
+            transcript_version_id=version_id,
+            depends_on_job=transcription_job,
+            client_id=client_id,
+            skip_memory_extraction=skip_memory_extraction,
+            skip_title_summary=skip_title_summary,
+        )
+        conversation.processing_enqueued_at = datetime.now(timezone.utc)
+        await conversation.save()
+    return conversation
+
+
 async def upload_and_process_audio_files(
     user: User,
     files: list[UploadFile],
@@ -50,6 +193,7 @@ async def upload_and_process_audio_files(
     data_purpose: str | None = None,
     memory_excluded: bool | None = None,
     memory_exclusion_reason: str | None = None,
+    conversation_origin: Literal["deliberate", "detected"] = "deliberate",
     # Wall-clock time of the first sample. Continuous capture knows this (the source
     # chunks are timestamped); a plain file upload does not, and passes None.
     captured_at: datetime | None = None,
@@ -182,6 +326,12 @@ async def upload_and_process_audio_files(
                     ),
                     memory_exclusion_reason=memory_exclusion_reason
                     or ("annotation_only_upload" if annotation_only else None),
+                    origin=conversation_origin,
+                    segmentation_key=(
+                        f"detected-upload:{external_source_id}:v1"
+                        if conversation_origin == "detected" and external_source_id
+                        else None
+                    ),
                 )
                 await conversation.insert()
                 conversation_id = (
@@ -194,16 +344,22 @@ async def upload_and_process_audio_files(
 
                 # Convert audio directly to MongoDB chunks
                 try:
-                    num_chunks = await convert_audio_to_chunks(
-                        conversation_id=conversation_id,
+                    ingest = await convert_audio_to_chunks(
+                        user_id=user.user_id,
+                        capture_source_id=client_id,
                         audio_data=audio_data,
                         sample_rate=sample_rate,
                         channels=channels,
                         sample_width=sample_width,
                         captured_at=captured_at,
+                        origin="upload",
+                        external_source_id=external_source_id,
+                        data_purpose=data_purpose
+                        or ("annotation" if annotation_only else "normal_capture"),
                     )
+                    await apply_audio_ranges(conversation, [ingest.audio_range])
                     audio_logger.info(
-                        f"📦 Converted uploaded file to {num_chunks} MongoDB chunks "
+                        f"📦 Converted uploaded file to {ingest.chunk_count} MongoDB chunks "
                         f"(conversation {conversation_id[:12]})"
                     )
                 except ValueError as val_error:

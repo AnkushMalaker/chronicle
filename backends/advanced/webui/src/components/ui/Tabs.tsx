@@ -25,13 +25,18 @@ export function Tabs<T extends string = string>({
 }: TabsProps<T>) {
   if (variant === 'underline') {
     return (
-      <div className={clsx('flex gap-0.5 border-b border-gray-200 dark:border-gray-700', className)}>
+      <div
+        role="tablist"
+        className={clsx('flex gap-0.5 border-b border-gray-200 dark:border-gray-700', className)}
+      >
         {tabs.map((t) => {
           const on = t.value === value
           return (
             <button
               key={t.value}
               type="button"
+              role="tab"
+              aria-selected={on}
               onClick={() => onChange?.(t.value)}
               className={clsx(
                 '-mb-px inline-flex items-center gap-1.5 border-b-2 px-4 py-2 text-sm font-medium transition-colors',
@@ -49,13 +54,15 @@ export function Tabs<T extends string = string>({
     )
   }
   return (
-    <div className={clsx('flex flex-wrap gap-2', className)}>
+    <div role="tablist" className={clsx('flex flex-wrap gap-2', className)}>
       {tabs.map((t) => {
         const on = t.value === value
         return (
           <button
             key={t.value}
             type="button"
+            role="tab"
+            aria-selected={on}
             onClick={() => onChange?.(t.value)}
             className={clsx(
               'inline-flex items-center gap-1.5 rounded-lg px-3.5 py-[7px] text-sm font-medium transition-colors',

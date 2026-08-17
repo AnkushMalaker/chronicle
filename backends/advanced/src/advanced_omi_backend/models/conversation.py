@@ -8,11 +8,13 @@ and transcript versions.
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from beanie import Document, Indexed
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import BaseModel, Field, computed_field
 from pymongo import IndexModel
+
+from advanced_omi_backend.models.audio_capture import AudioRangeRef
 
 
 class Conversation(Document):
@@ -218,9 +220,23 @@ class Conversation(Document):
     )
     user_id: Indexed(str) = Field(description="User who owns this conversation")
     client_id: Indexed(str) = Field(description="Client device identifier")
-    source_session_id: Optional[str] = Field(
-        None,
-        description="Immutable recording session that originally owned this conversation",
+    audio_ranges: List[AudioRangeRef] = Field(
+        default_factory=list,
+        description="Ordered absolute-time claims over immutable audio documents",
+    )
+    started_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Absolute start of the semantic conversation claim",
+    )
+    ended_at: Optional[datetime] = Field(
+        None, description="Absolute end of the semantic conversation claim"
+    )
+    origin: Literal["deliberate", "detected"] = Field(
+        default="deliberate",
+        description="Whether a user action or speech segmentation created the claim",
+    )
+    segmentation_key: Optional[str] = Field(
+        None, description="Deterministic idempotency key for detected materialization"
     )
 
     # External file tracking (for deduplication of imported files)
@@ -322,7 +338,7 @@ class Conversation(Document):
         None, description="When the conversation was marked as deleted"
     )
 
-    # Always persist audio flag and processing status.
+    # Processing status.
     # Canonical values are the ConversationStatus enum: "active" | "completed" |
     # "failed". This field is OWNED by apply_status() — derived from facts (does an
     # active transcript exist?) at terminal points and by the reconciler. Individual
@@ -337,11 +353,10 @@ class Conversation(Document):
     failure_stage: Optional[str] = Field(
         None, description="Stage that failed when processing_status == 'failed'"
     )
-    always_persist: bool = Field(
-        default=False,
-        description="Flag indicating conversation was created for audio persistence",
+    processing_enqueued_at: Optional[datetime] = Field(
+        None,
+        description="When the initial transcript/post-processing chain was durably enqueued",
     )
-
     # Conversation completion tracking
     end_reason: Optional["Conversation.EndReason"] = Field(
         None, description="Reason why the conversation ended"
@@ -370,56 +385,26 @@ class Conversation(Document):
 
     # Versioned processing
     transcript_versions: List["Conversation.TranscriptVersion"] = Field(
-        default_factory=list, description="All transcript processing attempts"
+        default_factory=list,
+        description=(
+            "Bounded embedded read models: provider sources plus the active derived "
+            "projection; immutable processing history lives in standalone revisions"
+        ),
     )
 
     # Active version pointer
     active_transcript_version: Optional[str] = Field(
         None, description="Version ID of currently active transcript"
     )
+    active_transcript_revision_id: Optional[str] = Field(
+        None,
+        description="Standalone derived transcript/diarization revision used for display",
+    )
 
     # Legacy fields removed - use transcript_versions[active_transcript_version].
     # Frontend should access: conversation.active_transcript.segments, conversation.active_transcript.transcript.
     # Memory is no longer versioned (the vault is the system of record); changes are
     # recorded in the memory_audit ledger (see models/memory_audit.py).
-
-    @model_validator(mode="before")
-    @classmethod
-    def clean_legacy_data(cls, data: Any) -> Any:
-        """Clean up legacy/malformed data before Pydantic validation."""
-
-        if not isinstance(data, dict):
-            return data
-
-        # Fix malformed transcript_versions (from old schema versions)
-        if "transcript_versions" in data and isinstance(
-            data["transcript_versions"], list
-        ):
-            for version in data["transcript_versions"]:
-                if isinstance(version, dict):
-                    # If segments is not a list, clear it
-                    if "segments" in version and not isinstance(
-                        version["segments"], list
-                    ):
-                        version["segments"] = []
-                    # If transcript is a dict, clear it
-                    if "transcript" in version and isinstance(
-                        version["transcript"], dict
-                    ):
-                        version["transcript"] = None
-                    # Normalize provider to lowercase (legacy data had "Deepgram" instead of "deepgram")
-                    if "provider" in version and isinstance(version["provider"], str):
-                        version["provider"] = version["provider"].lower()
-                    # Fix speaker IDs in segments (legacy data had integers, need strings)
-                    if "segments" in version and isinstance(version["segments"], list):
-                        for segment in version["segments"]:
-                            if isinstance(segment, dict) and "speaker" in segment:
-                                if isinstance(segment["speaker"], int):
-                                    segment["speaker"] = f"Speaker {segment['speaker']}"
-                                elif not isinstance(segment["speaker"], str):
-                                    segment["speaker"] = "unknown"
-
-        return data
 
     def get_transcript_version(
         self, version_id: str
@@ -583,9 +568,10 @@ class Conversation(Document):
                 [("external_source_id", 1)], sparse=True
             ),  # Sparse index for deduplication
             IndexModel(
-                [("source_session_id", 1)],
-                sparse=True,
-                name="source_session_lookup",
+                [("segmentation_key", 1)],
+                unique=True,
+                partialFilterExpression={"segmentation_key": {"$type": "string"}},
+                name="unique_detected_segmentation",
             ),
             IndexModel(
                 [
@@ -619,7 +605,11 @@ def create_conversation(
     data_purpose: Optional[str] = None,
     memory_excluded: bool = False,
     memory_exclusion_reason: Optional[str] = None,
-    source_session_id: Optional[str] = None,
+    audio_ranges: Optional[List[AudioRangeRef]] = None,
+    origin: Literal["deliberate", "detected"] = "deliberate",
+    started_at: Optional[datetime] = None,
+    ended_at: Optional[datetime] = None,
+    segmentation_key: Optional[str] = None,
 ) -> Conversation:
     """
     Factory function to create a new conversation.
@@ -639,10 +629,16 @@ def create_conversation(
         Conversation instance
     """
     # Build the conversation data
+    created_at = started_at or datetime.now(timezone.utc)
     conv_data = {
         "user_id": user_id,
         "client_id": client_id,
-        "created_at": datetime.now(),
+        "created_at": created_at,
+        "started_at": created_at,
+        "ended_at": ended_at,
+        "origin": origin,
+        "audio_ranges": audio_ranges or [],
+        "segmentation_key": segmentation_key,
         "title": title,
         "summary": summary,
         "transcript_versions": [],
@@ -652,7 +648,6 @@ def create_conversation(
         "data_purpose": data_purpose,
         "memory_excluded": memory_excluded,
         "memory_exclusion_reason": memory_exclusion_reason,
-        "source_session_id": source_session_id,
     }
 
     # Only set conversation_id if provided, otherwise let the model auto-generate it

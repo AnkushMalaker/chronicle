@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, Loader2, Pause, Play, Radio } from 'lucide-r
 import { BACKEND_URL, BackgroundAccuracyReport, BackgroundCleanupReport, BackgroundCluster, BackgroundClusterLane, BackgroundDecisionHistoryItem, BackgroundSurface, BatchProgress, dataAuditApi } from '../../services/api'
 import { useJobPolling } from '../../hooks/useJobPolling'
 import { getStorageKey } from '../../utils/storage'
+import { TITLE_NOT_GENERATED } from '../../lib/constants'
 import { formatClock } from './format'
 
 type Decision = 'noise' | 'background_speech' | 'not_background'
@@ -352,7 +353,7 @@ export default function BackgroundReviewPanel() {
                   </button>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-x-2 text-gray-400">
-                      <span className="font-medium text-gray-600 dark:text-gray-300">{sample.conversation_title || 'Untitled conversation'}</span>
+                      <span className="font-medium text-gray-600 dark:text-gray-300">{sample.conversation_title || TITLE_NOT_GENERATED}</span>
                       <span className="tabular-nums">{formatClock(sample.start)}–{formatClock(sample.end)}</span>
                       <span>{sample.current_label || 'Unknown speaker'}</span>
                       {sample.decision && <span>labelled {decisionLabel(sample.decision)}</span>}

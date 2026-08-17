@@ -14,11 +14,16 @@ import tempfile
 import time
 import uuid
 import wave
-from typing import Optional
+from typing import Iterator, Optional
 
 import uvicorn
 from common.base_service import BaseASRService, create_asr_app
-from common.response_models import TranscriptionResult
+from common.response_models import (
+    TranscriptionProgressEvent,
+    TranscriptionResult,
+    TranscriptionResultEvent,
+    TranscriptionStreamEvent,
+)
 from fastapi import (
     File,
     Form,
@@ -126,7 +131,7 @@ class Gemma4Service(BaseASRService):
         context_info: Optional[str] = None,
         prompt: Optional[str] = None,
         **kwargs,
-    ):
+    ) -> Iterator[TranscriptionStreamEvent]:
         """Yield progress counters then the final result for long audio.
 
         Delegates to the transcriber's batched generator (run synchronously via
@@ -145,9 +150,9 @@ class Gemma4Service(BaseASRService):
             prompt_override=prompt,
         ):
             if event["type"] == "result":
-                yield {"type": "result", **event["result"].to_dict()}
+                yield TranscriptionResultEvent.from_result(event["result"])
             else:
-                yield event
+                yield TranscriptionProgressEvent.model_validate(event)
 
     def get_capabilities(self) -> list[str]:
         # No "diarization": Gemma 4 E2B does NOT diarize. Even with explicit/forceful

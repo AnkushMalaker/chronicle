@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from advanced_omi_backend.services.memory.agent.memory_agent import MemoryAgentResult
+from advanced_omi_backend.services.memory.agent.vault_tools import VaultTools
 from advanced_omi_backend.services.memory.base import DayWriteOutcome
 from advanced_omi_backend.services.memory.conversation_note import (
     write_source_fallback_conversation_note,
@@ -43,7 +44,9 @@ Only one early detail was recorded before the agent stopped.
 
 
 @pytest.mark.asyncio
-async def test_incomplete_valid_note_is_replaced_by_lossless_source_fallback(tmp_path):
+async def test_incomplete_valid_note_is_replaced_by_lossless_source_fallback(
+    tmp_path, monkeypatch
+):
     source = "Speaker: retain this exact ending after the valid partial note stops."
     service = MemoryService(
         SimpleNamespace(
@@ -51,6 +54,11 @@ async def test_incomplete_valid_note_is_replaced_by_lossless_source_fallback(tmp
             write_recovery_backend=None,
             review_writes=False,
         )
+    )
+    system_events = []
+    monkeypatch.setattr(
+        "advanced_omi_backend.services.memory.providers.chronicle.record_event_sync",
+        lambda **event: system_events.append(event),
     )
 
     class IncompleteAgent:
@@ -84,6 +92,30 @@ async def test_incomplete_valid_note_is_replaced_by_lossless_source_fallback(tmp
     assert "Verbatim source transcript" in note_text
     assert result.truncated is True
     assert result.touched == ["Conversations/conversation-partial.md"]
+    assert system_events == [
+        {
+            "severity": "warning",
+            "category": "memory",
+            "source": "memory.provider.chronicle",
+            "title": "Deterministic memory fallback used: conversation-partial",
+            "detail": (
+                "The memory agent did not produce a complete valid note. Chronicle "
+                "wrote the deterministic source-preserving conversation note."
+            ),
+            "user_id": tmp_path.name,
+            "conversation_id": "conversation-partial",
+            "metadata": {
+                "fallback_type": "deterministic_source_preserving_note",
+                "note_path": "Conversations/conversation-partial.md",
+                "reasons": ["incomplete_agent"],
+                "agent_truncated": True,
+                "agent_stalled": False,
+                "agent_error_count": 0,
+                "rounds": 1,
+                "tool_calls": 0,
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -351,6 +383,63 @@ async def test_day_write_treats_a_deliberate_no_op_as_done_without_recovery(
 
 
 @pytest.mark.asyncio
+async def test_day_index_is_concise_and_installed_before_the_semantic_agent(
+    tmp_path, monkeypatch
+):
+    """The model must not spend its output budget copying Timeline summaries."""
+
+    service = MemoryService(
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend=None,
+            review_writes=False,
+        )
+    )
+    local_date = "2026-08-10"
+    root = tmp_path / "user-one"
+    day_rel = f"Daily/{local_date}.md"
+    verbose_summary = "This long detail belongs on TimelineEpisode, not in Daily."
+    digest = f"""Local day {local_date} (Etc/UTC), 1 episode(s).
+
+### 06:10–06:52 · meeting · highlight
+title: ADS Weekly Planning Sync
+summary: {verbose_summary}
+"""
+
+    class ObservesPreseededIndex:
+        def __init__(self, _root):
+            pass
+
+        async def run(self, *_args, **_kwargs):
+            written = (root / day_rel).read_text(encoding="utf-8")
+            assert "06:10–06:52 · meeting · highlight" in written
+            assert "ADS Weekly Planning Sync" in written
+            assert verbose_summary not in written
+            return MemoryAgentResult(
+                conversation_id=local_date,
+                rounds=1,
+                touched=[],
+                summary="No durable People or Topic facts to add.",
+                verified=True,
+            )
+
+    monkeypatch.setattr(service, "_write_agent_class", lambda: ObservesPreseededIndex)
+    monkeypatch.setattr(service, "_recovery_agent_class", lambda: None)
+    monkeypatch.setattr(service.vault, "user_root", lambda _uid: root)
+
+    outcome, touched = await service._add_day_memory_agent(
+        digest,
+        local_date,
+        "user-one",
+        source_date="2026-08-10T00:00:00+00:00",
+    )
+
+    assert outcome is DayWriteOutcome.COMPLETE
+    assert touched == [day_rel]
+    assert verbose_summary not in (root / day_rel).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
 async def test_day_write_surfaces_nonfatal_agent_diagnostics(
     tmp_path, monkeypatch, caplog
 ):
@@ -490,6 +579,122 @@ title: Late Zed review
 
 
 @pytest.mark.asyncio
+async def test_day_write_stays_retryable_when_repair_leaves_a_root_content_note(
+    tmp_path, monkeypatch
+):
+    """A detected root topic must not be accepted merely because the day was written."""
+
+    service = MemoryService(
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend=None,
+            review_writes=False,
+        )
+    )
+    local_date = "2026-08-10"
+    root = tmp_path / "user-one"
+    day_rel = f"Daily/{local_date}.md"
+    root_topic_rel = "Misplaced Topic.md"
+    digest = """Local day 2026-08-10 (Etc/UTC), 1 episode(s).
+
+### 06:10–06:52 · meeting · highlight
+title: ADS Weekly Planning Sync
+"""
+
+    class LeavesRootTopicBehind:
+        def __init__(self, _root):
+            pass
+
+        async def run(self, *_args, **_kwargs):
+            day = root / day_rel
+            day.parent.mkdir(parents=True, exist_ok=True)
+            day.write_text(
+                f"# {local_date}\n\n## Episodes\n\n"
+                "- 06:10–06:52 · meeting · highlight — ADS Weekly Planning Sync\n",
+                encoding="utf-8",
+            )
+            (root / root_topic_rel).write_text(
+                "## About\n- This content belongs under Topics/.\n",
+                encoding="utf-8",
+            )
+            return MemoryAgentResult(
+                conversation_id=local_date,
+                rounds=3,
+                touched=[day_rel, root_topic_rel],
+                summary="Recorded the day and misplaced a topic.",
+                verified=True,
+            )
+
+    monkeypatch.setattr(service, "_write_agent_class", lambda: LeavesRootTopicBehind)
+    monkeypatch.setattr(service, "_recovery_agent_class", lambda: None)
+    monkeypatch.setattr(service.vault, "user_root", lambda _uid: root)
+
+    outcome, touched = await service._add_day_memory_agent(
+        digest,
+        local_date,
+        "user-one",
+        source_date="2026-08-10T00:00:00+00:00",
+    )
+
+    assert outcome is DayWriteOutcome.FAILED
+    assert day_rel in touched
+    assert root_topic_rel in touched
+
+
+@pytest.mark.asyncio
+async def test_day_write_stays_retryable_when_agent_mints_a_category(
+    tmp_path, monkeypatch
+):
+    """Executor-native writes cannot bypass day ownership of the vault ontology."""
+
+    service = MemoryService(
+        SimpleNamespace(
+            write_agent_backend="codex",
+            write_recovery_backend=None,
+            review_writes=False,
+        )
+    )
+    local_date = "2026-08-10"
+    root = tmp_path / "user-one"
+    digest = """Local day 2026-08-10 (Etc/UTC), 1 episode(s).
+
+### 06:10–06:52 · meeting · highlight
+title: Vendor planning discussion
+"""
+
+    class MintsCompaniesCategory:
+        def __init__(self, _root):
+            pass
+
+        async def run(self, *_args, **_kwargs):
+            tools = VaultTools(root)
+            tools.create_category("Companies", ["org", "type"])
+            return MemoryAgentResult(
+                conversation_id=local_date,
+                rounds=3,
+                touched=[
+                    "Companies.md",
+                    "Templates/Companies Template.md",
+                ],
+                summary="Minted a category from one day.",
+            )
+
+    monkeypatch.setattr(service, "_write_agent_class", lambda: MintsCompaniesCategory)
+    monkeypatch.setattr(service, "_recovery_agent_class", lambda: None)
+    monkeypatch.setattr(service.vault, "user_root", lambda _uid: root)
+
+    outcome, touched = await service._add_day_memory_agent(
+        digest,
+        local_date,
+        "user-one",
+        source_date="2026-08-10T00:00:00+00:00",
+    )
+
+    assert outcome is DayWriteOutcome.FAILED
+    assert "Companies.md" in touched
+
+
+@pytest.mark.asyncio
 async def test_partial_day_write_logs_limit_cause_and_work_done(
     tmp_path, monkeypatch, caplog
 ):
@@ -599,6 +804,11 @@ async def test_narrating_the_next_step_is_not_a_deliberate_no_op(tmp_path, monke
             recovery_calls.append(1)
 
         async def run(self, *_args, **_kwargs):
+            note = root / "Daily" / f"{local_date}.md"
+            note.write_text(
+                "# From an older run\n\n## Recovered\n- Recorded the day.\n",
+                encoding="utf-8",
+            )
             return MemoryAgentResult(
                 conversation_id=local_date,
                 rounds=4,

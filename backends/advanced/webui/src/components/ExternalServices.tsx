@@ -551,16 +551,16 @@ export default function ExternalServices({
                   </div>
                 </div>
 
-                <div className="flex items-center space-x-2">
+                <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
                   {mode === 'providers' && service.provider && service.provider.available.length > 0 && (
-                    <div className="flex flex-col gap-1">
-                      <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+                    <div className="flex min-w-0 max-w-full flex-col gap-1">
+                      <label className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
                         {service.provider.streaming_available?.length ? <span className="w-14 shrink-0">Batch</span> : null}
                         <select
                           value={stagedValue(service, 'batch')}
                           onChange={e => stageProvider(service, 'batch', e.target.value)}
                           disabled={busy}
-                          className="text-sm px-2 py-1.5 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 disabled:opacity-50"
+                          className="min-w-0 flex-1 rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 disabled:opacity-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 sm:flex-none"
                           title="Active batch (file/full-audio) provider — choose, then click Apply to switch"
                         >
                           {!service.provider.current && <option value="">(no provider set)</option>}
@@ -571,13 +571,13 @@ export default function ExternalServices({
                         {renderApply(service, 'batch')}
                       </label>
                       {service.provider.streaming_available && service.provider.streaming_available.length > 0 && (
-                        <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+                        <label className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
                           <span className="w-14 shrink-0">Streaming</span>
                           <select
                             value={stagedValue(service, 'streaming')}
                             onChange={e => stageProvider(service, 'streaming', e.target.value)}
                             disabled={busy}
-                            className="text-sm px-2 py-1.5 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 disabled:opacity-50"
+                            className="min-w-0 flex-1 rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 disabled:opacity-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 sm:flex-none"
                             title="Active streaming (live transcription) provider — choose, then click Apply to switch"
                           >
                             {!service.provider.streaming_current && <option value="">(no provider set)</option>}

@@ -1,0 +1,23 @@
+# One Chronicle account is explicitly linked to the existing Swiggy OAuth files.
+linked_user_id: ${SWIGGY_LINKED_USER_ID}
+token_directory: ${SWIGGY_TOKEN_DIRECTORY:-/app/data/integrations/swiggy}
+
+# Existing configured Chronicle LLM operation used only to classify free-form
+# shopping turns into the narrow safe tool set. Checkout is never an LLM tool.
+llm_operation: plugin_assistant
+# Each primary/fallback attempt has its own bound. The operation resolves through
+# defaults.fast_llm so normal shopping language never waits on the heavy main model.
+llm_timeout_seconds: 3
+
+# Bound every MCP attempt as well. Safe reads may retry once; checkout remains
+# single-attempt regardless because its outcome is not safe to replay.
+mcp_request_timeout_seconds: 15
+mcp_max_attempts: 2
+search_samples: 3
+review_valid_seconds: 120
+checkout_limit_rupees: 1000
+hermes_plugin_id: hermes
+
+# The saved Swiggy label for the Bangalore home. The mode proposes this exact
+# label first and still waits for an explicit voice confirmation before using it.
+preferred_address_label: Home

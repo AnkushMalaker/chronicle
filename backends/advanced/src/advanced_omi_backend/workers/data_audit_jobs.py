@@ -6,7 +6,8 @@ Provides:
   frame scores to the chunk documents, and cache a probability histogram on
   the conversation so the Data Audit UI can filter/sort without re-decoding.
 - ``auto_clean_job``: system-wide sweep that analyzes unanalyzed audio and
-  auto-archives conversations meeting the configured speech-free "level".
+  classifies conversations meeting the configured speech-free "level". Raw capture
+  deletion is intentionally disabled until a capture-retention policy exists.
   Enqueued by the ``auto_clean`` cron job (off by default) so the work is
   visible in the queue/jobs pages.
 - ``export_annotation_dataset_job``: build an annotation dataset zip —
@@ -24,9 +25,6 @@ from beanie import PydanticObjectId
 from rq import get_current_job
 
 from advanced_omi_backend.config_loader import get_service_config
-from advanced_omi_backend.controllers.conversation_controller import (
-    archive_conversation_audio_doc,
-)
 from advanced_omi_backend.llm_client import async_generate
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import async_job
@@ -225,16 +223,16 @@ async def analyze_audio_batch_job(
 
 @async_job(redis=False, beanie=True, timeout=3600)
 async def auto_clean_job(dry_run: bool = False) -> Dict[str, Any]:
-    """System-wide auto-clean sweep.
+    """System-wide low-speech classification sweep.
 
-    Analyzes any unanalyzed audio, then archives conversations whose speech
-    fraction (at the configured VAD probability threshold) and duration meet
-    the configured "level" (``data_audit.auto_clean`` in config). Archiving
-    hard-deletes audio bytes (a metadata stub is kept), so the run is bounded
-    by ``max_archive_per_run`` as a safety valve.
+    Analyzes any unanalyzed audio and reports Conversations whose speech fraction and
+    duration meet the configured level. A Conversation is only one claim over capture
+    evidence and cannot authorize deletion of shared raw chunks, so this job never
+    deletes audio. ``dry_run`` remains in the public job contract but both modes are
+    classification-only until an explicit capture-retention policy is configured.
 
     Args:
-        dry_run: When True, count would-archive conversations without deleting.
+        dry_run: Retained for the public job contract; raw deletion is always disabled.
 
     Returns a summary dict (never raises for a single-conversation failure).
     """
@@ -263,12 +261,11 @@ async def auto_clean_job(dry_run: bool = False) -> Dict[str, Any]:
 
     analyzed = 0
     matched = 0
-    archived = 0
     failed = 0
     cap_hit = False
 
     for conv in conversations:
-        if archived >= max_per_run:
+        if matched >= max_per_run:
             cap_hit = True
             break
 
@@ -287,16 +284,6 @@ async def auto_clean_job(dry_run: bool = False) -> Dict[str, Any]:
             continue
 
         matched += 1
-        if dry_run:
-            continue
-        try:
-            await archive_conversation_audio_doc(conv, reason="near_silent")
-            archived += 1
-        except Exception as e:
-            failed += 1
-            logger.warning(
-                f"Auto-clean archive failed for {conv.conversation_id[:12]}: {e}"
-            )
 
     summary = {
         "success": True,
@@ -304,7 +291,9 @@ async def auto_clean_job(dry_run: bool = False) -> Dict[str, Any]:
         "scanned": len(conversations),
         "analyzed": analyzed,
         "matched": matched,
-        "archived": archived,
+        "would_archive": matched,
+        "archived": 0,
+        "deletion_disabled": True,
         "failed": failed,
         "cap_hit": cap_hit,
         "level": {
@@ -318,7 +307,7 @@ async def auto_clean_job(dry_run: bool = False) -> Dict[str, Any]:
     if cap_hit:
         logger.warning(
             f"🧹 auto_clean_job hit max_archive_per_run={max_per_run}; "
-            f"{matched - archived}+ candidates remain for the next run"
+            "additional candidates may remain for the next classification run"
         )
     logger.info(f"🧹 auto_clean_job done: {summary}")
     return summary

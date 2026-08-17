@@ -40,6 +40,10 @@ ENV ASR_MODEL="Systran/faster-whisper-large-v3"
 ENV COMPUTE_TYPE="float16"
 ENV DEVICE="cuda"
 ENV VAD_FILTER="true"
+# CTranslate2 loads these libraries by SONAME at inference time.  The NVIDIA
+# container runtime supplies the driver, not the CUDA math/runtime libraries shipped
+# by the locked nvidia-* Python wheels.
+ENV LD_LIBRARY_PATH="/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib"
 
 EXPOSE 8765
 

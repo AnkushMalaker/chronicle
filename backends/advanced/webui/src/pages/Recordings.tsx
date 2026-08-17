@@ -9,6 +9,7 @@ import { PlayheadTimeLabel } from '../components/audio/PlayheadWaveform'
 import { useGaplessPlayer } from '../hooks/useGaplessPlayer'
 import TranscriptEditor from '../components/transcript/TranscriptEditor'
 import { Button, Checkbox } from '../components/ui'
+import { TITLE_NOT_GENERATED } from '../lib/constants'
 
 interface Conversation {
   conversation_id: string
@@ -37,7 +38,7 @@ interface Conversation {
   deleted?: boolean
   deletion_reason?: string
   deleted_at?: string
-  always_persist?: boolean
+  origin?: 'deliberate' | 'detected'
   processing_status?: string
   failure_stage?: string
   is_orphan?: boolean
@@ -844,14 +845,14 @@ export default function Recordings() {
                         type="text"
                         value={editedTitle}
                         onChange={(e) => setEditedTitle(e.target.value)}
-                        onKeyDown={(e) => handleTitleKeyDown(e, conversation.conversation_id, conversation.title || 'Conversation')}
+                        onKeyDown={(e) => handleTitleKeyDown(e, conversation.conversation_id, conversation.title || TITLE_NOT_GENERATED)}
                         className="text-xl font-semibold px-2 py-1 border-2 border-blue-500 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 min-w-[200px]"
                         autoFocus
                         disabled={savingTitle}
                       />
                       <button
-                        onClick={() => handleSaveTitleEdit(conversation.conversation_id, conversation.title || 'Conversation')}
-                        disabled={savingTitle || editedTitle === (conversation.title || 'Conversation')}
+                        onClick={() => handleSaveTitleEdit(conversation.conversation_id, conversation.title || TITLE_NOT_GENERATED)}
+                        disabled={savingTitle || editedTitle === (conversation.title || TITLE_NOT_GENERATED)}
                         className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                       >
                         <Save className="w-3 h-3" />
@@ -872,10 +873,10 @@ export default function Recordings() {
                   ) : (
                     <h2
                       className="text-xl font-semibold text-gray-900 dark:text-gray-100 group cursor-pointer hover:bg-yellow-100 dark:hover:bg-yellow-900/30 px-1 rounded transition-colors inline-flex items-center gap-2"
-                      onClick={() => handleStartTitleEdit(conversation.conversation_id, conversation.title || 'Conversation')}
+                      onClick={() => handleStartTitleEdit(conversation.conversation_id, conversation.title || TITLE_NOT_GENERATED)}
                       title="Click to edit title"
                     >
-                      {conversation.title || "Conversation"}
+                      {conversation.title || TITLE_NOT_GENERATED}
                       <Pencil className="w-3.5 h-3.5 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" />
                     </h2>
                   )}

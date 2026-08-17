@@ -1,0 +1,41 @@
+# Generated outputs, imported corpora, and archived work
+artifacts/
+wispr-flow-backup/
+untracked/
+substrate/
+golden_data/
+
+# Dependencies, build products, caches, logs, and runtime data
+**/node_modules/
+**/dist/
+**/build/
+**/cache/
+**/caches/
+**/logs/
+**/data/
+**/models/
+**/benchmark/
+**/benchmarks/
+**/eval/
+**/speaker_data_backup/
+**/training_artifacts/
+**/farmed_conv/
+**/farmed_fps/
+**/discovered_*/
+
+# Backups and machine-specific snapshots
+*backup*
+*.bak*
+*.pre-*
+
+# Recordings, archives, screenshots, QR codes, and application artwork
+Screenshot*
+*.ogg
+*.wav
+*.zip
+*.tar.gz
+*qr.png
+app/assets/
+
+# Loose/generated images that do not document system architecture
+Untitled-*.png

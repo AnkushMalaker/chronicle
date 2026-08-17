@@ -2,7 +2,7 @@
 
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -33,9 +33,6 @@ class _QueryField:
 class _DurabilityStore:
     def __init__(self, redis_client):
         self._statuses = iter(redis_client.statuses)
-
-    async def get_current_conversation_id(self, session_id):
-        return "conversation-1"
 
     async def get_audio_format(self, session_id):
         return 16000, 1, 2
@@ -112,13 +109,27 @@ class _DurabilityRedis:
         return len(keys)
 
 
-class _PersistedConversation:
-    source_session_id = "session-1"
-    audio_chunks_count = 0
-    audio_total_duration = 0.0
-    audio_compression_ratio = None
+class _PersistedCapture:
+    capture_session_id = "session-1"
+    user_id = "user-1"
+    client_id = "client-1"
+    status = "active"
+    time_basis = "received"
+    ended_at = None
 
     async def save(self):
+        return None
+
+    async def set(self, updates):
+        for field, value in updates.items():
+            setattr(self, field, value)
+
+
+class _EmptyFind:
+    def sort(self, *_args, **_kwargs):
+        return self
+
+    async def first_or_none(self):
         return None
 
 
@@ -128,27 +139,29 @@ def _audio_message(message_id=b"1-0"):
         {
             b"audio_data": b"\x00\x01" * 160000,
             b"chunk_id": b"00001",
-            b"conversation_id": b"conversation-1",
+            b"capture_session_id": b"session-1",
+            b"captured_at": b"1770000000.0",
+            b"time_basis": b"received",
         },
     )
 
 
 def _patch_persistence_dependencies(monkeypatch, audio_chunk_model):
-    class FakeConversation:
-        conversation_id = _QueryField()
-        find_one = AsyncMock(return_value=_PersistedConversation())
+    persisted_capture = _PersistedCapture()
+
+    class FakeCapture:
+        capture_session_id = _QueryField()
+        find_one = AsyncMock(return_value=persisted_capture)
 
     monkeypatch.setattr(audio_jobs, "SessionStore", _DurabilityStore)
     monkeypatch.setattr(audio_jobs, "AudioChunkDocument", audio_chunk_model)
-    monkeypatch.setattr(audio_jobs, "Conversation", FakeConversation)
+    monkeypatch.setattr(audio_jobs, "AudioCaptureSession", FakeCapture)
     monkeypatch.setattr(audio_jobs, "get_current_job", lambda: object())
     monkeypatch.setattr(audio_jobs, "check_job_alive", AsyncMock(return_value=True))
     monkeypatch.setattr(
-        audio_jobs, "get_resume_position", AsyncMock(return_value=(0, 0.0))
-    )
-    monkeypatch.setattr(
         audio_jobs, "encode_pcm_to_opus", AsyncMock(return_value=b"opus")
     )
+    return persisted_capture
 
 
 @pytest.mark.asyncio
@@ -156,7 +169,9 @@ async def test_mongo_failure_never_acks_redis_audio(monkeypatch):
     class FailingAudioChunk:
         source_stream = _QueryField()
         source_first_message_id = _QueryField()
+        capture_session_id = _QueryField()
         find_one = AsyncMock(return_value=None)
+        find = staticmethod(lambda *_args, **_kwargs: _EmptyFind())
 
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
@@ -188,7 +203,9 @@ async def test_restarted_worker_replays_pending_audio_before_new_entries(monkeyp
     class SuccessfulAudioChunk:
         source_stream = _QueryField()
         source_first_message_id = _QueryField()
+        capture_session_id = _QueryField()
         find_one = AsyncMock(return_value=None)
+        find = staticmethod(lambda *_args, **_kwargs: _EmptyFind())
 
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
@@ -215,13 +232,15 @@ async def test_restarted_worker_replays_pending_audio_before_new_entries(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_wal_owner_rotation_never_merges_conversations(monkeypatch):
+async def test_wal_messages_stay_owned_by_the_capture_session(monkeypatch):
     inserted = []
 
     class OwnedAudioChunk:
         source_stream = _QueryField()
         source_first_message_id = _QueryField()
+        capture_session_id = _QueryField()
         find_one = AsyncMock(return_value=None)
+        find = staticmethod(lambda *_args, **_kwargs: _EmptyFind())
 
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
@@ -232,7 +251,6 @@ async def test_wal_owner_rotation_never_merges_conversations(monkeypatch):
     _patch_persistence_dependencies(monkeypatch, OwnedAudioChunk)
     first = _audio_message(b"1-0")
     second_id, second_fields = _audio_message(b"2-0")
-    second_fields[b"conversation_id"] = b"conversation-2"
     redis = _DurabilityRedis(
         statuses=[SessionStatus.ACTIVE, SessionStatus.FINISHED],
         new_message=[first, (second_id, second_fields)],
@@ -245,12 +263,89 @@ async def test_wal_owner_rotation_never_merges_conversations(monkeypatch):
         redis_client=redis,
     )
 
-    assert [chunk.conversation_id for chunk in inserted] == [
-        "conversation-1",
-        "conversation-2",
+    assert [chunk.capture_session_id for chunk in inserted] == [
+        "session-1",
+        "session-1",
     ]
+    assert [chunk.sequence for chunk in inserted] == [0, 1]
     assert [chunk.source_message_ids for chunk in inserted] == [["1-0"], ["2-0"]]
     assert redis.acked == [b"1-0", b"2-0"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_captured_at", "expected_durations", "expected_source_ids"),
+    [
+        pytest.param(
+            1_770_000_045.0,
+            [1.0, 1.0],
+            [["1-0"], ["2-0"]],
+            id="playback-gap",
+        ),
+        pytest.param(
+            1_770_000_001.2,
+            [2.0],
+            [["1-0", "2-0"]],
+            id="sub-tolerance-jitter",
+        ),
+    ],
+)
+async def test_persistence_respects_recorded_capture_continuity(
+    monkeypatch,
+    second_captured_at,
+    expected_durations,
+    expected_source_ids,
+):
+    inserted = []
+
+    class DiscontinuousAudioChunk:
+        source_stream = _QueryField()
+        source_first_message_id = _QueryField()
+        capture_session_id = _QueryField()
+        find_one = AsyncMock(return_value=None)
+        find = staticmethod(lambda *_args, **_kwargs: _EmptyFind())
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        async def insert(self):
+            inserted.append(self)
+
+    def one_second(message_id: bytes, captured_at: float):
+        return (
+            message_id,
+            {
+                b"audio_data": b"\x00\x01" * 16000,
+                b"chunk_id": b"00001",
+                b"capture_session_id": b"session-1",
+                b"captured_at": str(captured_at).encode(),
+                b"time_basis": b"recorded",
+            },
+        )
+
+    capture = _patch_persistence_dependencies(monkeypatch, DiscontinuousAudioChunk)
+    redis = _DurabilityRedis(
+        statuses=[SessionStatus.ACTIVE, SessionStatus.FINISHED],
+        new_message=[
+            one_second(b"1-0", 1_770_000_000.0),
+            one_second(b"2-0", second_captured_at),
+        ],
+    )
+
+    await audio_jobs.audio_streaming_persistence_job.__wrapped__(
+        "session-1",
+        "user-1",
+        "client-1",
+        redis_client=redis,
+    )
+
+    assert [chunk.duration for chunk in inserted] == expected_durations
+    assert [chunk.source_message_ids for chunk in inserted] == expected_source_ids
+    assert inserted[0].captured_at.timestamp() == 1_770_000_000.0
+    if len(inserted) == 2:
+        assert inserted[1].captured_at.timestamp() == second_captured_at
+    assert redis.acked == [b"1-0", b"2-0"]
+    assert capture.time_basis == "recorded"
 
 
 class _ProducerPipeline:
@@ -354,11 +449,74 @@ async def test_audio_stream_publish_does_not_trim_unpersisted_entries():
     )
 
     assert "maxlen" not in redis.calls[0][2]
-    assert redis.calls[0][1][b"conversation_id"] == b"conversation-1"
+    assert redis.calls[0][1][b"capture_session_id"] == b"session-1"
+    assert b"conversation_id" not in redis.calls[0][1]
 
 
 @pytest.mark.asyncio
-async def test_ownerless_session_rejects_xadd_without_discarding_audio():
+async def test_explicit_capture_timestamp_marks_wal_audio_as_recorded():
+    redis = _ProducerRedis()
+    producer = AudioStreamProducer(redis)
+    producer.update_session_chunk_count = AsyncMock()
+    producer.session_buffers["session-1"] = SessionBuffer(
+        user_id="user-1",
+        client_id="client-1",
+        stream_name="audio:stream:session-1",
+    )
+
+    await producer.add_audio_chunk(
+        b"\x00\x01" * 4000,
+        "session-1",
+        "user-1",
+        "client-1",
+        sample_rate=16000,
+        channels=1,
+        sample_width=2,
+        captured_at=1_770_000_000.125,
+    )
+
+    fields = redis.calls[0][1]
+    assert fields[b"captured_at"] == b"1770000000.125"
+    assert fields[b"time_basis"] == b"recorded"
+
+
+@pytest.mark.asyncio
+async def test_producer_flushes_partial_wal_chunk_before_capture_gap():
+    redis = _ProducerRedis()
+    producer = AudioStreamProducer(redis)
+    producer.update_session_chunk_count = AsyncMock()
+    producer.session_buffers["session-1"] = SessionBuffer(
+        user_id="user-1",
+        client_id="client-1",
+        stream_name="audio:stream:session-1",
+    )
+    tenth_second = b"\x00\x01" * 1600
+
+    await producer.add_audio_chunk(
+        tenth_second,
+        "session-1",
+        "user-1",
+        "client-1",
+        captured_at=1_770_000_000.0,
+    )
+    await producer.add_audio_chunk(
+        tenth_second,
+        "session-1",
+        "user-1",
+        "client-1",
+        captured_at=1_770_000_045.0,
+    )
+
+    assert len(redis.calls) == 1
+    assert redis.calls[0][1][b"audio_data"] == tenth_second
+    assert redis.calls[0][1][b"captured_at"] == b"1770000000.0"
+    buffer = producer.session_buffers["session-1"]
+    assert buffer.buffer == tenth_second
+    assert buffer.captured_at == 1_770_000_045.0
+
+
+@pytest.mark.asyncio
+async def test_capture_accepts_audio_without_a_conversation_owner():
     redis = _ProducerRedis(owner=None)
     producer = AudioStreamProducer(redis)
     producer.update_session_chunk_count = AsyncMock()
@@ -369,19 +527,18 @@ async def test_ownerless_session_rejects_xadd_without_discarding_audio():
     )
     audio = b"\x00\x01" * 4000
 
-    with pytest.raises(RuntimeError, match="has no conversation owner"):
-        await producer.add_audio_chunk(
-            audio,
-            "session-1",
-            "user-1",
-            "client-1",
-            sample_rate=16000,
-            channels=1,
-            sample_width=2,
-        )
+    await producer.add_audio_chunk(
+        audio,
+        "session-1",
+        "user-1",
+        "client-1",
+        sample_rate=16000,
+        channels=1,
+        sample_width=2,
+    )
 
-    assert producer.session_buffers["session-1"].buffer == audio
-    assert redis.calls == []
+    assert producer.session_buffers["session-1"].buffer == b""
+    assert redis.calls[0][1][b"capture_session_id"] == b"session-1"
 
 
 @pytest.mark.asyncio
@@ -412,48 +569,127 @@ async def test_terminal_session_rejects_late_audio_without_xadd():
 
 
 @pytest.mark.asyncio
-async def test_batch_transcription_refuses_to_invent_missing_durable_owner(monkeypatch):
-    class MissingOwnerConversation:
-        source_session_id = _QueryField()
-        always_persist = _QueryField()
-        processing_status = _QueryField()
-        ConversationStatus = transcription_jobs.Conversation.ConversationStatus
+async def test_batch_materialization_creates_detected_claim_after_speech(monkeypatch):
+    semantic = SimpleNamespace(insert=AsyncMock())
+    create = Mock(return_value=semantic)
+    apply_claim = AsyncMock(return_value=semantic)
+
+    class Conversations:
+        segmentation_key = _QueryField()
         find_one = AsyncMock(return_value=None)
 
-    monkeypatch.setattr(transcription_jobs, "Conversation", MissingOwnerConversation)
+    first_range = SimpleNamespace(started_at=1, ended_at=2)
+    second_range = SimpleNamespace(started_at=3, ended_at=4)
+    monkeypatch.setattr(transcription_jobs, "Conversation", Conversations)
+    monkeypatch.setattr(transcription_jobs, "create_conversation", create)
+    monkeypatch.setattr(transcription_jobs, "apply_audio_ranges", apply_claim)
 
-    with pytest.raises(RuntimeError, match="refusing to invent"):
-        await transcription_jobs.create_audio_only_conversation(
-            "session-1", "user-1", "client-1"
-        )
+    resolved = await transcription_jobs.materialize_batch_conversation(
+        "session-1", "user-1", "client-1", [first_range, second_range]
+    )
+
+    assert resolved is semantic
+    create.assert_called_once_with(
+        user_id="user-1",
+        client_id="client-1",
+        title=transcription_jobs.TITLE_NOT_GENERATED,
+        summary="Processing audio with offline transcription...",
+        origin="detected",
+        started_at=1,
+        ended_at=4,
+        segmentation_key="batch-fallback:session-1:v1",
+    )
+    apply_claim.assert_awaited_once_with(
+        semantic, [first_range, second_range], save=False
+    )
+    semantic.insert.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_batch_transcription_reuses_session_durable_owner(monkeypatch):
-    placeholder = SimpleNamespace(
-        conversation_id="conversation-1",
-        processing_status="failed",
-        title="old",
-        summary="old",
-        save=AsyncMock(),
+async def test_batch_fallback_entrypoint_materializes_all_capture_ranges(monkeypatch):
+    first_range = SimpleNamespace(
+        range_id="range-1", duration_seconds=20.0, chunk_ids=["chunk-1", "chunk-2"]
+    )
+    second_range = SimpleNamespace(
+        range_id="range-2", duration_seconds=10.0, chunk_ids=["chunk-3"]
+    )
+    artifact = SimpleNamespace(artifact_id="artifact-1")
+    conversation = SimpleNamespace(conversation_id="conversation-1")
+    materialize = AsyncMock(return_value=conversation)
+    process = AsyncMock(return_value={"success": True})
+    post_jobs = {"speaker_recognition": "speaker-1"}
+
+    monkeypatch.setattr(
+        transcription_jobs.Conversation,
+        "find_one",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        transcription_jobs, "is_transcription_available", lambda **_kwargs: True
+    )
+    monkeypatch.setattr(
+        transcription_jobs,
+        "claim_entire_capture",
+        AsyncMock(return_value=[first_range, second_range]),
+    )
+    monkeypatch.setattr(
+        transcription_jobs, "get_asr_context", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(
+        transcription_jobs,
+        "transcribe_audio_range",
+        AsyncMock(
+            return_value={
+                "text": "hello world",
+                "segments": [{"start": 0.0, "end": 1.0, "text": "hello world"}],
+                "words": [
+                    {"start": 0.0, "end": 0.5, "word": "hello"},
+                    {"start": 0.5, "end": 1.0, "word": "world"},
+                ],
+                "provider_name": "smallest",
+                "provider_capabilities": {"word_timestamps": True},
+                "wav_size": 100,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        transcription_jobs,
+        "validate_and_normalize_transcript_timing",
+        lambda segments, words, **_kwargs: (segments, words),
+    )
+    monkeypatch.setattr(
+        transcription_jobs,
+        "persist_transcript_artifact",
+        AsyncMock(return_value=artifact),
+    )
+    monkeypatch.setattr(
+        transcription_jobs,
+        "analyze_speech",
+        lambda _data: {"has_speech": True},
+    )
+    monkeypatch.setattr(
+        transcription_jobs, "materialize_batch_conversation", materialize
+    )
+    monkeypatch.setattr(transcription_jobs, "process_transcription_result", process)
+    monkeypatch.setattr(
+        transcription_jobs,
+        "start_post_conversation_jobs",
+        Mock(return_value=post_jobs),
     )
 
-    class DurableOwnerConversation:
-        source_session_id = _QueryField()
-        always_persist = _QueryField()
-        processing_status = _QueryField()
-        ConversationStatus = transcription_jobs.Conversation.ConversationStatus
-        find_one = AsyncMock(return_value=placeholder)
-
-    monkeypatch.setattr(transcription_jobs, "Conversation", DurableOwnerConversation)
-
-    resolved = await transcription_jobs.create_audio_only_conversation(
-        "session-1", "user-1", "client-1"
+    result = await transcription_jobs.transcription_fallback_check_job.__wrapped__(
+        "session-1",
+        "user-1",
+        "client-1",
+        redis_client=SimpleNamespace(),
     )
 
-    assert resolved is placeholder
-    assert placeholder.processing_status == "active"
-    placeholder.save.assert_awaited_once()
+    assert result["status"] == "batch_fallback_completed"
+    materialize.assert_awaited_once_with(
+        "session-1", "user-1", "client-1", [first_range, second_range]
+    )
+    process.assert_awaited_once()
+    assert process.await_args.kwargs["transcript_artifact"] is artifact
 
 
 class _LaggingStreamRedis:
@@ -517,11 +753,13 @@ def test_persistence_runtime_state_has_only_explicit_forward_transitions():
 async def test_replay_after_mongo_commit_before_xack_is_idempotent(monkeypatch):
     source_ids = ["pending-1"]
     existing = SimpleNamespace(
-        conversation_id="conversation-1",
-        chunk_index=0,
+        capture_session_id="session-1",
+        user_id="user-1",
+        capture_source_id="client-1",
+        sequence=0,
         original_size=320000,
         compressed_size=4,
-        end_time=10.0,
+        duration=10.0,
         source_message_ids=source_ids,
     )
     inserted = AsyncMock()
@@ -529,7 +767,9 @@ async def test_replay_after_mongo_commit_before_xack_is_idempotent(monkeypatch):
     class IdempotentAudioChunk:
         source_stream = _QueryField()
         source_first_message_id = _QueryField()
+        capture_session_id = _QueryField()
         find_one = AsyncMock(return_value=existing)
+        find = staticmethod(lambda *_args, **_kwargs: _EmptyFind())
 
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
@@ -555,7 +795,15 @@ async def test_replay_after_mongo_commit_before_xack_is_idempotent(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_finalization_flushes_residual_audio_before_terminal_state():
+async def test_finalization_flushes_residual_audio_before_terminal_state(monkeypatch):
+    class Capture:
+        capture_session_id = _QueryField()
+        find_one = AsyncMock(return_value=_PersistedCapture())
+
+    monkeypatch.setattr(
+        "advanced_omi_backend.services.audio_stream.producer.AudioCaptureSession",
+        Capture,
+    )
     redis = _ProducerRedis()
     producer = AudioStreamProducer(redis)
     producer.store = SimpleNamespace(
@@ -579,7 +827,17 @@ async def test_finalization_flushes_residual_audio_before_terminal_state():
 
 
 @pytest.mark.asyncio
-async def test_finalization_append_error_does_not_advance_or_discard_buffer():
+async def test_finalization_append_error_does_not_advance_or_discard_buffer(
+    monkeypatch,
+):
+    class Capture:
+        capture_session_id = _QueryField()
+        find_one = AsyncMock(return_value=_PersistedCapture())
+
+    monkeypatch.setattr(
+        "advanced_omi_backend.services.audio_stream.producer.AudioCaptureSession",
+        Capture,
+    )
     redis = _ProducerRedis(RuntimeError("redis unavailable"))
     producer = AudioStreamProducer(redis)
     producer.store = SimpleNamespace(

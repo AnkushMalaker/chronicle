@@ -14,8 +14,8 @@ from types import SimpleNamespace
 import pytest
 
 from advanced_omi_backend.controllers import data_audit_controller
-from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.utils import export_planning
 from advanced_omi_backend.utils.export_planning import (
     export_eligibility,
     plan_conversation_clips,
@@ -40,24 +40,6 @@ def _conv(**overrides):
     return SimpleNamespace(**base)
 
 
-class _ChunkCursor:
-    def __init__(self, docs):
-        self.docs = docs
-
-    def sort(self, *_args):
-        return self
-
-    def __aiter__(self):
-        self._it = iter(self.docs)
-        return self
-
-    async def __anext__(self):
-        try:
-            return next(self._it)
-        except StopIteration:
-            raise StopAsyncIteration
-
-
 def _chunk(start: float, end: float, scores, hop_ms: float = 100.0):
     return {
         "start_time": start,
@@ -68,10 +50,25 @@ def _chunk(start: float, end: float, scores, hop_ms: float = 100.0):
 
 
 def _mock_chunks(monkeypatch, docs):
-    collection = SimpleNamespace(find=lambda *_a, **_k: _ChunkCursor(docs))
-    monkeypatch.setattr(
-        AudioChunkDocument, "get_pymongo_collection", lambda: collection
-    )
+    claimed = []
+    for document in docs:
+        vad = document.get("vad")
+        claimed.append(
+            SimpleNamespace(
+                chunk=SimpleNamespace(
+                    sample_rate=document["sample_rate"],
+                    vad=(SimpleNamespace(**vad) if vad is not None else None),
+                ),
+                conversation_start_seconds=document["start_time"],
+                clip_start_seconds=0.0,
+                duration_seconds=document["end_time"] - document["start_time"],
+            )
+        )
+
+    async def resolve(_conversation_id):
+        return claimed
+
+    monkeypatch.setattr(export_planning, "resolve_conversation_audio", resolve)
 
 
 # Two speech runs: 2.0–5.0s and 20.0–24.0s (frames at 100ms hop).
@@ -177,15 +174,7 @@ class TestPlanConversationClips:
 
     @pytest.mark.asyncio
     async def test_full_mode_is_one_untouched_region(self, monkeypatch):
-        async def _no_chunk(*_a, **_k):
-            return None
-
-        # Uninitialized Beanie models raise on field access — give the class a
-        # plain attribute so the planner's find_one filter expression evaluates.
-        monkeypatch.setattr(
-            AudioChunkDocument, "conversation_id", "field", raising=False
-        )
-        monkeypatch.setattr(AudioChunkDocument, "find_one", _no_chunk)
+        _mock_chunks(monkeypatch, [_chunk(0.0, 42.5, [])])
         plan = await plan_conversation_clips(
             _conv(audio_total_duration=42.5),
             "full",

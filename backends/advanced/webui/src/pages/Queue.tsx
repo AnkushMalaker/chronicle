@@ -599,7 +599,9 @@ const Queue: React.FC = () => {
       'recognise_speakers_job': 'Speakers',
       'check_enrolled_speakers_job': 'Check Speakers',
       'process_memory_job': 'Memory',
-      'generate_title_summary_job': 'Title & Summary',
+      'generate_title_job': 'Title',
+      'generate_short_summary_job': 'Short Summary',
+      'generate_detailed_summary_job': 'Detailed Summary',
       'dispatch_conversation_complete_event_job': 'Dispatch Event',
     };
     return typeMap[jobType] || jobType;

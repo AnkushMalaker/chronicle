@@ -27,7 +27,6 @@ from advanced_omi_backend.controllers.queue_controller import (
     start_post_conversation_jobs,
     transcription_queue,
 )
-from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.job import JobPriority
 from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
@@ -120,8 +119,8 @@ async def close_current_conversation(client_id: str, user: User):
 
     if not success:
         return JSONResponse(
-            content={"error": "Session not found in Redis"},
-            status_code=404,
+            content={"error": "No speech conversation is currently open"},
+            status_code=409,
         )
 
     logger.info(
@@ -163,7 +162,8 @@ async def get_conversation(conversation_id: str, user: User):
             ),
             "processing_status": conversation.processing_status,
             "failure_stage": conversation.failure_stage,
-            "always_persist": conversation.always_persist,
+            "origin": conversation.origin,
+            "audio_ranges": [item.model_dump() for item in conversation.audio_ranges],
             "end_reason": (
                 conversation.end_reason.value if conversation.end_reason else None
             ),
@@ -248,7 +248,7 @@ def _conversation_to_list_dict(conv: Conversation) -> dict:
         "archive_reason": conv.archive_reason,
         "processing_status": conv.processing_status,
         "failure_stage": conv.failure_stage,
-        "always_persist": conv.always_persist,
+        "origin": conv.origin,
         "title": conv.title,
         "summary": conv.summary,
         "detailed_summary": conv.detailed_summary,
@@ -314,7 +314,7 @@ def _raw_doc_to_list_dict(doc: dict) -> dict:
         "archive_reason": doc.get("archive_reason"),
         "processing_status": doc.get("processing_status"),
         "failure_stage": doc.get("failure_stage"),
-        "always_persist": doc.get("always_persist", False),
+        "origin": doc.get("origin", "deliberate"),
         "title": doc.get("title"),
         "summary": doc.get("summary"),
         "detailed_summary": doc.get("detailed_summary"),
@@ -344,7 +344,7 @@ _LIST_PROJECTION = {
     "archive_reason": 1,
     "processing_status": 1,
     "failure_stage": 1,
-    "always_persist": 1,
+    "origin": 1,
     "title": 1,
     "summary": 1,
     "detailed_summary": 1,
@@ -381,13 +381,6 @@ async def get_conversations(
         user_filter: dict[str, Any] = (
             {} if user.is_superuser else {"user_id": str(user.user_id)}
         )
-        # Continuous capture is evidence for semantic episodes, not a user-facing
-        # conversation. Fence on purpose rather than on transport: a ScreenPipe
-        # recording the timeline agent judged conversational — a standup, a 1:1 — is
-        # promoted to data_purpose "conversation" and belongs here. The raw
-        # device-input API remains available for the rest.
-        user_filter["data_purpose"] = {"$ne": "capture_evidence"}
-
         if starred_only:
             user_filter["starred"] = True
 
@@ -401,14 +394,12 @@ async def get_conversations(
             conditions.append({"deleted": False})
 
         if include_unprocessed:
-            # Orphan type 1: always_persist that ended up failed (not deleted).
-            # "active" = still in-flight (don't flag); stale-active crashes are
-            # reconciled to "failed" by the reconciler, so they show up here too.
+            # Failed semantic conversations whose audio claim can be reprocessed.
             conditions.append(
                 {
-                    "always_persist": True,
                     "processing_status": Conversation.ConversationStatus.FAILED.value,
                     "deleted": False,
+                    "audio_ranges.0": {"$exists": True},
                 }
             )
             # Orphan type 2: soft-deleted due to no speech but have audio data
@@ -450,11 +441,10 @@ async def get_conversations(
         if include_unprocessed:
             for doc in raw_docs:
                 conv_id = doc.get("conversation_id")
-                is_orphan_type1 = (
-                    doc.get("always_persist")
-                    and doc.get("processing_status")
-                    == Conversation.ConversationStatus.FAILED.value
-                    and not doc.get("deleted")
+                is_orphan_type1 = doc.get(
+                    "processing_status"
+                ) == Conversation.ConversationStatus.FAILED.value and not doc.get(
+                    "deleted"
                 )
                 is_orphan_type2 = (
                     doc.get("deleted")
@@ -555,9 +545,6 @@ async def _regex_search_conversations(
 
     match_filter: dict = {
         "deleted": False,
-        # See get_conversations: purpose, not transport. Promoted ScreenPipe meetings
-        # are searchable; ambient capture evidence is not.
-        "data_purpose": {"$ne": "capture_evidence"},
     }
     if not user.is_superuser:
         match_filter["user_id"] = str(user.user_id)
@@ -628,42 +615,14 @@ async def search_conversations(
 async def _soft_delete_conversation(
     conversation: Conversation, user: User
 ) -> JSONResponse:
-    """Mark conversation and chunks as deleted (soft delete).
-
-    Chunks are soft-deleted first so that a crash between the two writes
-    leaves chunks deleted but the conversation still active — a safe state
-    where a retry will complete the operation.
-    """
+    """Soft-delete only the semantic claim; capture evidence remains durable."""
     conversation_id = conversation.conversation_id
     deleted_at = datetime.now(timezone.utc)
 
-    # 1. Soft delete audio chunks FIRST (safe failure mode: orphaned-deleted chunks)
-    result = await AudioChunkDocument.find(
-        AudioChunkDocument.conversation_id == conversation_id,
-        AudioChunkDocument.deleted == False,
-    ).update_many({"$set": {"deleted": True, "deleted_at": deleted_at}})
-
-    deleted_chunks = result.modified_count
-    logger.info(
-        f"Soft deleted {deleted_chunks} audio chunks for conversation {conversation_id}"
-    )
-
-    # 2. Mark conversation as deleted
     conversation.deleted = True
     conversation.deletion_reason = "user_deleted"
     conversation.deleted_at = deleted_at
-    try:
-        await conversation.save()
-    except Exception:
-        # Rollback: undo chunk soft-delete using the exact timestamp we set
-        logger.error(
-            f"Failed to soft-delete conversation {conversation_id}, rolling back chunk deletes"
-        )
-        await AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == conversation_id,
-            AudioChunkDocument.deleted_at == deleted_at,
-        ).update_many({"$set": {"deleted": False, "deleted_at": None}})
-        raise
+    await conversation.save()
 
     logger.info(f"Soft deleted conversation {conversation_id} for user {user.user_id}")
 
@@ -671,7 +630,7 @@ async def _soft_delete_conversation(
         status_code=200,
         content={
             "message": f"Successfully soft deleted conversation '{conversation_id}'",
-            "deleted_chunks": deleted_chunks,
+            "deleted_chunks": 0,
             "conversation_id": conversation_id,
             "client_id": conversation.client_id,
             "deleted_at": (
@@ -682,34 +641,11 @@ async def _soft_delete_conversation(
 
 
 async def _hard_delete_conversation(conversation: Conversation) -> JSONResponse:
-    """Permanently delete conversation and chunks (admin only).
-
-    Chunks are deleted first so that a crash between the two writes
-    leaves the conversation document intact — an admin can retry the
-    delete since the conversation still exists.
-    """
+    """Permanently delete the semantic claim, never shared capture evidence."""
     conversation_id = conversation.conversation_id
     client_id = conversation.client_id
 
-    # 1. Delete audio chunks FIRST (no rollback possible for hard deletes)
-    result = await AudioChunkDocument.find(
-        AudioChunkDocument.conversation_id == conversation_id
-    ).delete()
-
-    deleted_chunks = result.deleted_count
-    logger.info(
-        f"Hard deleted {deleted_chunks} audio chunks for conversation {conversation_id}"
-    )
-
-    # 2. Delete conversation document
-    try:
-        await conversation.delete()
-    except Exception:
-        logger.error(
-            f"Failed to hard-delete conversation {conversation_id} after "
-            f"deleting {deleted_chunks} chunks. Conversation document remains — retry delete."
-        )
-        raise
+    await conversation.delete()
 
     logger.info(f"Hard deleted conversation {conversation_id}")
 
@@ -717,7 +653,7 @@ async def _hard_delete_conversation(conversation: Conversation) -> JSONResponse:
         status_code=200,
         content={
             "message": f"Successfully permanently deleted conversation '{conversation_id}'",
-            "deleted_chunks": deleted_chunks,
+            "deleted_chunks": 0,
             "conversation_id": conversation_id,
             "client_id": client_id,
         },
@@ -772,66 +708,11 @@ async def delete_conversation(
 async def archive_conversation_audio_doc(
     conversation: Conversation, reason: str = "manual_cleanup"
 ) -> int:
-    """Archive a conversation document's audio (no permission check).
-
-    Hard-deletes the audio chunks and marks the conversation archived + soft-
-    deleted, keeping duration as the stub metadata. Returns the number of audio
-    chunks deleted. Idempotent: a re-run on an already-archived conversation
-    backfills the soft-delete flags and deletes 0 chunks.
-
-    This is the shared core used by both the user-facing endpoint (after a
-    permission check) and the system auto-clean sweep. Archiving is a
-    specialization of soft-delete: ``deleted=True`` hides it from the normal
-    list and surfaces it in the Archive tab; ``audio_archived``/``archive_reason``
-    record that the audio bytes were permanently purged. ``deletion_reason
-    ="audio_archived"`` is intentionally distinct from the no-speech/orphan
-    reasons so it isn't treated as a reprocessable orphan.
-    """
-    conversation_id = conversation.conversation_id
-    archived_at = datetime.now(timezone.utc)
-
-    if conversation.audio_archived:
-        # Idempotent backfill of soft-delete flags for items archived before
-        # archiving was unified with soft-delete.
-        if not conversation.deleted:
-            conversation.deleted = True
-            conversation.deletion_reason = "audio_archived"
-            conversation.deleted_at = conversation.audio_archived_at or archived_at
-            await conversation.save()
-        return 0
-
-    # 1. Hard delete audio chunks FIRST (no rollback for hard deletes; if the
-    #    metadata write fails afterwards a re-run completes — chunks are gone).
-    result = await AudioChunkDocument.find(
-        AudioChunkDocument.conversation_id == conversation_id
-    ).delete()
-    deleted_chunks = result.deleted_count
-
-    # 2. Mark the conversation as archived (+ soft-deleted), keeping duration.
-    conversation.audio_archived = True
-    conversation.audio_archived_at = archived_at
-    conversation.archive_reason = reason
-    conversation.audio_chunks_count = 0
-    conversation.audio_compression_ratio = None
-    conversation.vad_analysis = None  # derived from chunks that no longer exist
-    conversation.deleted = True
-    conversation.deletion_reason = "audio_archived"
-    conversation.deleted_at = archived_at
-    await conversation.save()
-
-    # Drop any cached waveform — it points at audio that no longer exists.
-    try:
-        await WaveformData.find(
-            WaveformData.conversation_id == conversation_id
-        ).delete()
-    except Exception as e:
-        logger.warning(f"Failed to delete waveform for {conversation_id}: {e}")
-
-    logger.info(
-        f"Archived audio for conversation {conversation_id} "
-        f"(reason={reason}, deleted {deleted_chunks} chunks)"
+    """Refuse implicit raw deletion until an explicit capture-retention policy exists."""
+    raise RuntimeError(
+        "Raw audio belongs to capture evidence and may support multiple claims; "
+        "conversation audio archival is disabled until capture retention is configured"
     )
-    return deleted_chunks
 
 
 async def archive_conversation_audio(
@@ -850,7 +731,10 @@ async def archive_conversation_audio(
         return error
 
     already_archived = conversation.audio_archived
-    deleted_chunks = await archive_conversation_audio_doc(conversation, reason)
+    try:
+        deleted_chunks = await archive_conversation_audio_doc(conversation, reason)
+    except RuntimeError as error:
+        return JSONResponse(status_code=409, content={"error": str(error)})
 
     if already_archived:
         return JSONResponse(
@@ -893,34 +777,11 @@ async def restore_conversation(conversation_id: str, user: User) -> JSONResponse
                 status_code=400, content={"error": "Conversation is not deleted"}
             )
 
-        # 1. Restore audio chunks FIRST (safe failure mode: restored chunks, conversation still deleted)
-        original_deleted_at = conversation.deleted_at
-        result = await AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == conversation_id,
-            AudioChunkDocument.deleted == True,
-        ).update_many({"$set": {"deleted": False, "deleted_at": None}})
-
-        restored_chunks = result.modified_count
-
-        # 2. Restore conversation
+        restored_chunks = 0
         conversation.deleted = False
         conversation.deletion_reason = None
         conversation.deleted_at = None
-        try:
-            await conversation.save()
-        except Exception:
-            # Rollback: re-soft-delete the chunks we just restored
-            logger.error(
-                f"Failed to restore conversation {conversation_id}, "
-                f"rolling back {restored_chunks} chunk restores"
-            )
-            await AudioChunkDocument.find(
-                AudioChunkDocument.conversation_id == conversation_id,
-                AudioChunkDocument.deleted == False,
-            ).update_many(
-                {"$set": {"deleted": True, "deleted_at": original_deleted_at}}
-            )
-            raise
+        await conversation.save()
 
         logger.info(
             f"Restored conversation {conversation_id} "
@@ -949,14 +810,10 @@ async def _restore_if_deleted_and_prepare(
     conversation_id: str,
     processing_status: str | None = Conversation.ConversationStatus.ACTIVE.value,
 ) -> None:
-    """Restore soft-deleted conversation/chunks and optionally set processing_status."""
+    """Restore a soft-deleted semantic claim and optionally set processing status."""
     changed = False
 
     if conversation.deleted:
-        await AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == conversation_id,
-            AudioChunkDocument.deleted == True,
-        ).update_many({"$set": {"deleted": False, "deleted_at": None}})
         conversation.deleted = False
         conversation.deletion_reason = None
         conversation.deleted_at = None
@@ -1184,10 +1041,7 @@ async def reprocess_orphan(conversation_id: str, user: User):
         if error:
             return error
 
-        # Verify audio chunks exist (check both deleted and non-deleted)
-        total_chunks = await AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == conversation_id
-        ).count()
+        total_chunks = sum(len(item.chunk_ids) for item in conversation.audio_ranges)
 
         if total_chunks == 0:
             return JSONResponse(
@@ -1195,13 +1049,8 @@ async def reprocess_orphan(conversation_id: str, user: User):
                 content={"error": "No audio data found for this conversation"},
             )
 
-        # If conversation is soft-deleted, restore it and its chunks
+        # If conversation is soft-deleted, restore the semantic claim.
         if conversation.deleted:
-            await AudioChunkDocument.find(
-                AudioChunkDocument.conversation_id == conversation_id,
-                AudioChunkDocument.deleted == True,
-            ).update_many({"$set": {"deleted": False, "deleted_at": None}})
-
             conversation.deleted = False
             conversation.deletion_reason = None
             conversation.deleted_at = None
@@ -1261,9 +1110,11 @@ async def reprocess_transcript(conversation_id: str, user: User):
 
         # Get audio_uuid from conversation
         # Validate audio chunks exist in MongoDB
-        chunks = await AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == conversation_id
-        ).to_list()
+        chunks = [
+            chunk_id
+            for item in conversation_model.audio_ranges
+            for chunk_id in item.chunk_ids
+        ]
 
         if not chunks:
             return JSONResponse(

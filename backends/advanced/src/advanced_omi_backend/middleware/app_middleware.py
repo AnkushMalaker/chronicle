@@ -91,7 +91,19 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
     def should_log_response_body(
         self, content_type: str, content_length: Optional[str]
     ) -> bool:
-        """Buffer-and-log only small JSON bodies."""
+        """Buffer-and-log only small JSON bodies, and only when asked for.
+
+        Pretty-printing every response at INFO made this logger ~97% of the backend's
+        entire log output — 434 requests produced 20,505 lines in two minutes, because
+        ``indent=2`` turns one response into hundreds of lines. All of it is written to
+        a stdout pipe, and all of it is buffered and re-serialized on the event loop.
+
+        The status line stays at INFO; bodies are debugging material, so they need
+        ``logging.getLogger("api.requests").setLevel(logging.DEBUG)``. Below that the
+        buffering is skipped outright rather than done and discarded.
+        """
+        if not request_logger.isEnabledFor(logging.DEBUG):
+            return False
         if not content_type.startswith("application/json"):
             return False
         if content_length:

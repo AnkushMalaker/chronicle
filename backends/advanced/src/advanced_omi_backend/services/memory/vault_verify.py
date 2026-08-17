@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
+import yaml
+
 from .vault_scaffold import VaultPathError, safe_vault_relative_path
 
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
@@ -52,6 +54,47 @@ NEW_NOTE_SCHEMA: Dict[str, Dict[str, Any]] = {
 }
 
 _UNKNOWN_SPEAKER_RE = re.compile(r"unknown speaker(?:\s+\d+)?", re.IGNORECASE)
+_SYSTEM_CONTENT_FOLDERS = frozenset(
+    {"Conversations", "Daily", "Manual Memories", "People", "Templates", "Topics"}
+)
+_TOPIC_FACT_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_TOPIC_FACT_STOPWORDS = frozenset(
+    {
+        "about",
+        "and",
+        "are",
+        "for",
+        "from",
+        "into",
+        "that",
+        "the",
+        "this",
+        "through",
+        "using",
+        "via",
+        "with",
+    }
+)
+
+
+def frontmatter_parse_error(content: str) -> str | None:
+    """Return an actionable error when an apparent YAML frontmatter block is invalid."""
+
+    if not content.startswith("---"):
+        return None
+    boundaries = list(re.finditer(r"^---\s*$", content, re.MULTILINE))
+    if not boundaries or boundaries[0].start() != 0:
+        return "YAML frontmatter opening delimiter must be the first line"
+    if len(boundaries) < 2:
+        return "YAML frontmatter has no closing `---` delimiter"
+    raw = content[boundaries[0].end() : boundaries[1].start()]
+    try:
+        parsed = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        return f"invalid YAML frontmatter: {exc}"
+    if parsed is not None and not isinstance(parsed, dict):
+        return "YAML frontmatter must be a key/value mapping"
+    return None
 
 
 @dataclass(frozen=True)
@@ -64,6 +107,16 @@ class Finding:
 
     def render(self) -> str:
         return f"- {self.path} [{self.rule}]: {self.detail}"
+
+
+@dataclass(frozen=True)
+class TopicScopeOverlap:
+    """A newly-created Topic whose facts are already carried by another Topic."""
+
+    path: str
+    other_path: str
+    matched_bullets: int
+    total_bullets: int
 
 
 def section_counts(text: str) -> Counter:
@@ -82,6 +135,148 @@ def new_duplicate_sections(before: str, after: str) -> List[str]:
     bc = section_counts(before)
     ac = section_counts(after)
     return sorted(h for h, n in ac.items() if n > 1 and n > bc.get(h, 0))
+
+
+def _meaningful_section_bodies(text: str, heading: str) -> tuple[str, ...]:
+    """Return non-placeholder bodies of every matching top-level H2 section.
+
+    A missing section, an empty section, and the canonical template's bare ``-``
+    placeholder are semantically equivalent. This lets a day create a well-formed new
+    Person note while still making any real ``Mentions`` content immutable.
+    """
+
+    matches = list(_H2_RE.finditer(text))
+    wanted = heading.casefold()
+    bodies: List[str] = []
+    for index, match in enumerate(matches):
+        if match.group(1).casefold() != wanted:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        lines = [line.rstrip() for line in text[match.end() : end].splitlines()]
+        meaningful = [line for line in lines if line.strip() not in {"", "-"}]
+        if meaningful:
+            bodies.append("\n".join(meaningful))
+    return tuple(bodies)
+
+
+def changed_immutable_sections(
+    rel: str,
+    before: str,
+    after: str,
+    immutable_sections: Sequence[tuple[str, str]],
+) -> List[str]:
+    """Configured section names whose meaningful content changed in ``rel``."""
+
+    parts = Path(rel).parts
+    if len(parts) < 2:
+        return []
+    folder = parts[0].casefold()
+    changed: List[str] = []
+    for configured_folder, heading in immutable_sections:
+        if folder != configured_folder.casefold():
+            continue
+        if _meaningful_section_bodies(before, heading) != _meaningful_section_bodies(
+            after, heading
+        ):
+            changed.append(heading)
+    return changed
+
+
+def _section_bullets(text: str, heading: str) -> List[str]:
+    """Fact bullets under one top-level H2 section, excluding template placeholders."""
+
+    matches = list(_H2_RE.finditer(text))
+    wanted = heading.casefold()
+    bullets: List[str] = []
+    for index, match in enumerate(matches):
+        if match.group(1).casefold() != wanted:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        for line in text[match.end() : end].splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- ") and stripped[2:].strip():
+                bullets.append(stripped[2:].strip())
+    return bullets
+
+
+def _topic_fact_tokens(text: str) -> set[str]:
+    return {
+        token
+        for token in _TOPIC_FACT_TOKEN_RE.findall(text.casefold())
+        if len(token) > 2 and token not in _TOPIC_FACT_STOPWORDS
+    }
+
+
+def _topic_scope_score(candidate: str, other: str) -> tuple[int, int]:
+    """How many candidate About bullets are substantially contained by ``other``."""
+
+    candidate_tokens = [
+        tokens
+        for bullet in _section_bullets(candidate, "About")
+        if len(tokens := _topic_fact_tokens(bullet)) >= 6
+    ]
+    other_tokens = [
+        tokens
+        for bullet in _section_bullets(other, "About")
+        if len(tokens := _topic_fact_tokens(bullet)) >= 6
+    ]
+    matched = 0
+    for tokens in candidate_tokens:
+        for comparison in other_tokens:
+            intersection = len(tokens & comparison)
+            if intersection >= 6 and intersection / len(tokens) >= 0.65:
+                matched += 1
+                break
+    return matched, len(candidate_tokens)
+
+
+def new_topic_scope_overlaps(
+    before: Mapping[str, str], after: Mapping[str, str]
+) -> List[TopicScopeOverlap]:
+    """Find new Topic notes whose About section substantially duplicates one peer.
+
+    One related fact does not collapse two legitimate subjects. A new note is rejected
+    only when at least two, and at least three quarters, of its substantive bullets are
+    already contained by one other Topic. This caught the measured ``Policy Store``
+    note (4/4 bullets repeated ``Agent Control``) without collapsing a related load-test
+    note whose remaining facts were distinct.
+    """
+
+    topics = {
+        rel: content
+        for rel, content in after.items()
+        if len(Path(rel).parts) == 2 and Path(rel).parts[0].casefold() == "topics"
+    }
+    new_paths = {rel for rel in topics if rel not in before}
+    candidates: Dict[str, TopicScopeOverlap] = {}
+    for rel in sorted(new_paths):
+        best: TopicScopeOverlap | None = None
+        for other_rel, other_content in topics.items():
+            if other_rel == rel:
+                continue
+            matched, total = _topic_scope_score(topics[rel], other_content)
+            if total < 2 or matched < 2 or matched / total < 0.75:
+                continue
+            overlap = TopicScopeOverlap(rel, other_rel, matched, total)
+            if best is None or (matched / total, matched, other_rel) > (
+                best.matched_bullets / best.total_bullets,
+                best.matched_bullets,
+                best.other_path,
+            ):
+                best = overlap
+        if best is not None:
+            candidates[rel] = best
+
+    # Two identical notes created in one run qualify against each other. Keep one
+    # deterministic canonical candidate and report only the casefold-later path.
+    overlaps: List[TopicScopeOverlap] = []
+    for rel, overlap in sorted(candidates.items()):
+        reciprocal = candidates.get(overlap.other_path)
+        if reciprocal is not None and reciprocal.other_path == rel:
+            if rel.casefold() < overlap.other_path.casefold():
+                continue
+        overlaps.append(overlap)
+    return overlaps
 
 
 def new_note_schema_problems(rel: str, content: str) -> List[str]:
@@ -209,6 +404,43 @@ def _markdown_files(root: Path) -> Dict[str, str]:
     return out
 
 
+def new_category_creations(
+    before: Mapping[str, str], after: Mapping[str, str]
+) -> Dict[str, str]:
+    """New category names mapped to one representative changed path.
+
+    A complete organic category normally introduces a root hub, template and Base.
+    The Base is not Markdown, so the diff cannot rely on seeing all three. Detect the
+    new hub first, then also catch an agent that skipped the hub and wrote directly to
+    a previously unknown top-level folder or emitted only a category template.
+    """
+
+    created: Dict[str, str] = {}
+    for rel, content in sorted(after.items()):
+        if rel in before or before.get(rel) == content:
+            continue
+        path = Path(rel)
+        if len(path.parts) == 1 and path.suffix.casefold() == ".md":
+            created[path.stem] = rel
+
+    for rel, content in sorted(after.items()):
+        if rel in before or before.get(rel) == content:
+            continue
+        path = Path(rel)
+        if len(path.parts) != 2:
+            continue
+        folder = path.parts[0]
+        if folder == "Templates" and path.name.endswith(" Template.md"):
+            category = path.name[: -len(" Template.md")]
+            if f"{category}.md" not in before:
+                created.setdefault(category, rel)
+            continue
+        if folder in _SYSTEM_CONTENT_FOLDERS or f"{folder}.md" in before:
+            continue
+        created.setdefault(folder, rel)
+    return created
+
+
 def verify_day_episode_ranges(note_path: Path, day_digest: str) -> List[Finding]:
     """Require the Daily episode index to mirror the active timeline exactly.
 
@@ -217,9 +449,10 @@ def verify_day_episode_ranges(note_path: Path, day_digest: str) -> List[Finding]
     episode but retained stale time ranges for every existing episode. The write then
     looked healthy even though the vault no longer represented the active run.
 
-    The semantic wording stays agentic, but the episode index is a source-backed
-    contract: one ordered bullet per supplied episode, with the exact range selected by
-    segmentation. Raw transcripts remain outside the vault.
+    The episode index is a source-backed Chronicle contract rather than model-authored
+    prose: one concise ordered bullet per supplied episode, with the exact range
+    selected by segmentation. Detailed summaries stay on TimelineEpisode and raw
+    transcripts remain outside the vault.
     """
 
     expected = _DAY_DIGEST_RANGE_RE.findall(day_digest or "")
@@ -261,6 +494,8 @@ def verify_vault_changes(
     *,
     required: Sequence[str] = (),
     forbidden_folders: Sequence[str] = (),
+    immutable_sections: Sequence[tuple[str, str]] = (),
+    forbid_new_categories: bool = False,
 ) -> List[Finding]:
     """Check what changed in ``root`` since the ``before`` snapshot.
 
@@ -281,6 +516,10 @@ def verify_vault_changes(
     ``Conversations/ads-standup-2026-08-06.md`` from an episode, minting an id matching
     no conversation and shadowing the real note the conversation path would write.
 
+    ``immutable_sections`` scopes section ownership by ``(folder, heading)``. Day
+    writes use it for ``People/## Mentions``: Daily/Timeline is the chronological
+    record, while People notes retain only durable facts in ``About``.
+
     Case collisions are checked across the whole vault rather than only the changed
     set: the offending pair is one new note plus one that was already there, and only
     the pair is meaningful.
@@ -289,6 +528,17 @@ def verify_vault_changes(
     after = _markdown_files(root)
     findings: List[Finding] = []
     forbidden = tuple(f"{folder.rstrip('/')}/" for folder in forbidden_folders)
+    topic_overlaps = {
+        overlap.path: overlap for overlap in new_topic_scope_overlaps(before, after)
+    }
+    new_category_paths = (
+        {
+            path: category
+            for category, path in new_category_creations(before, after).items()
+        }
+        if forbid_new_categories
+        else {}
+    )
 
     for rel in required:
         if rel in after and after[rel] != before.get(rel):
@@ -320,6 +570,50 @@ def verify_vault_changes(
                 )
             )
 
+        category = new_category_paths.get(rel)
+        if category is not None:
+            findings.append(
+                Finding(
+                    rel,
+                    "new_category",
+                    f"a day write cannot invent the '{category}' category schema. "
+                    "Delete the new hub/template/Base bundle and its new category "
+                    "notes. Keep the observation in Daily, link it unresolved, or "
+                    "record durable facts in an already-existing category.",
+                )
+            )
+
+        for heading in changed_immutable_sections(
+            rel,
+            was or "",
+            content,
+            immutable_sections,
+        ):
+            findings.append(
+                Finding(
+                    rel,
+                    "immutable_section",
+                    f"this write type cannot modify `## {heading}` in People notes. "
+                    "Daily/Timeline owns chronological activity; restore this section "
+                    "exactly and put only genuinely durable personal facts in "
+                    "`## About`.",
+                )
+            )
+
+        overlap = topic_overlaps.get(rel)
+        if overlap is not None:
+            findings.append(
+                Finding(
+                    rel,
+                    "topic_scope_overlap",
+                    f"{overlap.matched_bullets}/{overlap.total_bullets} substantive "
+                    f"`## About` bullets substantially repeat "
+                    f"{overlap.other_path}. Keep one canonical Topic: move only any "
+                    "genuinely unique facts into that note, then remove this newly "
+                    "created overlapping note.",
+                )
+            )
+
         reason = illegal_path_reason(rel)
         if reason:
             findings.append(Finding(rel, "illegal_path", reason))
@@ -331,6 +625,18 @@ def verify_vault_changes(
         reason = non_person_note_reason(rel)
         if reason:
             findings.append(Finding(rel, "not_a_person", reason))
+
+        reason = frontmatter_parse_error(content)
+        if reason:
+            findings.append(
+                Finding(
+                    rel,
+                    "invalid_frontmatter",
+                    f"{reason}. Repair the YAML before finishing; properties with "
+                    "multiple values must use a YAML list such as "
+                    '`author: ["[[A]]", "[[B]]"]`.',
+                )
+            )
 
         dupes = new_duplicate_sections(was or "", content)
         if dupes:
@@ -356,6 +662,22 @@ def verify_vault_changes(
                         f"{'; '.join(problems)}. Fill it from "
                         f"Templates/{template} Template.md, preserving every required "
                         f"section and copying the embed line verbatim.",
+                    )
+                )
+            parts = Path(rel).parts
+            if (
+                len(parts) == 2
+                and parts[0] in NEW_NOTE_SCHEMA
+                and not _section_bullets(content, "About")
+            ):
+                findings.append(
+                    Finding(
+                        rel,
+                        "empty_semantic_note",
+                        "this newly-created note has no substantive `## About` fact. "
+                        "An empty scaffold is not durable memory: add only a supported, "
+                        "reusable fact from the source, or delete the note and leave the "
+                        "name as an unresolved wikilink.",
                     )
                 )
 

@@ -97,7 +97,7 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     client = AsyncIOMotorClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017"))
     await init_beanie(
-        database=client.chronicle,
+        database=client[os.getenv("MONGODB_DATABASE", "chronicle")],
         document_models=[
             Conversation,
             User,

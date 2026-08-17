@@ -38,6 +38,7 @@ from advanced_omi_backend.services.memory.rebuild import (
     RebuildStage,
     build_rebuild_plan,
     build_timeline_days,
+    create_vault_backup,
     execute_memory_rebuild,
 )
 
@@ -49,9 +50,6 @@ IMPORT_STAGE_LABELS = {
     "export_files": "Export filesystem",
     "finalize_archive": "Finalize archive",
     "verify": "Verify checksums",
-    "scan_audio": "Scan audio identities",
-    "decode_archive_duplicates": "Decode duplicate candidates",
-    "decode_database_duplicates": "Compare existing audio",
     "restore_database": "Restore MongoDB",
     "restore_files": "Restore filesystem",
 }
@@ -157,15 +155,9 @@ async def _connect_database():
     return database
 
 
-def _read_id_list(path: Path) -> list[str]:
-    ids = [line.strip() for line in path.read_text().splitlines()]
-    return [value for value in ids if value and not value.startswith("#")]
-
-
 async def _run_export(args: argparse.Namespace) -> None:
     database = await _connect_database()
     output = args.output or _default_archive_path()
-    excluded = _read_id_list(args.exclude_audio_for) if args.exclude_audio_for else []
     with ArchiveProgressDisplay(
         ["export_database", "export_files", "finalize_archive"]
     ) as progress:
@@ -174,15 +166,21 @@ async def _run_export(args: argparse.Namespace) -> None:
             output,
             data_dir=args.data_dir,
             overwrite=args.overwrite,
-            exclude_audio_conversation_ids=excluded,
+            base_archives=args.base_archive or (),
             progress=progress.update,
         )
     excluded_note = ""
-    if summary.excluded_audio_conversations:
+    if (
+        summary.excluded_audio_chunks
+        or summary.excluded_documents
+        or summary.excluded_files
+    ):
         excluded_note = (
-            f"\n[yellow]Audio omitted:[/yellow] {summary.excluded_audio_chunks} chunks "
-            f"from {summary.excluded_audio_conversations} conversations already held by "
-            "an earlier backup; restore those alongside it."
+            "\n[yellow]Unchanged data omitted:[/yellow] "
+            f"{summary.excluded_audio_chunks} audio chunks, "
+            f"{summary.excluded_documents} MongoDB documents, and "
+            f"{summary.excluded_files} files already covered by the base archive "
+            "chain; restore the bases first."
         )
     console.print(
         Panel(
@@ -300,14 +298,7 @@ async def _run_import(args: argparse.Namespace) -> None:
             "--user-id for a selective rebuild."
         )
     restore_files = not args.database_only and not args.rebuild_from
-    stage_order = [
-        "verify",
-        "scan_audio",
-        "decode_archive_duplicates",
-    ]
-    if not args.replace:
-        stage_order.append("decode_database_duplicates")
-    stage_order.append("restore_database")
+    stage_order = ["verify", "restore_database"]
     if restore_files:
         stage_order.append("restore_files")
     with ArchiveProgressDisplay(stage_order) as progress:
@@ -346,18 +337,6 @@ async def _run_import(args: argparse.Namespace) -> None:
         console.print(
             "Skipped derived collections: " + ", ".join(summary.skipped_collections)
         )
-    for warning in summary.duplicate_audio_warnings:
-        console.print(
-            "[yellow]Duplicate audio skipped:[/yellow] conversation "
-            f"{warning.skipped_conversation_id} matches {warning.kept_source} "
-            f"conversation {warning.kept_conversation_id}; kept the first copy."
-        )
-    for warning in summary.duplicate_chunk_warnings:
-        console.print(
-            "[yellow]Duplicate audio chunk skipped:[/yellow] conversation "
-            f"{warning.conversation_id}, chunk {warning.chunk_index}; kept "
-            f"{warning.kept_source} chunk {warning.kept_chunk_id}."
-        )
     if args.rebuild_from:
         await _rebuild(database, args)
 
@@ -365,6 +344,44 @@ async def _run_import(args: argparse.Namespace) -> None:
 async def _run_rebuild(args: argparse.Namespace) -> None:
     database = await _connect_database()
     await _rebuild(database, args)
+
+
+async def _run_backup_vault(args: argparse.Namespace) -> None:
+    user_ids = tuple(sorted(set(args.user_id or [])))
+    if not user_ids:
+        roots = [
+            args.data_dir / root_name
+            for root_name in ("conversation_docs", "memory_md")
+        ]
+        user_ids = tuple(
+            sorted(
+                {
+                    path.name
+                    for root in roots
+                    if root.is_dir()
+                    for path in root.iterdir()
+                    if path.is_dir()
+                }
+            )
+        )
+    if not user_ids:
+        raise MemoryRebuildError("No user vaults found")
+    backup = create_vault_backup(
+        args.data_dir,
+        user_ids,
+        args.data_dir / "backups",
+        description=args.description,
+    )
+    if backup is None:
+        raise MemoryRebuildError("No vault files found for the selected users")
+    console.print(
+        Panel(
+            f"[green]Vault backup complete[/green]\n"
+            f"Path: {backup}\n"
+            f"Users: {len(user_ids)}\n"
+            f"Description: {args.description or '(none)'}"
+        )
+    )
 
 
 def _add_common_data_dir(parser: argparse.ArgumentParser) -> None:
@@ -386,12 +403,12 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("output", nargs="?", type=Path)
     export_parser.add_argument("--overwrite", action="store_true")
     export_parser.add_argument(
-        "--exclude-audio-for",
+        "--base-archive",
         type=Path,
+        action="append",
         help=(
-            "File of conversation ids (one per line) whose audio_chunks to omit "
-            "because an earlier backup already holds identical audio; produce it "
-            "with scripts/audio_backup_dedup.py scan --exclude-list"
+            "Verified earlier .chronicle archive whose unchanged audio, Mongo "
+            "documents, and files should not be stored again; repeat for a base chain"
         ),
     )
     _add_common_data_dir(export_parser)
@@ -402,6 +419,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify_parser.add_argument("archive", type=Path)
     verify_parser.set_defaults(handler=_run_verify)
+
+    vault_parser = subparsers.add_parser(
+        "backup-vault", help="Create a dated, checksummed Markdown-vault backup"
+    )
+    vault_parser.add_argument("--user-id", action="append")
+    vault_parser.add_argument(
+        "--description", help="Human-readable reason stored in manifest.json"
+    )
+    _add_common_data_dir(vault_parser)
+    vault_parser.set_defaults(handler=_run_backup_vault)
 
     import_parser = subparsers.add_parser("import", help="Import a data archive")
     import_parser.add_argument("archive", type=Path)

@@ -7,8 +7,8 @@ until something re-times it. That is why re-bounding has repeatedly cost annotat
 the text is keyed to the container, not to the audio.
 
 ``AudioChunkDocument.captured_at`` is immutable, so the wall-clock time is always
-recoverable. But it is only recoverable **per chunk**. Silence trimming removes whole
-chunks and repacks the surviving relative timeline, so the offset between relative and
+recoverable through a Conversation's range claims. Silence trimming clips those claims
+and repacks the surviving presentation timeline, so the offset between relative and
 absolute jumps at every seam. Measured on this deployment: 355 of 1093 conversations
 (32%) have a moving anchor, 298 of them by more than a minute, the worst by 8.8 hours.
 A single conversation-level anchor is therefore wrong for a third of the corpus, and
@@ -29,8 +29,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional, Sequence
 from zoneinfo import ZoneInfo
 
-from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.services.audio_claims import resolve_conversation_audio
 
 logger = logging.getLogger(__name__)
 
@@ -154,28 +154,16 @@ class AbsoluteSegment:
 
 
 async def load_anchor_map(conversation_id: str) -> AnchorMap:
-    """Build the relative→absolute map for one conversation from its chunks."""
-
-    documents = await AudioChunkDocument.find(
-        {"conversation_id": conversation_id, "deleted": {"$ne": True}}
-    ).to_list()
-    return _anchor_map_from_chunks(conversation_id, documents)
-
-
-def _anchor_map_from_chunks(conversation_id: str, chunks: Sequence) -> AnchorMap:
+    """Build the relative→absolute map from a Conversation's range claims."""
+    claimed = await resolve_conversation_audio(conversation_id)
     anchors = [
         ChunkAnchor(
-            start_time=float(chunk.start_time),
-            # ``end_time`` is stored, but a chunk written before it was reliable can
-            # disagree with ``duration``; the longer of the two never truncates real
-            # audio, and over-covering only ever costs a slightly generous match.
-            end_time=float(
-                max(chunk.end_time, chunk.start_time + (chunk.duration or 0.0))
-            ),
-            captured_at=as_utc(chunk.captured_at),
+            start_time=item.conversation_start_seconds,
+            end_time=item.conversation_start_seconds + item.duration_seconds,
+            captured_at=as_utc(item.chunk.captured_at)
+            + timedelta(seconds=item.clip_start_seconds),
         )
-        for chunk in chunks
-        if chunk.captured_at is not None
+        for item in claimed
     ]
     return AnchorMap(conversation_id=conversation_id, anchors=anchors)
 
@@ -270,31 +258,31 @@ def segments_in_range(
 async def conversations_overlapping(
     started_at: datetime, ended_at: datetime, *, user_id: Optional[str] = None
 ) -> list[str]:
-    """Conversation ids holding audio inside a range, found via the chunk table.
+    """Conversation IDs whose semantic claims overlap an absolute range.
 
-    Selection is by ``captured_at`` rather than by any container field, so it finds
-    the audio wherever a split, merge, or trim has since moved it — which is the whole
-    point of asking for a *range* instead of a recording.
+    Raw capture is intentionally absent from this query: continuous audio that has not
+    been materialized as speech must not appear as a user-visible Conversation.
     """
 
     start, end = as_utc(started_at), as_utc(ended_at)
     match: dict = {
-        "captured_at": {"$gte": start - MAX_EXTRAPOLATION, "$lt": end},
         "deleted": {"$ne": True},
+        "audio_ranges": {
+            "$elemMatch": {
+                "started_at": {"$lt": end},
+                "ended_at": {"$gt": start},
+                "time_basis": {"$ne": "unknown"},
+            }
+        },
     }
-    collection = AudioChunkDocument.get_pymongo_collection()
-    rows = await collection.aggregate(
-        [{"$match": match}, {"$group": {"_id": "$conversation_id"}}]
-    ).to_list(length=None)
-    ids = [str(row["_id"]) for row in rows if row.get("_id")]
-    if not ids:
-        return []
-    if user_id is None:
-        return sorted(ids)
-    owned = await Conversation.find(
-        {"conversation_id": {"$in": ids}, "user_id": user_id}
-    ).to_list()
-    return sorted(conversation.conversation_id for conversation in owned)
+    if user_id is not None:
+        match["user_id"] = user_id
+    rows = (
+        await Conversation.get_pymongo_collection()
+        .find(match, {"conversation_id": 1})
+        .to_list(length=None)
+    )
+    return sorted(str(row["conversation_id"]) for row in rows)
 
 
 async def transcript_for_range(

@@ -20,8 +20,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.services.audio_claims import resolve_conversation_audio
 from advanced_omi_backend.utils.vad_analysis import (
     frame_speech_intervals,
     merge_speech_regions,
@@ -85,38 +85,34 @@ async def collect_raw_intervals(
     Returns (intervals, last_chunk_end_seconds, sample_rate); intervals is
     None when any chunk lacks VAD scores (caller should analyze first).
     """
-    collection = AudioChunkDocument.get_pymongo_collection()
-    cursor = collection.find(
-        {"conversation_id": conversation_id},
-        {
-            "start_time": 1,
-            "end_time": 1,
-            "sample_rate": 1,
-            "vad.scores": 1,
-            "vad.frame_hop_ms": 1,
-        },
-    ).sort("chunk_index", 1)
-
+    claimed = await resolve_conversation_audio(conversation_id)
     intervals: List[List[float]] = []
     last_end = 0.0
     sample_rate = 16000
     first = True
-    async for chunk in cursor:
+    for item in claimed:
+        chunk = item.chunk
         if first:
-            sample_rate = int(chunk.get("sample_rate") or 16000)
+            sample_rate = int(chunk.sample_rate or 16000)
             first = False
-        vad = chunk.get("vad")
-        if not vad or vad.get("scores") is None:
+        vad = chunk.vad
+        if vad is None or vad.scores is None:
             return None, 0.0, sample_rate
-        intervals.extend(
-            frame_speech_intervals(
-                vad["scores"],
-                float(vad["frame_hop_ms"]) / 1000.0,
-                float(chunk["start_time"]),
-                threshold=threshold,
-            )
+        base = item.conversation_start_seconds - item.clip_start_seconds
+        item_intervals = frame_speech_intervals(
+            vad.scores,
+            float(vad.frame_hop_ms) / 1000.0,
+            base,
+            threshold=threshold,
         )
-        last_end = float(chunk["end_time"])
+        claim_start = item.conversation_start_seconds
+        claim_end = claim_start + item.duration_seconds
+        intervals.extend(
+            [max(start, claim_start), min(end, claim_end)]
+            for start, end in item_intervals
+            if start < claim_end and end > claim_start
+        )
+        last_end = claim_end
     return intervals, last_end, sample_rate
 
 
@@ -152,10 +148,8 @@ async def plan_conversation_clips(
         if duration <= 0:
             return ConversationPlan(conv, skipped_reason="no audio duration")
         regions: List[List[float]] = [[0.0, duration]]
-        first = await AudioChunkDocument.find_one(
-            AudioChunkDocument.conversation_id == cid
-        )
-        sample_rate = first.sample_rate if first else 16000
+        claimed = await resolve_conversation_audio(cid)
+        sample_rate = claimed[0].chunk.sample_rate if claimed else 16000
     else:
         intervals, last_end, sample_rate = await collect_raw_intervals(
             cid, speech_threshold

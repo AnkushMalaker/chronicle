@@ -50,7 +50,23 @@ class ContextItem(Protocol):
     metadata: dict[str, Any]
 
 
-async def request_conversation_context_jobs(conversation: Conversation) -> list[str]:
+class ConversationWindow(Protocol):
+    """The four facts ``request_conversation_context_jobs`` needs from a conversation.
+
+    It only derives a bounded time window and an owner, so a caller sweeping many
+    conversations can project these fields instead of loading whole documents —
+    a conversation carries its transcripts, and 69 of them are 63 MB here.
+    """
+
+    user_id: str
+    conversation_id: str
+    created_at: datetime
+    audio_total_duration: float | None
+
+
+async def request_conversation_context_jobs(
+    conversation: ConversationWindow,
+) -> list[str]:
     margin = timedelta(minutes=5)
     start_at = conversation.created_at - margin
     end_at = (
@@ -253,14 +269,24 @@ async def _expired_conversation_ids(
     expired: list[str] = []
     for index in range(0, len(conversation_ids), _PURGE_BATCH):
         batch = conversation_ids[index : index + _PURGE_BATCH]
-        rows = await Conversation.find({"conversation_id": {"$in": batch}}).to_list()
-        alive = {row.conversation_id for row in rows}
+        # Three small fields decide this, but hydrating the documents would pull
+        # every transcript of up to 500 conversations through the event loop.
+        rows = await (
+            Conversation.get_pymongo_collection()
+            .find(
+                {"conversation_id": {"$in": batch}},
+                {"conversation_id": 1, "deleted": 1, "deleted_at": 1},
+            )
+            .to_list(length=None)
+        )
+        alive = {row["conversation_id"] for row in rows}
         expired.extend(item for item in batch if item not in alive)
         for row in rows:
-            if not row.deleted or row.deleted_at is None:
+            deleted_at = row.get("deleted_at")
+            if not row.get("deleted") or deleted_at is None:
                 continue
-            if _as_utc(row.deleted_at) <= cutoff:
-                expired.append(row.conversation_id)
+            if _as_utc(deleted_at) <= cutoff:
+                expired.append(row["conversation_id"])
     return expired
 
 

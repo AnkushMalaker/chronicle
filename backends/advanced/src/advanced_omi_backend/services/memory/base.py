@@ -32,8 +32,8 @@ class DayWriteOutcome(str, Enum):
     a boolean forces it to be mislabelled either way:
 
     - reported complete, it hides that the run may have stopped before making any of
-      its durable People/Topic edits. Deterministic verification proves the day note's
-      shape and that its episode index mirrors the digest; it cannot prove the run
+      its durable People/Topic edits. Deterministic verification proves Chronicle's
+      day index mirrors the digest; it cannot prove the semantic agent
       finished the work it was asked to do.
     - reported failed, it spends the whole retry budget re-reaching the same
       truncation — truncation is usually a property of the model and its round limit,
@@ -175,6 +175,7 @@ class MemoryServiceBase(ABC):
         local_date: str,
         user_id: str,
         *,
+        day_index_digest: str,
         source_date: Optional[str] = None,
     ) -> Tuple["DayWriteOutcome", List[str]]:
         """Record one settled local day of timeline episodes.
@@ -186,6 +187,8 @@ class MemoryServiceBase(ABC):
         Args:
             day_digest: Rendered bounded episode summaries for the day. Raw transcripts
                 are intentionally excluded.
+            day_index_digest: Unabridged episode headings/titles used only to render the
+                deterministic Daily index. It is not sent to the semantic agent.
             local_date: The user-local date being recorded, ISO ``YYYY-MM-DD``
             user_id: User identifier
             source_date: Trusted timestamp for the day's record

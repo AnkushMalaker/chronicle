@@ -16,16 +16,35 @@ import io
 import logging
 import math
 import time
+import uuid
 import wave
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from bson import Binary
+from pymongo.errors import DuplicateKeyError
 
+from advanced_omi_backend.models.audio_capture import (
+    AudioCaptureSession,
+    AudioRangeRef,
+    as_utc,
+)
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.waveform import WaveformData
+from advanced_omi_backend.services.audio_claims import (
+    AudioClaimError,
+    ClaimedChunk,
+    range_duration,
+    resolve_audio_ranges,
+    resolve_conversation_audio,
+)
+from advanced_omi_backend.services.corpus_reconciliation import (
+    encoded_identity,
+    pcm_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -150,14 +169,33 @@ async def decode_opus_to_pcm(
     return stdout
 
 
+def _build_wav_bytes(
+    pcm_data: bytes,
+    sample_rate: int = 16000,
+    channels: int = 1,
+    sample_width: int = 2,
+) -> bytes:
+    """Synchronously encode a WAV container around PCM bytes."""
+
+    wav_buffer = io.BytesIO()
+    try:
+        with wave.open(wav_buffer, "wb") as wav_file:
+            wav_file.setnchannels(channels)
+            wav_file.setsampwidth(sample_width)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm_data)
+        return wav_buffer.getvalue()
+    finally:
+        wav_buffer.close()
+
+
 async def build_wav_from_pcm(
     pcm_data: bytes,
     sample_rate: int = 16000,
     channels: int = 1,
     sample_width: int = 2,
 ) -> bytes:
-    """
-    Build a complete WAV file from raw PCM data.
+    """Build a complete WAV file from raw PCM data without blocking the event loop.
 
     Args:
         pcm_data: Raw PCM audio bytes (signed 16-bit little-endian)
@@ -173,29 +211,24 @@ async def build_wav_from_pcm(
         >>> wav_bytes = await build_wav_from_pcm(pcm_bytes)
         >>> # wav_bytes can be served via StreamingResponse
     """
-    # Use BytesIO as in-memory file
-    wav_buffer = io.BytesIO()
-
-    try:
-        # Create WAV file writer
-        with wave.open(wav_buffer, "wb") as wav_file:
-            wav_file.setnchannels(channels)
-            wav_file.setsampwidth(sample_width)
-            wav_file.setframerate(sample_rate)
-            wav_file.writeframes(pcm_data)
-
-        # Get WAV bytes
-        wav_bytes = wav_buffer.getvalue()
-
-        logger.debug(
-            f"Built WAV file: {len(wav_bytes)} bytes "
-            f"(PCM: {len(pcm_data)}, header: {len(wav_bytes) - len(pcm_data)})"
-        )
-
-        return wav_bytes
-
-    finally:
-        wav_buffer.close()
+    # ``wave.writeframes`` copies the entire PCM payload. On the ten-hour corpus file
+    # that monopolized FastAPI's event-loop thread for 2.14 seconds, delaying health
+    # checks and live audio reads. The bytes are still built in memory, but on the
+    # default worker pool so other async work remains schedulable.
+    wav_bytes = await asyncio.to_thread(
+        _build_wav_bytes,
+        pcm_data,
+        sample_rate,
+        channels,
+        sample_width,
+    )
+    logger.debug(
+        "Built WAV file: %d bytes (PCM: %d, header: %d)",
+        len(wav_bytes),
+        len(pcm_data),
+        len(wav_bytes) - len(pcm_data),
+    )
+    return wav_bytes
 
 
 async def retrieve_audio_chunks(
@@ -203,40 +236,21 @@ async def retrieve_audio_chunks(
     start_index: int = 0,
     limit: Optional[int] = None,
 ) -> List[AudioChunkDocument]:
+    """Resolve a Conversation claim and return its chunks in presentation order.
+
+    ``start_index`` and ``limit`` address the ordered claim, not storage sequence.
+    Exact edge clipping is intentionally handled by the PCM reconstruction helpers;
+    callers that need playable audio must not concatenate this result directly.
     """
-    Retrieve audio chunks from MongoDB for a conversation.
-
-    Chunks are returned in sequential order by chunk_index.
-
-    Args:
-        conversation_id: Parent conversation ID
-        start_index: First chunk index to retrieve (default: 0)
-        limit: Maximum number of chunks to retrieve (default: None for all)
-
-    Returns:
-        List of AudioChunkDocument instances, sorted by chunk_index
-
-    Example:
-        >>> # Get all chunks for a conversation
-        >>> chunks = await retrieve_audio_chunks("550e8400-e29b-41d4...")
-        >>> # Get chunks 5-14 (10 chunks starting at index 5)
-        >>> chunks = await retrieve_audio_chunks("550e8400-e29b-41d4...", start_index=5, limit=10)
-    """
-    # Build query. Exclude soft-deleted chunks: a soft-delete (conversation
-    # delete, or the de-duplication repair for overlapping reconnect cycles)
-    # must not resurface in reconstructed audio.
-    query = AudioChunkDocument.find(
-        AudioChunkDocument.conversation_id == conversation_id,
-        AudioChunkDocument.chunk_index >= start_index,
-        AudioChunkDocument.deleted == False,  # noqa: E712 (Beanie needs ==)
-    )
-
-    # Apply limit if specified
-    if limit is not None:
-        query = query.limit(limit)
-
-    # Execute query with sorting
-    chunks = await query.sort("+chunk_index").to_list()
+    resolved = await resolve_conversation_audio(conversation_id)
+    chunks: list[AudioChunkDocument] = []
+    seen: set[str] = set()
+    for item in resolved:
+        chunk_id = str(item.chunk.id)
+        if chunk_id not in seen:
+            chunks.append(item.chunk)
+            seen.add(chunk_id)
+    chunks = chunks[start_index : None if limit is None else start_index + limit]
 
     logger.debug(
         f"Retrieved {len(chunks)} chunks for conversation {conversation_id[:8]}... "
@@ -284,32 +298,6 @@ async def invalidate_conversation_audio_caches(conversation_id: str) -> dict:
     return {"waveforms_deleted": waveforms_deleted, "vad_cleared": vad_cleared}
 
 
-async def get_resume_position(conversation_id: str) -> tuple[int, float]:
-    """Next (chunk_index, start_time) for appending audio to a conversation.
-
-    Returns (0, 0.0) when the conversation has no audio yet. When it already has
-    chunks — e.g. a WebSocket reconnect re-attaches a persistence cycle to an
-    ``always_persist`` placeholder a previous cycle already wrote to — resume from
-    the end so new chunks APPEND with a continuous chunk_index/timeline instead of
-    restarting at 0. Restarting at 0 produced overlapping duplicate chunks under
-    one conversation_id, which corrupts reconstruction (chunks are read sorted by
-    chunk_index, so duplicates interleave) and silently truncates playback. The
-    ``conversation.audio_chunks_count`` ``max()`` guard only masked the count; this
-    fixes the underlying data.
-    """
-    last = (
-        await AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == conversation_id,
-            AudioChunkDocument.deleted == False,  # noqa: E712 (Beanie needs ==)
-        )
-        .sort("-chunk_index")
-        .first_or_none()
-    )
-    if last is None:
-        return 0, 0.0
-    return last.chunk_index + 1, last.end_time
-
-
 async def concatenate_chunks_to_pcm(
     chunks: List[AudioChunkDocument],
 ) -> bytes:
@@ -348,6 +336,110 @@ async def concatenate_chunks_to_pcm(
     logger.debug(f"Batch decoded {len(chunks)} chunks → {len(pcm_data)} bytes PCM")
 
     return pcm_data
+
+
+def _clip_pcm(
+    pcm_data: bytes,
+    *,
+    start_seconds: float,
+    end_seconds: float,
+    sample_rate: int,
+    channels: int,
+) -> bytes:
+    """Clip decoded 16-bit PCM on complete sample frames."""
+    bytes_per_frame = channels * 2
+    bytes_per_second = sample_rate * bytes_per_frame
+    start_byte = int(start_seconds * bytes_per_second)
+    end_byte = int(end_seconds * bytes_per_second)
+    start_byte = max(0, start_byte - start_byte % bytes_per_frame)
+    end_byte = min(len(pcm_data), end_byte - end_byte % bytes_per_frame)
+    return pcm_data[start_byte:end_byte]
+
+
+async def _claimed_window_to_pcm(
+    resolved: Sequence[ClaimedChunk],
+    start_time: float,
+    end_time: float,
+    *,
+    decode_cache: Optional[dict[str, bytes]] = None,
+) -> tuple[bytes, int, int]:
+    """Render an exact presentation-time window from already-resolved claims."""
+    if start_time < 0 or end_time <= start_time:
+        raise ValueError(f"Invalid time range: start={start_time}s, end={end_time}s")
+
+    selected: list[tuple[ClaimedChunk, float, float]] = []
+    for item in resolved:
+        item_start = item.conversation_start_seconds
+        item_end = item_start + item.duration_seconds
+        overlap_start = max(start_time, item_start)
+        overlap_end = min(end_time, item_end)
+        if overlap_end > overlap_start:
+            selected.append((item, overlap_start, overlap_end))
+    if not selected:
+        raise AudioClaimError(f"No claimed audio covers [{start_time}, {end_time}]")
+
+    sample_rate = selected[0][0].chunk.sample_rate
+    channels = selected[0][0].chunk.channels
+
+    # Preserve the canonical full-capture decode used by the paid-transcription
+    # cache. Decoding each independent Ogg link separately is acoustically valid but
+    # produces different PCM bytes, defeating content-addressed reuse. The fast path
+    # is safe only when the requested window contains whole presentation-contiguous
+    # chunks; clipped playback continues through the exact per-chunk path below.
+    whole_chunk_window = decode_cache is None
+    expected_start = start_time
+    for item, overlap_start, overlap_end in selected:
+        chunk_duration = float(item.chunk.duration)
+        if (
+            abs(overlap_start - item.conversation_start_seconds) > 0.001
+            or abs(
+                overlap_end - (item.conversation_start_seconds + item.duration_seconds)
+            )
+            > 0.001
+            or abs(item.clip_start_seconds) > 0.001
+            or abs(item.clip_end_seconds - chunk_duration) > 0.001
+            or abs(item.conversation_start_seconds - expected_start) > 0.001
+        ):
+            whole_chunk_window = False
+            break
+        expected_start += item.duration_seconds
+    if whole_chunk_window and abs(expected_start - end_time) <= 0.001:
+        pcm_data = await concatenate_chunks_to_pcm(
+            [item.chunk for item, _, _ in selected]
+        )
+        return pcm_data, sample_rate, channels
+
+    output = bytearray()
+    for item, overlap_start, overlap_end in selected:
+        chunk = item.chunk
+        if chunk.sample_rate != sample_rate or chunk.channels != channels:
+            raise AudioClaimError("Audio format changes inside one conversation claim")
+        cache_key = str(chunk.id)
+        decoded = decode_cache.get(cache_key) if decode_cache is not None else None
+        if decoded is None:
+            decoded = await decode_opus_to_pcm(
+                bytes(chunk.audio_data),
+                sample_rate=sample_rate,
+                channels=channels,
+            )
+            if decode_cache is not None:
+                decode_cache[cache_key] = decoded
+        source_start = item.clip_start_seconds + (
+            overlap_start - item.conversation_start_seconds
+        )
+        source_end = item.clip_start_seconds + (
+            overlap_end - item.conversation_start_seconds
+        )
+        output.extend(
+            _clip_pcm(
+                decoded,
+                start_seconds=source_start,
+                end_seconds=source_end,
+                sample_rate=sample_rate,
+                channels=channels,
+            )
+        )
+    return bytes(output), sample_rate, channels
 
 
 async def get_trimmed_opus_for_time_range(
@@ -405,35 +497,24 @@ async def get_opus_for_conversation(
     start_index: int = 0,
     limit: Optional[int] = None,
 ) -> bytes:
-    """
-    Get raw ogg/opus audio for a full conversation by concatenating stored chunks.
-
-    No decoding — returns the original compressed data directly.
-
-    Args:
-        conversation_id: Conversation ID
-        start_index: First chunk index (default: 0)
-        limit: Max chunks (default: all)
-
-    Returns:
-        Concatenated ogg/opus bytes
-
-    Raises:
-        ValueError: If no chunks found
-    """
-    chunks = await retrieve_audio_chunks(
-        conversation_id=conversation_id,
-        start_index=start_index,
-        limit=limit,
+    """Render a playable Ogg/Opus stream from the selected semantic claim."""
+    resolved = await resolve_conversation_audio(conversation_id)
+    selected = list(
+        resolved[start_index : None if limit is None else start_index + limit]
+    )
+    if not selected:
+        raise ValueError(f"No audio claim found for conversation {conversation_id}")
+    start = selected[0].conversation_start_seconds
+    end = selected[-1].conversation_start_seconds + selected[-1].duration_seconds
+    pcm_data, sample_rate, channels = await _claimed_window_to_pcm(selected, start, end)
+    opus_data = await encode_pcm_to_opus(
+        pcm_data,
+        sample_rate=sample_rate,
+        channels=channels,
     )
 
-    if not chunks:
-        raise ValueError(f"No audio chunks found for conversation {conversation_id}")
-
-    opus_data = b"".join(bytes(chunk.audio_data) for chunk in chunks)
-
     logger.info(
-        f"Serving {len(chunks)} raw opus chunks for {conversation_id[:8]}... "
+        f"Serving {len(selected)} claimed chunks for {conversation_id[:8]}... "
         f"({len(opus_data)} bytes)"
     )
 
@@ -472,22 +553,15 @@ async def reconstruct_wav_from_conversation(
         >>> # Get first 60 seconds (6 chunks @ 10s each)
         >>> wav_data = await reconstruct_wav_from_conversation(conversation_id, limit=6)
     """
-    # Retrieve chunks
-    chunks = await retrieve_audio_chunks(
-        conversation_id=conversation_id,
-        start_index=start_index,
-        limit=limit,
+    resolved = await resolve_conversation_audio(conversation_id)
+    selected = list(
+        resolved[start_index : None if limit is None else start_index + limit]
     )
-
-    if not chunks:
-        raise ValueError(f"No audio chunks found for conversation {conversation_id}")
-
-    # Get audio format from first chunk
-    sample_rate = chunks[0].sample_rate
-    channels = chunks[0].channels
-
-    # Decode and concatenate
-    pcm_data = await concatenate_chunks_to_pcm(chunks)
+    if not selected:
+        raise ValueError(f"No audio claim found for conversation {conversation_id}")
+    start = selected[0].conversation_start_seconds
+    end = selected[-1].conversation_start_seconds + selected[-1].duration_seconds
+    pcm_data, sample_rate, channels = await _claimed_window_to_pcm(selected, start, end)
 
     # Build WAV file
     wav_data = await build_wav_from_pcm(
@@ -498,16 +572,36 @@ async def reconstruct_wav_from_conversation(
 
     logger.info(
         f"Reconstructed WAV for conversation {conversation_id[:8]}...: "
-        f"{len(chunks)} chunks, {len(wav_data)} bytes, "
+        f"{len(selected)} claimed chunks, {len(wav_data)} bytes, "
         f"{len(pcm_data) / sample_rate / channels / 2:.1f}s duration"
     )
 
     return wav_data
 
 
+async def reconstruct_wav_from_claims(
+    audio_ranges: Sequence[AudioRangeRef],
+    start_time: float = 0.0,
+    end_time: float | None = None,
+) -> bytes:
+    """Render capture evidence before a semantic Conversation exists."""
+    if not audio_ranges:
+        raise ValueError("No audio ranges supplied")
+    resolved = await resolve_audio_ranges(audio_ranges)
+    total_duration = range_duration(audio_ranges)
+    start = max(0.0, float(start_time))
+    end = total_duration if end_time is None else min(float(end_time), total_duration)
+    pcm_data, sample_rate, channels = await _claimed_window_to_pcm(resolved, start, end)
+    return await build_wav_from_pcm(
+        pcm_data=pcm_data,
+        sample_rate=sample_rate,
+        channels=channels,
+    )
+
+
 async def reconstruct_audio_segments(
     conversation_id: str,
-    segment_duration: float = 900.0,  # 15 minutes
+    segment_duration: float = 1200.0,  # 20-minute bounded compute window
     overlap: float = 30.0,  # 30 seconds overlap for continuity
 ):
     """
@@ -535,64 +629,23 @@ async def reconstruct_audio_segments(
         speaker continuity across segment boundaries. Overlapping regions
         should be merged during post-processing.
     """
-    # Get conversation metadata
-    conversation = await Conversation.find_one(
-        Conversation.conversation_id == conversation_id
-    )
-
-    if not conversation:
-        raise ValueError(f"Conversation {conversation_id} not found")
-
-    total_duration = conversation.audio_total_duration or 0.0
-
-    if total_duration == 0:
+    resolved = await resolve_conversation_audio(conversation_id)
+    total_duration = sum(item.duration_seconds for item in resolved)
+    if total_duration <= 0:
         logger.warning(
             f"Conversation {conversation_id} has zero duration, no segments to yield"
         )
         return
 
-    # Get audio format from first chunk
-    first_chunk = await AudioChunkDocument.find_one(
-        AudioChunkDocument.conversation_id == conversation_id
-    )
-
-    if not first_chunk:
-        raise ValueError(f"No audio chunks found for conversation {conversation_id}")
-
-    sample_rate = first_chunk.sample_rate
-    channels = first_chunk.channels
-
-    # Calculate segment boundaries
     start_time = 0.0
 
     while start_time < total_duration:
         # Calculate segment end time with overlap
         end_time = min(start_time + segment_duration + overlap, total_duration)
 
-        # Get chunks that overlap with this time range
-        # Note: Using start_time and end_time fields from chunks
-        chunks = (
-            await AudioChunkDocument.find(
-                AudioChunkDocument.conversation_id == conversation_id,
-                AudioChunkDocument.start_time
-                < end_time,  # Chunk starts before segment ends
-                AudioChunkDocument.end_time
-                > start_time,  # Chunk ends after segment starts
-            )
-            .sort(+AudioChunkDocument.chunk_index)
-            .to_list()
+        pcm_data, sample_rate, channels = await _claimed_window_to_pcm(
+            resolved, start_time, end_time
         )
-
-        if not chunks:
-            logger.warning(
-                f"No chunks found for time range {start_time:.1f}s - {end_time:.1f}s "
-                f"in conversation {conversation_id[:8]}..."
-            )
-            start_time += segment_duration
-            continue
-
-        # Decode and concatenate chunks
-        pcm_data = await concatenate_chunks_to_pcm(chunks)
 
         # Build WAV file for this segment
         wav_bytes = await build_wav_from_pcm(
@@ -604,7 +657,7 @@ async def reconstruct_audio_segments(
         logger.info(
             f"Yielding segment for {conversation_id[:8]}...: "
             f"{start_time:.1f}s - {end_time:.1f}s "
-            f"({len(chunks)} chunks, {len(wav_bytes)} bytes)"
+            f"({len(wav_bytes)} bytes)"
         )
 
         yield (wav_bytes, start_time, end_time)
@@ -635,78 +688,11 @@ async def get_clipped_pcm_for_time_range(
     Raises:
         ValueError: If conversation not found, has no audio, or range is invalid
     """
-    # Validate start_time
-    if start_time < 0:
-        raise ValueError(f"start_time must be >= 0, got {start_time}")
-
-    # Get conversation metadata
-    conversation = await Conversation.find_one(
-        Conversation.conversation_id == conversation_id
-    )
-
-    if not conversation:
-        raise ValueError(f"Conversation {conversation_id} not found")
-
-    total_duration = conversation.audio_total_duration or 0.0
-
-    if total_duration == 0:
-        raise ValueError(f"Conversation {conversation_id} has no audio")
-
-    # Clamp values to valid ranges
-    start_time = max(0, start_time)
-    end_time = min(end_time, total_duration)
-
-    # Validate clamped time range
-    if end_time <= start_time:
-        raise ValueError(
-            f"Invalid time range: end_time ({end_time}s) must be > start_time ({start_time}s)"
-        )
-
-    # Get audio format from first chunk
-    first_chunk = await AudioChunkDocument.find_one(
-        AudioChunkDocument.conversation_id == conversation_id
-    )
-
-    if not first_chunk:
-        raise ValueError(f"No audio chunks found for conversation {conversation_id}")
-
-    sample_rate = first_chunk.sample_rate
-    channels = first_chunk.channels
-
-    # Get chunks that overlap with this time range
-    chunks = (
-        await AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == conversation_id,
-            AudioChunkDocument.start_time
-            < end_time,  # Chunk starts before segment ends
-            AudioChunkDocument.end_time > start_time,  # Chunk ends after segment starts
-        )
-        .sort(+AudioChunkDocument.chunk_index)
-        .to_list()
-    )
-
-    if not chunks:
-        logger.warning(
-            f"No chunks found for time range {start_time:.1f}s - {end_time:.1f}s "
-            f"in conversation {conversation_id[:8]}..."
-        )
-        return b"", sample_rate, channels
-
-    # Batch decode all chunks in a single ffmpeg call (concatenated ogg stream)
-    pcm_data = await concatenate_chunks_to_pcm(chunks)
-
-    # Clip decoded PCM to the exact requested time range.
-    # The full PCM covers chunks[0].start_time .. chunks[-1].end_time.
-    bytes_per_second = sample_rate * channels * 2  # 16-bit = 2 bytes per sample
-    chunk_range_start = chunks[0].start_time
-
-    clip_start_byte = int((start_time - chunk_range_start) * bytes_per_second)
-    clip_start_byte = max(0, (clip_start_byte // 2) * 2)  # align to sample boundary
-
-    clip_end_byte = int((end_time - chunk_range_start) * bytes_per_second)
-    clip_end_byte = min(len(pcm_data), (clip_end_byte // 2) * 2)
-
-    return pcm_data[clip_start_byte:clip_end_byte], sample_rate, channels
+    resolved = await resolve_conversation_audio(conversation_id)
+    total_duration = sum(item.duration_seconds for item in resolved)
+    start = max(0.0, float(start_time))
+    end = min(float(end_time), total_duration)
+    return await _claimed_window_to_pcm(resolved, start, end)
 
 
 async def reconstruct_audio_segment(
@@ -764,25 +750,41 @@ async def reconstruct_audio_ranges(
     *,
     max_window_seconds: float = 120.0,
 ) -> List[bytes]:
-    """Reconstruct ordered ranges while decoding each bounded audio window once.
+    """Reconstruct presentation-time ranges from immutable range claims.
 
-    Unlike :func:`reconstruct_audio_segment`, this corpus-oriented path never
-    materializes the multi-megabyte Conversation model. It projects only duration,
-    groups nearby transcript ranges into bounded windows, fetches raw chunk documents,
-    and slices several WAV clips from each decoded PCM buffer.
+    Work is grouped into bounded windows, and no storage or semantic boundary is
+    inferred from those windows.
+    """
+    if not ranges:
+        return []
+    resolved = await resolve_conversation_audio(conversation_id)
+    return await reconstruct_resolved_audio_ranges(
+        resolved,
+        ranges,
+        conversation_id=conversation_id,
+        max_window_seconds=max_window_seconds,
+    )
+
+
+async def reconstruct_resolved_audio_ranges(
+    resolved: Sequence[ClaimedChunk],
+    ranges: List[tuple[float, float]],
+    *,
+    conversation_id: str = "resolved audio claim",
+    max_window_seconds: float = 120.0,
+) -> List[bytes]:
+    """Render several ranges after resolving their immutable claim once.
+
+    Corpus jobs often inspect hundreds of short turns from one recording. Passing the
+    already-resolved claim prevents every turn from reloading the complete chunk set
+    from MongoDB, while the existing compute windows keep decoded PCM caches bounded.
     """
     if not ranges:
         return []
     if max_window_seconds <= 0:
         raise ValueError("max_window_seconds must be positive")
 
-    conversation = await Conversation.get_pymongo_collection().find_one(
-        {"conversation_id": conversation_id, "deleted": {"$ne": True}},
-        {"_id": 0, "audio_total_duration": 1},
-    )
-    if conversation is None:
-        raise ValueError(f"Conversation {conversation_id} not found")
-    total_duration = float(conversation.get("audio_total_duration") or 0.0)
+    total_duration = sum(item.duration_seconds for item in resolved)
     if total_duration <= 0:
         raise ValueError(f"Conversation {conversation_id} has no audio")
 
@@ -805,93 +807,17 @@ async def reconstruct_audio_ranges(
             windows[-1].append(item)
 
     results: List[Optional[bytes]] = [None] * len(ranges)
-    chunk_collection = AudioChunkDocument.get_pymongo_collection()
     for window in windows:
-        window_start = min(item[1] for item in window)
-        window_end = max(item[2] for item in window)
-        chunks = await (
-            chunk_collection.find(
-                {
-                    "conversation_id": conversation_id,
-                    "start_time": {"$lt": window_end},
-                    "end_time": {"$gt": window_start},
-                    "deleted": {"$ne": True},
-                },
-                {
-                    "_id": 0,
-                    "audio_data": 1,
-                    "start_time": 1,
-                    "end_time": 1,
-                    "chunk_index": 1,
-                    "sample_rate": 1,
-                    "channels": 1,
-                },
+        decode_cache: dict[str, bytes] = {}
+        for original_index, start, end in window:
+            pcm_data, sample_rate, channels = await _claimed_window_to_pcm(
+                resolved, start, end, decode_cache=decode_cache
             )
-            .sort("chunk_index", 1)
-            .to_list(length=None)
-        )
-        if not chunks:
-            raise ValueError(
-                f"No audio chunks cover [{window_start}, {window_end}] in {conversation_id}"
-            )
-        chunk_islands: List[List[dict]] = []
-        for chunk in chunks:
-            if (
-                not chunk_islands
-                or float(chunk["start_time"]) - float(chunk_islands[-1][-1]["end_time"])
-                > 0.25
-            ):
-                chunk_islands.append([chunk])
-            else:
-                chunk_islands[-1].append(chunk)
-
-        for island in chunk_islands:
-            island_start = float(island[0]["start_time"])
-            island_end = float(island[-1]["end_time"])
-            island_ranges = [
-                item
-                for item in window
-                if item[1] >= island_start - 0.25 and item[2] <= island_end + 0.25
-            ]
-            if not island_ranges:
-                continue
-
-            sample_rate = int(island[0]["sample_rate"])
-            channels = int(island[0]["channels"])
-            if any(
-                int(chunk["sample_rate"]) != sample_rate
-                or int(chunk["channels"]) != channels
-                for chunk in island
-            ):
-                raise ValueError(
-                    "Audio format changes inside one reconstruction island"
-                )
-            pcm_data = await decode_opus_to_pcm(
-                opus_data=b"".join(bytes(chunk["audio_data"]) for chunk in island),
+            results[original_index] = await build_wav_from_pcm(
+                pcm_data,
                 sample_rate=sample_rate,
                 channels=channels,
             )
-            bytes_per_frame = channels * 2
-            bytes_per_second = sample_rate * bytes_per_frame
-            tolerance_bytes = int(0.25 * bytes_per_second)
-
-            for original_index, start, end in island_ranges:
-                start_byte = int((start - island_start) * bytes_per_second)
-                end_byte = int((end - island_start) * bytes_per_second)
-                start_byte = max(0, start_byte - start_byte % bytes_per_frame)
-                end_byte = min(len(pcm_data), end_byte - end_byte % bytes_per_frame)
-                expected_bytes = int((end - start) * bytes_per_second)
-                clipped = pcm_data[start_byte:end_byte]
-                if len(clipped) + tolerance_bytes < expected_bytes:
-                    raise ValueError(
-                        f"Decoded audio is too short for range [{start}, {end}] "
-                        f"in {conversation_id}"
-                    )
-                results[original_index] = await build_wav_from_pcm(
-                    clipped,
-                    sample_rate=sample_rate,
-                    channels=channels,
-                )
 
         missing = [item for item in window if results[item[0]] is None]
         if missing:
@@ -949,15 +875,30 @@ def filter_transcript_by_time(
     return {"text": filtered_text, "words": filtered_words}
 
 
+@dataclass(frozen=True)
+class CaptureIngestResult:
+    capture_session_id: str
+    audio_range: AudioRangeRef
+    chunk_count: int
+    duration_seconds: float
+    compression_ratio: float
+
+
 async def convert_audio_to_chunks(
-    conversation_id: str,
+    *,
+    user_id: str,
+    capture_source_id: str,
     audio_data: bytes,
     sample_rate: int = 16000,
     channels: int = 1,
     sample_width: int = 2,
     chunk_duration: float = 10.0,
     captured_at: Optional[datetime] = None,
-) -> int:
+    capture_session_id: Optional[str] = None,
+    origin: str = "upload",
+    external_source_id: Optional[str] = None,
+    data_purpose: str = "normal_capture",
+) -> CaptureIngestResult:
     """
     Convert raw PCM audio directly to MongoDB chunks without disk intermediary.
 
@@ -965,7 +906,8 @@ async def convert_audio_to_chunks(
     Used for both WebSocket streaming and file uploads.
 
     Args:
-        conversation_id: Conversation ID to associate chunks with
+        user_id: Owner of the capture evidence
+        capture_source_id: Stable device/channel identity
         audio_data: Raw PCM audio bytes (16-bit mono)
         sample_rate: Audio sample rate (default: 16000 Hz)
         channels: Number of channels (default: 1 = mono)
@@ -976,36 +918,179 @@ async def convert_audio_to_chunks(
             renumbering done by split, merge and silence trimming.
 
     Returns:
-        Number of chunks created
+        Capture identity, range claim, and storage statistics
 
     Example:
         >>> # Convert from memory without disk write
-        >>> num_chunks = await convert_audio_to_chunks(
-        ...     conversation_id="550e8400-e29b-41d4...",
+        >>> result = await convert_audio_to_chunks(
+        ...     user_id="user-id",
+        ...     capture_source_id="upload-device",
         ...     audio_data=pcm_bytes,
         ...     sample_rate=16000,
         ...     channels=1,
         ...     sample_width=2,
         ... )
-        >>> print(f"Created {num_chunks} chunks")
+        >>> print(f"Created {result.chunk_count} chunks")
     """
     logger.info(f"📦 Converting audio to MongoDB chunks: {len(audio_data)} bytes PCM")
 
-    # Calculate audio duration
+    if not audio_data:
+        raise ValueError("audio_data must not be empty")
+    capture_session_id = capture_session_id or str(uuid.uuid4())
+    time_basis = "recorded" if captured_at is not None else "unknown"
+    captured_at = captured_at or datetime.now(timezone.utc)
+    if captured_at.tzinfo is None:
+        captured_at = captured_at.replace(tzinfo=timezone.utc)
+
     bytes_per_second = sample_rate * sample_width * channels
     total_duration_seconds = len(audio_data) / bytes_per_second
-
-    # Calculate chunk size in bytes
+    ended_at = captured_at + timedelta(seconds=total_duration_seconds)
+    content_sha256 = pcm_identity(audio_data, sample_rate, channels, sample_width)
     chunk_size_bytes = int(chunk_duration * bytes_per_second)
+
+    # Finite audio is content-addressed per user. Backup restores and repeated uploads
+    # may carry a new source/session ID for bytes already stored; keep the oldest
+    # surviving capture as canonical and return its immutable range instead of writing
+    # another physical copy. Open live streams have no whole-capture digest and never
+    # enter this path.
+    canonical = (
+        await AudioCaptureSession.find(
+            AudioCaptureSession.user_id == user_id,
+            AudioCaptureSession.content_sha256 == content_sha256,
+        )
+        .sort("+started_at")
+        .first_or_none()
+    )
+    if canonical is not None and canonical.capture_session_id != capture_session_id:
+        canonical_chunks = (
+            await AudioChunkDocument.find(
+                AudioChunkDocument.capture_session_id == canonical.capture_session_id
+            )
+            .sort("+sequence")
+            .to_list()
+        )
+        if not canonical_chunks or canonical.ended_at is None:
+            raise ValueError(
+                "PCM dedupe candidate is incomplete: " f"{canonical.capture_session_id}"
+            )
+        original_size = sum(chunk.original_size for chunk in canonical_chunks)
+        compressed_size = sum(chunk.compressed_size for chunk in canonical_chunks)
+        logger.info(
+            "♻️ Reusing canonical PCM capture %s for duplicate session %s",
+            canonical.capture_session_id,
+            capture_session_id,
+        )
+        return CaptureIngestResult(
+            capture_session_id=canonical.capture_session_id,
+            audio_range=AudioRangeRef(
+                capture_source_id=canonical.capture_source_id,
+                time_basis=canonical.time_basis,
+                capture_session_ids=[canonical.capture_session_id],
+                chunk_ids=[str(chunk.id) for chunk in canonical_chunks],
+                started_at=as_utc(canonical.started_at),
+                ended_at=as_utc(canonical.ended_at),
+            ),
+            chunk_count=len(canonical_chunks),
+            duration_seconds=(
+                as_utc(canonical.ended_at) - as_utc(canonical.started_at)
+            ).total_seconds(),
+            compression_ratio=(
+                compressed_size / original_size if original_size else 0.0
+            ),
+        )
+
+    def validate_existing_capture(existing: AudioCaptureSession) -> None:
+        mismatches = []
+        for field, expected in (
+            ("user_id", user_id),
+            ("capture_source_id", capture_source_id),
+            ("sample_rate", sample_rate),
+            ("channels", channels),
+            ("sample_width", sample_width),
+            ("content_sha256", content_sha256),
+            ("time_basis", time_basis),
+        ):
+            if getattr(existing, field) != expected:
+                mismatches.append(field)
+        if abs((as_utc(existing.started_at) - captured_at).total_seconds()) > 0.001:
+            mismatches.append("started_at")
+        if mismatches:
+            raise ValueError(
+                f"capture_session_id {capture_session_id} was reused for different "
+                f"audio ({', '.join(mismatches)})"
+            )
+
+    existing_capture = await AudioCaptureSession.find_one(
+        AudioCaptureSession.capture_session_id == capture_session_id
+    )
+    if existing_capture is not None:
+        validate_existing_capture(existing_capture)
+
+    capture = existing_capture or AudioCaptureSession(
+        capture_session_id=capture_session_id,
+        user_id=user_id,
+        capture_source_id=capture_source_id,
+        client_id=capture_source_id,
+        origin=origin,
+        time_basis=time_basis,
+        status="active",
+        external_source_id=external_source_id,
+        content_sha256=content_sha256,
+        data_purpose=data_purpose,
+        started_at=captured_at,
+        sample_rate=sample_rate,
+        channels=channels,
+        sample_width=sample_width,
+    )
+    if existing_capture is None:
+        try:
+            await capture.insert()
+        except DuplicateKeyError:
+            # A concurrent retry won capture creation. Validate and resume its
+            # partial chunks rather than creating a second evidence copy.
+            winner = await AudioCaptureSession.find_one(
+                AudioCaptureSession.capture_session_id == capture_session_id
+            )
+            if winner is None:
+                raise
+            validate_existing_capture(winner)
+            capture = winner
+
+    stored = (
+        await AudioChunkDocument.find(
+            AudioChunkDocument.capture_session_id == capture_session_id
+        )
+        .sort("+sequence")
+        .to_list()
+    )
+    offset = 0
+    for expected_sequence, chunk in enumerate(stored):
+        expected_size = min(chunk_size_bytes, len(audio_data) - offset)
+        expected_started_at = captured_at + timedelta(seconds=offset / bytes_per_second)
+        if (
+            chunk.sequence != expected_sequence
+            or chunk.user_id != user_id
+            or chunk.capture_source_id != capture_source_id
+            or chunk.original_size != expected_size
+            or abs((as_utc(chunk.captured_at) - expected_started_at).total_seconds())
+            > 0.001
+        ):
+            raise ValueError(
+                f"partial capture {capture_session_id} is inconsistent at sequence "
+                f"{expected_sequence}"
+            )
+        offset += expected_size
+
+    if offset > len(audio_data):
+        raise ValueError(f"partial capture {capture_session_id} exceeds source audio")
 
     # Insert in batches of 100 chunks (~16 min at 10s/chunk) to avoid
     # accumulating all chunks in memory for very long audio files.
     BATCH_INSERT_SIZE = 100
     chunks_to_insert = []
-    chunk_index = 0
-    total_original_size = 0
-    total_compressed_size = 0
-    offset = 0
+    chunk_index = len(stored)
+    total_original_size = sum(chunk.original_size for chunk in stored)
+    total_compressed_size = sum(chunk.compressed_size for chunk in stored)
 
     while offset < len(audio_data):
         # Extract chunk PCM data
@@ -1015,9 +1100,8 @@ async def convert_audio_to_chunks(
         if len(chunk_pcm) == 0:
             break
 
-        # Calculate chunk timing
+        # Calculate absolute chunk timing
         chunk_start_time = offset / bytes_per_second
-        chunk_end_time = chunk_end / bytes_per_second
         chunk_duration_actual = (chunk_end - offset) / bytes_per_second
 
         # Encode to Opus
@@ -1030,19 +1114,16 @@ async def convert_audio_to_chunks(
 
         # Create MongoDB document
         audio_chunk = AudioChunkDocument(
-            conversation_id=conversation_id,
-            chunk_index=chunk_index,
+            user_id=user_id,
+            capture_source_id=capture_source_id,
+            capture_session_id=capture_session_id,
+            sequence=chunk_index,
             audio_data=Binary(opus_data),
+            content_sha256=encoded_identity(opus_data),
             original_size=len(chunk_pcm),
             compressed_size=len(opus_data),
-            start_time=chunk_start_time,
-            end_time=chunk_end_time,
             duration=chunk_duration_actual,
-            captured_at=(
-                captured_at + timedelta(seconds=chunk_start_time)
-                if captured_at is not None
-                else None
-            ),
+            captured_at=captured_at + timedelta(seconds=chunk_start_time),
             sample_rate=sample_rate,
             channels=channels,
         )
@@ -1078,35 +1159,27 @@ async def convert_audio_to_chunks(
             f"({total_duration_seconds:.1f}s audio)"
         )
 
-    # Update conversation metadata
-    conversation = await Conversation.find_one(
-        Conversation.conversation_id == conversation_id
+    compression_ratio = (
+        total_compressed_size / total_original_size if total_original_size > 0 else 0.0
     )
-
-    if conversation:
-        compression_ratio = (
-            total_compressed_size / total_original_size
-            if total_original_size > 0
-            else 0.0
+    stored = (
+        await AudioChunkDocument.find(
+            AudioChunkDocument.capture_session_id == capture_session_id
         )
-
-        logger.info(
-            f"🔍 DEBUG: Setting metadata - chunks={chunk_index}, duration={total_duration_seconds:.2f}s, ratio={compression_ratio:.3f}"
-        )
-
-        conversation.audio_chunks_count = chunk_index
-        conversation.audio_total_duration = total_duration_seconds
-        conversation.audio_compression_ratio = compression_ratio
-
-        logger.info(
-            f"🔍 DEBUG: Before save - chunks={conversation.audio_chunks_count}, duration={conversation.audio_total_duration}"
-        )
-        await conversation.save()
-        logger.info(f"🔍 DEBUG: After save - metadata should be persisted")
-    else:
-        logger.error(
-            f"❌ Conversation {conversation_id} not found for metadata update!"
-        )
+        .sort("+sequence")
+        .to_list()
+    )
+    audio_range = AudioRangeRef(
+        capture_source_id=capture_source_id,
+        time_basis=time_basis,
+        capture_session_ids=[capture_session_id],
+        chunk_ids=[str(chunk.id) for chunk in stored],
+        started_at=captured_at,
+        ended_at=ended_at,
+    )
+    capture.status = "complete"
+    capture.ended_at = ended_at
+    await capture.save()
 
     logger.info(
         f"✅ Converted audio to {chunk_index} MongoDB chunks: "
@@ -1116,15 +1189,27 @@ async def convert_audio_to_chunks(
         f"{(1 - compression_ratio) * 100:.1f}% savings)"
     )
 
-    return chunk_index
+    return CaptureIngestResult(
+        capture_session_id=capture_session_id,
+        audio_range=audio_range,
+        chunk_count=chunk_index,
+        duration_seconds=total_duration_seconds,
+        compression_ratio=compression_ratio,
+    )
 
 
 async def convert_wav_to_chunks(
-    conversation_id: str,
+    *,
+    user_id: str,
+    capture_source_id: str,
     wav_file_path: Path,
     chunk_duration: float = 10.0,
     captured_at: Optional[datetime] = None,
-) -> int:
+    capture_session_id: Optional[str] = None,
+    origin: str = "upload",
+    external_source_id: Optional[str] = None,
+    data_purpose: str = "normal_capture",
+) -> CaptureIngestResult:
     """
     Convert an existing WAV file to MongoDB audio chunks.
 
@@ -1134,23 +1219,25 @@ async def convert_wav_to_chunks(
     Reads WAV file, splits into 10-second chunks, encodes to Opus, and stores in MongoDB.
 
     Args:
-        conversation_id: Conversation ID to associate chunks with
+        user_id: Owner of the capture evidence
+        capture_source_id: Stable device/channel identity
         wav_file_path: Path to existing WAV file
         chunk_duration: Duration of each chunk in seconds (default: 10.0)
 
     Returns:
-        Number of chunks created
+        Capture identity, range claim, and storage statistics
 
     Raises:
         FileNotFoundError: If WAV file doesn't exist
 
     Example:
         >>> # Convert uploaded file to chunks
-        >>> num_chunks = await convert_wav_to_chunks(
-        ...     conversation_id="550e8400-e29b-41d4...",
+        >>> result = await convert_wav_to_chunks(
+        ...     user_id="user-id",
+        ...     capture_source_id="upload-device",
         ...     wav_file_path=Path("/path/to/uploaded.wav")
         ... )
-        >>> print(f"Created {num_chunks} chunks")
+        >>> print(f"Created {result.chunk_count} chunks")
     """
     if not wav_file_path.exists():
         raise FileNotFoundError(f"WAV file not found: {wav_file_path}")
@@ -1172,131 +1259,20 @@ async def convert_wav_to_chunks(
         f"{sample_rate}Hz, {channels}ch, {sample_width*8}-bit"
     )
 
-    # Calculate audio duration
-    bytes_per_second = sample_rate * sample_width * channels
-    total_duration_seconds = len(pcm_data) / bytes_per_second
-
-    # Calculate chunk size in bytes
-    chunk_size_bytes = int(chunk_duration * bytes_per_second)
-
-    # Insert in batches of 100 chunks (~16 min at 10s/chunk)
-    BATCH_INSERT_SIZE = 100
-    chunks_to_insert = []
-    chunk_index = 0
-    total_original_size = 0
-    total_compressed_size = 0
-    offset = 0
-
-    while offset < len(pcm_data):
-        # Extract chunk PCM data
-        chunk_end = min(offset + chunk_size_bytes, len(pcm_data))
-        chunk_pcm = pcm_data[offset:chunk_end]
-
-        if len(chunk_pcm) == 0:
-            break
-
-        # Calculate chunk timing
-        chunk_start_time = offset / bytes_per_second
-        chunk_end_time = chunk_end / bytes_per_second
-        chunk_duration_actual = (chunk_end - offset) / bytes_per_second
-
-        # Encode to Opus
-        opus_data = await encode_pcm_to_opus(
-            pcm_data=chunk_pcm,
-            sample_rate=sample_rate,
-            channels=channels,
-            bitrate=24,  # 24kbps for speech
-        )
-
-        # Create MongoDB document
-        audio_chunk = AudioChunkDocument(
-            conversation_id=conversation_id,
-            chunk_index=chunk_index,
-            audio_data=Binary(opus_data),
-            original_size=len(chunk_pcm),
-            compressed_size=len(opus_data),
-            start_time=chunk_start_time,
-            end_time=chunk_end_time,
-            duration=chunk_duration_actual,
-            captured_at=(
-                captured_at + timedelta(seconds=chunk_start_time)
-                if captured_at is not None
-                else None
-            ),
-            sample_rate=sample_rate,
-            channels=channels,
-        )
-
-        # Add to batch
-        chunks_to_insert.append(audio_chunk)
-
-        # Update stats
-        total_original_size += len(chunk_pcm)
-        total_compressed_size += len(opus_data)
-        chunk_index += 1
-        offset = chunk_end
-
-        logger.debug(
-            f"💾 Prepared chunk {chunk_index}: "
-            f"{len(chunk_pcm)} → {len(opus_data)} bytes"
-        )
-
-        # Flush batch to MongoDB when batch size reached
-        if len(chunks_to_insert) >= BATCH_INSERT_SIZE:
-            await AudioChunkDocument.insert_many(chunks_to_insert)
-            logger.info(
-                f"✅ Batch inserted {len(chunks_to_insert)} chunks to MongoDB "
-                f"(chunks {chunk_index - len(chunks_to_insert)}-{chunk_index - 1})"
-            )
-            chunks_to_insert = []
-
-    # Insert remaining chunks
-    if chunks_to_insert:
-        await AudioChunkDocument.insert_many(chunks_to_insert)
-        logger.info(
-            f"✅ Batch inserted {len(chunks_to_insert)} chunks to MongoDB "
-            f"({total_duration_seconds:.1f}s audio)"
-        )
-
-    # Update conversation metadata
-    conversation = await Conversation.find_one(
-        Conversation.conversation_id == conversation_id
+    return await convert_audio_to_chunks(
+        user_id=user_id,
+        capture_source_id=capture_source_id,
+        audio_data=pcm_data,
+        sample_rate=sample_rate,
+        channels=channels,
+        sample_width=sample_width,
+        chunk_duration=chunk_duration,
+        captured_at=captured_at,
+        capture_session_id=capture_session_id,
+        origin=origin,
+        external_source_id=external_source_id,
+        data_purpose=data_purpose,
     )
-
-    if conversation:
-        compression_ratio = (
-            total_compressed_size / total_original_size
-            if total_original_size > 0
-            else 0.0
-        )
-
-        logger.info(
-            f"🔍 DEBUG: Setting metadata - chunks={chunk_index}, duration={total_duration_seconds:.2f}s, ratio={compression_ratio:.3f}"
-        )
-
-        conversation.audio_chunks_count = chunk_index
-        conversation.audio_total_duration = total_duration_seconds
-        conversation.audio_compression_ratio = compression_ratio
-
-        logger.info(
-            f"🔍 DEBUG: Before save - chunks={conversation.audio_chunks_count}, duration={conversation.audio_total_duration}"
-        )
-        await conversation.save()
-        logger.info(f"🔍 DEBUG: After save - metadata should be persisted")
-    else:
-        logger.error(
-            f"❌ Conversation {conversation_id} not found for metadata update!"
-        )
-
-    logger.info(
-        f"✅ Converted WAV to {chunk_index} MongoDB chunks: "
-        f"{total_original_size / 1024 / 1024:.2f} MB → "
-        f"{total_compressed_size / 1024 / 1024:.2f} MB "
-        f"(compression: {compression_ratio:.3f}, "
-        f"{(1 - compression_ratio) * 100:.1f}% savings)"
-    )
-
-    return chunk_index
 
 
 async def wait_for_audio_chunks(
@@ -1329,11 +1305,16 @@ async def wait_for_audio_chunks(
 
     while time.time() - wait_start < max_wait_seconds:
         # Query chunk count
-        chunks = await retrieve_audio_chunks(
-            conversation_id=conversation_id,
-            start_index=0,
-            limit=1,  # Just check if any exist
-        )
+        try:
+            chunks = await retrieve_audio_chunks(
+                conversation_id=conversation_id,
+                start_index=0,
+                limit=1,  # Just check if any exist
+            )
+        except AudioClaimError:
+            # A deliberate Conversation may be visible while its capture ingest is
+            # still committing and before the range claim is attached.
+            chunks = []
 
         if len(chunks) >= min_chunks:
             wait_duration = time.time() - wait_start

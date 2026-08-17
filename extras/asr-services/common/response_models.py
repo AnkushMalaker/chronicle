@@ -4,7 +4,7 @@ Pydantic response models for ASR services.
 These models provide a standardized API response format across all providers.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -83,6 +83,31 @@ class TranscriptionResult(BaseModel):
         if self.metadata is not None:
             result["metadata"] = self.metadata
         return result
+
+
+class TranscriptionProgressEvent(BaseModel):
+    """Progress update emitted while a long transcription is running."""
+
+    type: Literal["progress"] = "progress"
+    current: int = Field(ge=0)
+    total: int = Field(ge=0)
+
+
+class TranscriptionResultEvent(TranscriptionResult):
+    """Final transcription emitted on the NDJSON progress stream."""
+
+    type: Literal["result"] = "result"
+
+    @classmethod
+    def from_result(cls, result: TranscriptionResult) -> "TranscriptionResultEvent":
+        """Create a flattened wire event from a provider result."""
+        return cls(**result.model_dump())
+
+
+TranscriptionStreamEvent = Annotated[
+    Union[TranscriptionProgressEvent, TranscriptionResultEvent],
+    Field(discriminator="type"),
+]
 
 
 class HealthResponse(BaseModel):

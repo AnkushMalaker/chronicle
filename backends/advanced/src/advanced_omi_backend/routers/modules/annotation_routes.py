@@ -61,7 +61,7 @@ def _apply_diarization_label(segment, corrected_speaker: str) -> None:
     segment.identified_as = None
     segment.confidence = None
     if corrected_speaker == NOISE_LABEL:
-        segment.segment_type = Conversation.SegmentType.EVENT.value
+        segment.segment_type = Conversation.SegmentType.EVENT
 
 
 def _should_reprocess_memory(conversation: Conversation) -> bool:

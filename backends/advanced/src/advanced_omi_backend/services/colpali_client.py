@@ -12,6 +12,7 @@ loop, so search has to be callable without an event loop.
 import json
 import logging
 import os
+import ssl
 import time
 from typing import Any, Optional
 
@@ -27,6 +28,19 @@ HEALTH_TIMEOUT = float(os.getenv("COLPALI_HEALTH_TIMEOUT", "3"))
 
 _DISCOVERY_TTL_SECS = 30.0
 _cached: tuple[Optional[str], float] = (None, 0.0)
+
+# Every httpx client constructor builds a fresh SSL context, which reads and parses a
+# CA bundle off disk synchronously — 81 ms for the first and ~15 ms after, on an idle
+# box. These clients are per-call and the health probe runs on a cron tick, so on the
+# API's own event loop that cost repeats forever. Build one context and hand it over.
+_ssl_context: Optional[ssl.SSLContext] = None
+
+
+def _verify() -> ssl.SSLContext:
+    global _ssl_context
+    if _ssl_context is None:
+        _ssl_context = httpx.create_ssl_context()
+    return _ssl_context
 
 
 def resolve_colpali_url() -> Optional[str]:
@@ -58,7 +72,9 @@ async def health() -> Optional[dict[str, Any]]:
     if not base_url:
         return None
     try:
-        async with httpx.AsyncClient(timeout=HEALTH_TIMEOUT) as client:
+        async with httpx.AsyncClient(
+            timeout=HEALTH_TIMEOUT, verify=_verify()
+        ) as client:
             response = await client.get(f"{base_url}/health")
             response.raise_for_status()
             return response.json()
@@ -78,7 +94,7 @@ async def embed_image(
     base_url = resolve_colpali_url()
     if not base_url:
         raise RuntimeError("ColPali service is not configured")
-    async with httpx.AsyncClient(timeout=EMBED_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=EMBED_TIMEOUT, verify=_verify()) as client:
         response = await client.post(
             f"{base_url}/embed",
             files={"file": (f"{doc_id}.img", data, content_type)},
@@ -98,7 +114,9 @@ async def indexed_documents(user_id: str) -> Optional[list[str]]:
     if not base_url:
         return None
     try:
-        async with httpx.AsyncClient(timeout=SEARCH_TIMEOUT) as client:
+        async with httpx.AsyncClient(
+            timeout=SEARCH_TIMEOUT, verify=_verify()
+        ) as client:
             response = await client.get(
                 f"{base_url}/documents", params={"user_id": user_id}
             )
@@ -121,7 +139,7 @@ def search_images_sync(
     if not base_url:
         return None
     try:
-        with httpx.Client(timeout=SEARCH_TIMEOUT) as client:
+        with httpx.Client(timeout=SEARCH_TIMEOUT, verify=_verify()) as client:
             response = client.post(
                 f"{base_url}/search",
                 json={"query": query, "user_id": user_id, "limit": limit},

@@ -351,23 +351,44 @@ Using results:
     )
 
     # ------------------------------------------------------------------
-    # conversation.title_summary
+    # conversation.title
     # ------------------------------------------------------------------
     registry.register_default(
-        "conversation.title_summary",
+        "conversation.title",
         template="""\
-Based on the full conversation transcript below, generate a concise title and a brief summary.
+Based on the full conversation transcript below, generate a concise title.
 
 Respond in this exact format:
 Title: <concise descriptive title, 3-6 words, no speaker names>
+
+Rules:
+- Maximum 6 words
+- Capture the main topic or theme
+- Do not use speaker names, quotes, or special characters""",
+        name="Conversation Title",
+        description="Generates a concise title from the full conversation context.",
+        category="conversation",
+        is_dynamic=True,
+    )
+
+    # ------------------------------------------------------------------
+    # conversation.short_summary
+    # ------------------------------------------------------------------
+    registry.register_default(
+        "conversation.short_summary",
+        template="""\
+Based on the full conversation transcript below, generate a brief summary.
+
+Respond in this exact format:
 Summary: <brief summary, 1-2 sentences, max 120 characters>
 
 Rules:
-- Title: Maximum 6 words, capture the main topic/theme, no quotes or special characters
-- Summary: Maximum 120 characters, capture key topics and outcomes, use present tense
+- Maximum 120 characters
+- Capture the key topics and outcomes
+- Use present tense
 {{speaker_instruction}}""",
-        name="Conversation Title & Summary",
-        description="Generates both title and short summary from full conversation context in one LLM call.",
+        name="Conversation Short Summary",
+        description="Generates the short list-view summary from full conversation context.",
         category="conversation",
         variables=["speaker_instruction"],
         is_dynamic=True,

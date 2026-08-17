@@ -11,6 +11,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from advanced_omi_backend.services.interaction_modes.contracts import (
+    InteractionContext,
+    InteractionModeDefinition,
+    InteractionResult,
+)
+
 
 class PluginConnectivityError(Exception):
     """An external dependency (e.g. a Home Assistant server) is unreachable.
@@ -64,6 +70,10 @@ class BasePlugin(ABC):
 
     # Subclasses declare which access levels they support
     SUPPORTED_ACCESS_LEVELS: List[str] = []
+    # Operational interaction modes are separate from event subscriptions.  A
+    # plugin may own zero or more long-lived modes, each with unique activation
+    # phrases registered by PluginRouter.
+    INTERACTION_MODES: tuple[InteractionModeDefinition, ...] = ()
 
     def __init__(self, config: Dict[str, Any]):
         """
@@ -241,4 +251,22 @@ class BasePlugin(ABC):
         Returns:
             PluginResult with success status, optional message, and should_continue flag
         """
+        pass
+
+    async def on_interaction_start(
+        self, context: InteractionContext
+    ) -> Optional[InteractionResult]:
+        """Start one of this plugin's registered interaction modes."""
+        pass
+
+    async def on_interaction_turn(
+        self, context: InteractionContext
+    ) -> Optional[InteractionResult]:
+        """Handle an utterance while one of this plugin's modes is active."""
+        pass
+
+    async def on_interaction_end(
+        self, context: InteractionContext
+    ) -> Optional[InteractionResult]:
+        """Observe mode completion or expiry and release plugin resources."""
         pass

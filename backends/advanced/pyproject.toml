@@ -8,6 +8,7 @@ dependencies = [
     "easy-audio-interfaces>=0.7.1", # we need to add local-audio for scripts/local-audio.py | If we don't need that, we can remove this, and then remove portaudio19-dev from Dockerfile
     "fastapi>=0.115.12",
     "fastmcp>=0.5.0", # MCP server for conversation access
+    "mcp>=1.20,<2.0", # MCP client used by the Swiggy interaction mode
     "motor>=3.7.1",
     "ollama>=0.4.8",
     "chronicle-wearable-sdk",

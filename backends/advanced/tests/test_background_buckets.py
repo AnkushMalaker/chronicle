@@ -457,8 +457,16 @@ async def test_background_reference_overrides_weaker_foreground_match(monkeypatc
         },
     ]
 
-    async def reconstruct(*_args):
-        return b"wav"
+    resolved_calls = []
+
+    async def resolve(conversation_id):
+        resolved_calls.append(conversation_id)
+        return ["resolved-claim"]
+
+    async def reconstruct(resolved, ranges, **_kwargs):
+        assert resolved == ["resolved-claim"]
+        assert ranges == [(0.0, 3.0), (4.0, 7.0)]
+        return [b"wav-1", b"wav-2"]
 
     class SpeakerClient:
         async def extract_speaker_embedding(self, _wav):
@@ -468,7 +476,8 @@ async def test_background_reference_overrides_weaker_foreground_match(monkeypatc
         similarity = 0.72 if bucket_type == "background_speech" else 0.2
         return {"results": [{"bucket_similarity": similarity}]}
 
-    monkeypatch.setattr(speaker_jobs, "reconstruct_audio_segment", reconstruct)
+    monkeypatch.setattr(speaker_jobs, "resolve_conversation_audio", resolve)
+    monkeypatch.setattr(speaker_jobs, "reconstruct_resolved_audio_ranges", reconstruct)
     monkeypatch.setattr(
         speaker_jobs.background_bucket_controller, "match_embeddings", match
     )
@@ -489,6 +498,7 @@ async def test_background_reference_overrides_weaker_foreground_match(monkeypatc
     records = sorted(ledger, key=lambda r: r["segment_start"])
     assert [r["zone"] for r in records] == ["unsure", "confident_background"]
     assert all(r["previous_identified_as"] == "Ankush" for r in records)
+    assert resolved_calls == ["conversation"]
 
 
 @pytest.mark.asyncio
@@ -502,8 +512,12 @@ async def test_background_reference_does_not_override_stronger_foreground(monkey
         }
     ]
 
-    async def reconstruct(*_args):
-        return b"wav"
+    async def resolve(_conversation_id):
+        return ["resolved-claim"]
+
+    async def reconstruct(_resolved, ranges, **_kwargs):
+        assert ranges == [(0.0, 3.0)]
+        return [b"wav"]
 
     class SpeakerClient:
         async def extract_speaker_embedding(self, _wav):
@@ -513,7 +527,8 @@ async def test_background_reference_does_not_override_stronger_foreground(monkey
         similarity = 0.74 if bucket_type == "background_speech" else 0.2
         return {"results": [{"bucket_similarity": similarity}]}
 
-    monkeypatch.setattr(speaker_jobs, "reconstruct_audio_segment", reconstruct)
+    monkeypatch.setattr(speaker_jobs, "resolve_conversation_audio", resolve)
+    monkeypatch.setattr(speaker_jobs, "reconstruct_resolved_audio_ranges", reconstruct)
     monkeypatch.setattr(
         speaker_jobs.background_bucket_controller, "match_embeddings", match
     )
@@ -542,7 +557,10 @@ async def test_background_reference_reuses_identification_embedding(monkeypatch)
         }
     ]
 
-    async def should_not_reconstruct(*_args):
+    async def should_not_resolve(*_args):
+        raise AssertionError("identification audio claim must not be resolved twice")
+
+    async def should_not_reconstruct(*_args, **_kwargs):
         raise AssertionError("identification audio must not be reconstructed twice")
 
     class SpeakerClient:
@@ -555,8 +573,9 @@ async def test_background_reference_reuses_identification_embedding(monkeypatch)
         similarity = 0.8 if bucket_type == "background_speech" else 0.2
         return {"results": [{"bucket_similarity": similarity}]}
 
+    monkeypatch.setattr(speaker_jobs, "resolve_conversation_audio", should_not_resolve)
     monkeypatch.setattr(
-        speaker_jobs, "reconstruct_audio_segment", should_not_reconstruct
+        speaker_jobs, "reconstruct_resolved_audio_ranges", should_not_reconstruct
     )
     monkeypatch.setattr(
         speaker_jobs.background_bucket_controller, "match_embeddings", match
@@ -568,3 +587,51 @@ async def test_background_reference_reuses_identification_embedding(monkeypatch)
     )
 
     assert segments[0]["identified_as"] == "Background Speech"
+
+
+@pytest.mark.asyncio
+async def test_background_reference_reconstructs_large_turn_sets_in_bounded_batches(
+    monkeypatch,
+):
+    segments = [
+        {
+            "start": float(index * 3),
+            "end": float(index * 3 + 2),
+            "identified_as": "Ankush",
+            "confidence": 0.9,
+        }
+        for index in range(205)
+    ]
+    resolve_calls = 0
+    batch_sizes = []
+
+    async def resolve(_conversation_id):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return ["resolved-claim"]
+
+    async def reconstruct(resolved, ranges, **_kwargs):
+        assert resolved == ["resolved-claim"]
+        batch_sizes.append(len(ranges))
+        return [b"wav"] * len(ranges)
+
+    class SpeakerClient:
+        async def extract_speaker_embedding(self, _wav):
+            return {"embedding": [1.0, 0.0], "embedding_model": "test-model"}
+
+    async def match(_user, _embeddings, _bucket_type, _model):
+        return {"results": [{"bucket_similarity": 0.0}]}
+
+    monkeypatch.setattr(speaker_jobs, "resolve_conversation_audio", resolve)
+    monkeypatch.setattr(speaker_jobs, "reconstruct_resolved_audio_ranges", reconstruct)
+    monkeypatch.setattr(
+        speaker_jobs.background_bucket_controller, "match_embeddings", match
+    )
+    _stub_suppression_ledger(monkeypatch)
+
+    await speaker_jobs._apply_background_references(
+        "conversation", segments, _StubUser(), SpeakerClient()
+    )
+
+    assert resolve_calls == 1
+    assert batch_sizes == [100, 100, 5]

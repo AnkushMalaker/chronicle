@@ -24,6 +24,7 @@ from beanie import init_beanie
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from advanced_omi_backend.client_manager import initialize_redis_for_client_manager
+from advanced_omi_backend.database import MONGODB_DATABASE
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
 from advanced_omi_backend.services.observability.loop_monitor import start_loop_monitor
@@ -70,7 +71,9 @@ async def main():
     # User document. This worker is otherwise Redis-only.
     try:
         mongo_client = AsyncIOMotorClient(MONGODB_URI)
-        await init_beanie(database=mongo_client.chronicle, document_models=[User])
+        await init_beanie(
+            database=mongo_client[MONGODB_DATABASE], document_models=[User]
+        )
         logger.info("✅ Database (Beanie) initialized for speaker gate")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}", exc_info=True)

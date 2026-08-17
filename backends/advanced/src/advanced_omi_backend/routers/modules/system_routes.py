@@ -8,7 +8,7 @@ import json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -211,15 +211,27 @@ async def get_speaker_service_status(current_user: User = Depends(current_superu
 # LLM Operations Configuration Endpoints
 
 
+class ReconcileStatusRequest(BaseModel):
+    dry_run: bool = False
+
+
 @router.post("/admin/conversations/reconcile-status")
 async def reconcile_conversation_status(
-    dry_run: bool = Body(False, embed=True),
+    dry_run: bool = Query(False, description="Preview the changes without writing"),
+    body: Optional[ReconcileStatusRequest] = None,
     current_user: User = Depends(current_superuser),
 ):
     """Recompute conversation processing_status from facts (transcript present =>
     completed; none, once settled => failed). Self-heals drift left by crashed or
-    timed-out jobs. Pass dry_run=true to preview without writing. Admin only."""
-    return await reconcile_conversation_statuses(dry_run=dry_run)
+    timed-out jobs. Pass dry_run=true to preview without writing. Admin only.
+
+    Accepted as a query parameter or in the body, and a preview requested either way
+    wins. It used to be body-only while every other ``dry_run`` in the API is a query
+    parameter, so the obvious ``?dry_run=true`` was silently dropped and the call
+    wrote instead — the one direction this flag must never fail in.
+    """
+    preview = dry_run or (body.dry_run if body is not None else False)
+    return await reconcile_conversation_statuses(dry_run=preview)
 
 
 @router.get("/admin/llm-operations")

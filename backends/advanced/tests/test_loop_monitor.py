@@ -20,6 +20,7 @@ import pytest
 
 from advanced_omi_backend.services.observability import loop_monitor
 from advanced_omi_backend.services.observability.loop_monitor import (
+    GC_PAUSE_MIN_SECONDS,
     LoopMonitor,
     Stall,
     _percentile,
@@ -244,6 +245,104 @@ def test_different_causes_do_not_share_a_signature():
 
 def test_an_unattributed_stall_still_has_a_stable_signature():
     assert Stall(0, 1.0, 0, ()).signature == "no-stack"
+
+
+def test_unattributed_stalls_from_different_work_stay_separate_incidents():
+    """Otherwise every unattributable stall collapses into one meaningless row."""
+    ingest = Stall(0, 1.0, 0, (), activity=("cron:device_audio",))
+    timeline = Stall(0, 1.0, 0, (), activity=("cron:timeline_days",))
+
+    assert ingest.signature != timeline.signature
+    assert ingest.signature != Stall(0, 1.0, 0, ()).signature
+
+
+# --------------------------------------------------------------------------- #
+# Attribution when the stack is deep, or absent
+# --------------------------------------------------------------------------- #
+
+
+def test_a_deep_stack_keeps_the_caller_not_just_the_blocking_call():
+    """Truncating to the innermost frames named the blocking call but never the job.
+
+    A blocking Redis read reported fourteen frames of ``redis-py`` internals and
+    nothing about which cron job made it, which is the half you act on.
+    """
+    app = [f"/app/src/advanced_omi_backend/caller{i}.py:{i} in job" for i in range(4)]
+    library = [f"/site-packages/redis/x{i}.py:{i} in internal" for i in range(30)]
+    lines = app + library
+
+    kept = loop_monitor._keep_both_ends(lines)
+
+    assert len(kept) < len(lines)
+    # The caller survived...
+    assert any("caller0.py" in frame for frame in kept)
+    # ...and so did the innermost frame, which says what actually blocked.
+    assert kept[-1] == library[-1]
+    assert any("frames" in frame and "..." in frame for frame in kept)
+
+
+def test_a_shallow_stack_is_returned_whole():
+    lines = ["a.py:1 in handler", "b.py:2 in blocking_read"]
+
+    assert loop_monitor._keep_both_ends(lines) == tuple(lines)
+
+
+async def test_a_stall_names_the_work_in_flight(no_side_effects):
+    """uvloop leaves no Python frame to sample, so the label is the only evidence."""
+    monitor = LoopMonitor("test", stall_seconds=0.3)
+
+    def _blocking_cron_job():
+        with loop_monitor.activity("cron:device_audio"):
+            _blocking_call(0.8)
+
+    await _run_briefly(monitor, _blocking_cron_job)
+
+    stall = monitor.stats()["recent_stalls"][0]
+    assert stall["activity"] == ["cron:device_audio"]
+
+
+def test_a_collection_is_timed_so_gc_can_be_ruled_out():
+    """GC holds the GIL, so it defeats sampling *and* leaves a plausible wrong stack."""
+    monitor = LoopMonitor("test", stall_seconds=0.3)
+    monitor._on_gc("start", {"generation": 2})
+    time.sleep(GC_PAUSE_MIN_SECONDS * 2)
+    monitor._on_gc("stop", {"generation": 2, "collected": 10})
+
+    stats = monitor.stats()["gc"]
+    assert stats["tracked_pauses"] == 1
+    assert stats["by_generation"]["2"]["count"] == 1
+    assert stats["max_pause_ms"] >= GC_PAUSE_MIN_SECONDS * 1000
+
+
+def test_a_trivial_collection_is_not_retained():
+    """Gen-0 runs constantly; keeping every one would crowd out the ones that matter."""
+    monitor = LoopMonitor("test")
+    monitor._on_gc("start", {"generation": 0})
+    monitor._on_gc("stop", {"generation": 0})
+
+    assert monitor.stats()["gc"]["tracked_pauses"] == 0
+
+
+def test_a_stall_is_attributed_to_a_collection_that_overlapped_it():
+    monitor = LoopMonitor("test")
+    monitor._on_gc("start", {"generation": 2})
+    time.sleep(GC_PAUSE_MIN_SECONDS * 2)
+    monitor._on_gc("stop", {"generation": 2})
+
+    # A stall that began just before the collection and is still in progress.
+    overlap = monitor._gc_pause_during(time.time() - 0.5, 1.0)
+    assert overlap is not None and overlap[0] == 2
+
+    # One safely in the past is not blamed on it.
+    assert monitor._gc_pause_during(time.time() - 3600, 0.5) is None
+
+
+def test_activity_is_cleared_even_when_the_work_raises():
+    with pytest.raises(RuntimeError):
+        with loop_monitor.activity("cron:boom"):
+            raise RuntimeError("job failed")
+
+    assert loop_monitor._current_activity() == ()
 
 
 async def test_the_monitor_can_be_disabled(monkeypatch, no_side_effects):

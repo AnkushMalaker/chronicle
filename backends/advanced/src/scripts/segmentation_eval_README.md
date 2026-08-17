@@ -101,7 +101,7 @@ Boundary quality is the thing worth optimising, and it is not captured by text o
 3. **Grounding** — every assertion carries `evidence_ids`. An assertion citing evidence
    outside its own episode's time bounds is a hallucinated span. This is cheap to check
    and catches the failure that reads best.
-4. **`conversational` accuracy.** This flag is load-bearing in Chronicle: it promotes a
+4. **`conversational` accuracy.** This flag matters in Chronicle: it promotes a
    capture-evidence recording back into the user-facing Recordings list. A false positive
    surfaces ambient room audio as a meeting.
 5. **Salience distribution.** A model that marks everything `notable` has not made a

@@ -162,7 +162,7 @@ export default function Layout() {
               <div className="hidden md:flex items-center space-x-2 text-sm text-gray-700 dark:text-gray-300">
                 <div className="flex items-center space-x-1">
                   {isAdmin && <Shield className="h-4 w-4 text-blue-600" />}
-                  <span className="truncate max-w-[160px]">{user?.name || user?.email}</span>
+                  <span className="truncate max-w-[160px]">{user?.display_name || user?.email}</span>
                 </div>
               </div>
 

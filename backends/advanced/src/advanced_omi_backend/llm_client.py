@@ -415,13 +415,18 @@ async def async_chat_with_tools(
     temperature: float | None = None,
     operation: str | None = None,
     force_fallback: bool = False,
+    default_model_type: str = "llm",
+    timeout_seconds: float | None = None,
 ):
     """Async wrapper for chat completion with tool calling.
 
     When ``operation`` is provided, parameters are resolved from config.
     Unreachable-primary and context-overflow calls retry once against
-    ``defaults.fallback_llm``. ``force_fallback`` is used for a semantic retry after
-    a provider returned a syntactically valid but incomplete result.
+    ``defaults.fallback_llm``. ``default_model_type`` lets latency-sensitive callers
+    resolve through ``defaults.fast_llm`` without pinning a deployment-specific model.
+    ``timeout_seconds`` bounds each primary/fallback attempt independently.
+    ``force_fallback`` is used for a semantic retry after a provider returned a
+    syntactically valid but incomplete result.
     Tracing is handled automatically by the OTEL instrumentor.
     """
 
@@ -435,14 +440,25 @@ async def async_chat_with_tools(
         api_params["messages"] = op.prepare_messages(messages)
         if tools:
             api_params["tools"] = tools
-        return await client.chat.completions.create(**api_params)
+        request = client.chat.completions.create(**api_params)
+        if timeout_seconds is None:
+            return await request
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        return await asyncio.wait_for(request, timeout=timeout_seconds)
 
     if operation:
         registry = get_models_registry()
         if registry:
-            op = registry.get_llm_operation(operation)
+            op = registry.get_llm_operation(
+                operation, default_model_type=default_model_type
+            )
             if force_fallback:
-                fb_op = registry.get_fallback_llm_operation(operation, primary=op)
+                fb_op = registry.get_fallback_llm_operation(
+                    operation,
+                    primary=op,
+                    default_model_type=default_model_type,
+                )
                 if fb_op is None:
                     raise RuntimeError(
                         f"No fallback LLM is configured for operation {operation!r}"
@@ -460,7 +476,11 @@ async def async_chat_with_tools(
                     e, _FALLBACK_EXCEPTIONS
                 ) and not _is_context_length_error(e):
                     raise
-                fb_op = registry.get_fallback_llm_operation(operation, primary=op)
+                fb_op = registry.get_fallback_llm_operation(
+                    operation,
+                    primary=op,
+                    default_model_type=default_model_type,
+                )
                 if fb_op is None:
                     raise
                 logger.warning(

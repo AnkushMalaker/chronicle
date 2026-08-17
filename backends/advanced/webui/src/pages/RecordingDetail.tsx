@@ -18,6 +18,7 @@ import ConversationContextLens from '../components/ConversationContextLens'
 import BackgroundSuppressionCard from '../components/BackgroundSuppressionCard'
 import { useGaplessPlayer } from '../hooks/useGaplessPlayer'
 import { AUDIO_FORMAT } from '../utils/audioFormat'
+import { TITLE_NOT_GENERATED } from '../lib/constants'
 import TranscriptEditor from '../components/transcript/TranscriptEditor'
 import { useWaveformZoomDisabled } from '../components/transcript/useWaveformZoom'
 import SplitConversationModal from '../components/dataAudit/SplitConversationModal'
@@ -326,7 +327,7 @@ export default function RecordingDetail() {
   // Title editing
   const handleStartTitleEdit = () => {
     if (conversation) {
-      setEditedTitle(conversation.title || 'Conversation')
+      setEditedTitle(conversation.title || TITLE_NOT_GENERATED)
       setEditingTitle(true)
       setTitleEditError(null)
     }
@@ -334,7 +335,7 @@ export default function RecordingDetail() {
 
   const handleSaveTitleEdit = async () => {
     if (!id || !conversation) return
-    const originalTitle = conversation.title || 'Conversation'
+    const originalTitle = conversation.title || TITLE_NOT_GENERATED
     if (!editedTitle.trim()) {
       setTitleEditError('Title cannot be empty')
       return
@@ -597,7 +598,7 @@ export default function RecordingDetail() {
                     variant="primary"
                     size="sm"
                     onClick={handleSaveTitleEdit}
-                    disabled={savingTitle || editedTitle === (conversation.title || 'Conversation')}
+                    disabled={savingTitle || editedTitle === (conversation.title || TITLE_NOT_GENERATED)}
                     icon={<Save className="w-3.5 h-3.5" />}
                   >
                     {savingTitle ? 'Saving...' : 'Save'}
@@ -620,7 +621,7 @@ export default function RecordingDetail() {
                 onClick={handleStartTitleEdit}
                 title="Click to edit title"
               >
-                {conversation.title || 'Conversation'}
+                {conversation.title || TITLE_NOT_GENERATED}
                 <Pencil className="w-4 h-4 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" />
               </h1>
             )}

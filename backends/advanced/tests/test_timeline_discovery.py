@@ -13,9 +13,78 @@ from advanced_omi_backend.models.timeline import (
 )
 from advanced_omi_backend.services.timeline import discovery
 from advanced_omi_backend.services.timeline.contracts import (
+    TimelineAgentResult,
     TimelineEvidenceItem,
     TimelineEvidenceManifest,
+    UnassignedInterval,
 )
+
+
+@pytest.mark.asyncio
+async def test_invalid_low_and_medium_segmentations_escalate_through_high(
+    tmp_path, monkeypatch
+):
+    started_at = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    evidence = TimelineEvidenceItem(
+        evidence_id="observation:one",
+        kind="observation",
+        started_at=started_at,
+        ended_at=started_at + timedelta(minutes=1),
+        role="application_state",
+        excerpt="One screen observation",
+    )
+    manifest = TimelineEvidenceManifest(
+        user_id="user",
+        local_date=date(2026, 8, 6),
+        timezone="UTC",
+        started_at=started_at,
+        ended_at=started_at + timedelta(days=1),
+        evidence_revision="revision",
+        windows=[],
+        evidence=[evidence],
+    )
+
+    class Executor:
+        def __init__(self):
+            self.efforts = []
+            self.feedback = []
+
+        async def analyze(
+            self, *args, reasoning_effort=None, validation_feedback=None, **kwargs
+        ):
+            self.efforts.append(reasoning_effort)
+            self.feedback.append(validation_feedback)
+            if reasoning_effort != "high":
+                return TimelineAgentResult(episodes=[], unassigned_intervals=[])
+            return TimelineAgentResult(
+                episodes=[],
+                unassigned_intervals=[
+                    UnassignedInterval(
+                        started_at=evidence.started_at,
+                        ended_at=evidence.ended_at,
+                        reason="Insufficient semantic detail",
+                    )
+                ],
+            )
+
+    executor = Executor()
+    monkeypatch.setattr(discovery, "build_executor", lambda: executor)
+
+    result = await discovery._analyze_with_escalation(
+        manifest,
+        tmp_path,
+        [],
+        [],
+        configured_effort="low",
+    )
+
+    assert executor.efforts == ["low", "medium", "high"]
+    assert executor.feedback[0] is None
+    assert all(
+        "no episodes and no unassigned intervals" in value
+        for value in executor.feedback[1:]
+    )
+    assert result.unassigned_intervals
 
 
 @pytest.mark.asyncio
@@ -55,6 +124,177 @@ async def test_processing_records_the_manifest_revision_actually_used(monkeypatc
 
     assert run.processed_evidence_revision == "processed-revision"
     assert run.state == "awaiting_evidence"
+
+
+@pytest.mark.asyncio
+async def test_clean_rebuild_omits_unconfirmed_prior_episodes(monkeypatch):
+    started_at = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    evidence = TimelineEvidenceItem(
+        evidence_id="transcript:new",
+        kind="transcript",
+        started_at=started_at,
+        ended_at=started_at + timedelta(minutes=5),
+        role="uncertain",
+        excerpt="new recovered conversation",
+    )
+    manifest = TimelineEvidenceManifest(
+        user_id="user",
+        local_date=date(2026, 8, 6),
+        timezone="UTC",
+        started_at=started_at,
+        ended_at=started_at + timedelta(days=1),
+        evidence_revision="new-revision",
+        windows=[],
+        evidence=[evidence],
+    )
+    prior = [
+        SimpleNamespace(confirmed_at=None),
+        SimpleNamespace(confirmed_at=started_at),
+    ]
+    captured = {}
+
+    async def assemble(*args, **kwargs):
+        return manifest, {}
+
+    async def analyze(manifest, workspace, existing, pinned, **kwargs):
+        captured["existing"] = existing
+        captured["pinned"] = pinned
+        return TimelineAgentResult(
+            episodes=[],
+            unassigned_intervals=[
+                UnassignedInterval(
+                    started_at=evidence.started_at,
+                    ended_at=evidence.ended_at,
+                    reason="covered by explicit accounting",
+                )
+            ],
+        )
+
+    async def publish(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(discovery, "assemble_day_evidence", assemble)
+    monkeypatch.setattr(discovery, "settings_dict", lambda: {})
+
+    async def active(_run):
+        return prior
+
+    monkeypatch.setattr(discovery, "_active_episodes", active)
+    monkeypatch.setattr(discovery, "_analyze_with_escalation", analyze)
+    monkeypatch.setattr(discovery, "_publish", publish)
+    monkeypatch.setattr(discovery, "write_workspace", lambda *args, **kwargs: None)
+
+    class Run(SimpleNamespace):
+        async def save(self):
+            return self
+
+    run = Run(
+        run_id="run-clean-rebuild",
+        user_id="user",
+        local_date=date(2026, 8, 6),
+        timezone="UTC",
+        executor="pi",
+        prompt_version="v1",
+        processed_evidence_revision=None,
+        coverage_window_ids=[],
+        state="preparing",
+        usage={},
+        completed_at=None,
+    )
+
+    await discovery._process_run(run, retain_unconfirmed_existing=False)
+
+    assert captured["existing"] == []
+    assert captured["pinned"] == [prior[1]]
+
+
+@pytest.mark.asyncio
+async def test_claimed_run_failure_records_visible_system_error(monkeypatch):
+    events = []
+
+    async def process(_run):
+        raise ValueError("context output was truncated")
+
+    class Run(SimpleNamespace):
+        async def save(self):
+            return self
+
+    run = Run(
+        run_id="run-failed",
+        user_id="user-42",
+        local_date=date(2026, 7, 23),
+        timezone="UTC",
+        state="running",
+        error=None,
+        completed_at=None,
+    )
+    monkeypatch.setattr(discovery, "_process_run", process)
+    monkeypatch.setattr(discovery, "settings_dict", lambda: {})
+    monkeypatch.setattr(
+        discovery, "record_event_sync", lambda **event: events.append(event)
+    )
+
+    result = await discovery._run_claimed(run)
+
+    assert result == {"processed": 0, "failed": 1, "deferred": 0}
+    assert run.state == "failed"
+    assert run.error == "ValueError: context output was truncated"
+    assert events == [
+        {
+            "severity": "error",
+            "category": "pipeline",
+            "source": "timeline.analysis",
+            "title": "Timeline analysis failed for 2026-07-23",
+            "detail": "ValueError: context output was truncated",
+            "user_id": "user-42",
+            "metadata": {
+                "run_id": "run-failed",
+                "local_date": "2026-07-23",
+                "timezone": "UTC",
+            },
+            "incident_key": "timeline.analysis:user-42:2026-07-23",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_claimed_run_success_resolves_the_day_incident(monkeypatch):
+    events = []
+
+    async def process(_run):
+        return None
+
+    run = SimpleNamespace(
+        run_id="run-repaired",
+        user_id="user-42",
+        local_date=date(2026, 7, 23),
+        timezone="UTC",
+    )
+    monkeypatch.setattr(discovery, "_process_run", process)
+    monkeypatch.setattr(discovery, "settings_dict", lambda: {})
+    monkeypatch.setattr(
+        discovery, "record_event_sync", lambda **event: events.append(event)
+    )
+
+    result = await discovery._run_claimed(run)
+
+    assert result == {"processed": 1, "failed": 0, "deferred": 0}
+    assert events == [
+        {
+            "severity": "info",
+            "category": "pipeline",
+            "source": "timeline.analysis",
+            "title": "Timeline analysis recovered for 2026-07-23",
+            "user_id": "user-42",
+            "metadata": {
+                "run_id": "run-repaired",
+                "local_date": "2026-07-23",
+                "timezone": "UTC",
+            },
+            "incident_key": "timeline.analysis:user-42:2026-07-23",
+            "resolves_incident": True,
+        }
+    ]
 
 
 def test_evidence_refs_keep_the_conversation_id_they_were_assembled_with():
@@ -137,6 +377,42 @@ def _manifest_with(evidence: list[TimelineEvidenceItem]) -> TimelineEvidenceMani
     )
 
 
+@pytest.mark.asyncio
+async def test_forced_reanalysis_can_replace_a_non_positive_prior_episode(
+    episode_documents,
+):
+    start = datetime(2026, 8, 6, 12, tzinfo=timezone.utc)
+    valid = _confirmed_episode(status="provisional")
+    await valid.insert()
+    collection = TimelineEpisode.get_pymongo_collection()
+    collapsed = await collection.find_one({"episode_id": "old-row"})
+    collapsed.pop("_id")
+    collapsed.update(
+        {
+            "episode_id": "collapsed-row",
+            "started_at": start,
+            "ended_at": start,
+        }
+    )
+    await collection.insert_one(collapsed)
+    await TimelineDay(
+        user_id="user",
+        local_date=date(2026, 8, 6),
+        timezone="UTC",
+        active_run_id="run-one",
+    ).insert()
+
+    episodes = await discovery._active_episodes(
+        SimpleNamespace(
+            user_id="user",
+            local_date=date(2026, 8, 6),
+            timezone="UTC",
+        )
+    )
+
+    assert [episode.episode_id for episode in episodes] == ["old-row"]
+
+
 def test_confirmed_episodes_are_carried_into_the_next_generation(episode_documents):
     episode = _confirmed_episode()
     run = SimpleNamespace(run_id="run-two")
@@ -209,20 +485,30 @@ def test_generated_episodes_are_provisional_so_reanalysis_can_replace_them(
 
 
 class _FakeCount:
-    def __init__(self, value):
+    def __init__(self, value, rows=()):
         self._value = value
+        self._rows = list(rows)
 
     async def count(self):
         return self._value
 
+    async def to_list(self):
+        return self._rows
 
-def _guard_env(monkeypatch, *, day, episode_count):
+
+def _guard_env(monkeypatch, *, day, episode_count, episode_rows=()):
     async def find_one(*args, **kwargs):
         return day
 
+    async def valid_episodes(*args, **kwargs):
+        return list(episode_rows)
+
     monkeypatch.setattr(discovery.TimelineDay, "find_one", find_one)
+    monkeypatch.setattr(discovery, "_valid_episodes_for_run", valid_episodes)
     monkeypatch.setattr(
-        discovery.TimelineEpisode, "find", lambda *a, **k: _FakeCount(episode_count)
+        discovery.TimelineEpisode,
+        "find",
+        lambda *a, **k: _FakeCount(episode_count, episode_rows),
     )
 
 
@@ -232,7 +518,7 @@ def _day(active_run_id="run-one", evidence_count=100):
         local_date=date(2026, 8, 6),
         timezone="UTC",
         active_run_id=active_run_id,
-        coverage={"evidence_count": evidence_count},
+        coverage={"evidence_count": evidence_count, "unassigned_intervals": []},
     )
 
 
@@ -275,6 +561,126 @@ async def test_a_generation_with_episodes_always_publishes(
     _guard_env(monkeypatch, day=_day(), episode_count=8)
 
     await discovery._guard_empty_generation(_run(), _manifest_of(100), 5)
+
+
+async def test_material_unexplained_coverage_regression_keeps_previous_generation(
+    monkeypatch,
+):
+    """A partial non-empty response must not replace a fully covered active day."""
+
+    _guard_env(monkeypatch, day=_day(), episode_count=8)
+    manifest = _manifest_of(100)
+    evidence_start = manifest.evidence[0].started_at
+    result = SimpleNamespace(
+        unassigned_intervals=[
+            UnassignedInterval(
+                started_at=evidence_start + timedelta(minutes=70),
+                ended_at=evidence_start + timedelta(minutes=100),
+                reason="model stopped before the end",
+                cause="unexplained",
+            )
+        ]
+    )
+
+    with pytest.raises(discovery.TimelineCoverageRegression):
+        await discovery._guard_coverage_regression(_run(), manifest, result)
+
+
+async def test_small_unexplained_difference_does_not_flap_generation(
+    monkeypatch,
+):
+    _guard_env(monkeypatch, day=_day(), episode_count=8)
+    manifest = _manifest_of(100)
+    evidence_start = manifest.evidence[0].started_at
+    result = SimpleNamespace(
+        unassigned_intervals=[
+            UnassignedInterval(
+                started_at=evidence_start + timedelta(minutes=98),
+                ended_at=evidence_start + timedelta(minutes=100),
+                reason="brief uncertain tail",
+                cause="unexplained",
+            )
+        ]
+    )
+
+    await discovery._guard_coverage_regression(_run(), manifest, result)
+
+
+async def test_uncaptured_interior_removed_from_bad_episode_is_not_coverage_regression(
+    monkeypatch,
+):
+    """Replacing a bridge over empty time must not look like lost captured coverage."""
+
+    _guard_env(monkeypatch, day=_day(evidence_count=2), episode_count=1)
+    start = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    manifest = _manifest_with(
+        [
+            TimelineEvidenceItem(
+                evidence_id="observation:early",
+                kind="observation",
+                started_at=start,
+                ended_at=start + timedelta(minutes=1),
+                role="application_state",
+            ),
+            TimelineEvidenceItem(
+                evidence_id="observation:late",
+                kind="observation",
+                started_at=start + timedelta(hours=11),
+                ended_at=start + timedelta(hours=11, minutes=1),
+                role="application_state",
+            ),
+        ]
+    )
+    result = SimpleNamespace(
+        unassigned_intervals=[
+            UnassignedInterval(
+                started_at=start + timedelta(minutes=1),
+                ended_at=start + timedelta(hours=11),
+                reason="No captured evidence between separate activities",
+                cause="unexplained",
+            )
+        ]
+    )
+
+    await discovery._guard_coverage_regression(_run(), manifest, result)
+
+
+async def test_invalid_prior_bridge_does_not_block_a_lower_coverage_repair(monkeypatch):
+    start = datetime(2026, 8, 6, 12, tzinfo=timezone.utc)
+    manifest = _manifest_of(100)
+    manifest.evidence.append(
+        TimelineEvidenceItem(
+            evidence_id="observation:far-later",
+            kind="observation",
+            started_at=start + timedelta(hours=11),
+            ended_at=start + timedelta(hours=11, minutes=1),
+            role="application_state",
+        )
+    )
+    prior_bridge = SimpleNamespace(
+        episode_id="bad-prior",
+        # Motor returns UTC datetimes without tzinfo unless tz-aware decoding is on.
+        started_at=start.replace(tzinfo=None),
+        ended_at=(start + timedelta(hours=11, minutes=1)).replace(tzinfo=None),
+    )
+    _guard_env(
+        monkeypatch,
+        day=_day(evidence_count=len(manifest.evidence)),
+        episode_count=1,
+        episode_rows=[prior_bridge],
+    )
+    result = SimpleNamespace(
+        unassigned_intervals=[
+            UnassignedInterval(
+                started_at=start + timedelta(minutes=70),
+                ended_at=start + timedelta(minutes=100),
+                reason="New draft left captured evidence unexplained",
+                cause="unexplained",
+            )
+        ]
+    )
+
+    await discovery._guard_coverage_regression(_run(), manifest, result)
 
 
 async def test_empty_generation_is_allowed_when_the_day_had_no_episodes(

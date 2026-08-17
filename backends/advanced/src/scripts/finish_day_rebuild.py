@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import uuid
 from collections import Counter
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -40,6 +41,8 @@ from advanced_omi_backend.services.memory.rebuild import (
     TIMELINE_REBUILD_JOB_TIMEOUT,
     build_timeline_days,
 )
+from advanced_omi_backend.services.memory.vault_scaffold import canonical_vault_scaffold
+from advanced_omi_backend.services.memory.vault_verify import verify_vault_changes
 from advanced_omi_backend.workers.timeline_jobs import rebuild_timeline_day_job
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -49,6 +52,17 @@ POLL_SECONDS = 60
 VAULT_ROOT = Path("/app/data/conversation_docs")
 COMPLETE_MEMORY_STATES = frozenset({"written", "no_changes"})
 TERMINAL_JOB_STATES = frozenset({"finished", "failed", "stopped", "canceled"})
+REQUIRED_SCAFFOLD_PATHS = (
+    "People.md",
+    "Conversations.md",
+    "Topics.md",
+    "Templates/Person Template.md",
+    "Templates/Conversation Template.md",
+    "Templates/Topic Template.md",
+    "Templates/Bases/People.base",
+    "Templates/Bases/Conversations.base",
+    "Templates/Bases/Topics.base",
+)
 console = Console()
 
 
@@ -193,11 +207,51 @@ async def _unwritten_days(
         if isinstance(local_date, date):
             stored[(local_date, document.get("timezone") or "UTC")] = document
 
+    # ``build_timeline_days`` deliberately starts from durable raw capture. A day can
+    # therefore be in the rebuild plan even when all of its chunks are silence,
+    # quarantined, or otherwise ineligible as Timeline evidence. The analysis entry
+    # point records that honest outcome as a completed ``awaiting_evidence`` run and
+    # returns ``memory=no_day``. Treat the latest such run as terminal: retrying cannot
+    # manufacture evidence and would make an otherwise healthy rebuild fail its repair
+    # budget. Inspect the latest run of *every* state so an older empty result cannot
+    # mask a newer pending or failed attempt.
+    latest_runs: dict[tuple[date, str], dict] = {}
+    cursor = database["timeline_analysis_runs"].find(
+        {"user_id": user_id},
+        projection={
+            "local_date": 1,
+            "timezone": 1,
+            "state": 1,
+            "created_at": 1,
+            "completed_at": 1,
+        },
+    )
+    async for document in cursor:
+        local_date = document.get("local_date")
+        if isinstance(local_date, datetime):
+            local_date = local_date.date()
+        if not isinstance(local_date, date):
+            continue
+        key = (local_date, document.get("timezone") or "UTC")
+        previous = latest_runs.get(key)
+        if previous is None or document.get("created_at", datetime.min) > previous.get(
+            "created_at", datetime.min
+        ):
+            latest_runs[key] = document
+    completed_empty_days = {
+        key
+        for key, run in latest_runs.items()
+        if run.get("state") == "awaiting_evidence"
+        and run.get("completed_at") is not None
+    }
+
     rows = []
     for expected in expected_days:
         key = (expected["local_date"], expected["timezone"])
         document = stored.get(key)
         if document and document.get("memory_state") in COMPLETE_MEMORY_STATES:
+            continue
+        if key in completed_empty_days:
             continue
         rows.append(
             {
@@ -216,7 +270,14 @@ async def _settled_completion(database, user_id: str, expected_days: list[dict])
     )
 
 
-def _enqueue(user_id: str, row: dict, *, sequence: str, depends_on):
+def _enqueue(
+    user_id: str,
+    row: dict,
+    *,
+    repair_scope: str,
+    sequence: str,
+    depends_on,
+):
     return memory_queue.enqueue(
         rebuild_timeline_day_job,
         user_id,
@@ -224,9 +285,15 @@ def _enqueue(user_id: str, row: dict, *, sequence: str, depends_on):
         row["timezone"],
         job_timeout=TIMELINE_REBUILD_JOB_TIMEOUT,
         result_ttl=JOB_RESULT_TTL,
-        job_id=f"day_retry_{sequence}_{row['local_date'].isoformat()}",
+        job_id=(f"day_retry_{repair_scope}_{sequence}_{row['local_date'].isoformat()}"),
         description=f"Retry day {row['local_date'].isoformat()}",
         depends_on=depends_on,
+        meta={
+            "user_id": user_id,
+            "rebuild_run_id": repair_scope,
+            "local_date": row["local_date"].isoformat(),
+            "trigger": "timeline_rebuild_repair",
+        },
     )
 
 
@@ -258,6 +325,43 @@ def _require_complete(remaining: list[dict]) -> None:
     )
 
 
+def _require_valid_vault(root: Path) -> int:
+    """Validate the complete rebuilt vault as if every note were newly created."""
+
+    canonical_scaffold = canonical_vault_scaffold()
+    missing_scaffold = [
+        relative
+        for relative in REQUIRED_SCAFFOLD_PATHS
+        if not (root / relative).is_file()
+    ]
+    if missing_scaffold:
+        raise RuntimeError(
+            "rebuilt vault is missing required scaffold files: "
+            + ", ".join(missing_scaffold)
+        )
+    changed_scaffold = [
+        relative
+        for relative in REQUIRED_SCAFFOLD_PATHS
+        if (root / relative).read_text(encoding="utf-8") != canonical_scaffold[relative]
+    ]
+    if changed_scaffold:
+        raise RuntimeError(
+            "rebuilt vault changed canonical scaffold files: "
+            + ", ".join(changed_scaffold)
+        )
+    findings = verify_vault_changes(root, canonical_scaffold)
+    if findings:
+        preview = "; ".join(
+            f"{finding.path} [{finding.rule}]" for finding in findings[:20]
+        )
+        suffix = f"; and {len(findings) - 20} more" if len(findings) > 20 else ""
+        raise RuntimeError(
+            f"rebuilt vault failed structural validation: {len(findings)} "
+            f"finding(s): {preview}{suffix}"
+        )
+    return len(list(root.rglob("*.md"))) if root.is_dir() else 0
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--user-id", required=True)
@@ -268,6 +372,7 @@ async def main() -> None:
     parser.add_argument("--max-retry-rounds", type=int, default=3)
     parser.add_argument("--poll-seconds", type=int, default=POLL_SECONDS)
     args = parser.parse_args()
+    repair_scope = args.run_id or uuid.uuid4().hex[:12]
 
     database = get_database()
     await database.command("ping")
@@ -320,6 +425,7 @@ async def main() -> None:
                 job = _enqueue(
                     args.user_id,
                     row,
+                    repair_scope=repair_scope,
                     sequence=f"{attempt}_{sequence}",
                     depends_on=dependency,
                 )
@@ -361,6 +467,7 @@ async def main() -> None:
         )
         remaining = await _unwritten_days(database, args.user_id, expected_days)
         _require_complete(remaining)
+        notes = _require_valid_vault(VAULT_ROOT / args.user_id)
 
         states = {
             state: await database["timeline_days"].count_documents(
@@ -371,7 +478,6 @@ async def main() -> None:
         total = await database["timeline_days"].count_documents(
             {"user_id": args.user_id}
         )
-        notes = len(list((VAULT_ROOT / args.user_id).rglob("*.md")))
         progress.complete_validation(
             f"{states['written']} written, {states['no_changes']} no-change, "
             f"{states['partial']} partial, {states['skipped']} skipped; {notes} notes"

@@ -1,42 +1,39 @@
 import io
+import threading
 import wave
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
 
-from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
-from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.services import audio_claims
+from advanced_omi_backend.services.audio_claims import ClaimedChunk
 from advanced_omi_backend.utils import audio_chunk_utils
 
 
-class ConversationCollection:
-    def __init__(self):
-        self.calls = []
-
-    async def find_one(self, query, projection):
-        self.calls.append((query, projection))
-        return {"audio_total_duration": 10.0}
-
-
-class ChunkCursor:
-    def __init__(self, documents):
-        self.documents = documents
-
-    def sort(self, *_args):
-        return self
-
-    async def to_list(self, length=None):
-        return self.documents
-
-
-class ChunkCollection:
-    def __init__(self, documents):
-        self.documents = documents
-        self.calls = []
-
-    def find(self, query, projection):
-        self.calls.append((query, projection))
-        return ChunkCursor(self.documents)
+def _claimed(
+    chunk_id: str,
+    opus: bytes,
+    *,
+    conversation_start: float,
+    duration: float,
+) -> ClaimedChunk:
+    chunk = SimpleNamespace(
+        id=chunk_id,
+        audio_data=opus,
+        sample_rate=16_000,
+        channels=1,
+        duration=duration,
+    )
+    return ClaimedChunk(
+        chunk=chunk,
+        range_id=f"range-{chunk_id}",
+        clip_start_seconds=0.0,
+        clip_end_seconds=duration,
+        conversation_start_seconds=conversation_start,
+    )
 
 
 def first_pcm_sample(wav_bytes):
@@ -45,22 +42,114 @@ def first_pcm_sample(wav_bytes):
 
 
 @pytest.mark.asyncio
-async def test_reconstruct_audio_ranges_loads_metadata_and_decodes_window_once(
+async def test_capture_claim_splits_reconnect_gap_into_stable_ranges(monkeypatch):
+    captured_at = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    chunks = [
+        SimpleNamespace(
+            id="chunk-1",
+            capture_source_id="source-1",
+            captured_at=captured_at,
+            duration=10.0,
+        ),
+        SimpleNamespace(
+            id="chunk-2",
+            capture_source_id="source-1",
+            captured_at=captured_at + timedelta(seconds=10),
+            duration=10.0,
+        ),
+        SimpleNamespace(
+            id="chunk-3",
+            capture_source_id="source-1",
+            captured_at=captured_at + timedelta(seconds=25),
+            duration=10.0,
+        ),
+    ]
+
+    ranges = audio_claims._build_capture_ranges(
+        capture_session_id="session-1",
+        capture_source_id="source-1",
+        time_basis="received",
+        chunks=chunks,
+        started_at=captured_at,
+        ended_at=captured_at + timedelta(seconds=35),
+    )
+    repeated = audio_claims._build_capture_ranges(
+        capture_session_id="session-1",
+        capture_source_id="source-1",
+        time_basis="received",
+        chunks=chunks,
+        started_at=captured_at,
+        ended_at=captured_at + timedelta(seconds=35),
+    )
+
+    assert [audio_range.chunk_ids for audio_range in ranges] == [
+        ["chunk-1", "chunk-2"],
+        ["chunk-3"],
+    ]
+    assert [audio_range.duration_seconds for audio_range in ranges] == [20.0, 10.0]
+    assert [audio_range.range_id for audio_range in ranges] == [
+        audio_range.range_id for audio_range in repeated
+    ]
+
+    monkeypatch.setattr(
+        audio_claims, "load_chunks_by_id", AsyncMock(return_value=chunks)
+    )
+    resolved = await audio_claims.resolve_audio_ranges(ranges)
+    assert [item.conversation_start_seconds for item in resolved] == [0.0, 10.0, 20.0]
+
+
+@pytest.mark.asyncio
+async def test_build_wav_from_pcm_runs_blocking_writer_off_event_loop(monkeypatch):
+    event_loop_thread = threading.get_ident()
+    writer_threads = []
+
+    def fake_writer(pcm_data, sample_rate, channels, sample_width):
+        writer_threads.append(threading.get_ident())
+        return b"RIFF-test"
+
+    monkeypatch.setattr(audio_chunk_utils, "_build_wav_bytes", fake_writer)
+
+    result = await audio_chunk_utils.build_wav_from_pcm(b"pcm")
+
+    assert result == b"RIFF-test"
+    assert writer_threads and writer_threads[0] != event_loop_thread
+
+
+@pytest.mark.asyncio
+async def test_full_claim_reconstruction_uses_canonical_chained_decode(monkeypatch):
+    first = _claimed("chunk-1", b"first", conversation_start=0, duration=10)
+    second = _claimed("chunk-2", b"second", conversation_start=10, duration=10)
+    first.chunk.duration = 10
+    second.chunk.duration = 10
+    ranges = [SimpleNamespace(duration_seconds=20)]
+    chained_decode = AsyncMock(return_value=b"canonical-pcm")
+
+    monkeypatch.setattr(
+        audio_chunk_utils,
+        "resolve_audio_ranges",
+        AsyncMock(return_value=[first, second]),
+    )
+    monkeypatch.setattr(
+        audio_chunk_utils,
+        "concatenate_chunks_to_pcm",
+        chained_decode,
+    )
+    monkeypatch.setattr(
+        audio_chunk_utils,
+        "build_wav_from_pcm",
+        AsyncMock(return_value=b"canonical-wav"),
+    )
+
+    result = await audio_chunk_utils.reconstruct_wav_from_claims(ranges)
+
+    assert result == b"canonical-wav"
+    chained_decode.assert_awaited_once_with([first.chunk, second.chunk])
+
+
+@pytest.mark.asyncio
+async def test_reconstruct_audio_ranges_reuses_decode_inside_one_compute_window(
     monkeypatch,
 ):
-    conversation_collection = ConversationCollection()
-    chunk_collection = ChunkCollection(
-        [
-            {
-                "audio_data": b"opus",
-                "start_time": 0.0,
-                "end_time": 10.0,
-                "chunk_index": 0,
-                "sample_rate": 16_000,
-                "channels": 1,
-            }
-        ]
-    )
     pcm = np.repeat(np.arange(10, dtype="<i2") * 100, 16_000).tobytes()
     decode_calls = []
 
@@ -69,14 +158,13 @@ async def test_reconstruct_audio_ranges_loads_metadata_and_decodes_window_once(
         return pcm
 
     monkeypatch.setattr(
-        Conversation,
-        "get_pymongo_collection",
-        lambda: conversation_collection,
-    )
-    monkeypatch.setattr(
-        AudioChunkDocument,
-        "get_pymongo_collection",
-        lambda: chunk_collection,
+        audio_chunk_utils,
+        "resolve_conversation_audio",
+        AsyncMock(
+            return_value=[
+                _claimed("chunk-1", b"opus", conversation_start=0, duration=10)
+            ]
+        ),
     )
     monkeypatch.setattr(audio_chunk_utils, "decode_opus_to_pcm", decode)
 
@@ -92,45 +180,11 @@ async def test_reconstruct_audio_ranges_loads_metadata_and_decodes_window_once(
 
     assert [first_pcm_sample(result) for result in results] == [300, 100]
     assert first_pcm_sample(scalar) == 200
-    assert conversation_collection.calls == [
-        (
-            {"conversation_id": "conversation-1", "deleted": {"$ne": True}},
-            {"_id": 0, "audio_total_duration": 1},
-        ),
-        (
-            {"conversation_id": "conversation-1", "deleted": {"$ne": True}},
-            {"_id": 0, "audio_total_duration": 1},
-        ),
-    ]
-    assert len(chunk_collection.calls) == 2
     assert decode_calls == [(b"opus", 16_000, 1), (b"opus", 16_000, 1)]
 
 
 @pytest.mark.asyncio
-async def test_reconstruct_audio_ranges_decodes_across_unrequested_gap_as_islands(
-    monkeypatch,
-):
-    conversation_collection = ConversationCollection()
-    chunk_collection = ChunkCollection(
-        [
-            {
-                "audio_data": b"first",
-                "start_time": 0.0,
-                "end_time": 4.0,
-                "chunk_index": 0,
-                "sample_rate": 16_000,
-                "channels": 1,
-            },
-            {
-                "audio_data": b"second",
-                "start_time": 6.0,
-                "end_time": 10.0,
-                "chunk_index": 1,
-                "sample_rate": 16_000,
-                "channels": 1,
-            },
-        ]
-    )
+async def test_reconstruct_audio_ranges_decodes_disjoint_claims_as_islands(monkeypatch):
     decode_calls = []
 
     async def decode(opus_data, sample_rate, channels):
@@ -138,21 +192,20 @@ async def test_reconstruct_audio_ranges_decodes_across_unrequested_gap_as_island
         value = 100 if opus_data == b"first" else 200
         return np.full(4 * sample_rate, value, dtype="<i2").tobytes()
 
+    resolved = [
+        _claimed("chunk-1", b"first", conversation_start=0, duration=4),
+        _claimed("chunk-2", b"second", conversation_start=4, duration=4),
+    ]
     monkeypatch.setattr(
-        Conversation,
-        "get_pymongo_collection",
-        lambda: conversation_collection,
-    )
-    monkeypatch.setattr(
-        AudioChunkDocument,
-        "get_pymongo_collection",
-        lambda: chunk_collection,
+        audio_chunk_utils,
+        "resolve_conversation_audio",
+        AsyncMock(return_value=resolved),
     )
     monkeypatch.setattr(audio_chunk_utils, "decode_opus_to_pcm", decode)
 
     results = await audio_chunk_utils.reconstruct_audio_ranges(
         "conversation-1",
-        [(1.0, 2.0), (7.0, 8.0)],
+        [(1.0, 2.0), (5.0, 6.0)],
     )
 
     assert [first_pcm_sample(result) for result in results] == [100, 200]

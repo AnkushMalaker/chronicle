@@ -21,19 +21,16 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.services.legacy_backups import (
-    LegacyChunk,
     discover_backups,
     load_corpus,
+    resolve_legacy_capture_anchor,
 )
 
 # The importer is a script, not a package module, so its pure helpers are reachable
 # only by adding the scripts directory to the path.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "scripts"))
 
-from import_legacy_backups import (  # noqa: E402
-    _conversation_document,
-    _synthetic_chunks,
-)
+from import_legacy_backups import _conversation_document  # noqa: E402
 
 USER = "69b80e5894aa9ec334a421c9"
 
@@ -59,14 +56,12 @@ def _write_backup(
     stamp: str,
     *,
     conversations: list[dict],
-    chunks: list[dict] | None = None,
     audio: dict[str, list[tuple[str, float]]] | None = None,
 ) -> Path:
     """One backup directory. ``audio`` maps conversation id -> [(filename, seconds)]."""
     path = root / f"backup_{stamp}"
     path.mkdir(parents=True)
     (path / "conversations.json").write_text(json.dumps(conversations))
-    (path / "audio_chunks_metadata.json").write_text(json.dumps(chunks or []))
     for conversation_id, files in (audio or {}).items():
         directory = path / "audio" / conversation_id
         directory.mkdir(parents=True)
@@ -150,20 +145,6 @@ def test_unions_a_conversation_split_across_backups(tmp_path: Path) -> None:
         tmp_path,
         "20260612_104458",
         conversations=[_conversation(conversation_id)],
-        chunks=[
-            {
-                "conversation_id": conversation_id,
-                "chunk_index": 0,
-                "start_time": 0.0,
-                "end_time": 1.0,
-                "duration": 1.0,
-                "original_size": 32000,
-                "compressed_size": 2800,
-                "sample_rate": 16000,
-                "channels": 1,
-                "created_at": "2026-06-12 10:44:58.000000",
-            }
-        ],
         audio={conversation_id: [("chunk_001.wav", 1.0)]},
     )
 
@@ -174,7 +155,7 @@ def test_unions_a_conversation_split_across_backups(tmp_path: Path) -> None:
     assert record.document_backup == "backup_20260224_162251"
     assert record.has_audio
     assert record.audio_backup == "backup_20260612_104458"
-    assert len(record.chunks) == 1
+    assert record.audio_duration == pytest.approx(1.0)
 
 
 def test_newer_record_wins_when_it_still_has_the_transcript(tmp_path: Path) -> None:
@@ -244,18 +225,36 @@ def test_larger_audio_directory_wins(tmp_path: Path) -> None:
     assert len(record.read_pcm()[0]) == int(10.0 * 16000 * 2)
 
 
-def test_synthetic_chunks_cover_audio_with_no_metadata(tmp_path: Path) -> None:
+def test_legacy_capture_anchor_uses_live_capture_created_at(tmp_path: Path) -> None:
     conversation_id = "aaaaaaaa-0000-4000-8000-000000000005"
     _write_backup(
-        tmp_path, "20260612_104458", conversations=[_conversation(conversation_id)]
+        tmp_path,
+        "20260612_104458",
+        conversations=[_conversation(conversation_id)],
     )
-    record = load_corpus(tmp_path).conversations[conversation_id]
 
-    chunks = _synthetic_chunks(record, int(25.5 * 16000 * 2), 16000, 1)
+    anchor, reason = resolve_legacy_capture_anchor(
+        load_corpus(tmp_path).conversations[conversation_id]
+    )
 
-    assert [chunk.duration for chunk in chunks] == [10.0, 10.0, pytest.approx(5.5)]
-    assert [chunk.chunk_index for chunk in chunks] == [0, 1, 2]
-    assert chunks[-1].end_time == pytest.approx(25.5)
+    assert anchor == datetime(2026, 3, 16, 14, 6, 21, 349000, tzinfo=timezone.utc)
+    assert reason == "conversation_created_at"
+
+
+def test_legacy_capture_anchor_refuses_upload_ingest_time(tmp_path: Path) -> None:
+    conversation_id = "aaaaaaaa-0000-4000-8000-000000000008"
+    _write_backup(
+        tmp_path,
+        "20260612_104458",
+        conversations=[_conversation(conversation_id, client_id="a421c9-upload")],
+    )
+
+    anchor, reason = resolve_legacy_capture_anchor(
+        load_corpus(tmp_path).conversations[conversation_id]
+    )
+
+    assert anchor is None
+    assert reason == "skipped:file_upload"
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -309,26 +308,3 @@ async def test_mapping_drops_view_fields_and_flags_missing_audio(
     assert conversation.audio_archived is True
     assert conversation.archive_reason == "legacy_backup_audio_missing"
     assert conversation.audio_chunks_count == 0
-
-
-def test_chunk_created_at_is_parsed_but_not_treated_as_capture_time() -> None:
-    """The dumps store a naive write time; it is UTC and it is not an anchor."""
-    chunk = LegacyChunk.from_row(
-        {
-            "conversation_id": "x",
-            "chunk_index": 3,
-            "start_time": 30.0,
-            "end_time": 40.0,
-            "duration": 10.0,
-            "original_size": 320000,
-            "compressed_size": 27559,
-            "sample_rate": 16000,
-            "channels": 1,
-            "created_at": "2026-03-16 14:06:31.227000",
-        }
-    )
-
-    assert chunk.created_at == datetime(
-        2026, 3, 16, 14, 6, 31, 227000, tzinfo=timezone.utc
-    )
-    assert chunk.start_time == 30.0

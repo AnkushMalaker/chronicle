@@ -92,7 +92,8 @@ def has_wakeword_dispatch_enabled() -> bool:
     wake-word → plugin path.
 
     Returns:
-        True if any enabled plugin subscribes to the ``wake_word.detected`` event.
+        True if an enabled plugin subscribes to ``wake_word.detected`` or owns an
+        enabled interaction mode. Acoustic Hermes activation uses this worker too.
     """
     try:
         plugins_yml = get_plugins_yml_path()
@@ -105,13 +106,33 @@ def has_wakeword_dispatch_enabled() -> bool:
                 continue
             if not orchestration.get("enabled", False):
                 continue
-            if "wake_word.detected" in (orchestration.get("events") or []):
+            if "wake_word.detected" in (
+                orchestration.get("events") or []
+            ) or orchestration.get("modes"):
                 return True
     except Exception as e:
         logger.warning(
             f"Failed to read wake-word dispatch config from plugins.yml: {e}"
         )
 
+    return False
+
+
+def has_interaction_modes_enabled() -> bool:
+    """Return True when an enabled plugin declares at least one mode."""
+    try:
+        plugins_yml = get_plugins_yml_path()
+        if not plugins_yml.exists():
+            return False
+        with open(plugins_yml, "r") as f:
+            plugins_config = yaml.safe_load(f) or {}
+        for orchestration in (plugins_config.get("plugins") or {}).values():
+            if not isinstance(orchestration, dict):
+                continue
+            if orchestration.get("enabled", False) and orchestration.get("modes"):
+                return True
+    except Exception as e:
+        logger.warning(f"Failed to read interaction-mode config from plugins.yml: {e}")
     return False
 
 
@@ -258,6 +279,23 @@ def build_worker_definitions() -> List[WorkerDefinition]:
             ],
             worker_type=WorkerType.STREAM_CONSUMER,
             enabled_check=has_wakeword_dispatch_enabled,
+            restart_on_failure=True,
+        )
+    )
+
+    # Interaction Mode Worker - Conditional.  The transcript producers only
+    # enqueue inputs; this worker serializes stateful plugin/MCP turns so live ASR
+    # never waits on an external shopping or agent call.
+    workers.append(
+        WorkerDefinition(
+            name="interaction-mode",
+            command=[
+                "python",
+                "-m",
+                "advanced_omi_backend.workers.interaction_mode_worker",
+            ],
+            worker_type=WorkerType.STREAM_CONSUMER,
+            enabled_check=has_interaction_modes_enabled,
             restart_on_failure=True,
         )
     )

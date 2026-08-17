@@ -8,6 +8,7 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import math
 import os
 import time
 import traceback
@@ -44,9 +45,7 @@ from advanced_omi_backend.models.conversation import create_conversation
 from advanced_omi_backend.plugins.events import BUTTON_STATE_TO_EVENT, ButtonState
 from advanced_omi_backend.redis_factory import create_async_redis
 from advanced_omi_backend.redis_keys import ClientId, device_downlink_channel
-from advanced_omi_backend.services.audio_stream.conversation_lifecycle import (
-    ensure_active_session_placeholder,
-)
+from advanced_omi_backend.services.audio_claims import apply_audio_ranges
 from advanced_omi_backend.services.audio_stream.durability import (
     AUDIO_PERSISTENCE_GROUP,
     inspect_stream_retention,
@@ -84,6 +83,7 @@ application_logger = logging.getLogger("audio_processing")
 
 # Track pending WebSocket connections to prevent race conditions
 pending_connections: set[str] = set()
+_MOBILE_AUDIO_RECEIPT_TTL_SECONDS = 7 * 24 * 60 * 60
 
 # Per-client_id locks serializing connection setup. A reconnecting device (same
 # client_id) must evict its stale connection and create a fresh ClientState as one
@@ -509,7 +509,6 @@ async def cleanup_client_state(client_id: str):
             results_key = f"transcription:results:{session_id}"
             if await async_redis.exists(results_key):
                 await async_redis.expire(results_key, 300)
-            await store.expire_current_conversation(session_id, 3600)
             await async_redis.expire(f"speech_detection_job:{session_id}", 3600)
     finally:
         await async_redis.aclose()
@@ -709,21 +708,6 @@ async def _initialize_streaming_session(
     # Store audio format in Redis session (not in ClientState)
     await audio_stream_producer.store.set_audio_format(session_id, audio_format)
 
-    # CONNECTED/ACTIVE is not allowed to accept raw audio without a durable Mongo
-    # owner. Create and atomically assign it before the persistence job or producer
-    # can observe the session. Speech detection may reuse/finalize this placeholder;
-    # it no longer controls whether the raw capture exists.
-    assignment = await ensure_active_session_placeholder(
-        audio_stream_producer.store,
-        session_id=session_id,
-        user_id=user_id,
-        client_id=client_id,
-    )
-    if assignment is None:
-        raise RuntimeError(
-            f"Could not assign durable audio owner for {client_state.stream_session_id}"
-        )
-
     # Enqueue streaming jobs (speech detection + audio persistence). RQ's client is
     # synchronous, so every enqueue and liveness check is a blocking Redis round-trip.
     job_ids = await asyncio.to_thread(
@@ -749,9 +733,6 @@ async def _initialize_streaming_session(
             "client_id": client_id,
         },
     )
-
-    # The durable placeholder was assigned synchronously above; the worker only
-    # consumes that state and never invents an alternate owner.
 
     # Launch interim results subscriber if WebSocket provided
     subscriber_task = None
@@ -864,6 +845,21 @@ async def _publish_audio_to_stream(
         sample_width=sample_width,
         captured_at=captured_at,
     )
+
+
+def _captured_at_seconds(audio_metadata: dict) -> float | None:
+    """Read a device capture timestamp from Wyoming audio metadata."""
+
+    raw = audio_metadata.get("captured_at_ms")
+    if raw is None:
+        return None
+    try:
+        captured_at = float(raw) / 1000.0
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"Invalid captured_at_ms value: {raw!r}") from error
+    if not math.isfinite(captured_at) or captured_at <= 0:
+        raise ValueError(f"Invalid captured_at_ms value: {raw!r}")
+    return captured_at
 
 
 async def _handle_omi_audio_chunk(
@@ -992,6 +988,7 @@ async def _handle_streaming_mode_audio(
         audio_format.get("rate", 16000),
         audio_format.get("channels", 1),
         audio_format.get("width", 2),
+        _captured_at_seconds(audio_format),
     )
 
     return subscriber_task
@@ -1103,6 +1100,118 @@ async def _handle_audio_chunk(
             client_state, audio_data, audio_format, client_id
         )
         return None
+
+
+async def _prepare_mobile_spool_receipt(
+    websocket: WebSocket,
+    audio_stream_producer,
+    user_id: str,
+    client_id: str,
+    audio_format: dict,
+) -> tuple[str | None, int | None, bool]:
+    """Resolve durable mobile identity and ACK an already committed packet."""
+
+    spool_segment_id = audio_format.get("spool_segment_id")
+    raw_sequence = audio_format.get("spool_sequence")
+    if spool_segment_id is None and raw_sequence is None:
+        return None, None, False
+    if not spool_segment_id or raw_sequence is None:
+        raise ValueError(
+            "Durable audio requires both spool_segment_id and spool_sequence"
+        )
+    try:
+        spool_sequence = int(raw_sequence)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"Invalid spool_sequence value: {raw_sequence!r}") from error
+    if spool_sequence < 0:
+        raise ValueError(f"Invalid spool_sequence value: {raw_sequence!r}")
+
+    receipt_key = f"mobile-audio-receipt:{user_id}:{client_id}:{spool_segment_id}"
+    prior = await audio_stream_producer.redis_client.get(receipt_key)
+    if prior is not None and int(prior) >= spool_sequence:
+        await websocket.send_json(
+            {
+                "type": "audio-ack",
+                "spool_segment_id": spool_segment_id,
+                "sequence": spool_sequence,
+            }
+        )
+        return receipt_key, spool_sequence, True
+    return receipt_key, spool_sequence, False
+
+
+async def _commit_mobile_spool_receipt(
+    websocket: WebSocket,
+    audio_stream_producer,
+    receipt_key: str,
+    spool_segment_id: str,
+    spool_sequence: int,
+) -> None:
+    await audio_stream_producer.redis_client.set(
+        receipt_key,
+        spool_sequence,
+        ex=_MOBILE_AUDIO_RECEIPT_TTL_SECONDS,
+    )
+    await websocket.send_json(
+        {
+            "type": "audio-ack",
+            "spool_segment_id": spool_segment_id,
+            "sequence": spool_sequence,
+        }
+    )
+
+
+async def _handle_pcm_wyoming_audio_packet(
+    websocket: WebSocket,
+    client_state,
+    audio_stream_producer,
+    control_header: dict,
+    audio_data: bytes,
+    user_id: str,
+    user_email: str,
+    client_id: str,
+) -> tuple[Optional[asyncio.Task], bool]:
+    """Publish one framed PCM packet and retire its durable mobile spool entry."""
+
+    audio_format = control_header.get("data", {})
+    receipt_key, spool_sequence, duplicate = await _prepare_mobile_spool_receipt(
+        websocket,
+        audio_stream_producer,
+        user_id,
+        client_id,
+        audio_format,
+    )
+    if duplicate:
+        return None, False
+
+    task = await _handle_audio_chunk(
+        client_state,
+        audio_stream_producer,
+        audio_data,
+        audio_format,
+        user_id,
+        user_email,
+        client_id,
+        websocket=websocket,
+    )
+    if receipt_key is not None and spool_sequence is not None:
+        session_id = client_state.stream_session_id
+        if session_id is None:
+            raise RuntimeError("Durable PCM audio requires an active streaming capture")
+        await audio_stream_producer.flush_session_buffer(
+            session_id,
+            sample_rate=audio_format.get("rate", 16000),
+            channels=audio_format.get("channels", 1),
+            sample_width=audio_format.get("width", 2),
+        )
+        await _commit_mobile_spool_receipt(
+            websocket,
+            audio_stream_producer,
+            receipt_key,
+            str(audio_format["spool_segment_id"]),
+            spool_sequence,
+        )
+    return task, True
 
 
 async def _handle_audio_session_start(
@@ -1383,15 +1492,19 @@ async def _create_batch_conversation_and_enqueue(
 
     # Convert audio to MongoDB chunks
     try:
-        num_chunks = await convert_audio_to_chunks(
-            conversation_id=conversation_id,
+        ingest = await convert_audio_to_chunks(
+            user_id=user_id,
+            capture_source_id=client_id,
             audio_data=complete_audio,
             sample_rate=sample_rate,
             channels=channels,
             sample_width=sample_width,
+            origin="batch",
         )
+        await apply_audio_ranges(conversation, [ingest.audio_range])
         application_logger.info(
-            f"📦 Batch: Converted to {num_chunks} MongoDB chunks ({conversation_id[:12]})"
+            f"📦 Batch: Converted to {ingest.chunk_count} MongoDB chunks "
+            f"({conversation_id[:12]})"
         )
     except Exception as chunk_error:
         application_logger.error(
@@ -1689,11 +1802,7 @@ async def handle_omi_websocket(
                     user.user_id,
                     client_id,
                     packet_count,
-                    (
-                        float(chunk_data["captured_at_ms"]) / 1000.0
-                        if chunk_data.get("captured_at_ms") is not None
-                        else None
-                    ),
+                    _captured_at_seconds(chunk_data),
                 )
 
                 if receipt_key is not None and decoded:
@@ -1918,25 +2027,25 @@ async def handle_pcm_websocket(
                                         )
                                         if "bytes" in payload_msg:
                                             audio_data = payload_msg["bytes"]
+                                            task, accepted = (
+                                                await _handle_pcm_wyoming_audio_packet(
+                                                    ws,
+                                                    client_state,
+                                                    audio_stream_producer,
+                                                    control_header,
+                                                    audio_data,
+                                                    user.user_id,
+                                                    user.email,
+                                                    client_id,
+                                                )
+                                            )
+                                            if not accepted:
+                                                continue
                                             packet_count += 1
                                             total_bytes += len(audio_data)
-
                                             application_logger.debug(
-                                                f"🎵 Received audio chunk #{packet_count}: {len(audio_data)} bytes"
-                                            )
-
-                                            audio_format = control_header.get(
-                                                "data", {}
-                                            )
-                                            task = await _handle_audio_chunk(
-                                                client_state,
-                                                audio_stream_producer,
-                                                audio_data,
-                                                audio_format,
-                                                user.user_id,
-                                                user.email,
-                                                client_id,
-                                                websocket=ws,
+                                                f"🎵 Received audio chunk #{packet_count}: "
+                                                f"{len(audio_data)} bytes"
                                             )
                                             if task and not interim_holder[0]:
                                                 interim_holder[0] = task

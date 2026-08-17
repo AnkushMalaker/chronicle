@@ -38,6 +38,8 @@ import logging
 from enum import Enum
 from typing import Any, Iterator, NamedTuple, Optional
 
+from opentelemetry import trace
+
 from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
 
 logger = logging.getLogger("memory_service.audit")
@@ -202,6 +204,18 @@ def _line_delta_summary(before: Optional[str], after: Optional[str]) -> Optional
     return f"+{added}/-{removed} lines"
 
 
+def _active_trace_context() -> dict[str, str]:
+    """IDs that join an exact vault path to its Langfuse/OpenTelemetry trace."""
+
+    context = trace.get_current_span().get_span_context()
+    if not context.is_valid:
+        return {}
+    return {
+        "otel_trace_id": f"{context.trace_id:032x}",
+        "otel_span_id": f"{context.span_id:016x}",
+    }
+
+
 async def record_vault_change(
     *,
     user_id: str,
@@ -238,7 +252,7 @@ async def record_vault_change(
             after_bytes=len(after.encode("utf-8")) if after is not None else None,
             after_text=after,
             summary=summary or _line_delta_summary(before, after),
-            extra=dict(extra),
+            extra={**dict(extra), **_active_trace_context()},
         )
         await entry.insert()
     except Exception as e:  # noqa: BLE001 — audit must never break processing

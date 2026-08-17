@@ -136,7 +136,8 @@ class ModelDef(BaseModel):
         default_factory=list,
         description=(
             "Provider capabilities. Output capabilities: word_timestamps, segments, "
-            "diarization. ASR hint mechanism (mutually exclusive): "
+            "diarization; forced_alignment advertises Chronicle's /align endpoint. "
+            "ASR hint mechanism (mutually exclusive): "
             "'keyword_boosting' — accepts a hot-word list as an acoustic recognition "
             "hint that biases decoding without leaking into the transcript "
             "(Deepgram keyterm, VibeVoice prompt, Parakeet); 'context_prompt' — an "
@@ -326,7 +327,8 @@ class ResolvedLLMOperation(BaseModel):
                 effort = self.reasoning_effort.strip().lower()
                 # "none" is accepted by versioned GPT-5.1+ models. Earlier GPT-5
                 # variants (gpt-5, gpt-5-mini/nano) require "minimal" instead.
-                version_match = re.match(r"^gpt-5\.(\d+)", model_name.lower())
+                unqualified_model_name = model_name.lower().rsplit("/", 1)[-1]
+                version_match = re.match(r"^gpt-5\.(\d+)", unqualified_model_name)
                 supports_none = bool(version_match and int(version_match.group(1)) >= 1)
                 if effort in ("none", "off", "0") and not supports_none:
                     effort = "minimal"

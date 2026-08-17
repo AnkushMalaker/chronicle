@@ -24,6 +24,7 @@ import {
 import { useConversationDetail } from '../hooks/useConversations'
 import { useGaplessPlayer } from '../hooks/useGaplessPlayer'
 import { Range } from '../lib/gaplessPlayer'
+import { TITLE_NOT_GENERATED } from '../lib/constants'
 import TranscriptEditor, { Segment } from '../components/transcript/TranscriptEditor'
 import { Button, Card, StateBadge } from '../components/ui'
 
@@ -230,7 +231,7 @@ function EpisodeRecording({
     <Card className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="min-w-0 text-sm font-medium text-gray-900 dark:text-gray-100">
-          {conversation.title || 'Untitled recording'}
+          {conversation.title || TITLE_NOT_GENERATED}
         </div>
         <Link
           to={openHref}

@@ -201,9 +201,13 @@ Conversation Closes On Inactivity Timeout And Restarts Speech Detection
     ${speaker_jobs}=    Get Jobs By Type And Conversation    recognise_speakers_job    ${conversation_id}
     Log To Console    Speaker recognition jobs found: ${speaker_jobs.__len__()}
 
-    # Title/summary generation job should be created
-    ${title_jobs}=    Get Jobs By Type And Conversation    generate_title_summary_job    ${conversation_id}
-    Log To Console    Title/summary jobs found: ${title_jobs.__len__()}
+    # The ordered summary bundle should create three independently timed jobs.
+    ${title_jobs}=    Get Jobs By Type And Conversation    generate_title_job    ${conversation_id}
+    ${short_summary_jobs}=    Get Jobs By Type And Conversation    generate_short_summary_job    ${conversation_id}
+    ${detailed_summary_jobs}=    Get Jobs By Type And Conversation    generate_detailed_summary_job    ${conversation_id}
+    Log To Console    Title jobs found: ${title_jobs.__len__()}
+    Log To Console    Short-summary jobs found: ${short_summary_jobs.__len__()}
+    Log To Console    Detailed-summary jobs found: ${detailed_summary_jobs.__len__()}
 
     # Memory extraction job should be created
     ${memory_jobs}=    Get Jobs By Type And Conversation    process_memory_job    ${conversation_id}

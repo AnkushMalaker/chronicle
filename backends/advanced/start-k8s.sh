@@ -20,6 +20,7 @@ shutdown() {
     kill $RQ_WORKER_1_PID 2>/dev/null || true
     kill $RQ_WORKER_2_PID 2>/dev/null || true
     kill $RQ_WORKER_3_PID 2>/dev/null || true
+    kill $SUMMARY_WORKER_PID 2>/dev/null || true
     kill $AUDIO_PERSISTENCE_WORKER_PID 2>/dev/null || true
     kill $BACKEND_PID 2>/dev/null || true
     wait
@@ -104,13 +105,25 @@ start_workers() {
         exit 1
     fi
 
+    # Keep local-LLM queue wait outside the per-job execution timeout.
+    echo "📝 Starting dedicated summary worker (summary queue)..."
+    if python3 -m advanced_omi_backend.workers.rq_worker_entry summary &
+    then
+        SUMMARY_WORKER_PID=$!
+        echo "  ✅ Summary worker started with PID: $SUMMARY_WORKER_PID"
+    else
+        echo "  ❌ Failed to start summary worker"
+        kill $AUDIO_WORKER_1_PID $RQ_WORKER_1_PID $RQ_WORKER_2_PID $RQ_WORKER_3_PID 2>/dev/null || true
+        exit 1
+    fi
+
     if python3 -m advanced_omi_backend.workers.rq_worker_entry transcription memory default &
     then
         RQ_WORKER_2_PID=$!
         echo "  ✅ RQ worker 2 started with PID: $RQ_WORKER_2_PID"
     else
         echo "  ❌ Failed to start RQ worker 2"
-        kill $AUDIO_WORKER_1_PID $RQ_WORKER_1_PID 2>/dev/null || true
+        kill $AUDIO_WORKER_1_PID $RQ_WORKER_1_PID $SUMMARY_WORKER_PID 2>/dev/null || true
         exit 1
     fi
 
@@ -120,7 +133,7 @@ start_workers() {
         echo "  ✅ RQ worker 3 started with PID: $RQ_WORKER_3_PID"
     else
         echo "  ❌ Failed to start RQ worker 3"
-        kill $AUDIO_WORKER_1_PID $RQ_WORKER_1_PID $RQ_WORKER_2_PID 2>/dev/null || true
+        kill $AUDIO_WORKER_1_PID $RQ_WORKER_1_PID $RQ_WORKER_2_PID $SUMMARY_WORKER_PID 2>/dev/null || true
         exit 1
     fi
 
@@ -132,7 +145,7 @@ start_workers() {
         echo "  ✅ Audio persistence worker started with PID: $AUDIO_PERSISTENCE_WORKER_PID"
     else
         echo "  ❌ Failed to start audio persistence worker"
-        kill $AUDIO_WORKER_1_PID $RQ_WORKER_1_PID $RQ_WORKER_2_PID $RQ_WORKER_3_PID 2>/dev/null || true
+        kill $AUDIO_WORKER_1_PID $RQ_WORKER_1_PID $RQ_WORKER_2_PID $RQ_WORKER_3_PID $SUMMARY_WORKER_PID 2>/dev/null || true
         exit 1
     fi
 
@@ -141,6 +154,7 @@ start_workers() {
     echo "  - RQ worker 1: $RQ_WORKER_1_PID (transcription, memory, default)"
     echo "  - RQ worker 2: $RQ_WORKER_2_PID (transcription, memory, default)"
     echo "  - RQ worker 3: $RQ_WORKER_3_PID (transcription, memory, default)"
+    echo "  - Summary worker: $SUMMARY_WORKER_PID (summary)"
     echo "  - Audio persistence worker: $AUDIO_PERSISTENCE_WORKER_PID (audio queue - file rotation)"
 }
 
@@ -181,7 +195,7 @@ monitor_worker_health() {
             echo "🔧 Self-healing: Restarting all workers to restore registration..."
 
             # Kill all workers
-            kill $AUDIO_WORKER_1_PID $RQ_WORKER_1_PID $RQ_WORKER_2_PID $RQ_WORKER_3_PID $AUDIO_PERSISTENCE_WORKER_PID 2>/dev/null || true
+            kill $AUDIO_WORKER_1_PID $RQ_WORKER_1_PID $RQ_WORKER_2_PID $RQ_WORKER_3_PID $SUMMARY_WORKER_PID $AUDIO_PERSISTENCE_WORKER_PID 2>/dev/null || true
             wait 2>/dev/null || true
 
             # Restart workers
@@ -260,7 +274,7 @@ then
     echo "  ✅ FastAPI backend started with PID: $BACKEND_PID"
 else
     echo "  ❌ Failed to start FastAPI backend"
-    kill $AUDIO_WORKER_1_PID $RQ_WORKER_1_PID $RQ_WORKER_2_PID $RQ_WORKER_3_PID $AUDIO_PERSISTENCE_WORKER_PID 2>/dev/null || true
+    kill $AUDIO_WORKER_1_PID $RQ_WORKER_1_PID $RQ_WORKER_2_PID $RQ_WORKER_3_PID $SUMMARY_WORKER_PID $AUDIO_PERSISTENCE_WORKER_PID 2>/dev/null || true
     exit 1
 fi
 
@@ -269,6 +283,7 @@ echo "  - Audio stream worker: $AUDIO_WORKER_1_PID (Redis Streams consumer - seq
 echo "  - RQ worker 1: $RQ_WORKER_1_PID (transcription, memory, default)"
 echo "  - RQ worker 2: $RQ_WORKER_2_PID (transcription, memory, default)"
 echo "  - RQ worker 3: $RQ_WORKER_3_PID (transcription, memory, default)"
+echo "  - Summary worker: $SUMMARY_WORKER_PID (summary)"
 echo "  - Audio persistence worker: $AUDIO_PERSISTENCE_WORKER_PID (audio queue - file rotation)"
 echo "  - Self-healing monitor: $MONITOR_PID"
 echo "  - FastAPI Backend: $BACKEND_PID"
@@ -284,6 +299,7 @@ echo "⚠️  One service exited, stopping all services..."
 [ -n "$RQ_WORKER_1_PID" ] && kill $RQ_WORKER_1_PID 2>/dev/null || true
 [ -n "$RQ_WORKER_2_PID" ] && kill $RQ_WORKER_2_PID 2>/dev/null || true
 [ -n "$RQ_WORKER_3_PID" ] && kill $RQ_WORKER_3_PID 2>/dev/null || true
+[ -n "$SUMMARY_WORKER_PID" ] && kill $SUMMARY_WORKER_PID 2>/dev/null || true
 [ -n "$AUDIO_PERSISTENCE_WORKER_PID" ] && kill $AUDIO_PERSISTENCE_WORKER_PID 2>/dev/null || true
 [ -n "$BACKEND_PID" ] && kill $BACKEND_PID 2>/dev/null || true
 wait

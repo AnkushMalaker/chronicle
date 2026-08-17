@@ -16,8 +16,8 @@ interface DiarizationSettings {
   min_duration: number
   collar: number
   min_duration_off: number
-  min_speakers: number
-  max_speakers: number
+  min_speakers: number | null
+  max_speakers: number | null
 }
 
 export default function Settings() {
@@ -35,8 +35,8 @@ export default function Settings() {
     min_duration: 0.5,
     collar: 2.0,
     min_duration_off: 1.5,
-    min_speakers: 2,
-    max_speakers: 6
+    min_speakers: null,
+    max_speakers: null
   })
   const [diarizationLoading, setDiarizationLoading] = useState(false)
 
@@ -369,42 +369,47 @@ export default function Settings() {
                   </div>
                 </div>
 
-                {/* Speaker Count Range */}
+                {/* Optional speaker-count constraints */}
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Min Speakers: {diarizationSettings.min_speakers}
+                      Min Speakers
                     </label>
                     <input
-                      type="range"
+                      type="number"
                       min="1"
-                      max="6"
+                      max="20"
                       step="1"
-                      value={diarizationSettings.min_speakers}
+                      placeholder="Automatic"
+                      value={diarizationSettings.min_speakers ?? ''}
                       onChange={(e) => setDiarizationSettings(prev => ({
                         ...prev,
-                        min_speakers: parseInt(e.target.value)
+                        min_speakers: e.target.value === '' ? null : parseInt(e.target.value)
                       }))}
-                      className="w-full h-2 bg-gray-200 dark:bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                      className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100"
                     />
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Max Speakers: {diarizationSettings.max_speakers}
+                      Max Speakers
                     </label>
                     <input
-                      type="range"
-                      min="2"
-                      max="10"
+                      type="number"
+                      min="1"
+                      max="20"
                       step="1"
-                      value={diarizationSettings.max_speakers}
+                      placeholder="Automatic"
+                      value={diarizationSettings.max_speakers ?? ''}
                       onChange={(e) => setDiarizationSettings(prev => ({
                         ...prev,
-                        max_speakers: parseInt(e.target.value)
+                        max_speakers: e.target.value === '' ? null : parseInt(e.target.value)
                       }))}
-                      className="w-full h-2 bg-gray-200 dark:bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                      className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100"
                     />
                   </div>
+                </div>
+                <div className="text-xs text-gray-500 dark:text-gray-400 -mt-2">
+                  Leave both blank to let pyannote infer the speaker count. Constraints can materially change segmentation.
                 </div>
             </>
 
@@ -662,7 +667,8 @@ const OPERATION_LABELS: Record<string, string> = {
   memory_extraction: 'Memory Extraction',
   memory_update: 'Memory Update',
   memory_reprocess: 'Memory Reprocess',
-  title_summary: 'Title & Summary',
+  conversation_title: 'Conversation Title',
+  short_summary: 'Short Summary',
   detailed_summary: 'Detailed Summary',
   entity_extraction: 'Entity Extraction',
   chat: 'Chat',

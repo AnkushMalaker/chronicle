@@ -1,9 +1,9 @@
-"""Durable, content-addressed records for paid inference subprocesses.
+"""Durable, content-addressed records for model and agent inference runs.
 
-Paid provider output must survive the process that consumed it.  The artifact keeps
-the complete request and response, while a small request index makes deterministic
-operations (currently timeline analysis) reusable without paying for the same call.
-Context-dependent vault mutations are archived for audit but are never replayed.
+The store is provider- and billing-neutral: a run may use a paid API, a subscription,
+or a local model. Reusability is an explicit property of an individual operation.
+Read-only deterministic runs may be cached; context-dependent mutations are retained
+for observability but are never replayed.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
-import logging
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -20,13 +19,9 @@ from typing import Any
 
 from advanced_omi_backend.config import DATA_DIR
 
-logger = logging.getLogger(__name__)
-
 
 def _root() -> Path:
-    return Path(
-        os.getenv("PAID_INFERENCE_ARTIFACT_DIR", DATA_DIR / "paid_inference_artifacts")
-    )
+    return Path(os.getenv("INFERENCE_ARTIFACT_DIR", DATA_DIR / "inference_artifacts"))
 
 
 def canonical_hash(value: Any) -> str:
@@ -50,7 +45,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
-def persist_paid_run(
+def persist_inference_run(
     *,
     operation: str,
     request: dict[str, Any],
@@ -60,11 +55,11 @@ def persist_paid_run(
     metadata: dict[str, Any] | None = None,
     reusable: bool = False,
 ) -> tuple[str, str]:
-    """Persist one complete provider interaction and return request/artifact hashes."""
+    """Persist one complete inference interaction and return content hashes."""
 
     request_hash = canonical_hash(request)
     record = {
-        "format": "chronicle-paid-inference-v1",
+        "format": "chronicle-inference-artifact-v1",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "operation": operation,
         "request_hash": request_hash,
@@ -103,5 +98,25 @@ def load_reusable_result(operation: str, request: dict[str, Any]) -> Any | None:
     with gzip.open(artifact_path, "rt", encoding="utf-8") as stream:
         record = json.load(stream)
     if record.get("request_hash") != request_hash or not record.get("reusable"):
-        raise ValueError(f"Invalid paid inference cache entry: {artifact_path}")
+        raise ValueError(f"Invalid inference cache entry: {artifact_path}")
     return record.get("result")
+
+
+def load_inference_runs(operation: str, *, limit: int = 500) -> list[dict[str, Any]]:
+    """Load the newest durable records for offline observability/optimization."""
+
+    if isinstance(limit, bool) or limit <= 0:
+        raise ValueError("limit must be a positive integer")
+    artifacts = _root() / operation / "artifacts"
+    if not artifacts.is_dir():
+        return []
+    records: list[dict[str, Any]] = []
+    for path in artifacts.glob("*.json.gz"):
+        with gzip.open(path, "rt", encoding="utf-8") as stream:
+            record = json.load(stream)
+        if not isinstance(record, dict) or record.get("operation") != operation:
+            raise ValueError(f"Invalid inference artifact: {path}")
+        record["artifact_hash"] = path.name.removesuffix(".json.gz")
+        records.append(record)
+    records.sort(key=lambda item: str(item.get("recorded_at", "")), reverse=True)
+    return records[:limit]

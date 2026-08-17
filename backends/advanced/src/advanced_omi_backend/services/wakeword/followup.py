@@ -30,7 +30,7 @@ from advanced_omi_backend.plugins.router import (
 from advanced_omi_backend.redis_keys import ClientId, SessionId
 from advanced_omi_backend.services.wakeword.executor import (
     execute_voice_command,
-    get_current_conversation_id,
+    get_active_conversation_id,
     get_followup_ctx,
     is_muted,
 )
@@ -206,7 +206,7 @@ async def maybe_handle_followup(
         return True  # consume — it was meant for us, just nothing to do
 
     logger.info("Follow-up %r -> %r (prev=%r)", text, resolved, last_command)
-    conversation_id = await get_current_conversation_id(redis_client, session_id)
+    conversation_id = await get_active_conversation_id(redis_client, session_id)
     session_ref = SessionId.from_value(session_id)
     client_ref = ClientId.from_value(client_id)
     await execute_voice_command(
@@ -297,7 +297,7 @@ async def handle_dial_followup(
     logger.info(
         "Dial %s -> %r (axis=%s, prev=%r)", direction, resolved, axis, last_command
     )
-    conversation_id = await get_current_conversation_id(redis_client, session_id)
+    conversation_id = await get_active_conversation_id(redis_client, session_id)
     session_ref = SessionId.from_value(session_id)
     client_ref = ClientId.from_value(client_id)
     # quiet=True: no spoken "warmer" per detent and no backend LED effect (the

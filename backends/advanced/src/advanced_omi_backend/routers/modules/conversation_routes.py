@@ -57,7 +57,7 @@ async def get_conversations(
     ),
     include_unprocessed: bool = Query(
         False,
-        description="Include orphan audio sessions (always_persist with failed/pending transcription)",
+        description="Include failed or pending semantic claims with no active transcript",
     ),
     starred_only: bool = Query(
         False, description="Only return starred/favorited conversations"
@@ -184,7 +184,7 @@ async def get_conversation_memories(
 async def reprocess_orphan(
     conversation_id: str, current_user: User = Depends(current_active_user)
 ):
-    """Reprocess an orphan audio session (always_persist conversation with failed/pending transcription)."""
+    """Reprocess a failed or pending semantic claim with retained capture audio."""
     return await conversation_controller.reprocess_orphan(conversation_id, current_user)
 
 

@@ -1,14 +1,12 @@
 """Resolve a cited recording to whatever is live now.
 
-An episode cites recordings by ``conversation_id``, but a conversation id is a
-container, not the audio. Three ordinary operations replace the container while the
-audio stays exactly where it was:
+An episode may cite recordings by ``conversation_id``, but a Conversation is a
+semantic claim, not the audio. Split, merge, and trim replace or clip those claims
+while immutable capture chunks stay exactly where they were.
 
-- **dedup** — a ScreenPipe ingest retry uploads the same span twice, and the sweep
-  soft-deletes one copy (``duplicate_screenpipe_ingest_retry``);
-- **merge/split** — re-bounding moves chunks to a new conversation and soft-deletes
-  the old one, recording ``derived_into``;
-- **silence trim** — the remnant is soft-deleted and keeps the silence.
+- **dedup** — a ScreenPipe retry can leave two semantic claims over one capture;
+- **merge/split** — re-bounding creates new range claims and soft-deletes sources;
+- **silence trim** — the visible claim is clipped without deleting raw evidence.
 
 Any of these leaves an episode pointing at a soft-deleted conversation, and promotion
 only unhides live ones — so a real meeting the agent identified stays hidden. Measured
@@ -22,11 +20,11 @@ also covers a dedup or trim that happens *after* the episode was published.
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Iterable
+from typing import Any, Iterable
 
-from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.timeline import TimelineAudioRange, TimelineEvidenceRef
+from advanced_omi_backend.services.audio_claims import load_chunks_by_id
 
 logger = logging.getLogger(__name__)
 
@@ -67,66 +65,53 @@ async def build_audio_ranges(
     if not owners:
         return []
     start, end = _utc(started_at), _utc(ended_at)
-    documents = (
-        await AudioChunkDocument.find(
-            {
-                "conversation_id": {"$in": sorted(owners)},
-                "captured_at": {"$lt": end},
-                "deleted": {"$ne": True},
-            }
-        )
-        .sort("+captured_at")
-        .to_list()
-    )
-    chunks = [
-        chunk
-        for chunk in documents
-        if chunk.captured_at is not None
-        and _utc(chunk.captured_at) + timedelta(seconds=chunk.duration) > start
-    ]
-    if not chunks:
-        return []
-
-    # Keep concurrent input/output streams distinct. Within a stream, start a new
-    # range at a real capture gap; adjacent chunks form one playable program section.
-    grouped: dict[str, list[AudioChunkDocument]] = {}
-    for chunk in chunks:
-        key = chunk.source_stream or f"conversation:{chunk.conversation_id}"
-        grouped.setdefault(key, []).append(chunk)
-
+    conversations = await Conversation.find(
+        {"conversation_id": {"$in": sorted(owners)}, "deleted": {"$ne": True}}
+    ).to_list()
     ranges: list[TimelineAudioRange] = []
-    for source, source_chunks in grouped.items():
-        source_chunks.sort(key=lambda row: _utc(row.captured_at))  # type: ignore[arg-type]
-        runs: list[list[AudioChunkDocument]] = []
-        for chunk in source_chunks:
-            if not runs:
-                runs.append([chunk])
+    seen: set[tuple] = set()
+    for conversation in conversations:
+        for claim in conversation.audio_ranges:
+            claim_start = max(start, _utc(claim.started_at))
+            claim_end = min(end, _utc(claim.ended_at))
+            if claim_end <= claim_start:
                 continue
-            previous = runs[-1][-1]
-            previous_end = _utc(previous.captured_at) + timedelta(  # type: ignore[arg-type]
-                seconds=previous.duration
-            )
-            if _utc(chunk.captured_at) - previous_end > timedelta(seconds=0.25):  # type: ignore[arg-type]
-                runs.append([chunk])
-            else:
-                runs[-1].append(chunk)
-        for run in runs:
-            run_start = max(start, _utc(run[0].captured_at))  # type: ignore[arg-type]
-            run_end = min(
-                end,
-                _utc(run[-1].captured_at) + timedelta(seconds=run[-1].duration),  # type: ignore[arg-type]
-            )
-            if run_end <= run_start:
+            chunks = await load_chunks_by_id(claim.chunk_ids)
+            chunk_ids = [
+                str(chunk.id)
+                for chunk in chunks
+                if _utc(chunk.captured_at) < claim_end
+                and _utc(chunk.captured_at) + timedelta(seconds=chunk.duration)
+                > claim_start
+            ]
+            if not chunk_ids:
                 continue
+            identity = (
+                claim.capture_source_id,
+                tuple(chunk_ids),
+                claim_start,
+                claim_end,
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
             ranges.append(
                 TimelineAudioRange(
-                    chunk_ids=[str(chunk.id) for chunk in run],
-                    started_at=run_start,
-                    ended_at=run_end,
-                    source_stream=(
-                        None if source.startswith("conversation:") else source
+                    capture_source_id=claim.capture_source_id,
+                    time_basis=claim.time_basis,
+                    capture_session_ids=claim.capture_session_ids,
+                    chunk_ids=chunk_ids,
+                    started_at=claim_start,
+                    ended_at=claim_end,
+                    source_stream=next(
+                        (
+                            chunk.source_stream
+                            for chunk in chunks
+                            if chunk.source_stream
+                        ),
+                        None,
                     ),
-                    conversation_ids=sorted({chunk.conversation_id for chunk in run}),
+                    conversation_ids=[conversation.conversation_id],
                 )
             )
     ranges.sort(key=lambda item: (item.started_at, item.source_stream or ""))
@@ -135,87 +120,127 @@ async def build_audio_ranges(
 
 async def resolve_live_recordings(conversation_ids: Iterable[str]) -> set[str]:
     """Live recordings covering the audio the given ids referred to."""
+    requested = list(dict.fromkeys(str(item) for item in conversation_ids if item))
+    conversations = await _conversation_documents(requested)
     resolved: set[str] = set()
-    for conversation_id in dict.fromkeys(conversation_ids):
-        conversation = await Conversation.find_one(
-            Conversation.conversation_id == conversation_id
-        )
+    deleted: dict[str, dict[str, Any]] = {}
+    for conversation_id in requested:
+        conversation = conversations.get(conversation_id)
         if conversation is None:
             continue
-        if not conversation.deleted:
+        if not conversation.get("deleted", False):
             resolved.add(conversation_id)
             continue
-        lineage = await _live_descendants(conversation)
+        deleted[conversation_id] = conversation
+
+    descendants = await _live_descendants(deleted)
+    for conversation_id, conversation in deleted.items():
+        lineage = descendants.get(conversation_id, set())
         if lineage:
             resolved |= lineage
             continue
         # Dedup records no lineage — the surviving twin was ingested separately and
         # never knew about this copy. What identifies them as the same recording is
         # that they cover the same wall-clock audio on the same capture stream.
-        resolved |= await _live_over_same_audio(conversation)
+        resolved |= await _live_over_same_audio(
+            conversation_id=conversation_id,
+            client_id=conversation.get("client_id"),
+        )
     return resolved
 
 
-async def _live_descendants(conversation: Conversation, depth: int = 0) -> set[str]:
-    if depth >= MAX_LINEAGE_DEPTH:
-        return set()
-    found: set[str] = set()
-    for child_id in conversation.derived_into or []:
-        child = await Conversation.find_one(Conversation.conversation_id == child_id)
-        if child is None:
-            continue
-        if not child.deleted:
-            found.add(child_id)
-        else:
-            found |= await _live_descendants(child, depth + 1)
+async def _conversation_documents(
+    conversation_ids: Iterable[str],
+) -> dict[str, dict[str, Any]]:
+    ids = sorted(set(conversation_ids))
+    if not ids:
+        return {}
+    documents = (
+        await Conversation.get_pymongo_collection()
+        .find(
+            {"conversation_id": {"$in": ids}},
+            {
+                "_id": 0,
+                "conversation_id": 1,
+                "deleted": 1,
+                "derived_into": 1,
+                "client_id": 1,
+                "audio_ranges": 1,
+            },
+        )
+        .to_list(length=None)
+    )
+    return {document["conversation_id"]: document for document in documents}
+
+
+async def _live_descendants(
+    roots: dict[str, dict[str, Any]],
+) -> dict[str, set[str]]:
+    """Resolve all lineage trees with one raw Mongo query per tree depth."""
+    found = {root_id: set() for root_id in roots}
+    frontier = {
+        root_id: set(root.get("derived_into") or []) for root_id, root in roots.items()
+    }
+    visited = {root_id: set() for root_id in roots}
+
+    for _depth in range(MAX_LINEAGE_DEPTH):
+        child_ids = set().union(*frontier.values()) if frontier else set()
+        if not child_ids:
+            break
+        children = await _conversation_documents(child_ids)
+        next_frontier: dict[str, set[str]] = {}
+        for root_id, requested_ids in frontier.items():
+            pending: set[str] = set()
+            for child_id in requested_ids - visited[root_id]:
+                visited[root_id].add(child_id)
+                child = children.get(child_id)
+                if child is None:
+                    continue
+                if not child.get("deleted", False):
+                    found[root_id].add(child_id)
+                else:
+                    pending.update(child.get("derived_into") or [])
+            next_frontier[root_id] = pending
+        frontier = next_frontier
     return found
 
 
-async def _live_over_same_audio(conversation: Conversation) -> set[str]:
+async def _live_over_same_audio(
+    *, conversation_id: str, client_id: str | None
+) -> set[str]:
     """Live recordings on the same stream whose audio overlaps this one's span."""
-    collection = AudioChunkDocument.get_pymongo_collection()
-    bounds = await collection.aggregate(
-        [
-            {
-                "$match": {
-                    "conversation_id": conversation.conversation_id,
-                    "deleted": {"$ne": True},
-                }
-            },
-            {
-                "$group": {
-                    "_id": None,
-                    "first": {"$min": "$captured_at"},
-                    "last": {"$max": "$captured_at"},
-                }
-            },
-        ]
-    ).to_list(length=1)
-    if not bounds or bounds[0]["first"] is None:
-        return set()
-
-    owners = await collection.distinct(
-        "conversation_id",
-        {
-            "captured_at": {"$gte": bounds[0]["first"], "$lte": bounds[0]["last"]},
-            "deleted": {"$ne": True},
-        },
+    source = await Conversation.get_pymongo_collection().find_one(
+        {"conversation_id": conversation_id}, {"audio_ranges.chunk_ids": 1}
     )
-    live: set[str] = set()
-    for owner_id in owners:
-        if owner_id == conversation.conversation_id:
-            continue
-        owner = await Conversation.find_one(Conversation.conversation_id == owner_id)
-        # Same capture stream, or it is different audio that merely happened at the
-        # same moment — the other node, or the other direction of the same call.
-        if owner is None or owner.deleted or owner.client_id != conversation.client_id:
-            continue
-        live.add(owner_id)
-        if len(live) >= MAX_FANOUT:
-            logger.warning(
-                "recording %s resolves to more than %d live recordings; truncating",
-                conversation.conversation_id[:8],
-                MAX_FANOUT,
-            )
-            break
+    chunk_ids = [
+        chunk_id
+        for audio_range in (source or {}).get("audio_ranges", [])
+        for chunk_id in audio_range.get("chunk_ids", [])
+    ]
+    if not chunk_ids:
+        return set()
+    # Same capture stream, or it is different audio that merely happened at the same
+    # moment — the other node, or the other direction of the same call. Fetch raw
+    # projected rows in one query; materialising every full Conversation model here
+    # was the dominant publish-time cost for large generated days.
+    documents = (
+        await Conversation.get_pymongo_collection()
+        .find(
+            {
+                "conversation_id": {"$ne": conversation_id},
+                "deleted": {"$ne": True},
+                "client_id": client_id,
+                "audio_ranges.chunk_ids": {"$in": chunk_ids},
+            },
+            {"_id": 0, "conversation_id": 1},
+        )
+        .to_list(length=MAX_FANOUT + 1)
+    )
+    live = {document["conversation_id"] for document in documents[:MAX_FANOUT]}
+    if len(documents) > MAX_FANOUT:
+        logger.warning(
+            "recording %s resolves to more than %d live recordings; truncating",
+            conversation_id[:8],
+            MAX_FANOUT,
+        )
     return live

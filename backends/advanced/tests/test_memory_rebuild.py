@@ -1,5 +1,8 @@
 """Tests for clean, ordered Markdown-vault reconstruction."""
 
+import hashlib
+import json
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +15,7 @@ from advanced_omi_backend.services.memory.rebuild import (
     RebuildPlan,
     RebuildStage,
     build_rebuild_plan,
+    create_vault_backup,
     execute_memory_rebuild,
 )
 
@@ -20,10 +24,14 @@ class AuditCollection:
     def __init__(self, deleted_count):
         self.deleted_count = deleted_count
         self.query = None
+        self.inserted = []
 
     async def delete_many(self, query):
         self.query = query
         return SimpleNamespace(deleted_count=self.deleted_count)
+
+    async def insert_many(self, documents):
+        self.inserted.extend(documents)
 
 
 class FakeDatabase:
@@ -74,6 +82,68 @@ class AudioCollection:
         return self.conversation_ids
 
 
+def test_active_rebuild_jobs_catches_user_scoped_timeline_job(monkeypatch):
+    empty_registry = SimpleNamespace(get_job_ids=lambda: [])
+
+    def queue(job_ids):
+        return SimpleNamespace(
+            get_job_ids=lambda: list(job_ids),
+            started_job_registry=empty_registry,
+            deferred_job_registry=empty_registry,
+            scheduled_job_registry=empty_registry,
+            connection=object(),
+        )
+
+    timeline_job = SimpleNamespace(
+        meta={},
+        func_name=(
+            "advanced_omi_backend.workers.timeline_jobs." "rebuild_timeline_day_job"
+        ),
+        args=("user-a", "2026-01-06", "Asia/Kolkata"),
+    )
+    monkeypatch.setattr(rebuild, "transcription_queue", queue([]))
+    monkeypatch.setattr(rebuild, "memory_queue", queue(["day-retry"]))
+    monkeypatch.setattr(rebuild, "default_queue", queue([]))
+    monkeypatch.setattr(
+        rebuild.Job,
+        "fetch",
+        staticmethod(lambda job_id, connection: timeline_job),
+    )
+
+    assert rebuild._active_rebuild_jobs(set(), {"user-a"}) == ["day-retry"]
+    assert rebuild._active_rebuild_jobs(set(), {"user-b"}) == []
+
+
+def test_vault_backup_manifest_records_description_and_file_hashes(tmp_path: Path):
+    vault = tmp_path / "conversation_docs" / "user-1"
+    vault.mkdir(parents=True)
+    note = vault / "Daily" / "2026-08-11.md"
+    note.parent.mkdir()
+    note.write_text("# The rebuilt day\n", encoding="utf-8")
+
+    backup = create_vault_backup(
+        tmp_path,
+        ("user-1",),
+        tmp_path / "backups",
+        description="reingest after speaker fix",
+    )
+
+    assert backup is not None
+    with tarfile.open(backup, "r:gz") as archive:
+        manifest = json.load(archive.extractfile("manifest.json"))
+        archived_note = archive.extractfile(
+            "conversation_docs/user-1/Daily/2026-08-11.md"
+        ).read()
+    assert manifest["format"] == "chronicle-memory-vault-backup"
+    assert manifest["schema_version"] == 1
+    assert manifest["description"] == "reingest after speaker fix"
+    assert manifest["user_ids"] == ["user-1"]
+    assert manifest["files"]["conversation_docs/user-1/Daily/2026-08-11.md"] == {
+        "bytes": len(archived_note),
+        "sha256": hashlib.sha256(archived_note).hexdigest(),
+    }
+
+
 @pytest.mark.asyncio
 async def test_build_rebuild_plan_collects_async_cursor():
     collection = ConversationCollection(
@@ -107,14 +177,14 @@ async def test_speaker_plan_includes_memory_excluded_conversations():
                 "created_at": datetime(2026, 7, 15, tzinfo=timezone.utc),
                 "active_transcript_version": "version-1",
                 "transcript_versions": [],
+                "audio_ranges": [],
                 "memory_excluded": True,
             }
         ]
     )
 
-    audio = AudioCollection([])
     plan = await build_rebuild_plan(
-        {"conversations": collection, "audio_chunks": audio},
+        {"conversations": collection},
         from_stage=RebuildStage.SPEAKERS,
     )
 
@@ -124,10 +194,6 @@ async def test_speaker_plan_includes_memory_excluded_conversations():
     assert plan.conversations[0].memory_excluded is True
     assert plan.conversations[0].has_audio is False
     assert "memory_excluded" not in collection.query
-    assert audio.query == {
-        "conversation_id": {"$in": ["excluded-conversation"]},
-        "deleted": {"$ne": True},
-    }
 
 
 @pytest.mark.asyncio
@@ -185,7 +251,7 @@ async def test_execute_rebuild_chains_each_user_chronologically(
         (root / "old.md").write_text("old", encoding="utf-8")
         (root / ".stignore").write_text("sync", encoding="utf-8")
 
-    monkeypatch.setattr(rebuild, "_active_rebuild_jobs", lambda _ids: [])
+    monkeypatch.setattr(rebuild, "_active_rebuild_jobs", lambda _ids, _users: [])
     enqueued = []
 
     def fake_enqueue(conversation_id, **kwargs):
@@ -213,8 +279,12 @@ async def test_execute_rebuild_chains_each_user_chronologically(
         for item in enqueued
     )
     assert result.deleted_vault_files == 2
-    assert result.deleted_audit_entries == 7
-    assert audit.query == {"user_id": {"$in": ["user-a", "user-b"]}}
+    assert result.deleted_audit_entries == 0
+    assert audit.query is None
+    assert {entry["user_id"] for entry in audit.inserted} == {"user-a", "user-b"}
+    assert all(
+        entry["extra"]["rebuild_epoch"] == result.run_id for entry in audit.inserted
+    )
     for user_id in plan.user_ids:
         assert (tmp_path / "conversation_docs" / user_id / ".stignore").exists()
         assert not (tmp_path / "conversation_docs" / user_id / "old.md").exists()
@@ -245,7 +315,7 @@ async def test_execute_rebuild_from_speakers_continues_after_failed_speaker(
         memory_calls.append((conversation_id, kwargs, job))
         return job
 
-    monkeypatch.setattr(rebuild, "_active_rebuild_jobs", lambda _ids: [])
+    monkeypatch.setattr(rebuild, "_active_rebuild_jobs", lambda _ids, _users: [])
     monkeypatch.setattr(rebuild, "_enqueue_speaker_rebuild", fake_speaker)
     monkeypatch.setattr(rebuild, "enqueue_memory_processing", fake_memory)
 
@@ -320,7 +390,7 @@ async def test_speaker_rebuild_skips_conversation_without_audio_but_rebuilds_mem
     )
     memory_calls = []
 
-    monkeypatch.setattr(rebuild, "_active_rebuild_jobs", lambda _ids: [])
+    monkeypatch.setattr(rebuild, "_active_rebuild_jobs", lambda _ids, _users: [])
     monkeypatch.setattr(
         rebuild,
         "_enqueue_speaker_rebuild",

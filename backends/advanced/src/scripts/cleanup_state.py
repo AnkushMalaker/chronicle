@@ -56,6 +56,7 @@ try:
     from advanced_omi_backend.models.conversation import Conversation
     from advanced_omi_backend.models.user import User
     from advanced_omi_backend.models.waveform import WaveformData
+    from advanced_omi_backend.services.audio_claims import resolve_conversation_audio
     from advanced_omi_backend.utils.audio_chunk_utils import decode_opus_to_pcm
 except ImportError as e:
     print(f"Error: Missing required dependency: {e}")
@@ -604,9 +605,7 @@ class BackupManager:
         most one minute of PCM), even for multi-hour conversations.
         Returns True if audio was exported.
         """
-        cursor = AudioChunkDocument.find(
-            AudioChunkDocument.conversation_id == conversation_id
-        ).sort("+chunk_index")
+        claimed = await resolve_conversation_audio(conversation_id)
 
         final_dir = audio_dir / conversation_id
         # Write into a temp dir and rename on completion, so an interrupted
@@ -628,7 +627,8 @@ class BackupManager:
                 wf.writeframes(segment_pcm)
             chunk_num += 1
 
-        async for chunk in cursor:
+        for item in claimed:
+            chunk = item.chunk
             if sample_rate is None:
                 sample_rate = chunk.sample_rate
                 channels = chunk.channels
@@ -642,10 +642,16 @@ class BackupManager:
                     sample_rate=sample_rate,
                     channels=channels,
                 )
-                pcm_buffer.extend(pcm_data)
+                bytes_per_second = sample_rate * channels * 2
+                start = int(item.clip_start_seconds * bytes_per_second)
+                end = int(item.clip_end_seconds * bytes_per_second)
+                frame_size = channels * 2
+                start -= start % frame_size
+                end -= end % frame_size
+                pcm_buffer.extend(pcm_data[start:end])
             except Exception as e:
                 logger.warning(
-                    f"Opus decode error for {conversation_id} chunk {chunk.chunk_index}: {e}"
+                    f"Opus decode error for {conversation_id} chunk {chunk.sequence}: {e}"
                 )
                 continue
 

@@ -88,6 +88,10 @@ from advanced_omi_backend.services.memory import (
     get_memory_service,
     shutdown_memory_service,
 )
+from advanced_omi_backend.services.memory.agent.operating_memory_optimizer import (
+    run_operating_memory_daily_job,
+    run_operating_memory_threshold_job,
+)
 from advanced_omi_backend.services.memory.syncthing_audit import (
     start_syncthing_audit_listener,
 )
@@ -356,6 +360,14 @@ async def lifespan(app: FastAPI):
             )
             register_cron_job("episode_memory", process_episode_memory)
             register_cron_job("audio_stream_reclaim", reclaim_settled_audio_streams)
+            register_cron_job(
+                "pi_operating_memory_threshold",
+                run_operating_memory_threshold_job,
+            )
+            register_cron_job(
+                "pi_operating_memory_daily",
+                run_operating_memory_daily_job,
+            )
 
             scheduler = get_scheduler()
             await scheduler.start()

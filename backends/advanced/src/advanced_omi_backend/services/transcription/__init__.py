@@ -514,6 +514,11 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
                             files=files,
                             data=form_data,
                         ) as resp:
+                            # The stream context closes the response while unwinding
+                            # an HTTPStatusError. Read error bodies before raising so
+                            # the provider's actual diagnostic survives that boundary.
+                            if resp.is_error:
+                                await resp.aread()
                             resp.raise_for_status()
                             content_type = resp.headers.get("content-type", "")
 

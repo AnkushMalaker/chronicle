@@ -108,7 +108,7 @@ class HermesPlugin(BasePlugin):
 
         self._client: Optional[httpx.AsyncClient] = None
 
-    async def _push_to_discord(self, text: str) -> None:
+    async def _push_to_discord(self, text: str) -> bool:
         """Best-effort push of text to the Hermes webhook "notify" route.
 
         Fire-and-forget: failures are logged but never affect the reply that
@@ -116,7 +116,7 @@ class HermesPlugin(BasePlugin):
         URL or secret is not configured.
         """
         if not (self.webhook_url and self.webhook_secret) or self._client is None:
-            return
+            return False
         try:
             body = json.dumps({"text": text}).encode()
             signature = (
@@ -135,8 +135,10 @@ class HermesPlugin(BasePlugin):
             )
             resp.raise_for_status()
             logger.info("Pushed Hermes reply to Discord webhook")
+            return True
         except Exception as e:
             logger.warning(f"Failed to push Hermes reply to Discord webhook: {e}")
+            return False
 
     def _headers(self, session_id: Optional[str] = None) -> Dict[str, str]:
         """Build request headers, including optional bearer auth and session id."""
@@ -378,6 +380,33 @@ class HermesPlugin(BasePlugin):
             command=context.data.get("command"),
             conversation_id=context.data.get("conversation_id"),
             empty_message="I heard the Hermes wake word but couldn't make out the command.",
+        )
+
+    async def on_plugin_action(self, context: PluginContext) -> Optional[PluginResult]:
+        """Deliver a targeted notification without invoking the Hermes agent.
+
+        Interaction modes use this for out-of-band links such as Swiggy's opaque
+        UPI bridge URL.  The configured ``notify`` webhook is ``deliver_only``, so
+        this sends directly to Discord and incurs no extra agent/LLM turn.
+        """
+        action = context.data.get("action")
+        if action != "notify":
+            return PluginResult(
+                success=False,
+                message=f"Unsupported Hermes plugin action: {action}",
+            )
+        notification = str(context.data.get("text") or "").strip()
+        if not notification:
+            return PluginResult(success=False, message="Notification text is required")
+        delivered = await self._push_to_discord(notification)
+        return PluginResult(
+            success=delivered,
+            message=(
+                "Notification delivered to Discord"
+                if delivered
+                else "Discord notification delivery failed"
+            ),
+            should_continue=False,
         )
 
     @staticmethod

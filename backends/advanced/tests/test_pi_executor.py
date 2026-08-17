@@ -24,6 +24,9 @@ from advanced_omi_backend.services.memory.agent.pi_agent import (
     _PiRuntimeConfig,
     search_vault_with_pi,
 )
+from advanced_omi_backend.services.memory.conversation_note import (
+    write_source_fallback_conversation_note,
+)
 
 
 @contextlib.contextmanager
@@ -36,11 +39,22 @@ def unlocked(monkeypatch):
     monkeypatch.setattr(vault_tools, "vault_note_lock", _no_lock)
 
 
+@pytest.fixture(autouse=True)
+def no_inference_artifact_writes(monkeypatch, tmp_path):
+    monkeypatch.setenv("PI_OPERATING_MEMORY_DIR", str(tmp_path / "operating-memory"))
+    monkeypatch.setattr(
+        pi_agent,
+        "persist_inference_run",
+        lambda **_kwargs: ("request-hash", "artifact-hash"),
+    )
+
+
 def _runtime_config(
     *,
     api_key="super-secret-key",
     base_url="http://kraken:8083/v1",
     temperature=0.2,
+    seed=None,
     timeout_seconds=30,
 ):
     return _PiRuntimeConfig(
@@ -55,6 +69,7 @@ def _runtime_config(
         timeout_seconds=timeout_seconds,
         reasoning=True,
         temperature=temperature,
+        seed=seed,
     )
 
 
@@ -441,6 +456,190 @@ def test_gateway_derives_mutating_tools_from_canonical_schema_difference():
     assert "verify_vault" not in pi_agent._MUTATING_VAULT_TOOLS
 
 
+def test_memory_agent_accepts_an_isolated_tool_round_cap(tmp_path):
+    agent = pi_agent.PiMemoryAgent(
+        tmp_path / "vault",
+        max_tool_rounds=16,
+        max_identical_tool_calls=3,
+    )
+
+    assert agent.max_tool_rounds == 16
+    assert agent.max_tool_calls == 64
+    assert agent.max_identical_tool_calls == 3
+
+    with pytest.raises(PiExecutorError, match="max_tool_rounds"):
+        pi_agent.PiMemoryAgent(tmp_path / "invalid", max_tool_rounds=0)
+
+
+def test_gateway_breaks_a_consecutive_identical_read_loop(tmp_path, unlocked):
+    root = tmp_path / "user"
+    note = root / "People" / "Alice.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("Alice prefers tea.", encoding="utf-8")
+    gateway = pi_agent._VaultToolGateway(
+        root,
+        vault_tools.VAULT_TOOL_SCHEMAS,
+        max_tool_calls=20,
+        max_identical_tool_calls=2,
+    )
+
+    assert gateway.dispatch("read_note", {"path": "People/Alice.md"})
+    assert gateway.dispatch("read_note", {"path": "People/Alice.md"})
+    assert gateway.dispatch(
+        "edit_note",
+        {
+            "path": "People/Alice.md",
+            "edits": [{"old_text": "tea", "new_text": "coffee"}],
+        },
+    )
+    assert gateway.dispatch("read_note", {"path": "People/Alice.md"})
+    assert gateway.dispatch("read_note", {"path": "People/Alice.md"})
+    with pytest.raises(pi_agent._PiLimitExceeded, match="identical tool call"):
+        gateway.dispatch("read_note", {"path": "People/Alice.md"})
+    assert gateway.limit_error and "consecutively" in gateway.limit_error
+
+
+def test_gateway_does_not_count_identical_calls_across_other_inspection(
+    tmp_path, unlocked
+):
+    root = tmp_path / "user"
+    note = root / "People" / "Alice.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("Alice prefers tea.", encoding="utf-8")
+    gateway = pi_agent._VaultToolGateway(
+        root,
+        vault_tools.VAULT_TOOL_SCHEMAS,
+        max_tool_calls=20,
+        max_identical_tool_calls=2,
+    )
+
+    for _ in range(4):
+        assert gateway.dispatch("read_note", {"path": "People/Alice.md"})
+        assert gateway.dispatch("glob", {"pattern": "Topics/*.md"})
+
+    assert gateway.limit_error is None
+
+
+def test_gateway_can_terminate_only_after_verified_required_note_exists(
+    tmp_path, unlocked
+):
+    root = tmp_path / "user"
+    required = "Conversations/case-1.md"
+    (root / "Conversations").mkdir(parents=True)
+    gateway = pi_agent._VaultToolGateway(
+        root,
+        vault_tools.VAULT_TOOL_SCHEMAS,
+        required_notes=[required],
+        terminate_on_verified=True,
+    )
+    gateway.tools.baseline()
+    write_source_fallback_conversation_note(
+        root / required,
+        transcript="Speaker: A grounded test statement.",
+        conversation_id="case-1",
+        date="2026-08-15T00:00:00+00:00",
+        duration_minutes=None,
+        title=None,
+    )
+    gateway.tools.touched.add(required)
+    gateway.__enter__()
+    try:
+        extension = pi_agent._extension_source(
+            vault_tools.VAULT_TOOL_SCHEMAS,
+            gateway_url=gateway.url,
+            token=gateway.token,
+        )
+        response = _call_gateway(extension, "verify_vault", {})
+    finally:
+        gateway._close()
+
+    assert response == {
+        "result": "Vault verification passed: no problems found.",
+        "terminate": True,
+    }
+    assert "terminate: payload.terminate === true" in extension
+
+
+def test_gateway_does_not_terminate_before_successful_required_write(tmp_path):
+    root = tmp_path / "user"
+    required = "Conversations/case-1.md"
+    gateway = pi_agent._VaultToolGateway(
+        root,
+        vault_tools.VAULT_TOOL_SCHEMAS,
+        required_notes=[required],
+        terminate_on_verified=True,
+    )
+
+    assert (
+        gateway.should_terminate(
+            "verify_vault", "Vault verification passed: no problems found."
+        )
+        is False
+    )
+    gateway.tools.touched.add("Topics/Incomplete.md")
+    assert (
+        gateway.should_terminate(
+            "verify_vault", "Vault verification passed: no problems found."
+        )
+        is False
+    )
+    (root / required).parent.mkdir(parents=True)
+    (root / required).write_text("incomplete", encoding="utf-8")
+    assert gateway.should_terminate("verify_vault", "1 problem found.") is False
+    assert gateway.terminal_completion is False
+
+
+def test_terminal_tool_allows_agent_end_without_extra_text_turn():
+    events = _parse_events(
+        _jsonl(
+            {"type": "agent_start"},
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "toolCall", "name": "verify_vault"}],
+                    "stopReason": "toolUse",
+                },
+            },
+            {"type": "agent_end", "messages": []},
+        ).decode(),
+        allow_terminal_tool=True,
+    )
+
+    assert events.agent_ended is True
+    assert events.rounds == 1
+    assert events.fatal_errors == []
+    assert events.summary == ""
+
+
+def test_later_successful_turn_recovers_an_earlier_length_limited_tool_call():
+    events = _parse_events(
+        _jsonl(
+            {"type": "agent_start"},
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "thinking", "thinking": "truncated"}],
+                    "stopReason": "length",
+                },
+            },
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Recovered and verified."}],
+                    "stopReason": "stop",
+                },
+            },
+            {"type": "agent_end", "messages": []},
+        ).decode()
+    )
+
+    assert events.truncated is False
+    assert events.summary == "Recovered and verified."
+
+
 @pytest.mark.asyncio
 async def test_gateway_shutdown_does_not_block_event_loop(tmp_path, monkeypatch):
     gateway = pi_agent._VaultToolGateway(
@@ -744,10 +943,55 @@ def test_gateway_tool_call_cap_is_atomic_under_concurrency(tmp_path):
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _index: read_note(), range(8)))
 
-    assert results.count("Alice prefers tea.") == 2
+    assert results.count("Alice prefers tea.") == 1
+    assert sum("unchanged read_note window" in result for result in results) == 1
     assert results.count("limited") == 6
     assert gateway.call_count == 2
     assert gateway.limit_error and "tool-call limit exceeded (2)" in gateway.limit_error
+
+
+def test_gateway_elides_an_unchanged_repeated_read_window(tmp_path):
+    root = tmp_path / "user"
+    note = root / "People" / "Alice.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("Alice prefers tea.", encoding="utf-8")
+    gateway = pi_agent._VaultToolGateway(
+        root,
+        vault_tools.VAULT_SEARCH_TOOL_SCHEMAS,
+        max_tool_calls=4,
+    )
+
+    first = gateway.dispatch("read_note", {"path": "People/Alice.md"})
+    repeated = gateway.dispatch("read_note", {"path": "People/Alice.md"})
+    refreshed = gateway.dispatch(
+        "read_note", {"path": "People/Alice.md", "refresh": True}
+    )
+
+    assert first == "Alice prefers tea."
+    assert "unchanged read_note window" in repeated
+    assert len(repeated) < len(first) + 200
+    assert refreshed == first
+    assert gateway.read_notes == {"People/Alice.md": first}
+
+
+def test_gateway_returns_a_repeated_read_after_the_note_changes(tmp_path):
+    root = tmp_path / "user"
+    note = root / "People" / "Alice.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("Alice prefers tea.", encoding="utf-8")
+    gateway = pi_agent._VaultToolGateway(
+        root,
+        vault_tools.VAULT_SEARCH_TOOL_SCHEMAS,
+        max_tool_calls=3,
+    )
+
+    assert gateway.dispatch("read_note", {"path": "People/Alice.md"})
+    note.write_text("Alice prefers coffee.", encoding="utf-8")
+
+    changed = gateway.dispatch("read_note", {"path": "People/Alice.md"})
+
+    assert changed == "Alice prefers coffee."
+    assert gateway.read_notes == {"People/Alice.md": changed}
 
 
 @pytest.mark.asyncio
@@ -763,6 +1007,7 @@ async def test_write_uses_isolated_canonical_gateway_and_reports_audit_state(
     root = tmp_path / "user"
     root.mkdir()
     captured = {}
+    inference_artifact = {}
     content = "A canonical conversation note."
     events = _successful_events(
         summary="Recorded the conversation.",
@@ -786,6 +1031,12 @@ async def test_write_uses_isolated_canonical_gateway_and_reports_audit_state(
         return "Chronicle write system prompt"
 
     monkeypatch.setattr(pi_agent, "_get_prompt", prompt)
+    monkeypatch.setattr(
+        pi_agent,
+        "persist_inference_run",
+        lambda **kwargs: inference_artifact.update(kwargs)
+        or ("request-hash", "artifact-hash"),
+    )
     monkeypatch.setenv("CHRONICLE_SECRET_SHOULD_NOT_LEAK", "backend-secret")
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:3128")
     monkeypatch.setattr(
@@ -819,6 +1070,25 @@ async def test_write_uses_isolated_canonical_gateway_and_reports_audit_state(
     }
     assert result.errors == []
     assert not result.truncated
+    assert inference_artifact["operation"] == "pi_memory"
+    assert inference_artifact["request"]["conversation_id"] == "conv-1"
+    assert inference_artifact["request"]["user_id"] == "user"
+    assert inference_artifact["request"]["record"] == "conversation"
+    assert inference_artifact["request"]["model"] == "qwen3.6-27b"
+    assert (
+        inference_artifact["request"]["system_prompt"]
+        == "Chronicle write system prompt"
+    )
+    assert "Speaker: hello" in inference_artifact["request"]["prompt"]
+    assert inference_artifact["stdout"] == _jsonl(*events).decode()
+    assert inference_artifact["stderr"] == ""
+    assert inference_artifact["result"]["usage"] == result.usage
+    assert inference_artifact["result"]["touched"] == ["Conversations/conv-1.md"]
+    assert inference_artifact["metadata"] == {
+        "returncode": 0,
+        "terminated_by_chronicle": False,
+    }
+    assert not inference_artifact["reusable"]
 
     command = captured["command"]
     for flag in (
@@ -867,6 +1137,7 @@ async def test_search_returns_only_notes_read_through_canonical_tools(
     note.parent.mkdir(parents=True)
     note.write_text("Alice prefers tea.", encoding="utf-8")
     captured = {}
+    inference_artifact = {}
     events = _successful_events(
         summary="Alice prefers tea (People/Alice.md).",
         tool_name="read_note",
@@ -882,6 +1153,17 @@ async def test_search_returns_only_notes_read_through_canonical_tools(
         return "Chronicle search system prompt"
 
     monkeypatch.setattr(pi_agent, "_get_prompt", prompt)
+    pi_agent.OperatingMemoryStore("user").replace_agents(
+        "# Retrieval\nStop when the selected evidence directly answers the query.",
+        rationale="Test active retrieval guidance.",
+        evidence_ids=["trace-test"],
+    )
+    monkeypatch.setattr(
+        pi_agent,
+        "persist_inference_run",
+        lambda **kwargs: inference_artifact.update(kwargs)
+        or ("request-hash", "artifact-hash"),
+    )
     monkeypatch.setattr(
         pi_agent.asyncio,
         "create_subprocess_exec",
@@ -904,6 +1186,12 @@ async def test_search_returns_only_notes_read_through_canonical_tools(
     assert captured["command"][captured["command"].index("--tools") + 1] == (
         "grep,glob,read_note,search_images"
     )
+    assert "Stop when the selected evidence" in captured["system_prompt"]
+    assert inference_artifact["operation"] == "pi_memory_search"
+    assert inference_artifact["request"]["record"] == "search"
+    assert inference_artifact["request"]["user_id"] == "user"
+    assert inference_artifact["result"]["read_paths"] == ["People/Alice.md"]
+    assert "Alice prefers tea." not in json.dumps(inference_artifact["result"])
 
 
 @pytest.mark.asyncio
@@ -1092,7 +1380,7 @@ async def test_no_tool_pi_invocation_loads_temperature_runtime_extension(
         prompt="final prompt",
         system_prompt="final system",
         schemas=(),
-        config=_runtime_config(temperature=0.37),
+        config=_runtime_config(temperature=0.37, seed=42),
         max_tool_rounds=1,
         max_tool_calls=1,
     )
@@ -1104,6 +1392,8 @@ async def test_no_tool_pi_invocation_loads_temperature_runtime_extension(
     assert "--tools" not in captured["command"]
     assert "before_provider_request" in captured["extension"]
     assert "const temperature = 0.37;" in captured["extension"]
+    assert "const seed = 42;" in captured["extension"]
+    assert "...(seed === null ? {} : { seed })," in captured["extension"]
     assert "pi.registerTool" in captured["extension"]
     assert captured["extension_mode"] == 0o600
     assert captured["stdin"] == "final prompt"
@@ -1145,6 +1435,73 @@ def test_parse_events_preserves_tool_and_protocol_errors():
         for error in parsed.fatal_errors
     )
     assert any("without a final assistant" in error for error in parsed.fatal_errors)
+
+
+def test_parse_events_does_not_treat_unicode_line_separator_inside_json_as_jsonl_boundary():
+    stdout = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "before\u2028after"}],
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "done"}],
+                        "usage": {},
+                    },
+                }
+            ),
+            json.dumps({"type": "agent_end", "messages": []}),
+        ]
+    )
+
+    parsed = _parse_events(stdout)
+
+    assert parsed.agent_ended is True
+    assert parsed.summary == "done"
+    assert not any("invalid JSONL" in error for error in parsed.fatal_errors)
+
+
+def test_artifact_stdout_drops_only_cumulative_message_updates():
+    message_update = json.dumps(
+        {
+            "type": "message_update",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "partial"}],
+            },
+        },
+        separators=(",", ":"),
+    )
+    message_end = json.dumps(
+        {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "complete"}],
+            },
+        },
+        separators=(",", ":"),
+    )
+    stdout = f"{message_update}\n{message_end}\n"
+
+    compact, metadata = pi_agent._compact_artifact_stdout(stdout)
+
+    assert compact == f"{message_end}\n"
+    assert metadata["raw_stdout_chars"] == len(stdout)
+    assert metadata["stored_stdout_chars"] == len(compact)
+    assert metadata["dropped_cumulative_message_updates"] == 1
+    assert len(metadata["raw_stdout_sha256"]) == 64
+    assert _parse_events(stdout).summary == "complete"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is required by Pi")

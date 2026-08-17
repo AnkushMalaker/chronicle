@@ -48,6 +48,9 @@ class MemoryConfig:
     # source-preserving note fallback immediately.
     write_agent_backend: str = "direct"
     write_recovery_backend: Optional[str] = "direct"
+    # Stop only a literal consecutive tool+arguments loop. Intervening inspection
+    # always resets the counter, preserving Pi's autonomous file selection.
+    write_max_consecutive_identical_tool_calls: Optional[int] = None
     search_agent_backend: str = "direct"
     # A read-only second agent reads what a write added and reports what the vault
     # already knew or the source never said. Costs one extra agent run per write.
@@ -184,6 +187,30 @@ def build_memory_config_from_env() -> MemoryConfig:
         )
         search_agent_backend = str(search_cfg.get("backend") or "direct").lower()
         review_writes = bool(write_cfg.get("review", True))
+        raw_consecutive_limit = write_cfg.get("max_consecutive_identical_tool_calls")
+        if raw_consecutive_limit in (None, ""):
+            write_max_consecutive_identical_tool_calls = None
+        else:
+            if isinstance(raw_consecutive_limit, bool) or (
+                isinstance(raw_consecutive_limit, float)
+                and not raw_consecutive_limit.is_integer()
+            ):
+                raise ValueError(
+                    "memory.agents.write.max_consecutive_identical_tool_calls "
+                    "must be a positive integer"
+                )
+            try:
+                write_max_consecutive_identical_tool_calls = int(raw_consecutive_limit)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "memory.agents.write.max_consecutive_identical_tool_calls "
+                    "must be a positive integer"
+                ) from exc
+            if write_max_consecutive_identical_tool_calls <= 0:
+                raise ValueError(
+                    "memory.agents.write.max_consecutive_identical_tool_calls "
+                    "must be a positive integer"
+                )
 
         write_backends = {"direct", "codex", "pi"}
         search_backends = {"direct", "pi"}
@@ -216,6 +243,9 @@ def build_memory_config_from_env() -> MemoryConfig:
             timeout_seconds=timeout_seconds,
             write_agent_backend=write_agent_backend,
             write_recovery_backend=write_recovery_backend,
+            write_max_consecutive_identical_tool_calls=(
+                write_max_consecutive_identical_tool_calls
+            ),
             search_agent_backend=search_agent_backend,
             review_writes=review_writes,
         )

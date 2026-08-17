@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+from html import escape
 from pathlib import Path
 from typing import Any, Iterable
 
 from ruamel.yaml import YAML
+
+from advanced_omi_backend.constants import TITLE_NOT_GENERATED
 
 _YAML = YAML(typ="safe")
 _FRONTMATTER_BOUNDARY = re.compile(r"^---\s*$", re.MULTILINE)
@@ -80,6 +83,17 @@ def _render_list(name: str, values: Iterable[str]) -> list[str]:
     if not values:
         return [f"{name}: []"]
     return [f"{name}:", *(f"  - {json.dumps(value)}" for value in values)]
+
+
+def _encode_source_markdown(value: str) -> str:
+    """Losslessly encode source characters that could become note structure."""
+
+    # Escape existing ampersands first so the numeric entities introduced below
+    # remain unambiguous and ``html.unescape`` recovers the exact source. Obsidian
+    # renders these entities as the original characters without interpreting a
+    # transcript's code fence as structure or retaining a literal ``\n`` marker.
+    escaped = escape(value, quote=False)
+    return escaped.replace("\\", "&#92;").replace("`", "&#96;")
 
 
 def canonicalize_conversation_note(
@@ -166,9 +180,10 @@ def write_source_fallback_conversation_note(
         )
     # Summary stays skimmable; Key Facts carries the full source — this note is
     # the vault's only record of the conversation, so truncating it loses data.
-    safe_excerpt = source[:500].replace('"', "'")
-    safe_source = source.replace('"', "'")
-    fallback_title = (title or "").strip() or f"Conversation on {date[:10]}"
+    safe_excerpt = _encode_source_markdown(source[:500])
+    safe_source = _encode_source_markdown(source)
+    raw_fallback_title = " ".join((title or "").split()).strip() or TITLE_NOT_GENERATED
+    fallback_title = _encode_source_markdown(raw_fallback_title)
     duration = "" if duration_minutes is None else f"{float(duration_minutes):g}"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

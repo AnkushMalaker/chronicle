@@ -9,13 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from advanced_omi_backend.services.codex_langfuse import upload_codex_trace
+from advanced_omi_backend.services.inference_artifacts import (
+    load_reusable_result,
+    persist_inference_run,
+)
 from advanced_omi_backend.services.memory.agent import codex_quota
 from advanced_omi_backend.services.memory.agent.codex_agent import (
     codex_executor_available,
-)
-from advanced_omi_backend.services.paid_inference_artifacts import (
-    load_reusable_result,
-    persist_paid_run,
 )
 
 from .contracts import TimelineAgentResult, TimelineEvidenceManifest
@@ -123,6 +123,7 @@ class CodexTimelineExecutor:
         existing_episodes: list[dict[str, Any]],
         pinned_episodes: list[dict[str, Any]] | None = None,
         reasoning_effort: str | None = None,
+        validation_feedback: str | None = None,
     ) -> TimelineAgentResult:
         sandbox_mode = str(self.settings.get("sandbox_mode") or "workspace-write")
         schema_path = workspace / "output-schema.json"
@@ -149,16 +150,27 @@ class CodexTimelineExecutor:
                 "them, or mark their time unassigned:\n"
                 + json.dumps(pinned_episodes, default=str)[:30000]
             )
+        if validation_feedback:
+            prompt += (
+                "\nA previous draft was rejected by Chronicle's deterministic "
+                "validator. Correct this exact structural error in the new draft; "
+                "do not repeat the rejected bounds:\n" + validation_feedback[:4000]
+            )
         model = self.settings.get("model")
         reasoning_effort = reasoning_effort or self.settings.get("reasoning_effort")
+        service_tier = str(self.settings.get("service_tier") or "").strip().lower()
+        if service_tier not in {"", "priority"}:
+            raise ValueError("timeline.codex.service_tier must be empty or priority")
         request = {
             "prompt": prompt,
             "output_schema": OUTPUT_SCHEMA,
             "manifest": manifest.model_dump(mode="json"),
             "existing_episodes": existing_episodes,
             "pinned_episodes": pinned_episodes or [],
+            "validation_feedback": validation_feedback or "",
             "model": model or "codex-default",
             "reasoning_effort": reasoning_effort or "",
+            "service_tier": service_tier,
             "sandbox_mode": sandbox_mode,
             "required_runtime_capabilities": ["code_mode_host"],
             "workspace_files": workspace_files,
@@ -202,6 +214,8 @@ class CodexTimelineExecutor:
             command.extend(["-m", str(model)])
         if reasoning_effort:
             command.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
+        if service_tier:
+            command.extend(["-c", f'service_tier="{service_tier}"'])
         command.append("-")
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -222,7 +236,7 @@ class CodexTimelineExecutor:
             partial_stderr = getattr(exc, "stderr", None) or b""
             try:
                 await asyncio.to_thread(
-                    persist_paid_run,
+                    persist_inference_run,
                     operation="codex_timeline",
                     request=request,
                     stdout=(
@@ -251,7 +265,7 @@ class CodexTimelineExecutor:
         if process.returncode != 0:
             try:
                 await asyncio.to_thread(
-                    persist_paid_run,
+                    persist_inference_run,
                     operation="codex_timeline",
                     request=request,
                     stdout=stdout.decode(errors="replace"),
@@ -280,7 +294,7 @@ class CodexTimelineExecutor:
         if not source.is_file():
             try:
                 await asyncio.to_thread(
-                    persist_paid_run,
+                    persist_inference_run,
                     operation="codex_timeline",
                     request=request,
                     stdout=stdout.decode(errors="replace"),
@@ -300,7 +314,7 @@ class CodexTimelineExecutor:
             result = TimelineAgentResult.model_validate_json(raw_result)
         except Exception as exc:
             await asyncio.to_thread(
-                persist_paid_run,
+                persist_inference_run,
                 operation="codex_timeline",
                 request=request,
                 stdout=stdout.decode(errors="replace"),
@@ -313,7 +327,7 @@ class CodexTimelineExecutor:
         result.usage = {**usage, **_parse_usage(stdout)}
         try:
             await asyncio.to_thread(
-                persist_paid_run,
+                persist_inference_run,
                 operation="codex_timeline",
                 request=request,
                 stdout=stdout.decode(errors="replace"),

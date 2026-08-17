@@ -263,14 +263,14 @@ async def _set_mute(
     await redis_client.set(_mute_key(session_id), "1", ex=max(1, int(secs + 0.999)))
 
 
-async def get_current_conversation_id(
+async def get_active_conversation_id(
     redis_client: redis.Redis, session_id: str | SessionId
 ) -> Optional[str]:
     """Resolve the active conversation id for a session, if any."""
     if not session_id:
         return None
     try:
-        return await SessionStore(redis_client).get_current_conversation_id(session_id)
+        return await SessionStore(redis_client).get_active_conversation_id(session_id)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Could not read current conversation for {session_id}: {e}")
     return None

@@ -67,6 +67,18 @@ def test_memory_config_semantics_accept_valid_pi(monkeypatch):
     system_controller._validate_memory_mapping(_pi_memory())
 
 
+def test_memory_config_semantics_validates_consecutive_pi_call_guard(monkeypatch):
+    monkeypatch.setattr(system_controller, "get_models_registry", _registry)
+    memory = _pi_memory()
+    memory["agents"]["write"]["max_consecutive_identical_tool_calls"] = 2
+
+    system_controller._validate_memory_mapping(memory)
+
+    memory["agents"]["write"]["max_consecutive_identical_tool_calls"] = 0
+    with pytest.raises(ValueError, match="max_consecutive_identical_tool_calls"):
+        system_controller._validate_memory_mapping(memory)
+
+
 @pytest.mark.parametrize(
     ("memory", "message"),
     [

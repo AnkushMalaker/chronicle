@@ -29,8 +29,15 @@ logger = logging.getLogger("advanced-backend")
 from advanced_omi_backend.services.observability.log_handler import (  # noqa: E402
     install_system_event_log_handler,
 )
+from advanced_omi_backend.services.observability.log_queue import (  # noqa: E402
+    install_non_blocking_logging,
+)
 
 install_system_event_log_handler()
+
+# Last, so it captures every handler above: both of them do blocking I/O (a stdout
+# pipe write, a synchronous Redis push) and would otherwise do it on the event loop.
+install_non_blocking_logging()
 
 # Create FastAPI application using the app factory pattern
 app = create_app()

@@ -191,9 +191,11 @@ models:
   # Capabilities: what this provider can produce
   # - word_timestamps: Word-level timing data
   # - segments: Speaker segments
+  # - forced_alignment: Chronicle /align endpoint for known transcript text
   capabilities:
     - word_timestamps
     - segments
+    - forced_alignment
   operations:
     stt_transcribe:
       method: POST
@@ -458,6 +460,7 @@ speaker_recognition:
   # Request timeout in seconds
   timeout: 60
   # Diarization chunking configuration (speaker service self-managed chunking)
-  max_diarize_duration: 60  # Maximum audio duration (seconds) for single PyAnnote call
+  max_diarize_duration: 1200  # Maximum audio duration (seconds) for one PyAnnote call
+  diarize_concurrent_chunks: 1  # Serialize 20-minute neural windows by default
   diarize_chunk_overlap: 5.0  # Overlap (seconds) between chunks
   backend_api_url: http://host.docker.internal:8000  # Backend API URL

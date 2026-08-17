@@ -5,12 +5,17 @@ Audio stream producer - publishes audio chunks to Redis Streams.
 import logging
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import redis.asyncio as redis
 from redis.exceptions import WatchError
 
+from advanced_omi_backend.models.audio_capture import (
+    CAPTURE_CONTINUITY_TOLERANCE_SECONDS,
+    AudioCaptureSession,
+)
 from advanced_omi_backend.redis_factory import REDIS_URL, create_async_redis
-from advanced_omi_backend.redis_keys import audio_session, conversation_current
+from advanced_omi_backend.redis_keys import audio_session
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -32,6 +37,7 @@ class SessionBuffer:
     buffer: bytes = b""
     chunk_count: int = 0
     captured_at: float | None = None
+    time_basis: str = "received"
 
 
 class AudioStreamProducer:
@@ -58,22 +64,19 @@ class AudioStreamProducer:
         # Per-session audio buffers for sample-aligned chunking: {session_id: SessionBuffer}
         self.session_buffers: dict[str, SessionBuffer] = {}
 
-    async def _append_owned_message(
+    async def _append_capture_message(
         self, session_id: str, stream_name: str, fields: dict[bytes, bytes]
     ):
-        """Atomically bind one WAL entry to the conversation owning it.
+        """Append one WAL entry while atomically verifying capture is active.
 
-        Conversation rotation and XADD share the watched assignment key. If the
-        owner changes concurrently, the append retries against the new owner. A
-        missing owner is an invalid ingress state: no bytes are removed from the
-        process buffer and no owner is guessed.
+        The entry is identified by the technical capture session. No Conversation
+        needs to exist, and semantic segmentation cannot interrupt this write path.
         """
-        owner_key = conversation_current(session_id)
         session_key = audio_session(session_id)
         while True:
             async with self.redis_client.pipeline(transaction=True) as pipe:
                 try:
-                    await pipe.watch(session_key, owner_key)
+                    await pipe.watch(session_key)
                     raw_status = await pipe.hget(session_key, "status")
                     status = (
                         raw_status.decode()
@@ -85,23 +88,11 @@ class AudioStreamProducer:
                         raise RuntimeError(
                             f"Audio session {session_id} is not active ({status})"
                         )
-                    raw_owner = await pipe.get(owner_key)
-                    if raw_owner is None:
-                        await pipe.unwatch()
-                        raise RuntimeError(
-                            f"Audio session {session_id} has no conversation owner"
-                        )
-
-                    owner = (
-                        raw_owner
-                        if isinstance(raw_owner, bytes)
-                        else str(raw_owner).encode()
-                    )
-                    owned_fields = dict(fields)
-                    owned_fields[b"conversation_id"] = owner
+                    capture_fields = dict(fields)
+                    capture_fields[b"capture_session_id"] = session_id.encode()
 
                     pipe.multi()
-                    pipe.xadd(stream_name, owned_fields)
+                    pipe.xadd(stream_name, capture_fields)
                     result = await pipe.execute()
                     return result[0]
                 except WatchError:
@@ -181,6 +172,17 @@ class AudioStreamProducer:
             provider=provider,
         )
 
+        capture = AudioCaptureSession(
+            capture_session_id=session_id,
+            user_id=user_id,
+            capture_source_id=client_id,
+            client_id=client_id,
+            origin="streaming" if mode == "streaming" else "batch",
+            time_basis="received",
+            source_stream=stream_name,
+        )
+        await capture.insert()
+
         if session_id in self.session_buffers:
             raise RuntimeError(f"Audio session {session_id} is already initialized")
 
@@ -234,7 +236,7 @@ class AudioStreamProducer:
             b"sample_width": str(sample_width).encode(),
         }
 
-        await self._append_owned_message(session_id, stream_name, end_signal)
+        await self._append_capture_message(session_id, stream_name, end_signal)
         logger.info(f"📡 Sent end-of-session signal for {session_id} to {stream_name}")
 
     async def update_session_job_ids(
@@ -295,6 +297,15 @@ class AudioStreamProducer:
         # producer-owned bytes and the marker are already in the Redis WAL.
         await self.store.mark_finalizing(session_id, completion_reason)
 
+        capture = await AudioCaptureSession.find_one(
+            AudioCaptureSession.capture_session_id == session_id
+        )
+        if capture is None:
+            raise RuntimeError(f"Capture session {session_id} disappeared")
+        capture.status = "finalizing"
+        capture.ended_at = datetime.now(timezone.utc)
+        await capture.save()
+
         if session_id in self.session_buffers:
             # Clean up session buffer
             del self.session_buffers[session_id]
@@ -342,17 +353,44 @@ class AudioStreamProducer:
                 f"Audio identity mismatch for initialized session {session_id}"
             )
 
+        bytes_per_second = sample_rate * channels * sample_width
+        target_chunk_size = int(bytes_per_second * 0.25)
+        incoming_time_basis = "recorded" if captured_at is not None else "received"
+        incoming_captured_at = captured_at if captured_at is not None else time.time()
+
+        # A partial producer chunk is still physical audio. Close it before a clock
+        # seam so the first resumed sample cannot be packed behind pre-gap samples.
+        if session_buffer.buffer:
+            expected_at = (session_buffer.captured_at or incoming_captured_at) + (
+                len(session_buffer.buffer) / bytes_per_second
+            )
+            discontinuity_seconds = incoming_captured_at - expected_at
+            if (
+                session_buffer.time_basis != incoming_time_basis
+                or abs(discontinuity_seconds) > CAPTURE_CONTINUITY_TOLERANCE_SECONDS
+            ):
+                logger.info(
+                    "Flushing producer buffer for capture %s at %+.3fs "
+                    "timestamp discontinuity",
+                    session_id,
+                    discontinuity_seconds,
+                )
+                await self.flush_session_buffer(
+                    session_id,
+                    sample_rate=sample_rate,
+                    channels=channels,
+                    sample_width=sample_width,
+                )
+
         # Add incoming audio to buffer
         if not session_buffer.buffer:
-            session_buffer.captured_at = captured_at
+            session_buffer.captured_at = incoming_captured_at
+            session_buffer.time_basis = incoming_time_basis
         session_buffer.buffer += audio_data
 
         # Calculate target chunk size (0.25 seconds of audio)
         # bytes_per_second = sample_rate * channels * sample_width
         # target_chunk_duration = 0.25 seconds
-        bytes_per_second = sample_rate * channels * sample_width
-        target_chunk_size = int(bytes_per_second * 0.25)
-
         # Publish fixed-size chunks from buffer
         message_ids = []
         stream_name = session_buffer.stream_name
@@ -374,6 +412,7 @@ class AudioStreamProducer:
                 b"client_id": client_id.encode(),
                 b"timestamp": str(time.time()).encode(),
                 b"captured_at": str(session_buffer.captured_at or time.time()).encode(),
+                b"time_basis": session_buffer.time_basis.encode(),
                 b"sample_rate": str(sample_rate).encode(),
                 b"channels": str(channels).encode(),
                 b"sample_width": str(sample_width).encode(),
@@ -381,7 +420,7 @@ class AudioStreamProducer:
 
             # Never cap the shared raw-audio WAL. A consumer-independent MAXLEN can
             # trim unread/pending data out from under Mongo persistence.
-            message_id = await self._append_owned_message(
+            message_id = await self._append_capture_message(
                 session_id, stream_name, chunk_data
             )
 
@@ -461,13 +500,14 @@ class AudioStreamProducer:
                 b"client_id": session_buffer.client_id.encode(),
                 b"timestamp": str(time.time()).encode(),
                 b"captured_at": str(session_buffer.captured_at or time.time()).encode(),
+                b"time_basis": session_buffer.time_basis.encode(),
                 b"sample_rate": str(sample_rate).encode(),
                 b"channels": str(channels).encode(),
                 b"sample_width": str(sample_width).encode(),
             }
 
             # Keep the process buffer intact if Redis rejects the append.
-            message_id = await self._append_owned_message(
+            message_id = await self._append_capture_message(
                 session_id, stream_name, chunk_data
             )
             session_buffer.buffer = b""

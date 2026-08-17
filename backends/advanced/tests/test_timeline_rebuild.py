@@ -8,11 +8,13 @@ import pytest
 from advanced_omi_backend.services.memory import rebuild
 from advanced_omi_backend.services.memory.rebuild import (
     RebuildConversation,
+    RebuildDay,
     RebuildPlan,
     RebuildStage,
     build_timeline_days,
     execute_memory_rebuild,
 )
+from advanced_omi_backend.workers import timeline_jobs
 
 USER = "507f1f77bcf86cd799439011"
 
@@ -21,6 +23,35 @@ def captured(text: str) -> datetime:
     """Naive UTC, exactly as Mongo hands a BSON date back."""
 
     return datetime.fromisoformat(text).astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def test_timeline_rebuild_job_carries_user_and_run_metadata(monkeypatch):
+    captured_call = {}
+
+    def fake_enqueue(*args, **kwargs):
+        captured_call.update(kwargs)
+        return SimpleNamespace(id=kwargs["job_id"])
+
+    monkeypatch.setattr(rebuild, "memory_queue", SimpleNamespace(enqueue=fake_enqueue))
+
+    job = rebuild._enqueue_timeline_rebuild(
+        RebuildDay(
+            user_id=USER,
+            local_date=date(2026, 8, 5),
+            timezone="Asia/Kolkata",
+        ),
+        run_id="run-1",
+        sequence=2,
+        depends_on=None,
+    )
+
+    assert job.id == "timeline_rebuild_run-1_2_2026-08-05"
+    assert captured_call["meta"] == {
+        "user_id": USER,
+        "rebuild_run_id": "run-1",
+        "local_date": "2026-08-05",
+        "trigger": "timeline_rebuild",
+    }
 
 
 class Cursor:
@@ -51,8 +82,11 @@ class Collection:
         self.documents = list(documents)
         self.rows = list(rows)
         self.deleted_queries = []
+        self.find_queries = []
+        self.inserted = []
 
     def find(self, query, projection=None):
+        self.find_queries.append(query)
         return Cursor(self.documents)
 
     def aggregate(self, pipeline, **kwargs):
@@ -62,6 +96,9 @@ class Collection:
     async def delete_many(self, query):
         self.deleted_queries.append(query)
         return SimpleNamespace(deleted_count=len(self.documents) or 3)
+
+    async def insert_many(self, documents):
+        self.inserted.extend(documents)
 
 
 class Database:
@@ -79,6 +116,55 @@ def users_collection() -> Collection:
 
 
 @pytest.mark.asyncio
+async def test_registered_day_worker_runs_analysis_then_glimmer_vault_write(
+    monkeypatch,
+):
+    calls = []
+    run = SimpleNamespace(run_id="pi-run")
+    stored_day = SimpleNamespace(active_run_id="pi-run")
+
+    async def request(user_id, local_date, timezone_name, force=False):
+        calls.append(("request", user_id, str(local_date), timezone_name, force))
+        return run
+
+    async def process(run_id, *, retain_unconfirmed_existing=True):
+        calls.append(("process", run_id, retain_unconfirmed_existing))
+        return {"processed": 1, "failed": 0, "deferred": 0}
+
+    async def find_one(*_args, **_kwargs):
+        return stored_day
+
+    async def write(day):
+        calls.append(("write", day.active_run_id))
+        return "written_by_pi"
+
+    monkeypatch.setattr(timeline_jobs, "request_timeline_analysis", request)
+    monkeypatch.setattr(timeline_jobs, "process_timeline_run", process)
+    monkeypatch.setattr(
+        timeline_jobs,
+        "TimelineDay",
+        SimpleNamespace(
+            user_id="user_id",
+            local_date="local_date",
+            timezone="timezone",
+            find_one=find_one,
+        ),
+    )
+    monkeypatch.setattr(timeline_jobs, "write_day_memory", write)
+
+    result = await timeline_jobs.rebuild_timeline_day_job.__wrapped__(
+        USER, "2026-08-06", "Asia/Kolkata", redis_client=None
+    )
+
+    assert calls == [
+        ("request", USER, "2026-08-06", "Asia/Kolkata", True),
+        ("process", "pi-run", False),
+        ("write", "pi-run"),
+    ]
+    assert result["memory"] == "written_by_pi"
+
+
+@pytest.mark.asyncio
 async def test_days_come_from_capture_time_and_span_local_midnight():
     """A recording crossing local midnight belongs to both days, not the later one."""
 
@@ -88,13 +174,24 @@ async def test_days_come_from_capture_time_and_span_local_midnight():
             "conversations": Collection(
                 documents=[{"conversation_id": "conv-a", "user_id": USER}]
             ),
+            "audio_capture_sessions": Collection(
+                documents=[
+                    {
+                        "capture_session_id": "capture-a",
+                        "user_id": USER,
+                        "time_basis": "recorded",
+                        "data_purpose": "normal_capture",
+                    }
+                ]
+            ),
             # 18:00-19:30 UTC on the 5th is 23:30-01:00 IST, i.e. the 5th into the 6th.
             "audio_chunks": Collection(
                 rows=[
                     {
-                        "_id": "conv-a",
+                        "_id": "capture-a",
                         "first": captured("2026-08-05T18:00:00+00:00"),
-                        "last": captured("2026-08-05T19:30:00+00:00"),
+                        "last_start": captured("2026-08-05T19:29:50+00:00"),
+                        "last_duration": 10.0,
                     }
                 ]
             ),
@@ -111,11 +208,11 @@ async def test_days_come_from_capture_time_and_span_local_midnight():
 async def test_annotation_audio_is_not_a_day_to_rebuild():
     """Data imported for mining is not part of the user's lived timeline."""
 
-    conversations = Collection(documents=[])
+    captures = Collection(documents=[])
     database = Database(
         {
             "users": users_collection(),
-            "conversations": conversations,
+            "audio_capture_sessions": captures,
             "audio_chunks": Collection(),
         }
     )
@@ -123,7 +220,7 @@ async def test_annotation_audio_is_not_a_day_to_rebuild():
     assert await build_timeline_days(database, (USER,)) == ()
     # The exclusion has to be in the query, not applied after the fact, or the audio
     # aggregation still pulls a mining corpus' worth of chunks.
-    conversations.find({"data_purpose": {"$ne": "annotation"}})
+    assert captures.find_queries[0]["data_purpose"] == {"$ne": "annotation"}
 
 
 @pytest.mark.asyncio
@@ -137,12 +234,23 @@ async def test_timeline_stage_clears_prior_episodes_and_chains_days(
         "conversations": Collection(
             documents=[{"conversation_id": "conv-a", "user_id": USER}]
         ),
+        "audio_capture_sessions": Collection(
+            documents=[
+                {
+                    "capture_session_id": "capture-a",
+                    "user_id": USER,
+                    "time_basis": "recorded",
+                    "data_purpose": "normal_capture",
+                }
+            ]
+        ),
         "audio_chunks": Collection(
             rows=[
                 {
-                    "_id": "conv-a",
+                    "_id": "capture-a",
                     "first": captured("2026-08-05T06:00:00+00:00"),
-                    "last": captured("2026-08-06T06:00:00+00:00"),
+                    "last_start": captured("2026-08-06T05:59:50+00:00"),
+                    "last_duration": 10.0,
                 }
             ]
         ),
@@ -165,7 +273,7 @@ async def test_timeline_stage_clears_prior_episodes_and_chains_days(
 
     monkeypatch.setattr(rebuild, "_enqueue_timeline_rebuild", fake_day)
     monkeypatch.setattr(rebuild, "_enqueue_speaker_rebuild", fake_speaker)
-    monkeypatch.setattr(rebuild, "_active_rebuild_jobs", lambda _ids: [])
+    monkeypatch.setattr(rebuild, "_active_rebuild_jobs", lambda _ids, _users: [])
     monkeypatch.setattr(rebuild, "clear_vault_contents", lambda _path: 0)
 
     plan = RebuildPlan(
@@ -220,12 +328,23 @@ async def test_days_stage_replays_boundaries_over_the_existing_speaker_layer(
         "conversations": Collection(
             documents=[{"conversation_id": "conv-a", "user_id": USER}]
         ),
+        "audio_capture_sessions": Collection(
+            documents=[
+                {
+                    "capture_session_id": "capture-a",
+                    "user_id": USER,
+                    "time_basis": "recorded",
+                    "data_purpose": "normal_capture",
+                }
+            ]
+        ),
         "audio_chunks": Collection(
             rows=[
                 {
-                    "_id": "conv-a",
+                    "_id": "capture-a",
                     "first": captured("2026-08-05T06:00:00+00:00"),
-                    "last": captured("2026-08-06T06:00:00+00:00"),
+                    "last_start": captured("2026-08-06T05:59:50+00:00"),
+                    "last_duration": 10.0,
                 }
             ]
         ),
@@ -252,7 +371,7 @@ async def test_days_stage_replays_boundaries_over_the_existing_speaker_layer(
     monkeypatch.setattr(rebuild, "_enqueue_timeline_rebuild", fake_day)
     monkeypatch.setattr(rebuild, "_enqueue_speaker_rebuild", fail_speaker)
     monkeypatch.setattr(rebuild, "_reset_active_versions_to_asr", fake_reset)
-    monkeypatch.setattr(rebuild, "_active_rebuild_jobs", lambda _ids: [])
+    monkeypatch.setattr(rebuild, "_active_rebuild_jobs", lambda _ids, _users: [])
     monkeypatch.setattr(rebuild, "clear_vault_contents", lambda _path: 0)
 
     plan = RebuildPlan(
@@ -294,6 +413,7 @@ async def test_timeline_stage_refuses_a_user_with_no_captured_audio(
         {
             "users": users_collection(),
             "conversations": Collection(documents=[]),
+            "audio_capture_sessions": Collection(documents=[]),
             "audio_chunks": Collection(),
             "memory_audit": Collection(),
             "timeline_episodes": Collection(),
@@ -301,7 +421,7 @@ async def test_timeline_stage_refuses_a_user_with_no_captured_audio(
             "timeline_analysis_runs": Collection(),
         }
     )
-    monkeypatch.setattr(rebuild, "_active_rebuild_jobs", lambda _ids: [])
+    monkeypatch.setattr(rebuild, "_active_rebuild_jobs", lambda _ids, _users: [])
     monkeypatch.setattr(rebuild, "clear_vault_contents", lambda _path: 0)
 
     plan = RebuildPlan(

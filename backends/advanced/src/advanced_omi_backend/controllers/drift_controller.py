@@ -6,9 +6,10 @@ centroids against the live gallery (pure vector math — no GPU, no re-diarizati
 how many segment labels would flip, so you reprocess only the ones that drifted.
 
 Centroids are stored in ``TranscriptVersion.metadata["cluster_centroids"]`` keyed by the
-segment's display label (the speaker name or "Unknown Speaker N"), so they map 1:1 to a
-version's segments via ``segment.speaker``. Conversations recorded before centroid storage
-need the one-time :func:`backfill_cluster_embeddings` pass.
+automatic cluster result (the speaker name or "Unknown Speaker N"). Human overlays can
+create visible labels without a matching centroid; those are reported as unverifiable,
+never guessed as drift. Conversations recorded before centroid storage need the one-time
+:func:`backfill_cluster_embeddings` pass.
 """
 
 import hashlib
@@ -19,7 +20,11 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from advanced_omi_backend.config import get_diarization_settings
-from advanced_omi_backend.constants import BACKGROUND_SPEECH_LABEL, NOISE_LABEL
+from advanced_omi_backend.constants import (
+    BACKGROUND_SPEECH_LABEL,
+    NOISE_LABEL,
+    is_unknown_speaker_label,
+)
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.utils.audio_chunk_utils import reconstruct_audio_segment
@@ -39,11 +44,22 @@ def _speech_segments(version) -> list:
     ]
 
 
-def _threshold() -> Optional[float]:
+def _identification_policy() -> tuple[Optional[float], float, bool]:
+    """The cluster-assignment policy a fresh diarization run would use."""
+
     try:
-        return get_diarization_settings().get("similarity_threshold")
+        settings = get_diarization_settings()
+        return (
+            settings.get("similarity_threshold"),
+            float(settings.get("identify_margin", 0.1)),
+            bool(settings.get("exclusive", True)),
+        )
     except Exception:
-        return None
+        return None, 0.1, True
+
+
+def _threshold() -> Optional[float]:
+    return _identification_policy()[0]
 
 
 def _cache_collection():
@@ -136,8 +152,17 @@ async def drift_fingerprint() -> str:
         )
     convs.sort()
 
+    threshold, identify_margin, exclusive = _identification_policy()
     payload = json.dumps(
-        {"threshold": _threshold(), "gallery": gallery, "convs": convs},
+        {
+            "identification_policy": {
+                "threshold": threshold,
+                "identify_margin": identify_margin,
+                "exclusive": exclusive,
+            },
+            "gallery": gallery,
+            "convs": convs,
+        },
         default=str,
     )
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -182,7 +207,7 @@ async def find_drift_conversations(
     ``progress_callback(processed, total, drifted_count)`` fires once per conversation
     when running as a job.
     """
-    threshold = _threshold()
+    threshold, identify_margin, exclusive = _identification_policy()
     client = SpeakerRecognitionClient()
     convs = await Conversation.find({"deleted": {"$ne": True}}).to_list()
 
@@ -190,6 +215,8 @@ async def find_drift_conversations(
     scanned = 0
     no_data = 0
     not_analyzable = 0
+    unverifiable = []
+    unverifiable_segments = 0
     total = len(convs)
     for i, conv in enumerate(convs):
         if progress_callback:
@@ -216,42 +243,69 @@ async def find_drift_conversations(
             for label, vec in centroids.items()
             if label not in (NOISE_LABEL, BACKGROUND_SPEECH_LABEL)
         }
+
+        speech_by_label = Counter(
+            segment.speaker
+            for segment in _speech_segments(version)
+            if segment.speaker not in (NOISE_LABEL, BACKGROUND_SPEECH_LABEL)
+        )
+        missing_labels = {
+            label: count
+            for label, count in speech_by_label.items()
+            if label not in person_centroids
+        }
+        if missing_labels:
+            missing_count = sum(missing_labels.values())
+            unverifiable_segments += missing_count
+            unverifiable.append(
+                {
+                    "conversation_id": conv.conversation_id,
+                    "title": conv.title or "(untitled)",
+                    "segments": missing_count,
+                    "labels": [
+                        {"speaker": label, "count": count}
+                        for label, count in sorted(missing_labels.items())
+                    ],
+                }
+            )
         if not person_centroids:
             continue
 
-        # Threshold-only acceptance (margin 0, non-exclusive): the stored labels were
-        # produced by per-segment identification with NO margin/exclusivity gate, so
-        # re-checking them through assign_clusters' stricter default gate reports mass
-        # fake drift (e.g. an intact 0.61 ankush match dropped for a 0.52 runner-up).
+        # Replay the same threshold + runner-up margin + exclusive assignment policy
+        # used by a fresh cluster-then-identify run. A looser threshold-only replay
+        # manufactures mass ``Unknown -> name`` drift for clusters ingestion
+        # deliberately rejected as ambiguous.
         resp = await client.reidentify_clusters(
             person_centroids,
             # The gallery searched is the conversation's own owner's.
             user_id=conv.user_id,
             similarity_threshold=threshold,
-            identify_margin=0.0,
-            exclusive=False,
+            identify_margin=identify_margin,
+            exclusive=exclusive,
         )
         if resp.get("error"):
-            logger.warning(
-                "reidentify failed for %s: %s",
-                conv.conversation_id[:8],
-                resp.get("error"),
+            raise RuntimeError(
+                "Speaker drift scan could not re-identify "
+                f"{conv.conversation_id}: {resp.get('error')}"
             )
-            continue
         assignments = resp.get("assignments", {})
 
+        # ``identified_as`` is deliberately cleared on human-overlaid segments, so it
+        # cannot describe the old automatic cluster assignment. The centroid key does:
+        # named key = old resolved identity; Unknown Speaker N = old open-set rejection.
+        # Compare once per neural cluster and weight it by the visible segments that
+        # still carry that cluster label. Labels without centroids were recorded above
+        # as unverifiable and must never be manufactured into ``name -> Unknown`` drift.
         changed = []
-        speech_count = 0
-        for s in _speech_segments(version):
-            # Bucket labels aren't people — nothing to drift.
-            if s.speaker in (NOISE_LABEL, BACKGROUND_SPEECH_LABEL):
+        speech_count = sum(speech_by_label.values())
+        for label, count in speech_by_label.items():
+            if label not in person_centroids:
                 continue
-            speech_count += 1
-            old = s.identified_as or None
-            new_a = assignments.get(s.speaker)
+            old = None if is_unknown_speaker_label(label) else label
+            new_a = assignments.get(label)
             new = (new_a["name"] if new_a else None) or None
             if old != new:
-                changed.append((old, new))
+                changed.extend([(old, new)] * count)
 
         if changed:
             trans = Counter(changed)
@@ -274,13 +328,19 @@ async def find_drift_conversations(
     if progress_callback:
         progress_callback(total, total, len(drifted))
     drifted.sort(key=lambda c: c["drifted_segments"], reverse=True)
+    unverifiable.sort(key=lambda c: c["segments"], reverse=True)
     return {
         "drifted": drifted,
         "total_drifted": len(drifted),
         "conversations_scanned": scanned,
         "no_centroid_data": no_data,
         "not_analyzable": not_analyzable,
+        "unverifiable": unverifiable,
+        "unverifiable_segments": unverifiable_segments,
+        "conversations_with_unverifiable_segments": len(unverifiable),
         "similarity_threshold": threshold,
+        "identify_margin": identify_margin,
+        "exclusive": exclusive,
     }
 
 

@@ -104,6 +104,24 @@ class TestRenamePersonMerge:
 
 
 class TestRenamePersonMove:
+    def test_case_only_repeat_is_an_idempotent_noop(self, tmp_path):
+        """The agent may request title casing after case-insensitive path resolution."""
+
+        tools = VaultTools(tmp_path)
+        people = tmp_path / "People"
+        people.mkdir(parents=True, exist_ok=True)
+        source = people / "anushpa.md"
+        original = _person(about="- fact.", mentions="- mention.")
+        source.write_text(original, encoding="utf-8")
+
+        message = tools.rename_person("anushpa", "Anushpa")
+
+        assert "already resolves" in message
+        assert source.read_text(encoding="utf-8") == original
+        assert not (people / "Anushpa.md").exists()
+        assert tools.touched == set()
+        assert tools.removed == []
+
     def test_plain_rename_records_removal(self, tmp_path):
         tools = VaultTools(tmp_path)
         (tmp_path / "People").mkdir(parents=True, exist_ok=True)

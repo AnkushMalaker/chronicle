@@ -63,6 +63,8 @@ Before a long or delegated run:
 
 The review is resumable by default. Existing successful files referenced by the manifest are validated and skipped; use `--no-resume` for an intentional clean recapture. Derive filenames before capture; never fall back to shared `retry-*.png` names.
 
+The harness waits for visible loading indicators after its initial render delay, up to 12 seconds by default. Use `--settle-timeout-ms` when a known external-service query needs a different ceiling; a spinner that remains after that timeout is retained as a review finding.
+
 After fixing a subset of pages, replace only those route results while retaining the rest of the dated review. Repeat `--only-route` for each `App.tsx` route template and pair it with `--no-resume`:
 
 ```bash
@@ -79,6 +81,7 @@ uv run --with playwright python \
 Treat a substantially rendered page with a stuck subsection as `review-issue`, preserve its screenshot, and record its loading indicators. Reserve `failed` for a missing or blank page, login redirect, error boundary, missing real fixture, navigation failure, or missing output.
 
 For phone captures, compare `document.documentElement.scrollWidth` with the 390px viewport. When content overflows, retain the full-page screenshot as evidence and add a clipped 390×844 screenshot for realistic phone review.
+When a recapture no longer overflows, remove its previously generated clipped companion so the dated directory cannot retain stale regression evidence.
 
 Only perform explicitly allowlisted, reversible interactions such as opening tabs, disclosures, summaries, and transcripts. Never submit forms or trigger save, upload, record, delete, enqueue, train, restart, provider-switch, or similar actions.
 

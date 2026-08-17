@@ -10,6 +10,7 @@ day-to-day operation, and use [AGENTS.md](../AGENTS.md) for development conventi
 - [Testing and coverage](testing.md): fast Python lanes, coverage reports, and integration tests
 - [Release process](releasing.md): candidate validation, TestFlight, publication, and verification
 - [Audio pipeline](audio-pipeline-architecture.md): session, transcription, and memory flow
+- [Live interaction modes](interaction-modes.md): stateful voice workflows, routing, and the Swiggy order mode
 - [Multimodal memory](multimodal-memory.md): observations, event discovery, evidence retrieval, and durable memory
 - [Manual memories](manual-memories.md): deliberately saving attachments, asynchronous enrichment, browsing, and retrieval
 - [Initialization system](init-system.md): setup wizard and service orchestration
@@ -23,6 +24,7 @@ day-to-day operation, and use [AGENTS.md](../AGENTS.md) for development conventi
 - [Compose stack](backend/compose-stack.md): the backend's containers, shared mounts, and profiles
 - [Authentication](backend/auth.md): user identity, JWTs, and protected endpoints
 - [Memory system](backend/memories.md): agentic Markdown vault and retrieval
+- [Memory segmentation and storage](backend/memory-segmentation-storage.md): multimodal evidence shaping, semantic episodes, and the Mongo/vault boundary
 - [Semantic timeline episodes](backend/timeline-episodes.md): evidence compaction, agent analysis, and revisioned day views
 - [Obsidian companion](obsidian-companion.md): deterministic vault maintenance from Obsidian and agent skills
 - [Audio durability](backend/audio-durability.md): raw-audio write path and its state machine
@@ -33,6 +35,11 @@ day-to-day operation, and use [AGENTS.md](../AGENTS.md) for development conventi
 ## Contributing
 
 - [Frontend UX review notes](agents/frontend-ux-review.md): Chronicle-specific UI conventions
+
+## Architecture decisions
+
+- [ADR index](adr/README.md): status and conventions for cross-cutting architecture decisions
+- [Separate durable audio capture from conversations](adr/0001-separate-audio-capture-from-conversations.md): proposed capture, processing-artifact, and semantic-range model
 
 ## Research
 

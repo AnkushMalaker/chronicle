@@ -73,6 +73,7 @@ def test_codex_settings_apply_defaults_and_normalize_cli_values():
         "sandbox_mode": "workspace-write",
         "model": "",
         "reasoning_effort": "",
+        "service_tier": "",
         "max_used_percent": None,
         "limit_id": "",
     }
@@ -83,6 +84,7 @@ def test_codex_settings_apply_defaults_and_normalize_cli_values():
             "sandbox_mode": "read-only",
             "model": "  gpt-5.6-terra  ",
             "reasoning_effort": "  HIGH  ",
+            "service_tier": "  PRIORITY  ",
             "max_used_percent": "80",
             "limit_id": "  codex_bengalfox  ",
         }
@@ -93,6 +95,7 @@ def test_codex_settings_apply_defaults_and_normalize_cli_values():
         "sandbox_mode": "read-only",
         "model": "gpt-5.6-terra",
         "reasoning_effort": "high",
+        "service_tier": "priority",
         "max_used_percent": 80,
         "limit_id": "codex_bengalfox",
     }
@@ -110,6 +113,8 @@ def test_codex_settings_apply_defaults_and_normalize_cli_values():
         ({"model": 123}, "model must be a string"),
         ({"reasoning_effort": False}, "reasoning_effort must be a string"),
         ({"reasoning_effort": "extreme"}, "reasoning_effort must be one of"),
+        ({"service_tier": False}, "service_tier must be a string"),
+        ({"service_tier": "batch"}, "service_tier must be empty or one of"),
         ({"max_used_percent": -1}, "max_used_percent must be between"),
         ({"max_used_percent": 101}, "max_used_percent must be between"),
         ({"max_used_percent": 1.5}, "max_used_percent must be an integer"),

@@ -1,104 +1,110 @@
 # Raw audio durability state machine
 
-Chronicle has one raw-audio durability path:
+Chronicle has one streaming durability path:
 
-`backend process buffer -> Redis Stream WAL -> journaled MongoDB audio chunk -> Redis XACK`
+```text
+backend buffer -> Redis Stream WAL -> journaled Mongo AudioChunkDocument -> XACK
+```
 
+The owner of this path is a technical `AudioCaptureSession`, never a Conversation.
 There is no alternate persistence fallback. An error stops the transition and leaves
 the last durable state intact.
 
 ## Guarantee boundary
 
-The guarantee begins when Redis returns success from `XADD`. Redis runs AOF with
-`appendfsync always`, so that response follows a filesystem sync. Before `XADD`
-returns, bytes exist only in the backend/device transport and cannot survive a backend
-host crash; closing the connection on ingress error prevents Chronicle from pretending
-that such a capture remained contiguous.
+The guarantee begins when Redis returns success from `XADD`. Redis is configured with
+AOF `appendfsync always`, so success follows a filesystem sync. Before that point bytes
+exist only in transport/backend memory. If ingress cannot commit them, Chronicle closes
+the connection instead of pretending the capture stayed contiguous.
 
 ## Session transitions
 
-| From | Event and required commit | To | Error behavior |
+| From | Required commit | To | Failure behavior |
 |---|---|---|---|
-| Disconnected | audio-start begins initialization | Connecting | Connection is rejected; no audio accepted |
-| Connecting | A unique session/WAL exists, a Mongo conversation owner is atomically assigned, and the single persistence job is live | Active | State does not become ingress-ready |
-| Active | One transaction verifies session `ACTIVE`, snapshots its owner, and `XADD`s the owned audio | Active | Producer buffer and sequence stay unchanged; connection stops |
-| Active/owner A | Conversation closes while capture continues; Mongo owner B is inserted, then Redis pointer A→B is compare-and-swapped | Active/owner B | Candidate B is deleted; owner A remains |
-| Active | Residual producer buffer `XADD` succeeds, then terminal marker `XADD` succeeds, then session status is written | Draining | Status does not advance and the same buffer/session remains retryable |
-| Draining | Producer commits `FINISHED` (no more `XADD`s are legal) | Producer-finished | A failed write leaves the connection/session available for the same finalization transition |
-| Producer-finished | Persistence group has zero lag, zero pending entries, and no local PCM | Persistence-complete/retained | Stream remains if proof is unavailable |
-| Persistence-complete | Every required and registered consumer group has zero lag and zero pending entries | Stream deleted | Stream remains |
+| Disconnected | audio-start begins initialization | Connecting | Reject connection |
+| Connecting | unique Redis session/WAL, Mongo `AudioCaptureSession`, and persistence job are ready | Active | Do not accept audio |
+| Active | transaction verifies `ACTIVE` and `XADD`s capture fields | Active | Preserve producer buffer; stop ingress |
+| Active | residual buffer and terminal marker are appended, then status changes | Draining | Leave session retryable |
+| Draining | producer declares no more legal `XADD`s | Producer-finished | Preserve WAL/session |
+| Producer-finished | persistence group has zero lag, zero pending entries, and no local PCM | Persistence-complete | Retain stream if proof is absent |
+| Persistence-complete | every required consumer group is drained | Stream deletable | Retain stream |
 
-`SessionStatus.ACTIVE` may exist briefly inside Connecting, but the controller does not
-return to the receive loop until owner assignment and job liveness both succeed. Each
-recording attempt has a new `session_id`; reconnect never resets an older hash, stream,
-consumer, or producer buffer.
+Every connection attempt has a unique capture/session ID. Reconnect cannot reset or
+append behind an older WAL that is still draining.
 
-## Error semantics
+## Message transitions
 
-`Error` is an attempt outcome, not a second storage path or a state that consumes data.
-
-| Error location | Observable result | State retained |
+| State | Evidence | Only legal next transition |
 |---|---|---|
-| Connecting | audio-start/connection is rejected | No ingress-ready session |
-| Producer before Redis accepts | socket is closed; no later packet is accepted | Exact producer buffer and chunk number |
-| Disconnect/finalize | client is not removed, so reconnect must retry cleanup first | Same unique session and producer buffer |
-| Mongo insert or metadata update | RQ attempt fails and retries | Redis entries remain pending |
-| After Mongo insert, before ACK | RQ retry finds the provenance-keyed chunk | Mongo chunk plus pending Redis IDs |
-| Retention inspection | deletion is refused | Full Redis stream |
+| Accepted/unread | persistence-group lag is non-zero | `XREADGROUP` makes entry pending |
+| Pending | pending entry retains source bytes | encode and commit Mongo chunk |
+| Mongo committed | chunk has capture identity and exact stream-message provenance | update capture metadata |
+| Metadata committed | all Mongo writes succeeded | `XACK` exact source IDs |
+| Acknowledged | group no longer owns the IDs | eligible for drain proof |
 
-There is no `continue`, guessed owner, age-based delete, alternate store, or
-administrative ACK on these paths.
+The chunk key `(source_stream, source_first_message_id)` is unique. A crash after Mongo
+commit but before ACK therefore replays as validation plus ACK, not duplicate audio.
+The separate unique `(capture_session_id, sequence)` index protects ingest order.
 
-## Redis message transitions
+## Capture identity
 
-| State | Redis evidence | Only legal next transition |
-|---|---|---|
-| Accepted/unread | persistence group `lag > 0`; entry contains `conversation_id` | `XREADGROUP` makes it pending |
-| Pending | persistence group `pending > 0` | Encode and commit Mongo chunk |
-| Mongo committed | chunk has the stream/message provenance key and the write is majority+journal acknowledged | Update visible metadata |
-| Metadata committed | Mongo writes succeeded | `XACK` the exact source IDs |
-| Acknowledged | group no longer owns the IDs | Eligible for stream-level drain proof |
+Each committed chunk contains:
 
-A worker crash before `XACK` leaves entries pending. Every worker attempt starts by
-reading its pending list before reading new entries. If the Mongo insert succeeded but
-the worker died before `XACK`, the unique `(source_stream,
-source_first_message_id)` key turns replay into an idempotent metadata retry rather
-than duplicate audio.
+- `user_id`;
+- `capture_source_id`;
+- `capture_session_id` and sequence;
+- immutable absolute `captured_at`;
+- duration/format/Opus bytes; and
+- the exact Redis message IDs folded into it.
 
-## Worker runtime transitions
+The Redis message carries an explicit capture time where available; otherwise its
+Redis stream timestamp anchors `captured_at`. A missing/invalid absolute time is an
+invariant failure, not permission to guess.
+
+No WAL entry or Mongo chunk requires a Conversation ID. Semantic segmentation cannot
+interrupt or rotate persistence.
+
+## Worker runtime
 
 The persistence worker tracks two independent axes:
 
-- Reader: `recovering_pending -> tailing_new`
-- Session: `active -> draining`
+- reader: `recovering_pending -> tailing_new`;
+- session: `active -> draining`.
 
-Completion is legal only in `(tailing_new, draining)` after the persistence group is
-proven drained. Any exception changes the RQ attempt to Error; unread/pending Redis
-state is not changed, and the next RQ attempt starts again at `recovering_pending`.
+Completion is legal only at `(tailing_new, draining)` after the group is proven
+drained. Any exception fails the RQ attempt; unread and pending Redis state remains,
+and the retry re-enters pending recovery.
 
-Conversation handoff has no unassigned interval. The lifecycle inserts the successor
-first and compare-and-swaps the Redis pointer, while producer `XADD` watches that same
-pointer. The persistence worker groups by the immutable owner on each entry; a pointer
-change or worker restart cannot merge two conversations.
+## Finite-capture durability
+
+Uploads, ScreenPipe windows, and approved imports use `convert_audio_to_chunks` rather
+than the Redis WAL. Their deterministic retry contract is:
+
+1. hash the complete source PCM;
+2. insert or load the specified `AudioCaptureSession`;
+3. reject any identity/format/hash/time mismatch;
+4. validate already stored contiguous chunks; and
+5. resume only missing chunks.
+
+A completed retry returns the same IDs. ScreenPipe persists its full mixed window
+before VAD, so silence and semantic-processing failures cannot discard source audio.
 
 ## Forbidden cleanup
 
-Raw `audio:stream:*` keys must never be:
+Raw `audio:stream:*` keys must never be capped, age-expired, independently trimmed,
+administratively ACKed without the Mongo side effect, or deleted while any required
+consumer has unknown/non-zero lag or pending entries. Age is not durability evidence.
 
-- capped with `MAXLEN`;
-- trimmed by an independent consumer;
-- expired because a socket disconnected or a stream is old;
-- administratively claimed and ACKed without committing the side effect;
-- deleted while the session is active or any group has unknown/non-zero lag or pending.
-
-Age is not durability evidence.
+Likewise, deleting or archiving a Conversation cannot delete capture documents. Raw
+deletion requires a separate retention policy and a complete claimant check.
 
 ## Regression coverage
 
-`tests/test_audio_durability.py` covers Redis append failure, inactive/ownerless
-ingress, owner rotation, Mongo failure, pending recovery, commit-before-ACK crash
-replay, retention lag, terminal residual flush, and legal runtime transitions.
-`tests/test_audio_persistence_lifecycle.py` covers the conversation-close/finalize
-race. `tests/test_streaming_persistence_invariant.py` covers unique reconnect sessions,
-connection-level fail-closed behavior, failed-disconnect retention, ordered stop, and
-persistence liveness.
+- `tests/test_audio_durability.py`: append failure, Mongo failure, pending recovery,
+  commit-before-ACK replay, retention gates, and legal transitions.
+- `tests/test_audio_persistence_lifecycle.py`: close/finalize race.
+- `tests/test_streaming_persistence_invariant.py`: capture initialization and reconnect
+  isolation.
+- `tests/test_audio_persistence_mongodb.py`: finite-capture retry convergence.
+- `tests/test_device_audio_ingest.py`: silent ScreenPipe capture persists without a
+  semantic Conversation.

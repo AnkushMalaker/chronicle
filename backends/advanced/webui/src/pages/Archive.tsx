@@ -4,6 +4,7 @@ import { Archive as ArchiveIcon, RefreshCw, Calendar, User, RotateCcw, Trash2, C
 import { conversationsApi, authApi } from '../services/api'
 import { useConversations, useRestoreConversation, usePermanentDeleteConversation } from '../hooks/useConversations'
 import { Button } from '../components/ui'
+import { TITLE_NOT_GENERATED } from '../lib/constants'
 
 interface Conversation {
   conversation_id: string
@@ -251,7 +252,7 @@ export default function Archive() {
               <div className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                 <div className="flex min-w-0 flex-col space-y-2">
                   <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-                    {conversation.title || "Conversation"}
+                    {conversation.title || TITLE_NOT_GENERATED}
                   </h2>
 
                   {conversation.summary && (

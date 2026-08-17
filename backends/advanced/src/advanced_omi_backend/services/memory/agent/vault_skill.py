@@ -96,6 +96,17 @@ section into a note that already has it.
 - Use list properties (`["[[A]]", "[[B]]"]`) for anything that may hold more than one
   value.
 - Capture what was actually said. Quote key facts; never invent.
+- In a Person note, `## About` holds stable/current facts, not dated activity logs.
+  `## Mentions` is only a compact source index for meaningful appearances. Never copy
+  the same proposition into both sections; skip routine/background mentions.
+- The vault owner's own Person note is not a diary. Do not add a dated Mention merely
+  because the owner spoke, worked, built, or tested something that day; the Daily index
+  already records that chronology. Update the owner only for a durable personal fact,
+  in `About`. Other people's Mentions are sparse relationship/source pointers, not day
+  summaries.
+- A Topic or category note's `## About` describes the recurring thing itself. Do not
+  turn it into a day-by-day transcript index or create a note for a one-off phrase,
+  implementation detail, or event without durable state that matters across days.
 - `Unknown Speaker N` is a diarization placeholder, not a person — never give it a
   note or a wikilink.
 - Hermes is Chronicle's assistant, not a person. It is `Topics/Hermes.md`.

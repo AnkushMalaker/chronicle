@@ -6,6 +6,9 @@ Tests that don't need Beanie initialization (pure model validation).
 
 from datetime import datetime
 
+import pytest
+from pydantic import ValidationError
+
 from advanced_omi_backend.models.conversation import Conversation
 
 
@@ -74,6 +77,41 @@ class TestConversationModel:
         assert segment.confidence is None
         assert segment.identified_as is None
         assert segment.words == []
+        assert segment.segment_type is Conversation.SegmentType.SPEECH
+        assert segment.model_dump(mode="json")["segment_type"] == "speech"
+
+    def test_speaker_segment_rejects_unknown_segment_type(self):
+        """Transcript segments only accept Chronicle's declared segment kinds."""
+        with pytest.raises(ValidationError):
+            Conversation.SpeakerSegment(
+                start=0.0,
+                end=1.0,
+                text="Test",
+                speaker="Speaker 0",
+                segment_type="ambient_noise",
+            )
+
+    def test_derived_from_rejects_unknown_operation(self):
+        """Conversation lineage is limited to split and merge operations."""
+        with pytest.raises(ValidationError):
+            Conversation.DerivedFrom(
+                operation="copy",
+                source_conversation_ids=["source-1"],
+                performed_at=datetime.now(),
+                performed_by="user-1",
+            )
+
+    def test_derived_from_serializes_declared_operation(self):
+        """Lineage exposes a typed operation while preserving its JSON value."""
+        derived_from = Conversation.DerivedFrom(
+            operation="split",
+            source_conversation_ids=["source-1"],
+            performed_at=datetime.now(),
+            performed_by="user-1",
+        )
+
+        assert derived_from.operation is Conversation.DerivedOperation.SPLIT
+        assert derived_from.model_dump(mode="json")["operation"] == "split"
 
     def test_transcript_version_defaults(self):
         """Test TranscriptVersion default values."""

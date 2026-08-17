@@ -24,6 +24,7 @@ from typing import Any, Iterable, List, Optional, Tuple
 # episodes, shared with the incremental projection layer so a settled-day write and a
 # rolling refresh install identical content. Aliased under the historical private names
 # because callers (and scripts) import them from this module.
+from advanced_omi_backend.services.observability.system_events import record_event_sync
 from advanced_omi_backend.services.timeline.projection import (
     ensure_day_episode_index as _ensure_day_episode_index,
 )
@@ -242,6 +243,22 @@ class MemoryService(MemoryServiceBase):
     def _recovery_agent_class(self):
         backend = getattr(self.config, "write_recovery_backend", "direct")
         return self._write_agent_class(backend) if backend else None
+
+    def _write_agent_instance(self, agent_class, user_root: Path, **kwargs: Any):
+        """Instantiate a writer with Pi-only, evidence-gated runtime safeguards."""
+
+        # Lazy: ..agent imports llm_client, which imports this package's config back.
+        from ..agent.pi_agent import PiMemoryAgent
+
+        if agent_class is PiMemoryAgent:
+            limit = getattr(
+                self.config,
+                "write_max_consecutive_identical_tool_calls",
+                None,
+            )
+            if limit is not None:
+                kwargs["max_identical_tool_calls"] = limit
+        return agent_class(user_root, **kwargs)
 
     async def _review_write(
         self,
@@ -652,7 +669,9 @@ class MemoryService(MemoryServiceBase):
                 break
             with memory_attempt(attempt):
                 try:
-                    result = await agent_class(user_root).run(
+                    result = await self._write_agent_instance(
+                        agent_class, user_root
+                    ).run(
                         day_digest,
                         local_date,
                         date=trusted_date,
@@ -720,7 +739,9 @@ class MemoryService(MemoryServiceBase):
             )
             with memory_attempt("verify_repair"):
                 try:
-                    repair = await repair_class(user_root).run(
+                    repair = await self._write_agent_instance(
+                        repair_class, user_root
+                    ).run(
                         day_digest,
                         local_date,
                         date=trusted_date,
@@ -905,7 +926,7 @@ class MemoryService(MemoryServiceBase):
                 # still takes the explicitly configured recovery path.
                 if agent_class is None:
                     agent_class = self._write_agent_class()
-                result = await agent_class(user_root).run(
+                result = await self._write_agent_instance(agent_class, user_root).run(
                     transcript,
                     source_id,
                     date=trusted_date,
@@ -1030,7 +1051,8 @@ class MemoryService(MemoryServiceBase):
                 )
             else:
                 try:
-                    recovery = await recovery_class(
+                    recovery = await self._write_agent_instance(
+                        recovery_class,
                         user_root,
                         # Reusing the direct runtime means retrying through its configured
                         # fallback model. Switching runtimes already supplies an independent
@@ -1116,6 +1138,34 @@ class MemoryService(MemoryServiceBase):
                         date=trusted_date,
                         duration_minutes=source_duration_minutes,
                         title=source_title,
+                    )
+                    fallback_reasons = []
+                    if not recovery_valid:
+                        fallback_reasons.append("invalid_note")
+                    if recovery_incomplete:
+                        fallback_reasons.append("incomplete_agent")
+                    record_event_sync(
+                        severity="warning",
+                        category="memory",
+                        source="memory.provider.chronicle",
+                        title=f"Deterministic memory fallback used: {source_id}",
+                        detail=(
+                            "The memory agent did not produce a complete valid note. "
+                            "Chronicle wrote the deterministic source-preserving "
+                            "conversation note."
+                        ),
+                        user_id=user_root.name,
+                        conversation_id=source_id,
+                        metadata={
+                            "fallback_type": "deterministic_source_preserving_note",
+                            "note_path": f"Conversations/{note_name}.md",
+                            "reasons": fallback_reasons,
+                            "agent_truncated": bool(recovery.truncated),
+                            "agent_stalled": bool(recovery.stalled),
+                            "agent_error_count": len(recovery.errors),
+                            "rounds": recovery.rounds,
+                            "tool_calls": recovery.tool_calls,
+                        },
                     )
                     set_safe_span_attributes(
                         span,

@@ -38,7 +38,23 @@ def test_prompt_version_is_pinned():
     the only thing a second copy can achieve.
     """
 
-    assert PROMPT_VERSION == "timeline-episodes-v11"
+    assert PROMPT_VERSION == "timeline-episodes-v17"
+
+
+def test_prompt_uses_local_day_bounds_instead_of_utc_calendar_date():
+    prompt = build_prompt(None)
+
+    assert "exact UTC start/end bounds" in prompt
+    assert "Do not filter evidence by its UTC calendar date" in prompt
+    assert "previous UTC date" in prompt
+
+
+def test_prompt_forbids_joining_evidence_across_empty_time():
+    prompt = build_prompt("result.json")
+
+    assert "more than fifteen minutes" in prompt
+    assert "compact context event may contain" in prompt
+    assert "Split them into separate episodes" in prompt
 
 
 def test_prompt_treats_observations_as_coarse_sessions_without_cross_app_merging():
@@ -85,6 +101,13 @@ def test_prompt_keeps_one_activity_in_one_episode_across_modalities():
     )
 
 
+def test_direct_prompt_returns_json_without_a_file_tool():
+    prompt = build_prompt(None)
+
+    assert "Return only the final schema-valid JSON object" in prompt
+    assert "work/" not in prompt
+
+
 def test_shipped_config_pins_the_same_prompt_version():
     """Run identity comes from config, not this constant — they must not drift.
 
@@ -98,3 +121,7 @@ def test_shipped_config_pins_the_same_prompt_version():
     )
 
     assert defaults["timeline"]["prompt_version"] == PROMPT_VERSION
+    assert defaults["timeline"]["pi"]["max_tokens"] == 32000
+    assert defaults["timeline"]["pi"]["max_attempts"] == 3
+    assert defaults["timeline"]["pi"]["condense_max_tokens"] == 12000
+    assert defaults["timeline"]["pi"]["condense_max_attempts"] == 3

@@ -29,7 +29,10 @@ def is_reasoning_model(model: str | None) -> bool:
     """
     if not model:
         return False
-    m = model.lower()
+    # OpenAI models routed through an OpenAI-compatible aggregator use qualified
+    # IDs such as ``openai/gpt-5.6-luna``. Parameter compatibility is determined
+    # by the provider model name, not by that routing namespace.
+    m = model.lower().rsplit("/", 1)[-1]
     return m.startswith(("o1", "o3", "o4")) or m.startswith("gpt-5")
 
 

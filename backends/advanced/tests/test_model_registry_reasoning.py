@@ -26,6 +26,16 @@ def test_unversioned_gpt_5_uses_minimal_reasoning_effort():
     assert _operation("gpt-5-mini").to_api_params()["reasoning_effort"] == "minimal"
 
 
+def test_openrouter_qualified_gpt_5_6_uses_reasoning_parameters():
+    params = _operation("openai/gpt-5.6-luna").to_api_params()
+
+    assert params["model"] == "openai/gpt-5.6-luna"
+    assert params["max_completion_tokens"] == 100
+    assert params["reasoning_effort"] == "none"
+    assert "max_tokens" not in params
+    assert "temperature" not in params
+
+
 def test_muse_sampling_and_reasoning_prompt_follow_model_card():
     operation = ResolvedLLMOperation(
         model_def=ModelDef(

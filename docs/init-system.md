@@ -309,7 +309,7 @@ cd extras/asr-services && docker compose up --build -d
 ### Why `chronicle-setup` is installed editable
 
 `setup-requirements.txt` lists the shared package as `-e ./extras/chronicle-setup`.
-The `-e` is load-bearing: `uv run --with-requirements` caches the environment it
+The `-e` matters: `uv run --with-requirements` caches the environment it
 builds and reuses it while this file's text is unchanged, so a non-editable path
 dependency stays frozen at the sources it was first built from. Edits to
 `chronicle_setup/` are then silently ignored by the wizard, every `init.py`, and

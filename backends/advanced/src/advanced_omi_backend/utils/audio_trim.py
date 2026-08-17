@@ -1,19 +1,17 @@
-"""Plan and re-time a silence trim over a conversation's audio chunks.
+"""Plan and re-time a silence trim over a Conversation's virtual audio timeline.
 
 A continuous-capture recording is mostly silence: measured over this deployment's
 ScreenPipe corpus, 95.9 hours of stored audio carried 24.9 hours of speech. Keeping
 the silence inside the conversation makes it unplayable and unreadable, but deleting
 it throws away evidence that the capture existed at all.
 
-So a trim *moves* chunks rather than dropping them. Chunks with no speech are handed
-to a soft-deleted remnant conversation, the surviving chunks are renumbered to be
-contiguous again, and the transcript is re-timed through the same map. Every chunk
-keeps its immutable ``captured_at``, so a remnant needs no "trimmed from here" note:
-the audio says when it happened, which is the only provenance that survives further
-splits and merges.
+So a trim narrows the Conversation's `AudioRangeRef` claims without mutating capture
+chunks. Excluded virtual slots disappear from the gap-elided presentation timeline,
+and the transcript is re-timed through the same map. Every chunk and its immutable
+``captured_at`` remain intact for other claims and retention policy.
 
-This module is pure. It decides *what* to move and how time maps; applying it belongs
-to the caller that owns the documents.
+This module is pure. It decides what presentation intervals remain and how time maps;
+the caller applies that plan to semantic claims and derived revisions.
 """
 
 from dataclasses import dataclass, field
@@ -27,7 +25,7 @@ KeptRegion = Tuple[float, float, float]
 
 @dataclass
 class TrimPlan:
-    """Chunk moves and the time map they imply.
+    """Virtual slots retained/excluded and the time map they imply.
 
     ``keep``/``drop`` are chunk indices in the pre-trim numbering. ``regions`` maps
     surviving pre-trim time onto post-trim time and is what the transcript is
@@ -67,7 +65,7 @@ def plan_silence_trim(
     min_run_seconds: float = 120.0,
     min_saving_seconds: float = 60.0,
 ) -> TrimPlan:
-    """Choose which chunks to move out of a conversation.
+    """Choose which virtual chunk slots to exclude from a Conversation claim.
 
     A chunk is kept when it overlaps speech, or padding around speech. Chunks are the
     unit of decision because they are the unit of storage — cutting inside one would

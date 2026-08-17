@@ -335,11 +335,11 @@ class SpeakerRecognitionClient:
 
                 # Add pyannote diarization parameters
                 form_data.add_field(
-                    "min_duration", str(config.get("min_duration", 0.5))
+                    "min_duration", str(config.get("min_duration", 0.0))
                 )
                 form_data.add_field("collar", str(config.get("collar", 2.0)))
                 form_data.add_field(
-                    "min_duration_off", str(config.get("min_duration_off", 1.5))
+                    "min_duration_off", str(config.get("min_duration_off", 0.0))
                 )
                 if config.get("min_speakers"):
                     form_data.add_field("min_speakers", str(config.get("min_speakers")))
@@ -1125,12 +1125,12 @@ class SpeakerRecognitionClient:
                 diarization_settings = get_diarization_settings()
 
                 # Add all diarization parameters for the diarize-and-identify endpoint
-                min_duration = diarization_settings.get("min_duration", 0.5)
+                min_duration = diarization_settings.get("min_duration", 0.0)
                 similarity_threshold = diarization_settings.get(
                     "similarity_threshold", 0.45
                 )
                 collar = diarization_settings.get("collar", 2.0)
-                min_duration_off = diarization_settings.get("min_duration_off", 1.5)
+                min_duration_off = diarization_settings.get("min_duration_off", 0.0)
 
                 form_data.add_field("min_duration", str(min_duration))
                 form_data.add_field("similarity_threshold", str(similarity_threshold))
@@ -1286,7 +1286,7 @@ class SpeakerRecognitionClient:
                     # Add all diarization parameters for the diarize-and-identify endpoint
                     form_data.add_field(
                         "min_duration",
-                        str(_diarization_settings.get("min_duration", 0.5)),
+                        str(_diarization_settings.get("min_duration", 0.0)),
                     )
                     form_data.add_field(
                         "similarity_threshold",
@@ -1297,7 +1297,7 @@ class SpeakerRecognitionClient:
                     )
                     form_data.add_field(
                         "min_duration_off",
-                        str(_diarization_settings.get("min_duration_off", 1.5)),
+                        str(_diarization_settings.get("min_duration_off", 0.0)),
                     )
                     if _diarization_settings.get("min_speakers"):
                         form_data.add_field(

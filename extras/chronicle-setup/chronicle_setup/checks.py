@@ -6,7 +6,7 @@ external DNS or its TLS certificate still passes every existing health check.
 
 Like :mod:`chronicle_setup.system`, every function here degrades rather than raising:
 a missing ``tailscale``/``openssl``/engine binary, or a container that is not running,
-yields ``NOT_APPLICABLE`` instead of an error. That distinction is load-bearing —
+yields ``NOT_APPLICABLE`` instead of an error. That distinction matters —
 it lets the same suite run honestly in CI (where nothing is configured) and on a
 fully configured host, without skipping tests or inventing failures.
 

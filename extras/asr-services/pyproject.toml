@@ -96,6 +96,8 @@ faster-whisper = [
     "faster-whisper>=1.0.0",
     "ctranslate2>=4.0.0",
     "av>=13,<14",
+    "nvidia-cublas-cu12>=12.4",
+    "nvidia-cudnn-cu12>=9,<10",
 ]
 
 transformers = [

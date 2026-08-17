@@ -55,6 +55,7 @@ services:
       - CORS_ORIGINS=http://localhost:5173,http://localhost:8000,http://192.168.1.153:5173,http://192.168.1.153:8000,https://localhost:5173,https://localhost:8000,https://100.105.225.45,https://localhost,app://obsidian.md
       - REDIS_URL=redis://redis:6379/0
       - MONGODB_URI=mongodb://mongo:27017
+      - MONGODB_DATABASE=${MONGODB_DATABASE:-chronicle}
       # Service endpoints — what each is for: compose-stack.md#chronicle-backend
       - VAULT_SYNC_SYNCTHING_URL=http://vault-syncthing:8384
       - VAULT_SYNC_API_KEY=${VAULT_SYNC_API_KEY:-}
@@ -114,6 +115,7 @@ services:
       - HA_TOKEN=${HA_TOKEN}
       - REDIS_URL=redis://redis:6379/0
       - MONGODB_URI=mongodb://mongo:27017
+      - MONGODB_DATABASE=${MONGODB_DATABASE:-chronicle}
       # Orchestrator tunables (optional - defaults shown): compose-stack.md#workers
       - WORKER_CHECK_INTERVAL=${WORKER_CHECK_INTERVAL:-10}
       - MIN_RQ_WORKERS=${MIN_RQ_WORKERS:-6}
@@ -155,6 +157,7 @@ services:
       - .env
     environment:
       - MONGODB_URI=mongodb://mongo:27017
+      - MONGODB_DATABASE=${MONGODB_DATABASE:-chronicle}
       - DEV_MODE=${DEV_MODE:-false}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - LLM_PROVIDER=${LLM_PROVIDER:-openai}

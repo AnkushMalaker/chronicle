@@ -55,11 +55,19 @@ It is per-user (keyed by the MongoDB ObjectId `user_id`) and organized into note
 | Note type | Path | Contents |
 |-----------|------|----------|
 | **Conversations** | `Conversations/<conversation_id>.md` | One note per conversation — the record of what was discussed. |
-| **People** | `People/<name>.md` | A note per person mentioned, accumulating facts about them over time. |
+| **People** | `People/<name>.md` | A durable semantic profile for a person when captured evidence establishes reusable facts about them. |
 | **Topics** | `Topics/<topic>.md` | A note per recurring topic. |
 | **Categories** | `<Category>/<name>.md` | Other category notes (e.g. places, projects, preferences). |
 
 These are ordinary Markdown files — readable, editable, and grep-able. Because the vault is the system of record, memories survive as durable text rather than as opaque vector rows.
+
+`People/` is deliberately **not** the enrolled-speaker roster or a count of successful
+voice identifications. The speaker service owns enrollment, and active transcript
+segments retain every recognized name whether or not a person note exists. Timeline
+episodes may carry those names as entities. A memory write creates a person note only
+when it has durable person-specific knowledge to put in the note; a routine appearance
+or a recognized name alone remains a transcript/timeline fact instead of producing a
+thin placeholder profile.
 
 If an Immich photo library is configured (`IMMICH_URL`/`IMMICH_API_KEY`, offered by the setup wizard), the `person_photos` cron job (`services/person_photos.py`) matches each `People/<name>.md` note against Immich's people API, stores the person's face-crop thumbnail content-addressed under the vault's `_media/` directory, and embeds a small photo at the top of the note.
 
@@ -95,8 +103,8 @@ them and loads a generated extension containing only the canonical vault tool sc
 calls cross a short-lived, bearer-authenticated loopback gateway into `VaultTools`.
 The search extension receives only the read-only search schemas.
 
-Write loops are bounded at 32 model/tool rounds. Pi additionally enforces an atomic
-128-call write cap at the gateway. Search is bounded at 6 tool rounds and 24 calls.
+Write loops are bounded at 48 model/tool rounds. Pi additionally enforces an atomic
+192-call write cap at the gateway. Search is bounded at 6 tool rounds and 24 calls.
 When that tool budget is exhausted, the direct backend gets exactly one completion with
 no tool schemas so it can synthesize from evidence already in its conversation. Pi gets
 one fresh, isolated no-tool process only when it has already read note evidence; that
@@ -107,7 +115,10 @@ mutation but is not reported as complete: Chronicle invokes the configured recov
 backend even when the partial run already produced a valid conversation note. New
 People and Topic notes are also checked at the tool boundary for every canonical
 section and aggregation embed, so a smaller local model gets a recoverable tool error
-instead of silently leaving a malformed long-lived note.
+instead of silently leaving a malformed long-lived note. A second deterministic guard
+rejects a new Topic when at least two and three quarters of its substantive `About`
+bullets are already contained by one peer Topic; the same check is repeated after native
+filesystem agents finish.
 
 ## Write path: the memory agent
 
@@ -116,32 +127,74 @@ Memory extraction runs as part of the post-conversation RQ pipeline. After a con
 Given the conversation transcript and metadata, the selected write backend:
 
 1. Records the conversation as a new `Conversations/<conversation_id>.md` note.
-2. **Surgically edits** existing People / Topics / Category notes — adding or updating facts in place rather than blindly appending — and creates new notes when a person/topic/category is seen for the first time.
+2. **Surgically edits** existing People / Topics / Category notes — adding or updating facts in place rather than blindly appending — and creates a new semantic note only when the evidence establishes reusable, durable knowledge for it.
 
 This is LLM-driven extraction: the agent decides what is worth remembering and where it belongs in the vault.
 
 ### Capture evidence is remembered by the day, not the conversation
 
-Continuous ScreenPipe audio does not take this path. It is assembled into bounded compute spans — 30 minutes, or two hours given a collector meeting interval — so one meeting can span several recordings, and remembering per recording would inherit those arbitrary cuts. A timeline episode already carries the semantic bounds.
+Continuous ScreenPipe audio does not take this path. Capture is profiled in windows
+capped at two hours; detected Conversation claims prefer quiet seams near 30 minutes but
+may stay longer while speech is continuous. Remembering per claim would inherit those
+operational bounds, while a Timeline episode already carries the semantic bounds.
 
-`add_day_memory` therefore records one **settled local day** of episodes in a single write, anchored on `Daily/<local_date>.md` rather than under `Conversations/`, which stays one note per conversation. Durable People/Topic/Category edits are unchanged, and the write shares the conversation path's executor selection, recovery backend, bounded rounds, Langfuse spans, and audit ledger (`MemoryCause.DAY_EPISODES`).
+`add_day_memory` therefore records one **settled local day** of episodes in a single
+write, anchored on `Daily/<local_date>.md` rather than under `Conversations/`, which
+stays one note per conversation. Chronicle first writes a concise, deterministic
+episode index (range, kind, salience and title); the agent then considers only durable
+People/Topic/Category facts. It shares the conversation path's executor selection,
+recovery backend, bounded rounds, Langfuse spans, and audit ledger
+(`MemoryCause.DAY_EPISODES`).
 
-Unlike the conversation path there is no deterministic source-preserving fallback: a conversation note can always be written from its transcript, but a day has no such artifact. A day that cannot be written stays unwritten and is retried, then settles into `skipped` with its diagnostic.
+Person notes deliberately separate durable identity from provenance. `## About` holds
+stable/current facts such as relationship, work and enduring preferences; it is not a
+dated activity log. Conversation-scoped writes may use `## Mentions` as a compact source
+pointer, but settled-day writes cannot modify that section at all: Daily/Timeline owns
+chronology. The same proposition therefore cannot be copied into both sections by a day
+run. Topic/category `## About` sections likewise describe the recurring thing rather
+than repeating each day's episode summary.
+The vault owner's own Person note is specifically not a second Daily log: speaking,
+building, or testing something on a day does not earn a dated self-mention. The owner
+note changes only when the day establishes a durable personal fact, placed in `About`.
+Other people's mentions remain sparse relationship/provenance pointers rather than
+episode synopses on conversation writes; day writes put a materially clarified durable
+relationship or role in `About` and leave `Mentions` unchanged. One-off implementation
+phrases and events do not mint Topic notes unless they establish durable state that is
+likely to matter across days. A fact belongs to one canonical Topic; a narrower note
+cannot substantially repeat the `About` scope of a broader peer.
+
+The day digest contains only bounded episode summaries, entities, attributes, and
+role/confidence assertions. Raw transcripts and deterministic `Episodes/*.md` artifacts
+remain outside the vault. See [Memory segmentation and storage](memory-segmentation-storage.md)
+for the complete evidence-to-vault contract.
+
+The episode index has a deterministic source-preserving representation and does not
+depend on the model. Semantic People/Topic/Category extraction still has no safe
+fallback: a day whose agent does not deliberately finish stays unwritten and is retried
+with its diagnostic rather than pretending the missing judgement succeeded.
 
 A ScreenPipe recording that the timeline agent judged **conversational** — a standup, a 1:1 — is separately promoted back into the Recordings list and search. See [Semantic timeline episodes](timeline-episodes.md#a-conversational-episode-promotes-the-recordings-it-cites).
 
-### Checking the write: structure, then a reviewer
+### Checking the write: deterministic gates, then an optional reviewer
 
-A completed write is checked twice before the run is accepted, because the two things
-that go wrong are not the same kind of thing.
+A completed write always passes deterministic gates before the run is accepted. When
+`memory.agents.write.review` is enabled, a separate semantic reviewer also checks what
+was added; the two checks address different failure classes.
 
 **Structure** is decided by a function. `vault_verify.verify_vault_changes` diffs the
 vault against a pre-run snapshot and reports illegal paths, a note missing its canonical
 sections or aggregation embed, a newly duplicated `## Section`, a case-only collision, a
-day write that minted a `Conversations/` note, and a run that never wrote the record note
-it was asked for. Each `Finding` carries a fix instruction addressed to a model. The same
+day write that minted a `Conversations/` note, and a captured-content note at the vault
+root (where only complete category hubs belong). It also treats People `Mentions` as an
+immutable section for day runs and rejects newly-created Topics whose factual scope is
+mostly already carried by another Topic. The Daily episode index is separately
+verified against the active Timeline digest and restored mechanically if the model
+touches it. Each `Finding` carries a fix instruction addressed to a model. The same
 function is offered to the agent as the `verify_vault` tool so it can self-correct
 in-run, and re-run server-side so correctness does not depend on it choosing to.
+Deterministic findings that survive the bounded repair pass fail the day and leave it
+retryable; they are never merely logged and latched as written. The unattended rebuild
+finisher also scans the complete regenerated vault as one final structural gate.
 
 **Redundancy cannot be.** Structural verification passes on a perfectly well-formed
 bullet that re-records something the vault already holds — which is exactly how a
@@ -158,7 +211,9 @@ agent does it (`agent/review_agent.py`):
   done;
 - **narrow** — only `redundant` (a note of the same kind already records this) and
   `unsupported` (the source does not say this). Off-vocabulary verdicts are dropped;
-  `Daily`, `People`, and `Topics` overlap on purpose and that overlap is not redundancy;
+  `Daily`, `People`, and `Topics` may cover the same evidence at different semantic
+  levels, but a People/Topic bullet that merely rephrases the Daily activity log is
+  redundancy;
 - **never judging what it cannot see** — the source is bounded at the day digest's own
   budget, and if it still had to be cut, `unsupported` is withdrawn for that run. A
   reviewer shown part of a source cannot tell "the source never said this" from "the
@@ -183,6 +238,12 @@ trials on Qwen 3.6 27B. Genuinely-new bullets were left alone 8/8 and invented o
 caught 8/8. All four misses are the same borderline bullet, where the reviewer finds the
 overlap and then rules it a *new detail about an already-recorded event* — the exception
 its own instructions grant — rather than a duplicate.
+
+The reviewer is not an ontology gate. An exact replay of the bad 2026-06-17 write read
+both `Agent Control` and `Policy Store`, spent 41,887 tokens over five rounds/eight tool
+calls, and returned no finding even though all four Policy Store facts were contained by
+Agent Control. That failure is why Topic-scope containment is enforced deterministically
+at the write boundary instead of paying the reviewer and hoping it notices.
 
 Disable per deployment with `memory.agents.write.review: false`; it costs one extra
 agent run per write that changed anything (~38s against a ~190s day write here).
@@ -224,7 +285,11 @@ whether the final answer was usable. Pi's Node subprocess emits equivalent manua
 usage spans, so it is visible beside Direct and Codex rather than becoming a telemetry
 blind spot. Langfuse OTLP export is batched, keeping network export off the vault-tool
 mutation path even when an agent emits many tool observations. Chronicle explicitly
-flushes the completed trace tree before a forked RQ work-horse exits.
+flushes the completed trace tree at the common `async_job` boundary before a forked RQ
+work-horse exits. The flush belongs to the job wrapper rather than an individual
+memory decorator because the final model/agent spans end only moments before RQ calls
+`os._exit()`; relying on the batch exporter's timer would selectively lose those late
+spans while retaining earlier Timeline calls from the same job.
 
 Chronicle's manual memory spans are metadata-only by default: they retain lengths and
 SHA-256 fingerprints but omit transcripts, queries, answers, note paths/bodies, tool
@@ -240,12 +305,34 @@ inputs/outputs by default. Set both `OPENINFERENCE_HIDE_INPUTS=true` and
 those settings apply to every OpenAI-client call in Chronicle, not only memory. Pi and
 Codex subprocess spans use the memory-specific content toggle above.
 
+## Pi operating memory
+
+Pi's learned operating guidance is private per-user state under
+`data/pi_operating_memory/<user_id>/`, outside the semantic Obsidian vault. Production
+loads only the active `AGENTS.md` snapshot at the start of a run; Pi still chooses which
+vault files to search, read, and edit. Generated guidance is not fixed file routing.
+
+Both the writer and read-only retriever load the same stable snapshot. Their completed
+`pi_memory` and `pi_memory_search` inference artifacts feed bounded, content-free outlines
+to the optimizer. It runs after 25 new traces and has a daily backstop. In the default
+`shadow` mode it may write one AGENTS.md proposal or one inert skill/script candidate per
+run, but cannot change active guidance or production code. AGENTS.md proposals require distinct
+development and holdout evaluation artifacts, review, and promotion. Promotion refuses
+a candidate when active guidance changed since that candidate was generated. Every
+activation records the prior text, and a later rollback creates another revision instead
+of deleting history. Skill
+and script candidates remain inspectable but non-executable.
+
 ## API Endpoints
 
 - `GET /api/memories/search?query={query}&limit={limit}` — runs the agentic vault search and returns the synthesized answer plus the notes the read agent consulted.
 - `GET /api/memories/people/suggestions` — ranks conservative deterministic duplicate-person candidates for review; it never merges automatically.
 - `POST /api/memories/people/identity` — records or clears a symmetric `distinct_from` decision in two People notes, with optional stale-revision protection.
 - `POST /api/memories/people/merge/preview` and `POST /api/memories/people/merge` — preview and apply a locked deterministic merge. A `distinct_from` decision blocks preview.
+- `GET /api/memories/operating-memory` — returns active Pi guidance, content-free candidate metadata, revision metadata, and optimizer progress for the current user.
+- `GET /api/memories/operating-memory/candidates/{id}` — reads one bounded candidate for human inspection.
+- `POST /api/memories/operating-memory/candidates/{id}/review` and `/promote` — record an evidence-backed decision, then explicitly activate an approved, non-stale AGENTS.md candidate.
+- `POST /api/memories/operating-memory/revisions/{id}/rollback` — restores the state preceding a selected revision while retaining rollback history.
 - Other `/api/memories/*` management endpoints operate over the vault notes.
 
 ## Vault sync to Obsidian (separate feature)
@@ -319,14 +406,11 @@ output limits are one quarter of the context up to 4096 tokens, leaving most of 
 window for Pi's system prompt, tool schemas, transcript, and multi-round results.
 Existing explicit Pi limits are preserved on rerun.
 
-The built-in Qwen 3.6 27B profile serves a 64K context with one parallel slot, flash
-attention, Q8_0 K/V cache, and Jinja chat templates. It also disables llama.cpp's
-automatic multimodal-projector download: Chronicle's memory workload is text-only, so
-loading its projector wastes memory. On the A30, 64K Q8 KV used 19,482 MiB with the
-auto-loaded projector and 18,344 MiB with the text-only profile, freeing about 1.1 GiB;
-32K Q8 used 18,234 MiB with the projector. Prompt processing stayed near 667
-tokens/second. Audited memory prompts reached roughly 15K tokens, making the old 8K
-profile invalid for real conversations. Other local models retain llama.cpp's safer
-automatic flash-attention, F16 KV-cache, and projector defaults. Increase the served
-context before raising output limits or enabling thinking, and validate changes with
-the benchmark harness.
+The built-in Qwen 3.8 27B profile declares a 98,304-token context and uses llama.cpp's
+OpenAI-compatible route and Qwen chat-template thinking control. Chronicle's Pi memory
+workload is text-only even though the registry model can also serve vision. Keep the
+4,096-token output cap so the system prompt, transcript, tool schemas, and multi-round
+results retain headroom. Thinking is a per-memory-agent setting, not an assumption made
+from the registry model's general capabilities. Increase output limits or enable thinking
+only after the isolated vault benchmark passes; a model fitting in GPU memory does not
+show that its agent loop completes valid writes.

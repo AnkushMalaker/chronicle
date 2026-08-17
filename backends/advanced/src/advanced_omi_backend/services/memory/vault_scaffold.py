@@ -250,6 +250,12 @@ def _build_scaffold() -> Dict[str, str]:
 _SCAFFOLD: Dict[str, str] = _build_scaffold()
 
 
+def canonical_vault_scaffold() -> Dict[str, str]:
+    """Return a copy of the exact built-in scaffold used to seed a new vault."""
+
+    return dict(_SCAFFOLD)
+
+
 def is_scaffold_note(path: Path, vault_root: Path) -> bool:
     """True if ``path`` is scaffolding (a root hub note, or anything under ``Templates/``).
 

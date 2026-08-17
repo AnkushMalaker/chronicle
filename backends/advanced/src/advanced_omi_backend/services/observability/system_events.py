@@ -28,7 +28,7 @@ from typing import Any, Optional
 from advanced_omi_backend.models.system_event import SystemEvent
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.redis_factory import create_async_redis, create_sync_redis
-from advanced_omi_backend.services.sse_publisher import publish_sse_event
+from advanced_omi_backend.services.sse_publisher import publish_sse_event_async
 
 logger = logging.getLogger("observability.system_events")
 
@@ -267,7 +267,7 @@ async def _fan_out_sse(doc) -> None:
             "title": doc.title,
         }
         for admin_id in await _get_admin_ids():
-            publish_sse_event(admin_id, "system.error", payload)
+            await publish_sse_event_async(admin_id, "system.error", payload)
     except Exception:  # noqa: BLE001
         logger.debug("SSE fan-out for system event failed", exc_info=True)
 

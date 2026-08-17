@@ -20,6 +20,42 @@ BSON is used instead of JSON so MongoDB ObjectIds, datetimes, binary audio, and
 nested transcript data round-trip without conversion. Archives include password
 hashes and personal data from the users collection. Store them as sensitive data.
 
+Mongo-backed screenshots and other `DeviceInputItem` media are included with their
+documents. Filesystem-backed inference artifacts, Pi operating memory, and both vault
+roots are included from the data directory.
+
+## Full and incremental archives
+
+An export without a base is self-contained. Supplying one or more verified
+`--base-archive` files creates a true incremental snapshot:
+
+- unchanged `audio_chunks` already present in the base state are omitted by canonical
+  BSON SHA-256, so their compressed audio bytes are not copied again;
+- unchanged documents in every other MongoDB collection are omitted by the same digest;
+- unchanged data-directory files are omitted by path, size, and SHA-256; and
+- documents/files removed since the base are represented by tombstones.
+
+Changed documents are stored in full. Thus a chunk whose quarantine/deletion metadata
+changes is stored once in the delta even though its `_id` and audio bytes are stable;
+an unchanged chunk is omitted entirely. Likewise, a changed Mongo document containing
+image bytes is stored again, while an unchanged screenshot document is not. The manifest
+carries cumulative document/file digest indexes, omitted IDs/paths, tombstones, and
+checksummed base references; it does not copy unchanged base bytes.
+
+```bash
+# Self-contained baseline
+./chronicle-data.sh export /app/data/backups/base.chronicle
+
+# Delta; unchanged audio, Mongo documents, vault files, and artifacts are omitted
+./chronicle-data.sh export /app/data/backups/delta-1.chronicle \
+  --base-archive /app/data/backups/base.chronicle
+
+./chronicle-data.sh verify /app/data/backups/base.chronicle
+./chronicle-data.sh verify /app/data/backups/delta-1.chronicle
+```
+
+Keep the base chain: a delta is intentionally not another full copy.
+
 ## Maintenance window
 
 Export is not a transactional MongoDB snapshot. For a consistent archive, stop
@@ -50,15 +86,23 @@ The exporter writes to a partial file and renames it only after completion. The
 importer verifies the complete manifest and every checksum before changing MongoDB
 or filesystem data.
 
-During import, Chronicle first groups conversations by chunk structure, then decodes
-only matching candidates and fingerprints their PCM samples. This detects the same
-clip even when its Opus container bytes differ. If identical audio occurs more than
-once in the archive, only the earliest conversation by `created_at` is imported; its
-transcript versions are retained and the later conversation plus related audio
-chunks, annotations, waveforms, and other conversation-scoped records are skipped.
-Merge imports also compare against audio already in MongoDB, where the existing
-conversation wins. Every skipped duplicate is written to the application log and
-printed by the CLI with both conversation IDs.
+## Back up only the Markdown vault
+
+Create a small dated vault snapshot without exporting MongoDB or source audio:
+
+```bash
+./chronicle-data.sh backup-vault \
+  --description "reingest after speaker fix"
+```
+
+Use `--user-id <id>` one or more times to limit the snapshot. The resulting
+`data/backups/memory_vault_<UTC timestamp>.tar.gz` contains a `manifest.json` with the
+description, creation time, selected user IDs, and the byte size and SHA-256 digest of
+every file. This command only reads the live vault; it does not clear or rebuild it.
+
+Merge restore upserts ordinary documents by `_id`. Audio identity is stricter: the
+pair `(capture_session_id, sequence)` must resolve to the same immutable chunk `_id` in
+the archive and target database. A conflict aborts instead of choosing one copy.
 
 ## Restore an archive
 
@@ -68,8 +112,16 @@ Merge restore upserts documents by MongoDB `_id` and overlays filesystem files:
 ./chronicle-data.sh import /app/data/backups/before-upgrade.chronicle
 ```
 
-Replace restore clears every collection and filesystem root represented by the
-archive before restoring it:
+For an incremental chain, restore the verified base(s) in chronological order and then
+apply the delta using merge restore. Before any delta mutation, Chronicle verifies that
+every omitted audio chunk and Mongo document exists, that omitted documents still have
+the expected digest, and that every omitted filesystem file still has the expected size
+and SHA-256. A missing or changed base fails before mutation. Changed/new data is then
+upserted and deletion tombstones are applied.
+
+Incremental archives cannot be restored with `--replace`, because clearing the target
+would destroy the base state the delta omits. Replace restore is available only for a
+self-contained archive and clears every represented collection/filesystem root first:
 
 ```bash
 ./chronicle-data.sh import /app/data/backups/before-upgrade.chronicle \
@@ -157,6 +209,12 @@ The same clean rebuild can run without importing an archive:
 ./chronicle-data.sh rebuild-memory --rebuild-from days --force
 ./chronicle-data.sh rebuild-memory --user-id 507f1f77bcf86cd799439011 --force
 ```
+
+If the vault is shared by a bidirectional filesystem sync service, pause that service
+before a clean rebuild and resume it only after the finisher's whole-vault structural
+check passes. Otherwise a peer can race the clear/rewrite window and reintroduce stale
+root notes or old episode files even though the memory agent itself obeyed the current
+schema. Chronicle preserves `.stignore`/`.stfolder` markers while clearing content.
 
 The rebuild refuses to start when an existing queued, deferred, scheduled, or
 running speaker or memory job targets any selected conversation. Syncthing

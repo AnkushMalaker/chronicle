@@ -1,11 +1,10 @@
 """Record a settled local day of timeline episodes into the memory vault.
 
-The conversation is the wrong memory unit for capture evidence. Continuous ScreenPipe
-audio is assembled into bounded compute spans — up to 30 minutes, or two hours when the
-collector supplied a meeting interval — so a 45-minute standup without meeting detection
-is already two recordings. A timeline episode carries the semantic bounds instead, so the
-day of episodes is what gets remembered and the recordings underneath are the artifacts
-it cites.
+The conversation is the wrong memory unit for capture evidence. Continuous audio is
+persisted independently as immutable capture chunks; detected Conversations and bounded
+processing windows are mutable claims over that evidence, not its temporal identity. A
+timeline episode carries the semantic bounds, so the day of episodes is what gets
+remembered and the underlying capture ranges remain the cited artifacts.
 
 Writing happens once per (user, local_date), for a day that has stopped changing. Every
 analysis run regenerates a whole day from scratch and does so non-deterministically, so
@@ -116,15 +115,6 @@ def render_episode(
     return "\n".join(lines)
 
 
-def _cited_conversation_ids(episode: TimelineEpisode) -> set[str]:
-    cited = {str(item) for item in episode.related_conversation_ids if item}
-    for ref in episode.evidence_refs:
-        conversation_id = ref.metadata.get("conversation_id")
-        if conversation_id:
-            cited.add(str(conversation_id))
-    return cited
-
-
 def build_day_digest(
     episodes: list[TimelineEpisode],
     local_date: date,
@@ -191,6 +181,29 @@ def build_day_digest(
         if episode.episode_id in keep
     )
     return f"{header}\n\n{body}", dropped
+
+
+def build_day_index_digest(
+    episodes: list[TimelineEpisode], local_date: date, timezone_name: str
+) -> str:
+    """Render every active episode for Chronicle's concise Daily index.
+
+    This source is deliberately separate from the bounded semantic digest: shedding a
+    low-salience summary to fit the model prompt must never remove that episode's exact
+    range from the deterministic index.
+    """
+
+    zone = ZoneInfo(timezone_name)
+    ordered = sorted(episodes, key=lambda item: (item.started_at, item.ended_at))
+    body = "\n\n".join(
+        f"### {_clock(episode, zone)} · {episode.kind} · {episode.salience}\n"
+        f"title: {episode.title}"
+        for episode in ordered
+    )
+    return (
+        f"Local day {local_date.isoformat()} ({timezone_name}), "
+        f"{len(ordered)} episode(s).\n\n{body}"
+    )
 
 
 def _claim_query(
@@ -288,6 +301,7 @@ async def _write_day(day: TimelineDay) -> str:
         return "skipped"
 
     digest, dropped = build_day_digest(episodes, day.local_date, day.timezone)
+    index_digest = build_day_index_digest(episodes, day.local_date, day.timezone)
     if dropped:
         logger.warning(
             "🗓️ Day %s digest exceeded its budget; dropped %d low-salience "
@@ -303,6 +317,7 @@ async def _write_day(day: TimelineDay) -> str:
             digest,
             day.local_date.isoformat(),
             day.user_id,
+            day_index_digest=index_digest,
             source_date=datetime.combine(
                 day.local_date, datetime.min.time(), tzinfo=ZoneInfo(day.timezone)
             ).isoformat(),

@@ -9,7 +9,7 @@ import copy
 import math
 from typing import Any
 
-from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
+from advanced_omi_backend.services.audio_claims import get_conversation_audio_ranges
 
 TIMING_EDGE_TOLERANCE_SECONDS = 1.0
 
@@ -159,10 +159,12 @@ def validate_and_normalize_transcript_timing(
 async def load_transcript_audio_ranges(
     conversation_id: str,
 ) -> list[tuple[float, float]]:
-    """Load current non-deleted chunk coverage for ingest/preflight checks."""
-
-    chunks = await AudioChunkDocument.find(
-        AudioChunkDocument.conversation_id == conversation_id,
-        AudioChunkDocument.deleted == False,  # noqa: E712 - Beanie needs ==
-    ).to_list()
-    return [(float(chunk.start_time), float(chunk.end_time)) for chunk in chunks]
+    """Load claim coverage in the Conversation's gap-elided presentation clock."""
+    ranges = await get_conversation_audio_ranges(conversation_id)
+    cursor = 0.0
+    coverage = []
+    for audio_range in ranges:
+        end = cursor + audio_range.duration_seconds
+        coverage.append((cursor, end))
+        cursor = end
+    return coverage

@@ -1,5 +1,12 @@
+import os
 from datetime import datetime, timedelta, timezone
 
+import pytest
+import pytest_asyncio
+from beanie import init_beanie
+from motor.motor_asyncio import AsyncIOMotorClient
+
+from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.routers.modules.device_input_routes import ActivityItem
 from advanced_omi_backend.services import device_context
 from advanced_omi_backend.services.device_context import (
@@ -277,70 +284,81 @@ def test_items_are_ordered_by_capture_time_before_filtering():
     assert [item.source_item_id for item in kept] == ["frame:0", "frame:2"]
 
 
-class FakeConversation:
-    def __init__(self, conversation_id, deleted=False, deleted_at=None):
-        self.conversation_id = conversation_id
-        self.deleted = deleted
-        self.deleted_at = deleted_at
+@pytest_asyncio.fixture
+async def conversations(mongo_service):
+    """A real collection, isolated per run and torn down afterwards.
+
+    These used to run against a fake ``Conversation.find``. A fake cannot show that
+    hydrating whole documents is expensive, and it cannot fail on a document the model
+    refuses to parse — both of which the real collection does.
+    """
+    client = AsyncIOMotorClient(os.getenv("MONGODB_URI", "mongodb://localhost:27018"))
+    database = client["chronicle_device_context_test"]
+    await init_beanie(database=database, document_models=[Conversation])
+    await Conversation.find_all().delete()
+    yield Conversation.get_pymongo_collection()
+    await client.drop_database("chronicle_device_context_test")
+    client.close()
 
 
-class FakeFind:
-    def __init__(self, rows):
-        self._rows = rows
-
-    async def to_list(self):
-        return self._rows
+async def _store(collection, conversation_id, **fields):
+    await collection.insert_one({"conversation_id": conversation_id, **fields})
 
 
-def patch_conversations(monkeypatch, rows):
-    def find(query):
-        wanted = query["conversation_id"]["$in"]
-        return FakeFind([row for row in rows if row.conversation_id in wanted])
-
-    monkeypatch.setattr(device_context.Conversation, "find", staticmethod(find))
+@pytest.mark.integration
+async def test_hard_deleted_conversations_expire_immediately(conversations):
+    assert await _expired_conversation_ids(["gone-1"], BASE) == ["gone-1"]
 
 
-async def test_hard_deleted_conversations_expire_immediately(monkeypatch):
-    patch_conversations(monkeypatch, [])
-
-    expired = await _expired_conversation_ids(["gone-1"], BASE)
-
-    assert expired == ["gone-1"]
-
-
-async def test_recently_soft_deleted_conversations_are_kept(monkeypatch):
+@pytest.mark.integration
+async def test_recently_soft_deleted_conversations_are_kept(conversations):
     """A soft delete is restorable, so its context waits out the retention window."""
-    patch_conversations(
-        monkeypatch,
-        [FakeConversation("conv-1", deleted=True, deleted_at=BASE + timedelta(days=1))],
+    await _store(
+        conversations, "conv-1", deleted=True, deleted_at=BASE + timedelta(days=1)
     )
 
     assert await _expired_conversation_ids(["conv-1"], BASE) == []
 
 
-async def test_soft_deleted_conversations_expire_past_the_cutoff(monkeypatch):
-    patch_conversations(
-        monkeypatch,
-        [FakeConversation("conv-1", deleted=True, deleted_at=BASE - timedelta(days=1))],
+@pytest.mark.integration
+async def test_soft_deleted_conversations_expire_past_the_cutoff(conversations):
+    await _store(
+        conversations, "conv-1", deleted=True, deleted_at=BASE - timedelta(days=1)
     )
 
     assert await _expired_conversation_ids(["conv-1"], BASE) == ["conv-1"]
 
 
-async def test_live_conversations_keep_their_context(monkeypatch):
-    patch_conversations(monkeypatch, [FakeConversation("conv-1")])
+@pytest.mark.integration
+async def test_live_conversations_keep_their_context(conversations):
+    await _store(conversations, "conv-1", deleted=False)
 
     assert await _expired_conversation_ids(["conv-1"], BASE) == []
 
 
-async def test_naive_mongo_delete_timestamps_compare_as_utc(monkeypatch):
-    patch_conversations(
-        monkeypatch,
-        [
-            FakeConversation(
-                "conv-1", deleted=True, deleted_at=datetime(2026, 7, 25, 10, 0)
-            )
-        ],
+@pytest.mark.integration
+async def test_naive_mongo_delete_timestamps_compare_as_utc(conversations):
+    await _store(
+        conversations, "conv-1", deleted=True, deleted_at=datetime(2026, 7, 25, 10, 0)
+    )
+
+    assert await _expired_conversation_ids(["conv-1"], BASE) == ["conv-1"]
+
+
+@pytest.mark.integration
+async def test_a_document_the_model_cannot_parse_is_still_swept(conversations):
+    """Expiry reads three fields, so a document that fails validation must not break it.
+
+    Three live conversations carry ``derived_from.operation = 'leading_silence_trim'``,
+    a value renamed out of the enum. Loading them as models raises ``ValidationError``;
+    a retention sweep that touched one would abort instead of expiring anything.
+    """
+    await _store(
+        conversations,
+        "conv-1",
+        deleted=True,
+        deleted_at=BASE - timedelta(days=1),
+        derived_from={"operation": "leading_silence_trim"},
     )
 
     assert await _expired_conversation_ids(["conv-1"], BASE) == ["conv-1"]

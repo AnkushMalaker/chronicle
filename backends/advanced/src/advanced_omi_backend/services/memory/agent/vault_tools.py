@@ -40,6 +40,7 @@ from ..telemetry import (
 from ..vault_lock import VaultLockTimeout, vault_note_lock
 from ..vault_scaffold import (
     VaultPathError,
+    build_category_files,
     confined_vault_path,
     safe_vault_relative_path,
     validate_category_name,
@@ -47,8 +48,11 @@ from ..vault_scaffold import (
 )
 from ..vault_verify import (
     Finding,
+    changed_immutable_sections,
+    frontmatter_parse_error,
     new_duplicate_sections,
     new_note_schema_problems,
+    new_topic_scope_overlaps,
     render_findings,
     section_counts,
     verify_vault_changes,
@@ -59,12 +63,24 @@ from .section_edit import SectionEditError, apply_section_edit
 logger = logging.getLogger("memory_service.agent.tools")
 
 _GREP_MAX_LINES = 200  # default head limit, like Claude Code's grep
+_TOOL_RESULT_MAX_CHARS = 8000
+_GREP_RESULT_COMPACTION_ENV = "CHRONICLE_GREP_RESULT_COMPACTION"
+
+
+def _assert_parseable_frontmatter(path: str, content: str) -> None:
+    reason = frontmatter_parse_error(content)
+    if reason:
+        raise VaultToolError(
+            f"Cannot write '{path}': {reason}. Use valid YAML; properties with "
+            'multiple values need a list such as `["[[A]]", "[[B]]"]`.'
+        )
+
+
 # A note has no bound on its length, so a read of one needs its own. Sized so a full
-# window is a few thousand tokens: enough to work with, small enough that several reads
-# still leave room for the transcript in a 32k-64k local context.
-_READ_DEFAULT_LINES = 400
+# window is about two thousand tokens: enough to inspect one note, small enough that a
+# model can inspect several candidates without crowding the transcript out of context.
+_READ_DEFAULT_LINES = 200
 _READ_MAX_LINES = 2000
-_READ_MAX_CHARS = 20000
 
 
 class VaultToolError(Exception):
@@ -188,6 +204,62 @@ def _assert_new_note_schema(rel: str, content: str) -> None:
     )
 
 
+def _assert_immutable_sections(
+    rel: str,
+    before: str,
+    after: str,
+    immutable_sections: Sequence[tuple[str, str]],
+) -> None:
+    """Reject writes to sections owned by another Chronicle record type."""
+
+    changed = changed_immutable_sections(rel, before, after, immutable_sections)
+    if not changed:
+        return
+    rendered = ", ".join(f"'## {heading}'" for heading in changed)
+    raise VaultToolError(
+        f"Refusing to write '{rel}': immutable section(s) {rendered} belong to a "
+        "different record path. For day writes, Daily/Timeline owns chronology; "
+        "People notes may receive only durable facts under '## About'."
+    )
+
+
+def _assert_no_new_topic_scope_overlap(
+    tools: "VaultTools",
+    rel: str,
+    prospective_content: str,
+) -> None:
+    """Reject the mutation that would introduce two substantially duplicate Topics."""
+
+    parts = Path(rel).parts
+    if len(parts) != 2 or parts[0].casefold() != "topics":
+        return
+    current = {
+        path.relative_to(tools.root).as_posix(): path.read_text(
+            encoding="utf-8", errors="replace"
+        )
+        for path in tools._all_md()
+    }
+    current[rel] = prospective_content
+    overlaps = new_topic_scope_overlaps(tools.baseline(), current)
+    relevant = next(
+        (
+            overlap
+            for overlap in overlaps
+            if overlap.path == rel or overlap.other_path == rel
+        ),
+        None,
+    )
+    if relevant is None:
+        return
+    peer = relevant.other_path if relevant.path == rel else relevant.path
+    raise VaultToolError(
+        f"Refusing to write '{rel}': its Topic scope would overlap {peer}; "
+        f"{relevant.matched_bullets}/{relevant.total_bullets} substantive bullets "
+        "repeat the same facts. Keep one canonical Topic and add only genuinely "
+        "distinct facts to it."
+    )
+
+
 class VaultTools:
     """Filesystem-scoped tool implementations for one user's vault."""
 
@@ -198,6 +270,8 @@ class VaultTools:
         trace_context: Any = None,
         required_notes: Sequence[str] = (),
         forbidden_folders: Sequence[str] = (),
+        immutable_sections: Sequence[tuple[str, str]] = (),
+        allow_new_categories: bool = True,
         user_id: str = "",
     ):
         # Whose vault this is. Only search_images needs it — the visual index is a
@@ -208,6 +282,12 @@ class VaultTools:
         # Folders this run must not touch at all (a day write must not mint a
         # Conversations/ note, which is keyed by a conversation_id it does not have).
         self.forbidden_folders = tuple(forbidden_folders)
+        # Sections owned by another record type. A day write cannot turn a Person's
+        # Mentions into a second chronological day log.
+        self.immutable_sections = tuple(immutable_sections)
+        # A day records facts into the settled ontology. Category schema creation is
+        # deliberately reserved for conversation/manual curation paths.
+        self.allow_new_categories = bool(allow_new_categories)
         self.root = Path(vault_root).absolute()
         self.root.mkdir(parents=True, exist_ok=True)
         if self.root.is_symlink():
@@ -217,6 +297,9 @@ class VaultTools:
         self._resolved_root = self.root.resolve(strict=True)
         self._rg = shutil.which("rg")
         self._notesmd = os.getenv("NOTESMD_CLI_BIN") or shutil.which("notesmd-cli")
+        self._compact_unchanged_grep_results = os.getenv(
+            _GREP_RESULT_COMPACTION_ENV, "on"
+        ).strip().lower() not in {"0", "false", "off", "no"}
         # Pi dispatches through a loopback HTTP server on fresh request threads.
         # Retaining the caller's immutable OTEL context keeps those tool spans under
         # the Pi agent rather than creating unrelated root traces. Context variables
@@ -228,6 +311,11 @@ class VaultTools:
         # Unlike ``touched``, this is monotonic: editing the same note twice must
         # still mark both tool observations as mutating.
         self._mutation_count = 0
+        # A later grep may vary only its output limit even though ripgrep returns the
+        # same complete rows. Keep a content-addressed, run-local reference so Pi sees
+        # an explicit unchanged result instead of paying to replay thousands of chars.
+        # Every call still executes ripgrep; changed vault evidence therefore misses.
+        self._grep_cache: Dict[tuple[Any, ...], dict[str, Any]] = {}
         # Notes retired by a rename/merge this run. Each entry is
         # {"old_path", "new_path", "before"} — the audit step turns these into
         # ``rename`` ledger entries so a note vanishing is never invisible.
@@ -265,6 +353,8 @@ class VaultTools:
                 self.baseline(),
                 required=self.required_notes if self.touched else (),
                 forbidden_folders=self.forbidden_folders,
+                immutable_sections=self.immutable_sections,
+                forbid_new_categories=not self.allow_new_categories,
             )
         )
 
@@ -415,7 +505,9 @@ class VaultTools:
             raise VaultToolError(
                 "ripgrep (rg) is not installed in this environment; cannot search."
             )
-        args = [self._rg, "--no-messages", "--color=never"]
+        # The vault is a semantic datastore, not a Git working tree. Parent or local
+        # ignore files must not make valid notes disappear from the agent's view.
+        args = [self._rg, "--no-ignore", "--no-messages", "--color=never"]
         if ignore_case:
             args.append("-i")
         if glob:
@@ -447,22 +539,90 @@ class VaultTools:
                 f"Invalid regex {pattern!r}: {proc.stderr.strip() or 'ripgrep error'}"
             )
         out = proc.stdout.strip()
-        if not out:
-            return "No matches found."
         # Strip the leading "./" ripgrep adds when searching ".".
-        lines = [ln[2:] if ln.startswith("./") else ln for ln in out.splitlines()]
+        lines = (
+            [ln[2:] if ln.startswith("./") else ln for ln in out.splitlines()]
+            if out
+            else []
+        )
+        total_lines = len(lines)
         if len(lines) > head_limit:
             extra = len(lines) - head_limit
             lines = lines[:head_limit]
             lines.append(f"... ({extra} more line(s) truncated; refine the pattern)")
-        return "\n".join(lines)
+        result = "\n".join(lines) if lines else "No matches found."
+        if len(result) > _TOOL_RESULT_MAX_CHARS:
+            result = result[:_TOOL_RESULT_MAX_CHARS].rstrip()
+            result += (
+                "\n... (search output truncated at "
+                f"{_TOOL_RESULT_MAX_CHARS} characters; refine the pattern)"
+            )
+        if not self._compact_unchanged_grep_results:
+            return result
+        # Do not put result-shaping arguments in the query identity. ``context`` can
+        # reveal more content and ``head_limit`` can expose more already-matched rows,
+        # but the complete evidence hash below detects those real changes. Excluding
+        # both lets an increasing argument compact as soon as it stops revealing any
+        # new evidence instead of creating an unbounded series of cache partitions.
+        cache_key = (pattern, glob, output_mode, bool(ignore_case))
+        # ripgrep may emit matching files in a different order across identical
+        # invocations (its directory walker is parallel).  Hash the complete result
+        # as an order-independent multiset so shuffled output is still recognised as
+        # the same vault evidence.  Keep duplicates: they can represent distinct
+        # matching/context lines with identical text.
+        # The comparison must cover the untruncated result, not just the visible
+        # prefix.  Recreate its normalized identity from ``out`` after removing the
+        # cosmetic leading ``./`` added by ripgrep.
+        all_lines = (
+            [ln[2:] if ln.startswith("./") else ln for ln in out.splitlines()]
+            if out
+            else []
+        )
+        evidence_sha256 = hashlib.sha256(
+            "\n".join(sorted(all_lines)).encode()
+        ).hexdigest()
+        result_id = hashlib.sha256(
+            json.dumps(
+                [*cache_key, evidence_sha256],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()[:12]
+        previous = self._grep_cache.get(cache_key)
+        self._grep_cache[cache_key] = {
+            "evidence_sha256": evidence_sha256,
+            "result_id": result_id,
+            "total_lines": total_lines,
+            "max_head_limit": max(
+                int(head_limit),
+                int(previous.get("max_head_limit", 0)) if previous else 0,
+            ),
+        }
+        if (
+            previous is not None
+            and previous.get("evidence_sha256") == evidence_sha256
+            # A larger limit may intentionally expose evidence that was previously
+            # truncated.  Replaying the same or a smaller window cannot.
+            and not (
+                int(head_limit) > int(previous.get("max_head_limit", 0))
+                and int(previous.get("max_head_limit", 0)) < total_lines
+            )
+        ):
+            return (
+                f"Search result unchanged [grep:{result_id}]: no new vault evidence; "
+                f"same {total_lines} result line(s) as prior. Changing ignored arguments "
+                "or head_limit adds no output. Do not request this result again unless "
+                "the vault changed or a genuinely new question makes it relevant; "
+                "continue with the actor contract."
+            )
+        return result
 
     def glob(self, pattern: str) -> str:
         """Find notes by filename pattern (e.g. ``People/*.md``). Returns paths."""
         self._assert_root_safe()
         if self._rg:
             proc = subprocess.run(
-                [self._rg, "--files", "--glob", pattern],
+                [self._rg, "--no-ignore", "--files", "--glob", pattern],
                 cwd=self.root,
                 capture_output=True,
                 text=True,
@@ -480,7 +640,11 @@ class VaultTools:
     # --- read / write -------------------------------------------------------
 
     def read_note(
-        self, path: str, offset: int = 0, limit: int = _READ_DEFAULT_LINES
+        self,
+        path: str,
+        offset: int = 0,
+        limit: int = _READ_DEFAULT_LINES,
+        char_offset: int = 0,
     ) -> str:
         """Read a window of a note, numbered from ``offset``.
 
@@ -502,8 +666,11 @@ class VaultTools:
         try:
             offset = max(0, int(offset))
             limit = int(limit)
+            char_offset = max(0, int(char_offset))
         except (TypeError, ValueError):
-            raise VaultToolError("read_note offset and limit must be integers.")
+            raise VaultToolError(
+                "read_note offset, limit, and char_offset must be integers."
+            )
         if limit <= 0:
             limit = _READ_DEFAULT_LINES
         limit = min(limit, _READ_MAX_LINES)
@@ -516,19 +683,30 @@ class VaultTools:
         window = lines[offset : offset + limit]
 
         # A single very long line can still blow the window, so cap the characters too.
-        body = "".join(window)
+        window_body = "".join(window)
+        if char_offset > len(window_body):
+            raise VaultToolError(
+                f"read_note char_offset {char_offset} exceeds this window's "
+                f"{len(window_body)} characters."
+            )
+        body = window_body[char_offset:]
         char_capped = False
-        if len(body) > _READ_MAX_CHARS:
-            body = body[:_READ_MAX_CHARS]
+        if len(body) > _TOOL_RESULT_MAX_CHARS:
+            body = body[:_TOOL_RESULT_MAX_CHARS]
             char_capped = True
 
         shown_to = offset + len(window)
-        if offset == 0 and shown_to >= total and not char_capped:
+        if offset == 0 and char_offset == 0 and shown_to >= total and not char_capped:
             return body
         notes = [f"[showing lines {offset + 1}-{shown_to} of {total}]"]
         if char_capped:
-            notes.append(f"[truncated at {_READ_MAX_CHARS} characters]")
-        if shown_to < total:
+            notes.append(f"[truncated at {_TOOL_RESULT_MAX_CHARS} characters]")
+            notes.append(
+                "[continue this window with "
+                f"read_note(path, offset={offset}, limit={limit}, "
+                f"char_offset={char_offset + _TOOL_RESULT_MAX_CHARS})]"
+            )
+        elif shown_to < total:
             notes.append(
                 f"[continue with read_note(path, offset={shown_to}) — or prefer "
                 f"grep to find the part you need, and edit_section to append without "
@@ -549,7 +727,19 @@ class VaultTools:
                 new_content = apply_edits(content, parsed, path)
             except EditError as e:
                 raise VaultToolError(str(e))
+            _assert_parseable_frontmatter(path, new_content)
             _assert_no_new_section_dupes(path, content, new_content)
+            _assert_immutable_sections(
+                self._resolve_ci(_safe_relpath(path)),
+                content,
+                new_content,
+                self.immutable_sections,
+            )
+            _assert_no_new_topic_scope_overlap(
+                self,
+                self._resolve_ci(_safe_relpath(path)),
+                new_content,
+            )
             fp.write_text(new_content, encoding="utf-8")
             self._mark_touched(self._resolve_ci(_safe_relpath(path)))
         return f"Edited {path} ({len(edits)} replacement(s))."
@@ -576,7 +766,19 @@ class VaultTools:
                 new_content = apply_section_edit(content, target, text, operation)
             except SectionEditError as e:
                 raise VaultToolError(str(e))
+            _assert_parseable_frontmatter(path, new_content)
             _assert_no_new_section_dupes(path, content, new_content)
+            _assert_immutable_sections(
+                self._resolve_ci(_safe_relpath(path)),
+                content,
+                new_content,
+                self.immutable_sections,
+            )
+            _assert_no_new_topic_scope_overlap(
+                self,
+                self._resolve_ci(_safe_relpath(path)),
+                new_content,
+            )
             fp.write_text(new_content, encoding="utf-8")
             self._mark_touched(self._resolve_ci(_safe_relpath(path)))
         return f"Edited {path} ({operation} under '{target}')."
@@ -612,7 +814,15 @@ class VaultTools:
                     f"read_note it and edit_note only the new lines."
                 )
             before = fp.read_text(encoding="utf-8") if existed else ""
+            _assert_parseable_frontmatter(rel, content)
             _assert_no_new_section_dupes(rel, before, content)
+            _assert_immutable_sections(
+                rel,
+                before,
+                content,
+                self.immutable_sections,
+            )
+            _assert_no_new_topic_scope_overlap(self, rel, content)
             if not existed:
                 _assert_new_note_schema(rel, content)
             fp.parent.mkdir(parents=True, exist_ok=True)
@@ -632,6 +842,17 @@ class VaultTools:
         except VaultPathError as exc:
             raise VaultToolError(f"Invalid category name {name!r}: {exc}") from exc
         with self._locked():
+            category_files = build_category_files(category, properties or [])
+            missing = [
+                rel for rel in category_files if not self._confined_path(rel).exists()
+            ]
+            if missing and not self.allow_new_categories:
+                raise VaultToolError(
+                    f"Refusing to create category '{category}' during a day write. "
+                    "Daily ingestion may update existing ontology notes, but category "
+                    "hub/template/Base design is a separate curated operation. Keep "
+                    "the entity in the Daily index or as an unresolved wikilink."
+                )
             try:
                 created = write_category(self.root, category, properties or [])
             except VaultPathError as exc:
@@ -656,6 +877,18 @@ class VaultTools:
             if not old_fp.exists():
                 raise VaultToolError(
                     f"Person note 'People/{old_name}.md' does not exist."
+                )
+            # ``_abs`` deliberately resolves paths case-insensitively so a Linux
+            # writer cannot create two notes that collide on macOS/Windows. The same
+            # rule means a model's harmless casing normalization (``anushpa`` ->
+            # ``Anushpa``) resolves both arguments to the one existing note. Treat
+            # that repeated request as success: routing it through the merge service
+            # raises ``PersonMergeError`` and consumes a repair round even though no
+            # vault mutation is needed.
+            if old_fp == new_fp:
+                return (
+                    f"People/{old_fp.name} already resolves both '{old_name}' and "
+                    f"'{new_name}'; no rename is needed."
                 )
             # Both merge implementations scan and rewrite backlinks across the
             # complete vault. Reject a symlink anywhere before handing paths to
@@ -852,6 +1085,7 @@ class VaultTools:
                 args["path"],
                 offset=args.get("offset", 0),
                 limit=args.get("limit", _READ_DEFAULT_LINES),
+                char_offset=args.get("char_offset", 0),
             )
         if name == "edit_note":
             return self.edit_note(args["path"], args["edits"])
@@ -1006,6 +1240,20 @@ _READ_TOOL = {
                     "description": (
                         f"Lines to return (default {_READ_DEFAULT_LINES}, max "
                         f"{_READ_MAX_LINES})."
+                    ),
+                },
+                "char_offset": {
+                    "type": "integer",
+                    "description": (
+                        "0-based character cursor within the selected line window; "
+                        "use the continuation value returned for a very long line."
+                    ),
+                },
+                "refresh": {
+                    "type": "boolean",
+                    "description": (
+                        "Return the bytes again even if this exact unchanged window "
+                        "was already read during the current Pi run. Default false."
                     ),
                 },
             },

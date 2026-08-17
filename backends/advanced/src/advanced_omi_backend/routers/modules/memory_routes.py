@@ -5,13 +5,18 @@ Handles memory CRUD operations, search, and debug functionality.
 """
 
 import logging
-from typing import Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from advanced_omi_backend.auth import current_active_user, current_superuser
 from advanced_omi_backend.controllers import memory_controller
+from advanced_omi_backend.services.memory.agent.operating_memory import (
+    OperatingMemoryStore,
+    VaultToolError,
+)
 from advanced_omi_backend.services.memory.person_merge import (
     PersonMergeError,
     PersonMergeStale,
@@ -22,11 +27,18 @@ from advanced_omi_backend.services.memory.person_merge_actions import (
     preview_person_merge,
     set_people_distinct,
 )
+from advanced_omi_backend.services.observability.system_events import record_event
 from advanced_omi_backend.users import User
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/memories", tags=["memories"])
+
+
+async def _run_blocking(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run one filesystem operation on Starlette's managed worker pool."""
+
+    return await run_in_threadpool(function, *args, **kwargs)
 
 
 class AddMemoryRequest(BaseModel):
@@ -62,9 +74,28 @@ class PersonIdentityDecisionRequest(BaseModel):
     revision: Optional[str] = None
 
 
+class OperatingMemoryReviewRequest(BaseModel):
+    """Human evaluation decision for one shadow AGENTS.md candidate."""
+
+    decision: Literal["approve", "reject"]
+    rationale: str
+    evidence_ids: list[str]
+
+
 def _person_merge_http_error(error: PersonMergeError) -> HTTPException:
     status = 409 if isinstance(error, PersonMergeStale) else 422
     return HTTPException(status_code=status, detail=str(error))
+
+
+def _operating_memory_http_error(error: VaultToolError) -> HTTPException:
+    detail = str(error)
+    if detail.startswith("Unknown"):
+        status = 404
+    elif "stale" in detail or "must be approved" in detail:
+        status = 409
+    else:
+        status = 422
+    return HTTPException(status_code=status, detail=detail)
 
 
 @router.get("")
@@ -212,6 +243,139 @@ async def set_people_identity(
         )
     except PersonMergeError as error:
         raise _person_merge_http_error(error) from error
+
+
+@router.get("/operating-memory")
+async def get_operating_memory(
+    candidate_limit: int = Query(default=100, ge=1, le=500),
+    revision_limit: int = Query(default=100, ge=1, le=500),
+    current_user: User = Depends(current_active_user),
+):
+    """Inspect the current user's active Pi guidance, candidates, and revisions."""
+
+    store = OperatingMemoryStore(current_user.user_id)
+
+    def read_overview() -> (
+        tuple[str, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]
+    ):
+        return (
+            store.read_agents(),
+            store.list_candidates(candidate_limit),
+            store.list_revisions(revision_limit),
+            store.load_state(),
+        )
+
+    active_agents, candidates, revisions, state = await _run_blocking(read_overview)
+    return {
+        "user_id": current_user.user_id,
+        "active_agents": active_agents,
+        "candidates": candidates,
+        "revisions": revisions,
+        "optimizer": {
+            "last_optimized_at": state.get("last_optimized_at"),
+            "processed_trace_count": len(state.get("processed_artifact_hashes") or []),
+        },
+    }
+
+
+@router.get("/operating-memory/candidates/{candidate_id}")
+async def get_operating_memory_candidate(
+    candidate_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Read one bounded candidate before an explicit review decision."""
+
+    try:
+        store = OperatingMemoryStore(current_user.user_id)
+        return await _run_blocking(store.read_candidate, candidate_id)
+    except VaultToolError as error:
+        raise _operating_memory_http_error(error) from error
+
+
+@router.post("/operating-memory/candidates/{candidate_id}/review")
+async def review_operating_memory_candidate(
+    candidate_id: str,
+    request: OperatingMemoryReviewRequest,
+    current_user: User = Depends(current_active_user),
+):
+    """Approve or reject a candidate without activating it."""
+
+    try:
+        store = OperatingMemoryStore(current_user.user_id)
+        message = await _run_blocking(
+            store.review_agents_candidate,
+            candidate_id,
+            decision=request.decision,
+            rationale=request.rationale,
+            evidence_ids=request.evidence_ids,
+        )
+    except VaultToolError as error:
+        raise _operating_memory_http_error(error) from error
+    await record_event(
+        severity="info",
+        category="memory",
+        source="pi_operating_memory",
+        title=(
+            "Pi operating-memory candidate approved"
+            if request.decision == "approve"
+            else "Pi operating-memory candidate rejected"
+        ),
+        detail=message,
+        user_id=current_user.user_id,
+        metadata={"candidate_id": candidate_id, "decision": request.decision},
+    )
+    candidate = await _run_blocking(store.read_candidate, candidate_id)
+    return {"message": message, "candidate": candidate}
+
+
+@router.post("/operating-memory/candidates/{candidate_id}/promote")
+async def promote_operating_memory_candidate(
+    candidate_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Activate one reviewed AGENTS.md candidate with stale-base protection."""
+
+    try:
+        store = OperatingMemoryStore(current_user.user_id)
+        message = await _run_blocking(store.promote_agents_candidate, candidate_id)
+    except VaultToolError as error:
+        raise _operating_memory_http_error(error) from error
+    await record_event(
+        severity="info",
+        category="memory",
+        source="pi_operating_memory",
+        title="Pi operating-memory candidate promoted",
+        detail=message,
+        user_id=current_user.user_id,
+        metadata={"candidate_id": candidate_id},
+    )
+    active_agents = await _run_blocking(store.read_agents)
+    return {"message": message, "active_agents": active_agents}
+
+
+@router.post("/operating-memory/revisions/{revision_id}/rollback")
+async def rollback_operating_memory_revision(
+    revision_id: str,
+    current_user: User = Depends(current_active_user),
+):
+    """Restore the active guidance that preceded a selected revision."""
+
+    try:
+        store = OperatingMemoryStore(current_user.user_id)
+        message = await _run_blocking(store.rollback_agents_revision, revision_id)
+    except VaultToolError as error:
+        raise _operating_memory_http_error(error) from error
+    await record_event(
+        severity="warning",
+        category="memory",
+        source="pi_operating_memory",
+        title="Pi operating memory rolled back",
+        detail=message,
+        user_id=current_user.user_id,
+        metadata={"revision_id": revision_id},
+    )
+    active_agents = await _run_blocking(store.read_agents)
+    return {"message": message, "active_agents": active_agents}
 
 
 @router.delete("/{memory_id}")

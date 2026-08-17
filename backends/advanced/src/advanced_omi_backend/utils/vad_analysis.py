@@ -21,11 +21,9 @@ import numpy as np
 from pymongo import UpdateOne
 
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
+from advanced_omi_backend.services.audio_claims import resolve_conversation_audio
 from advanced_omi_backend.services.vad import get_vad_provider
-from advanced_omi_backend.utils.audio_chunk_utils import (
-    concatenate_chunks_to_pcm,
-    retrieve_audio_chunks,
-)
+from advanced_omi_backend.utils.audio_chunk_utils import decode_opus_to_pcm
 
 logger = logging.getLogger(__name__)
 
@@ -408,53 +406,26 @@ async def analyze_conversation_audio(conversation_id: str) -> dict:
     total_duration = 0.0
     raw_intervals: List[List[float]] = []  # frame-accurate speech intervals
 
-    batch_index = 0
-    while True:
-        chunks = await retrieve_audio_chunks(
-            conversation_id=conversation_id,
-            start_index=batch_index * BATCH_CHUNKS,
-            limit=BATCH_CHUNKS,
-        )
-        if not chunks:
-            break
+    claimed = await resolve_conversation_audio(conversation_id)
+    if not claimed:
+        raise ValueError(f"Conversation {conversation_id} has no analyzable audio")
 
-        sample_rate = chunks[0].sample_rate
-        channels = chunks[0].channels
-        pcm = await concatenate_chunks_to_pcm(chunks)
-        samples = _pcm_to_mono_int16(pcm, channels)
-
-        # Partition the decoded stream back into chunks by expected sample
-        # counts; decode drift is at most a few samples, far below the VAD
-        # frame size, so boundary error is irrelevant. The final chunk takes
-        # any remainder.
-        updates = []
-        cursor = 0
-        for i, chunk in enumerate(chunks):
-            if i == len(chunks) - 1:
-                chunk_samples = samples[cursor:]
-            else:
-                n = int(round(chunk.duration * sample_rate))
-                chunk_samples = samples[cursor : cursor + n]
-                cursor += n
-
-            scores = provider.score(chunk_samples, sample_rate)
-            if scores.size:
-                max_score = float(scores.max())
-                bin_idx = np.minimum(
-                    (scores / HISTOGRAM_BIN_WIDTH).astype(int), HISTOGRAM_BINS - 1
-                )
-                counts = np.bincount(bin_idx, minlength=HISTOGRAM_BINS)
-                for b in range(HISTOGRAM_BINS):
-                    histogram[b] += int(counts[b])
-                total_frames += int(scores.size)
-                raw_intervals.extend(
-                    frame_speech_intervals(
-                        scores, provider.frame_hop_ms / 1000.0, chunk.start_time
-                    )
-                )
-            else:
-                max_score = 0.0
-
+    score_cache: dict[str, np.ndarray] = {}
+    updates = []
+    for item in claimed:
+        chunk = item.chunk
+        chunk_id = str(chunk.id)
+        scores = score_cache.get(chunk_id)
+        if scores is None:
+            pcm = await decode_opus_to_pcm(
+                bytes(chunk.audio_data),
+                sample_rate=chunk.sample_rate,
+                channels=chunk.channels,
+            )
+            samples = _pcm_to_mono_int16(pcm, chunk.channels)
+            scores = provider.score(samples, chunk.sample_rate)
+            score_cache[chunk_id] = scores
+            max_score = float(scores.max()) if scores.size else 0.0
             updates.append(
                 UpdateOne(
                     {"_id": chunk.id},
@@ -472,14 +443,37 @@ async def analyze_conversation_audio(conversation_id: str) -> dict:
                     },
                 )
             )
-            total_duration += chunk.duration
 
-        if updates:
-            await collection.bulk_write(updates, ordered=False)
+        hop_seconds = provider.frame_hop_ms / 1000.0
+        first_frame = max(0, int(np.floor(item.clip_start_seconds / hop_seconds)))
+        last_frame = min(len(scores), int(np.ceil(item.clip_end_seconds / hop_seconds)))
+        claim_scores = scores[first_frame:last_frame]
+        if claim_scores.size:
+            bin_idx = np.minimum(
+                (claim_scores / HISTOGRAM_BIN_WIDTH).astype(int), HISTOGRAM_BINS - 1
+            )
+            counts = np.bincount(bin_idx, minlength=HISTOGRAM_BINS)
+            for bin_number in range(HISTOGRAM_BINS):
+                histogram[bin_number] += int(counts[bin_number])
+            total_frames += int(claim_scores.size)
+            interval_start = (
+                item.conversation_start_seconds
+                - item.clip_start_seconds
+                + first_frame * hop_seconds
+            )
+            claim_start = item.conversation_start_seconds
+            claim_end = claim_start + item.duration_seconds
+            raw_intervals.extend(
+                [max(start, claim_start), min(end, claim_end)]
+                for start, end in frame_speech_intervals(
+                    claim_scores, hop_seconds, interval_start
+                )
+                if start < claim_end and end > claim_start
+            )
+        total_duration += item.duration_seconds
 
-        if len(chunks) < BATCH_CHUNKS:
-            break
-        batch_index += 1
+    if updates:
+        await collection.bulk_write(updates, ordered=False)
 
     if total_frames == 0:
         raise ValueError(

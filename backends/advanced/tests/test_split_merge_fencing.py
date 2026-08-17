@@ -1,11 +1,11 @@
-"""Split and merge must not launder what a recording is.
+"""Split and merge must not launder a Conversation's policy or provenance.
 
 An operation that only moves audio must preserve the audio's identity, and
 ``create_conversation`` defaults every part of that identity off:
 
-- ``data_purpose``/``memory_excluded`` — ScreenPipe audio is ingested as
-  ``capture_evidence`` with ``memory_excluded=True``; a child that does not inherit
-  them is memory-eligible, and an hour of ambient room audio walks into the vault.
+- ``data_purpose``/``memory_excluded`` — Timeline-day-owned ScreenPipe Conversations
+  are visible but excluded from per-Conversation memory. A child that does not inherit
+  that policy duplicates continuous evidence in the vault.
 - ``external_source_type``/``external_source_id`` — the timeline selects its audio
   evidence by source type and reads the capture direction out of the source id, so a
   child without them vanishes from the timeline and loses its media/speech role.
@@ -18,6 +18,7 @@ Verified against real MongoDB:
 """
 
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -26,6 +27,7 @@ from beanie import init_beanie
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from advanced_omi_backend.controllers import data_audit_controller as dac
+from advanced_omi_backend.models.audio_capture import AudioRangeRef
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation, create_conversation
 
@@ -56,21 +58,48 @@ async def clean_db(init_db):
     yield
 
 
-async def _evidence(
-    n_chunks, start=EPOCH, *, excluded=True, purpose="capture_evidence"
-):
+async def _evidence(n_chunks, start=EPOCH, *, excluded=True, purpose="conversation"):
+    capture_id = f"capture-{uuid.uuid4()}"
+    chunks = []
+    for i in range(n_chunks):
+        chunk = AudioChunkDocument(
+            user_id="u1",
+            capture_source_id="u1-screenpipe-abc-output",
+            capture_session_id=capture_id,
+            sequence=i,
+            audio_data=b"x",
+            original_size=1,
+            compressed_size=1,
+            duration=10.0,
+            captured_at=start + timedelta(seconds=i * 10.0),
+        )
+        await chunk.insert()
+        chunks.append(chunk)
+    audio_range = AudioRangeRef(
+        capture_source_id="u1-screenpipe-abc-output",
+        time_basis="recorded",
+        capture_session_ids=[capture_id],
+        chunk_ids=[str(chunk.id) for chunk in chunks],
+        started_at=start,
+        ended_at=start + timedelta(seconds=n_chunks * 10),
+    )
     conv = create_conversation(
         user_id="u1",
         client_id="u1-screenpipe-abc-output",
         data_purpose=purpose,
         memory_excluded=excluded,
-        memory_exclusion_reason="continuous_screenpipe_capture" if excluded else None,
+        memory_exclusion_reason=(
+            "timeline_day_memory_owns_continuous_capture" if excluded else None
+        ),
         external_source_type="screenpipe",
         external_source_id="screenpipe:abc:output",
+        audio_ranges=[audio_range],
+        started_at=audio_range.started_at,
+        ended_at=audio_range.ended_at,
     )
     conv.created_at = start
     conv.audio_chunks_count = n_chunks
-    conv.audio_total_duration = n_chunks * 10.0
+    conv.audio_total_duration = audio_range.duration_seconds
     conv.add_transcript_version(
         version_id=f"v-{conv.conversation_id[:8]}",
         transcript="hello",
@@ -82,22 +111,12 @@ async def _evidence(
         set_as_active=True,
     )
     await conv.insert()
-    for i in range(n_chunks):
-        await AudioChunkDocument(
-            conversation_id=conv.conversation_id,
-            chunk_index=i,
-            audio_data=b"x",
-            original_size=1,
-            compressed_size=1,
-            start_time=i * 10.0,
-            end_time=(i + 1) * 10.0,
-            duration=10.0,
-            captured_at=start + timedelta(seconds=i * 10.0),
-        ).insert()
     return conv
 
 
-async def test_merging_two_evidence_recordings_keeps_them_fenced(clean_db, monkeypatch):
+async def test_merging_two_excluded_recordings_keeps_memory_policy(
+    clean_db, monkeypatch
+):
     monkeypatch.setattr(dac, "start_post_conversation_jobs", lambda *a, **k: {})
     first = await _evidence(6)
     second = await _evidence(6, EPOCH + timedelta(seconds=60))
@@ -111,11 +130,13 @@ async def test_merging_two_evidence_recordings_keeps_them_fenced(clean_db, monke
     )
     assert merged is not None
     assert merged.memory_excluded is True
-    assert merged.data_purpose == "capture_evidence"
+    assert merged.data_purpose == "conversation"
 
 
-async def test_merging_a_promoted_part_unfences_the_whole_span(clean_db, monkeypatch):
-    """One promoted part means that stretch was judged conversational."""
+async def test_merging_a_memory_eligible_part_unfences_the_whole_span(
+    clean_db, monkeypatch
+):
+    """One eligible part means the merged semantic span is memory eligible."""
     monkeypatch.setattr(dac, "start_post_conversation_jobs", lambda *a, **k: {})
     fenced = await _evidence(6)
     promoted = await _evidence(
@@ -135,7 +156,9 @@ async def test_merging_a_promoted_part_unfences_the_whole_span(clean_db, monkeyp
     assert merged.data_purpose == "conversation"
 
 
-async def test_splitting_evidence_keeps_every_child_fenced(clean_db, monkeypatch):
+async def test_splitting_excluded_recording_keeps_every_child_excluded(
+    clean_db, monkeypatch
+):
     monkeypatch.setattr(dac, "start_post_conversation_jobs", lambda *a, **k: {})
     monkeypatch.setattr(dac, "_delete_source_memories", _noop)
     conv = await _evidence(12)
@@ -149,7 +172,7 @@ async def test_splitting_evidence_keeps_every_child_fenced(clean_db, monkeypatch
     ).to_list()
     assert len(children) == 2
     assert all(child.memory_excluded for child in children)
-    assert all(child.data_purpose == "capture_evidence" for child in children)
+    assert all(child.data_purpose == "conversation" for child in children)
 
 
 async def test_children_keep_the_source_and_the_time_of_their_audio(

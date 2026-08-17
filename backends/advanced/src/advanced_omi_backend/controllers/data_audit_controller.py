@@ -34,8 +34,14 @@ from advanced_omi_backend.controllers.queue_controller import (
     start_post_conversation_jobs,
 )
 from advanced_omi_backend.models.annotation import Annotation, AnnotationType
-from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation, create_conversation
+from advanced_omi_backend.services.audio_claims import (
+    apply_audio_ranges,
+    merge_audio_ranges,
+    partition_audio_ranges,
+    resolve_audio_ranges,
+    resolve_conversation_audio,
+)
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 from advanced_omi_backend.users import User
@@ -919,15 +925,6 @@ async def archive_audio_many(user: User, conversation_ids: List[str], reason: st
 # Split / merge
 # ---------------------------------------------------------------------------
 
-# Projection for chunk timeline reads — never pull audio_data.
-_CHUNK_META_PROJECTION = {
-    "chunk_index": 1,
-    "start_time": 1,
-    "end_time": 1,
-    "duration": 1,
-    "vad.max_score": 1,
-}
-
 
 async def _load_operable_conversation(
     user: User, conversation_id: str
@@ -968,12 +965,18 @@ async def _load_operable_conversation(
 
 
 async def _chunk_timeline(conversation_id: str) -> List[dict]:
-    """Chunk metadata (no audio bytes) sorted by chunk_index."""
-    collection = AudioChunkDocument.get_pymongo_collection()
-    cursor = collection.find(
-        {"conversation_id": conversation_id}, _CHUNK_META_PROJECTION
-    ).sort("chunk_index", 1)
-    return await cursor.to_list(length=None)
+    """Virtual presentation timeline derived from immutable audio claims."""
+    claimed = await resolve_conversation_audio(conversation_id)
+    return [
+        {
+            "chunk_index": index,
+            "start_time": item.conversation_start_seconds,
+            "end_time": item.conversation_start_seconds + item.duration_seconds,
+            "duration": item.duration_seconds,
+            "vad": item.chunk.vad.model_dump() if item.chunk.vad else None,
+        }
+        for index, item in enumerate(claimed)
+    ]
 
 
 def _active_transcript_version(
@@ -1094,14 +1097,6 @@ async def get_speech_regions(
     if not wanted and va_fresh and va.speech_regions is not None:
         regions = va.speech_regions
     else:
-        # Derive from chunk frame scores with a streaming cursor (score
-        # vectors are ~5KB per chunk; never materialize them all at once).
-        collection = AudioChunkDocument.get_pymongo_collection()
-        cursor = collection.find(
-            {"conversation_id": conversation_id},
-            {"start_time": 1, "end_time": 1, "vad.scores": 1, "vad.frame_hop_ms": 1},
-        ).sort("chunk_index", 1)
-
         # Derive regions from the chunks that have scores; chunks missing them
         # contribute no speech intervals (treated as non-speech for speech-only
         # playback — full-audio mode still plays everything). Only report
@@ -1114,7 +1109,7 @@ async def get_speech_regions(
         raw_intervals: List[List[float]] = []
         scored_any = False
         last_end = 0.0
-        async for chunk in cursor:
+        for chunk in await _chunk_timeline(conversation_id):
             vad = chunk.get("vad")
             last_end = max(last_end, float(chunk["end_time"]))
             if not vad or vad.get("scores") is None:
@@ -1761,21 +1756,15 @@ def _slice_versions_onto_child(
 async def split_conversation(
     user: User, conversation_id: str, split_points: List[float]
 ):
-    """Split a conversation into children at the given time points.
-
-    Chunk documents are reassigned to the children (no audio re-encode); every
-    one of the parent's transcript versions is sliced by time range; the parent
-    is soft-deleted with lineage metadata; memory + title jobs run per child.
-    Crash-safe ordering without transactions: children are created first, the
-    parent is mutated last.
-    """
+    """Partition semantic range claims without rewriting capture chunks."""
     conversation, error = await _load_operable_conversation(user, conversation_id)
     if error:
         return error
 
+    children: List[Conversation] = []
     try:
-        chunks = await _chunk_timeline(conversation_id)
-        if not chunks:
+        duration = float(conversation.audio_total_duration or 0.0)
+        if duration <= 0 or not conversation.audio_ranges:
             return JSONResponse(
                 status_code=409, content={"error": "Conversation has no audio chunks"}
             )
@@ -1796,31 +1785,32 @@ async def split_conversation(
                 moved_cuts,
             )
 
-        boundary_indices, message = _snap_split_points(adjusted_points, chunks)
-        if message:
-            return JSONResponse(status_code=422, content={"error": message})
+        if any(point <= 0 or point >= duration for point in adjusted_points):
+            return JSONResponse(
+                status_code=422,
+                content={"error": f"Split points must lie inside (0, {duration})"},
+            )
+        if len(set(adjusted_points)) != len(adjusted_points):
+            return JSONResponse(
+                status_code=422, content={"error": "Split points must be unique"}
+            )
 
-        # Build [start_index, end_index) chunk ranges for each child.
-        edges = [0] + boundary_indices + [len(chunks)]
-        chunk_by_index = {int(c["chunk_index"]): c for c in chunks}
+        claim_groups = await partition_audio_ranges(
+            conversation.audio_ranges, adjusted_points
+        )
+        edges = [0.0, *adjusted_points, duration]
         now = datetime.now(timezone.utc)
 
-        children: List[Conversation] = []
         child_specs: List[dict] = []
-        for a, b in zip(edges[:-1], edges[1:]):
-            t0 = float(chunk_by_index[a]["start_time"])
-            t1 = float(chunk_by_index[b - 1]["end_time"])
-
+        for t0, t1, ranges in zip(edges[:-1], edges[1:], claim_groups):
             child = create_conversation(
                 user_id=conversation.user_id,
                 client_id=conversation.client_id,
-                # Inherit the parent's fencing. Splitting continuous capture must not
-                # launder it into memory-eligible conversations: create_conversation
-                # defaults to data_purpose=None/memory_excluded=False, so omitting
-                # these silently promotes every child.
                 data_purpose=conversation.data_purpose,
                 memory_excluded=conversation.memory_excluded,
                 memory_exclusion_reason=conversation.memory_exclusion_reason,
+                origin=conversation.origin,
+                audio_ranges=ranges,
             )
             child.derived_from = Conversation.DerivedFrom(
                 operation="split",
@@ -1829,22 +1819,10 @@ async def split_conversation(
                 performed_at=now,
                 performed_by=str(user.user_id),
             )
-            # A child begins where its audio begins, not when the split ran.
-            # Consumers that date a recording by created_at would otherwise pile
-            # every child onto today instead of the day it was recorded. (The
-            # timeline itself now dates evidence by the chunks' captured_at.)
-            child.created_at = conversation.created_at + timedelta(seconds=t0)
             child.external_source_type = conversation.external_source_type
             child.external_source_id = conversation.external_source_id
             child.end_reason = conversation.end_reason
-            child.audio_chunks_count = b - a
-            child.audio_total_duration = round(
-                sum(
-                    float(chunk_by_index[i].get("duration") or 0.0) for i in range(a, b)
-                ),
-                2,
-            )
-            child.audio_compression_ratio = conversation.audio_compression_ratio
+            await apply_audio_ranges(child, ranges, save=False)
 
             version_id = _slice_versions_onto_child(child, conversation, t0, t1)
 
@@ -1855,9 +1833,7 @@ async def split_conversation(
 
             await child.insert()
             children.append(child)
-            child_specs.append(
-                {"a": a, "b": b, "t0": t0, "t1": t1, "version_id": version_id}
-            )
+            child_specs.append({"t0": t0, "t1": t1, "version_id": version_id})
 
         # Re-validate just before mutating chunks (no lock; admin tool).
         current = await Conversation.find_one(
@@ -1871,32 +1847,11 @@ async def split_conversation(
                 content={"error": "Conversation changed during split; aborted"},
             )
 
-        # Move chunks to the children: re-id, re-index, shift times.
-        collection = AudioChunkDocument.get_pymongo_collection()
-        for child, spec in zip(children, child_specs):
-            await collection.update_many(
-                {
-                    "conversation_id": conversation_id,
-                    "chunk_index": {"$gte": spec["a"], "$lt": spec["b"]},
-                },
-                [
-                    {
-                        "$set": {
-                            "conversation_id": child.conversation_id,
-                            "chunk_index": {"$subtract": ["$chunk_index", spec["a"]]},
-                            "start_time": {"$subtract": ["$start_time", spec["t0"]]},
-                            "end_time": {"$subtract": ["$end_time", spec["t0"]]},
-                        }
-                    }
-                ],
-            )
-
-        # Soft-delete the parent (chunks were moved, not deleted).
+        # Retire only the old semantic claim. Its ranges remain as lineage/evidence.
         conversation.deleted = True
         conversation.deletion_reason = "split"
         conversation.deleted_at = now
         conversation.derived_into = [c.conversation_id for c in children]
-        conversation.audio_chunks_count = 0
         await conversation.save()
 
         await _delete_source_memories(conversation.user_id, conversation_id)
@@ -1935,6 +1890,15 @@ async def split_conversation(
         }
 
     except Exception as e:
+        for child in children:
+            try:
+                await child.delete()
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Could not remove partial split child %s: %s",
+                    child.conversation_id,
+                    cleanup_error,
+                )
         logger.exception(f"Error splitting conversation {conversation_id}: {e}")
         return JSONResponse(
             status_code=500, content={"error": "Error splitting conversation"}
@@ -2000,34 +1964,46 @@ async def merge_conversations(user: User, conversation_ids: List[str]):
                 },
             )
 
-        # Uniform audio format across all sources' chunks.
-        chunk_collection = AudioChunkDocument.get_pymongo_collection()
-        chunk_filter = {"conversation_id": {"$in": conversation_ids}}
-        sample_rates = await chunk_collection.distinct("sample_rate", chunk_filter)
-        channel_counts = await chunk_collection.distinct("channels", chunk_filter)
+        resolved_by_source = {
+            source.conversation_id: await resolve_audio_ranges(source.audio_ranges)
+            for source in sources
+        }
+        sample_rates = {
+            item.chunk.sample_rate
+            for claimed in resolved_by_source.values()
+            for item in claimed
+        }
+        channel_counts = {
+            item.chunk.channels
+            for claimed in resolved_by_source.values()
+            for item in claimed
+        }
         if len(sample_rates) > 1 or len(channel_counts) > 1:
             return JSONResponse(
                 status_code=422,
                 content={"error": "Conversations have mixed audio formats"},
             )
 
-        # Precise per-source duration/count from the chunks themselves.
         stats = {
-            row["_id"]: row
-            for row in await chunk_collection.aggregate(
-                [
-                    {"$match": chunk_filter},
+            source.conversation_id: {
+                "duration": sum(
+                    item.duration_seconds
+                    for item in resolved_by_source[source.conversation_id]
+                ),
+                "count": len(
                     {
-                        "$group": {
-                            "_id": "$conversation_id",
-                            "duration": {"$sum": "$duration"},
-                            "count": {"$sum": 1},
-                        }
-                    },
-                ]
-            ).to_list(length=None)
+                        str(item.chunk.id)
+                        for item in resolved_by_source[source.conversation_id]
+                    }
+                ),
+            }
+            for source in sources
         }
-        missing = [s.conversation_id for s in sources if s.conversation_id not in stats]
+        missing = [
+            source.conversation_id
+            for source in sources
+            if not resolved_by_source[source.conversation_id]
+        ]
         if missing:
             return JSONResponse(
                 status_code=409,
@@ -2053,8 +2029,8 @@ async def merge_conversations(user: User, conversation_ids: List[str]):
             memory_exclusion_reason=(
                 first.memory_exclusion_reason if len(fenced) == len(sources) else None
             ),
+            audio_ranges=merge_audio_ranges(source.audio_ranges for source in sources),
         )
-        merged.created_at = first.created_at
         # Where the audio came from survives a merge too. The timeline selects its
         # audio evidence by external_source_type and reads the capture direction out
         # of external_source_id, so a merged recording that drops them disappears from
@@ -2068,13 +2044,7 @@ async def merge_conversations(user: User, conversation_ids: List[str]):
             performed_by=str(user.user_id),
         )
         merged.end_reason = Conversation.EndReason.MERGE
-        merged.audio_chunks_count = sum(
-            int(stats[s.conversation_id]["count"]) for s in sources
-        )
-        merged.audio_total_duration = round(
-            sum(float(stats[s.conversation_id]["duration"]) for s in sources), 2
-        )
-        merged.audio_compression_ratio = first.audio_compression_ratio
+        await apply_audio_ranges(merged, merged.audio_ranges, save=False)
 
         def _concatenate(pick) -> tuple:
             """Concatenate one layer across the sources, with cumulative offsets.
@@ -2181,33 +2151,13 @@ async def merge_conversations(user: User, conversation_ids: List[str]):
         merged.title = first.title or f"Merged conversation ({len(sources)} parts)"
         await merged.insert()
 
-        # Move chunks: per source, offset index/time and re-id.
-        offset = 0.0
-        index_base = 0
-        for source in sources:
-            await chunk_collection.update_many(
-                {"conversation_id": source.conversation_id},
-                [
-                    {
-                        "$set": {
-                            "conversation_id": merged.conversation_id,
-                            "chunk_index": {"$add": ["$chunk_index", index_base]},
-                            "start_time": {"$add": ["$start_time", offset]},
-                            "end_time": {"$add": ["$end_time", offset]},
-                        }
-                    }
-                ],
-            )
-            offset += float(stats[source.conversation_id]["duration"])
-            index_base += int(stats[source.conversation_id]["count"])
-
-        # Soft-delete sources with lineage (chunks were moved, not deleted).
+        # Soft-delete source semantic claims with lineage. Capture chunks are shared
+        # immutable evidence and remain untouched.
         for source in sources:
             source.deleted = True
             source.deletion_reason = "merged"
             source.deleted_at = now
             source.derived_into = [merged.conversation_id]
-            source.audio_chunks_count = 0
             await source.save()
             await _delete_source_memories(source.user_id, source.conversation_id)
 
@@ -2317,29 +2267,31 @@ async def import_annotation_dataset(user: User, archive_bytes: bytes):
             conversation.apply_status(settled=bool(clip.transcript.strip()))
             await conversation.insert()
 
-            chunk_count = await convert_audio_to_chunks(
-                conversation_id=conversation.conversation_id,
+            ingest = await convert_audio_to_chunks(
+                user_id=user.user_id,
+                capture_source_id=client_id,
                 audio_data=audio_data,
                 sample_rate=sample_rate,
                 channels=channels,
                 sample_width=sample_width,
+                origin="import",
+                external_source_id=external_source_id,
+                data_purpose="annotation",
             )
+            await apply_audio_ranges(conversation, [ingest.audio_range])
             results.append(
                 {
                     "clip_id": clip.clip_id,
                     "status": "imported",
                     "conversation_id": conversation.conversation_id,
                     "duration_seconds": round(duration, 2),
-                    "chunk_count": chunk_count,
+                    "chunk_count": ingest.chunk_count,
                     "transcript_source": clip.transcript_source,
                 }
             )
         except (AudioValidationError, ValueError) as exc:
             logger.warning(f"Could not import annotation clip {clip.clip_id}: {exc}")
             if conversation and conversation.id:
-                await AudioChunkDocument.find(
-                    AudioChunkDocument.conversation_id == conversation.conversation_id
-                ).delete()
                 await conversation.delete()
             results.append(
                 {"clip_id": clip.clip_id, "status": "error", "error": str(exc)}
@@ -2347,9 +2299,6 @@ async def import_annotation_dataset(user: User, archive_bytes: bytes):
         except Exception as exc:
             logger.exception(f"Could not import annotation clip {clip.clip_id}")
             if conversation and conversation.id:
-                await AudioChunkDocument.find(
-                    AudioChunkDocument.conversation_id == conversation.conversation_id
-                ).delete()
                 await conversation.delete()
             results.append(
                 {"clip_id": clip.clip_id, "status": "error", "error": str(exc)}

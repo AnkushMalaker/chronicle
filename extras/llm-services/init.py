@@ -43,20 +43,12 @@ LLM_MODELS = {
         "ctx_size": 8192,
         "thinking": True,
     },
-    "meta-models/Muse-Glimmer-30B-GGUF": {
-        "hf": "meta-models/Muse-Glimmer-30B-GGUF",
-        "hf_file": "muse-glimmer-30B-kquant-17gb.gguf",
-        "model_name": (
-            "meta-models/Muse-Glimmer-30B-GGUF:" "muse-glimmer-30B-kquant-17gb.gguf"
-        ),
-        "draft_url": (
-            "https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF/resolve/"
-            "main/dflash-kquant.gguf"
-        ),
-        "description": (
-            "Muse Glimmer 30B K-Quant-17GB (agentic, vision, DFlash, 24GB GPU)"
-        ),
-        "ctx_size": 131072,
+    "unsloth/Qwen3.8-27B-GGUF": {
+        "hf": "unsloth/Qwen3.8-27B-GGUF",
+        "hf_file": "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+        "model_name": ("unsloth/Qwen3.8-27B-GGUF:" "Qwen3.8-27B-UD-Q4_K_XL.gguf"),
+        "description": ("Qwen3.8 27B Dynamic Q4_K_XL (agentic, vision, MTP, 24GB GPU)"),
+        "ctx_size": 98304,
         "thinking": True,
     },
     "bartowski/Qwen2.5-7B-Instruct-GGUF": {
@@ -73,9 +65,9 @@ LLM_MODELS = {
     },
 }
 
-MUSE_GLIMMER_REPO = "meta-models/Muse-Glimmer-30B-GGUF"
-DEFAULT_LLM_REPO = MUSE_GLIMMER_REPO
-MANAGED_LLAMACPP_REGISTRY_MODELS = {"llamacpp-llm", "muse-glimmer-llm"}
+QWEN38_REPO = "unsloth/Qwen3.8-27B-GGUF"
+DEFAULT_LLM_REPO = QWEN38_REPO
+MANAGED_LLAMACPP_REGISTRY_MODELS = {"llamacpp-llm", "qwen3.8-llm"}
 DEFAULT_CUSTOM_CONTEXT_WINDOW = 8192
 DEFAULT_PI_MAX_TOKENS = 4096
 PI_PROMPT_HEADROOM_TOKENS = 1024
@@ -99,7 +91,7 @@ DEFAULT_SERVER_PROFILE = {
     "LLAMA_ARG_FIT": "on",
     "LLAMA_DRAFT_MODEL_URL": "",
 }
-MUSE_GLIMMER_SERVER_PROFILE = {
+QWEN38_SERVER_PROFILE = {
     **DEFAULT_SERVER_PROFILE,
     "LLAMA_ARG_N_PARALLEL": "1",
     "LLAMA_ARG_FLASH_ATTN": "on",
@@ -107,15 +99,14 @@ MUSE_GLIMMER_SERVER_PROFILE = {
     "LLAMA_ARG_CACHE_TYPE_V": "q8_0",
     "LLAMA_ARG_MMPROJ_AUTO": "true",
     "LLAMA_ARG_THINK_BUDGET": "-1",
-    "LLAMA_ARG_REASONING": "on",
-    "LLAMA_ARG_SPEC_TYPE": "draft-dflash",
-    "LLAMA_ARG_SPEC_DRAFT_MODEL": "/cache/dflash-kquant.gguf",
+    "LLAMA_ARG_REASONING": "auto",
+    "LLAMA_ARG_SPEC_TYPE": "draft-mtp",
+    "LLAMA_ARG_SPEC_DRAFT_MODEL": "",
     "LLAMA_ARG_SPEC_DRAFT_N_MAX": "4",
-    # Do not silently shrink the advertised 131K window to make a bad fit appear
-    # healthy. The official 17GB target, projector, and drafter are designed for a
-    # 24GB device; startup should fail loudly if the actual device cannot hold them.
+    # Do not silently shrink the configured window. The 17.9GB target, ~0.9GB
+    # projector, Q8 KV cache, and in-model MTP head are sized for the local 4090.
     "LLAMA_ARG_FIT": "off",
-    "LLAMA_DRAFT_MODEL_URL": LLM_MODELS[MUSE_GLIMMER_REPO]["draft_url"],
+    "LLAMA_DRAFT_MODEL_URL": "",
 }
 
 # Embedding model options
@@ -470,14 +461,14 @@ class LLMServicesSetup:
         """Map a served GGUF to the Chronicle registry entry that identifies it."""
         hf_ref = str(llm_info.get("hf") or "")
         upstream_repo = hf_ref.split(":", 1)[0]
-        if llm_repo == MUSE_GLIMMER_REPO or upstream_repo == MUSE_GLIMMER_REPO:
-            return "muse-glimmer-llm"
+        if llm_repo == QWEN38_REPO or upstream_repo == QWEN38_REPO:
+            return "qwen3.8-llm"
         return "llamacpp-llm"
 
     @classmethod
     def _server_profile(cls, llm_repo, llm_info) -> Dict[str, str]:
-        if cls._registry_llm_name(llm_repo, llm_info) == "muse-glimmer-llm":
-            return dict(MUSE_GLIMMER_SERVER_PROFILE)
+        if cls._registry_llm_name(llm_repo, llm_info) == "qwen3.8-llm":
+            return dict(QWEN38_SERVER_PROFILE)
         return dict(DEFAULT_SERVER_PROFILE)
 
     @staticmethod

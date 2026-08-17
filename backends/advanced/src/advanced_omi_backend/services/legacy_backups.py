@@ -15,16 +15,16 @@ conversation's transcript can be in one directory, its audio in an older one, an
 neither in the newest. Anything asking "what do we still have" has to union across all
 of them, per conversation, per artifact.
 
-**The audio directory is not one file per chunk.** ``audio/<conversation_id>/`` holds
-grouped WAVs — measured here, 60 seconds each, so six 10-second chunks per file — while
-``audio_chunks_metadata.json`` describes the chunks. Concatenating the group files in
-numeric order reproduces the conversation's PCM exactly (verified against the metadata's
-own durations on 497 of 498 conversation directories), which is what makes re-slicing
-into chunks safe.
+**The audio directory is not one file per current capture chunk.**
+``audio/<conversation_id>/`` holds grouped WAVs, measured here at roughly 60 seconds
+each. Concatenating those files in numeric order reproduces the source PCM, which the
+one-time importer writes through the current capture interface. The obsolete
+``audio_chunks_metadata.json`` shape is deliberately ignored; it is neither a domain
+model nor an input to current storage.
 
-This module only *reads*. It derives no capture times and writes nothing: see
-``scripts/import_legacy_backups.py`` for ingestion and
-``scripts/backfill_chunk_capture_time.py`` for the anchoring policy.
+This module only *reads* and applies the one-time import policy; it writes nothing.
+See ``scripts/import_legacy_backups.py`` for ingestion. Runtime capture storage does
+not depend on any of these pre-archive shapes.
 """
 
 from __future__ import annotations
@@ -47,6 +47,9 @@ GROUP_WAV_PATTERN = re.compile(r"(\d+)")
 # very first backends wrote. The epoch prefix is a real capture time and is the only
 # place it survives, so it is parsed out rather than discarded with the filename.
 LEGACY_WAV_PATTERN = re.compile(r"^(\d{13})_(.+)_([0-9a-f-]{36})\.wav$")
+ANNOTATION_DEVICES = {"speaker-mining", "annotation-import"}
+UNANCHORED_SOURCE_TYPES = {"annotation_dataset"}
+UNANCHORED_DEVICES = {"upload"}
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -65,46 +68,6 @@ def parse_timestamp(value: Any) -> datetime | None:
         return _as_utc(datetime.fromisoformat(value.replace(" ", "T")))
     except ValueError:
         return None
-
-
-@dataclass(frozen=True)
-class LegacyChunk:
-    """One row of ``audio_chunks_metadata.json``.
-
-    ``created_at`` is when the chunk was *written*, which is only capture time for a
-    live stream keeping up with real time. Measured across one backup: 165 conversations
-    advance ~10s per chunk (streaming), 4 were written in a burst (batch), and 200 tick
-    at ~15.7s per 10s of audio — a writer running behind. So this is carried through for
-    diagnosis and never used as an anchor.
-    """
-
-    conversation_id: str
-    chunk_index: int
-    start_time: float
-    end_time: float
-    duration: float
-    original_size: int
-    compressed_size: int
-    sample_rate: int
-    channels: int
-    created_at: datetime | None
-    has_speech: bool | None
-
-    @classmethod
-    def from_row(cls, row: dict[str, Any]) -> "LegacyChunk":
-        return cls(
-            conversation_id=str(row["conversation_id"]),
-            chunk_index=int(row["chunk_index"]),
-            start_time=float(row.get("start_time") or 0.0),
-            end_time=float(row.get("end_time") or 0.0),
-            duration=float(row.get("duration") or 0.0),
-            original_size=int(row.get("original_size") or 0),
-            compressed_size=int(row.get("compressed_size") or 0),
-            sample_rate=int(row.get("sample_rate") or 16000),
-            channels=int(row.get("channels") or 1),
-            created_at=parse_timestamp(row.get("created_at")),
-            has_speech=row.get("has_speech"),
-        )
 
 
 @dataclass
@@ -130,10 +93,6 @@ class LegacyBackup:
 
     def conversations(self) -> list[dict[str, Any]]:
         payload = self._load_json("conversations.json")
-        return [row for row in (payload or []) if row.get("conversation_id")]
-
-    def chunk_rows(self) -> list[dict[str, Any]]:
-        payload = self._load_json("audio_chunks_metadata.json")
         return [row for row in (payload or []) if row.get("conversation_id")]
 
     def audio_dirs(self) -> dict[str, Path]:
@@ -167,8 +126,6 @@ class LegacyConversation:
     conversation_id: str
     document: dict[str, Any]
     document_backup: str
-    chunks: list[LegacyChunk] = field(default_factory=list)
-    chunks_backup: str | None = None
     audio_dir: Path | None = None
     audio_backup: str | None = None
     legacy_wav: Path | None = None
@@ -215,8 +172,13 @@ class LegacyConversation:
 
     @property
     def audio_duration(self) -> float:
-        if self.chunks:
-            return sum(chunk.duration for chunk in self.chunks)
+        paths = self.audio_paths()
+        if paths:
+            total = 0.0
+            for path in paths:
+                with wave.open(str(path), "rb") as handle:
+                    total += handle.getnframes() / handle.getframerate()
+            return total
         return float(self.document.get("audio_total_duration") or 0.0)
 
     def audio_paths(self) -> list[Path]:
@@ -241,6 +203,37 @@ class LegacyConversation:
                 channels = handle.getnchannels()
                 buffer.write(handle.readframes(handle.getnframes()))
         return buffer.getvalue(), sample_rate, channels
+
+
+def resolve_legacy_capture_anchor(
+    record: LegacyConversation,
+) -> tuple[datetime | None, str]:
+    """Return an honest absolute start time for a one-time legacy import.
+
+    This is intentionally a policy over ``LegacyConversation``, not a compatibility
+    API on the current chunk or conversation models. The epoch embedded in an old WAV
+    filename is exact. ``created_at`` is usable only for live capture; upload and
+    annotation timestamps describe ingestion/mining, and derived records need their
+    original parent capture, which these API-shaped dumps cannot reliably reconstruct.
+    """
+    if record.legacy_wav_captured_at is not None:
+        return _as_utc(record.legacy_wav_captured_at), "legacy_wav_filename"
+
+    document = record.document
+    device_parts = record.client_id.split("-", 1)
+    device = device_parts[1] if len(device_parts) > 1 else ""
+    data_purpose = document.get("data_purpose")
+    if data_purpose == "annotation" or device in ANNOTATION_DEVICES:
+        return None, "skipped:annotation_clip"
+    if document.get("external_source_type") in UNANCHORED_SOURCE_TYPES:
+        return None, "skipped:imported_audio"
+    if device in UNANCHORED_DEVICES:
+        return None, "skipped:file_upload"
+    if document.get("derived_from"):
+        return None, "skipped:derived_without_parent_capture"
+    if record.created_at is None:
+        return None, "skipped:missing_created_at"
+    return record.created_at, "conversation_created_at"
 
 
 def _group_sort_key(path: Path) -> tuple[int, str]:
@@ -332,20 +325,6 @@ def load_corpus(
             if _prefer_document(existing, row):
                 existing.document = row
                 existing.document_backup = backup.name
-
-        by_conversation: dict[str, list[LegacyChunk]] = {}
-        for row in backup.chunk_rows():
-            chunk = LegacyChunk.from_row(row)
-            by_conversation.setdefault(chunk.conversation_id, []).append(chunk)
-        for conversation_id, chunks in by_conversation.items():
-            record = conversations.get(conversation_id)
-            if record is None:
-                continue
-            # Most chunks wins, not newest: a later backup can hold a trimmed or
-            # partially re-bound copy of the same recording.
-            if len(chunks) >= len(record.chunks):
-                record.chunks = sorted(chunks, key=lambda item: item.chunk_index)
-                record.chunks_backup = backup.name
 
         for conversation_id, path in backup.audio_dirs().items():
             record = conversations.get(conversation_id)

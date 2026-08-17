@@ -1,10 +1,11 @@
-"""Tests for the streaming-session conversation-assignment module."""
+"""Tests for speech-driven Conversation materialization and teardown."""
 
-from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from pymongo.errors import DuplicateKeyError
 
 from advanced_omi_backend.services.audio_stream import conversation_lifecycle
 from advanced_omi_backend.services.audio_stream.session_store import SessionStatus
@@ -18,214 +19,142 @@ class _QueryField:
         return value
 
 
-class _Store:
-    def __init__(self, statuses, current_id=None):
-        self._statuses = iter(statuses)
-        self.current_id = current_id
-        self.assignments = []
-        self.clears = []
+class _CaptureModel:
+    capture_session_id = _QueryField()
+    result = None
 
-    @asynccontextmanager
-    async def conversation_create_lock(self, session_id):
-        yield True
-
-    async def get_status(self, session_id):
-        return next(self._statuses, SessionStatus.ACTIVE)
-
-    async def get_current_conversation_id(self, session_id):
-        return self.current_id
-
-    async def clear_current_conversation(self, session_id, *, expected_id=None):
-        self.clears.append((session_id, expected_id))
-        if expected_id is None or self.current_id == expected_id:
-            self.current_id = None
-            return True
-        return False
-
-    async def set_current_conversation(self, session_id, conversation_id, *, ttl=86400):
-        self.current_id = conversation_id
-        self.assignments.append((session_id, conversation_id, ttl))
-
-    async def assign_current_conversation_if_active(
-        self, session_id, conversation_id, *, ttl=86400
-    ):
-        if (
-            await self.get_status(session_id) != SessionStatus.ACTIVE
-            or self.current_id is not None
-        ):
-            return False
-        await self.set_current_conversation(session_id, conversation_id, ttl=ttl)
-        return True
-
-    async def replace_current_conversation_if_active(
-        self, session_id, expected_id, replacement_id, *, ttl=86400
-    ):
-        if (
-            await self.get_status(session_id) != SessionStatus.ACTIVE
-            or self.current_id != expected_id
-        ):
-            return False
-        await self.set_current_conversation(session_id, replacement_id, ttl=ttl)
-        return True
+    @classmethod
+    async def find_one(cls, _query):
+        return cls.result
 
 
-def _conversation_model(existing=None):
-    class FakeConversation:
-        conversation_id = _QueryField()
-        ConversationStatus = conversation_lifecycle.Conversation.ConversationStatus
-        find_one_result = existing
-        inserted = []
-        deleted_candidates = []
+class _ConversationModel:
+    segmentation_key = _QueryField()
+    result = None
 
-        def __init__(self, **kwargs):
-            self.conversation_id = "placeholder-1"
-            self.processing_status = kwargs["processing_status"]
-            self.deleted = False
+    @classmethod
+    async def find_one(cls, _query):
+        return cls.result
 
-        @classmethod
-        async def find_one(cls, query):
-            return cls.find_one_result
 
-        async def insert(self):
-            type(self).inserted.append(self.conversation_id)
-
-        async def delete(self):
-            type(self).deleted_candidates.append(self.conversation_id)
-
-    return FakeConversation
+@pytest.fixture(autouse=True)
+def _reset_models(monkeypatch):
+    _CaptureModel.result = None
+    _ConversationModel.result = None
+    monkeypatch.setattr(conversation_lifecycle, "AudioCaptureSession", _CaptureModel)
+    monkeypatch.setattr(conversation_lifecycle, "Conversation", _ConversationModel)
 
 
 @pytest.mark.asyncio
-async def test_terminal_session_never_gets_a_placeholder(monkeypatch):
-    model = _conversation_model()
-    monkeypatch.setattr(conversation_lifecycle, "Conversation", model)
-    store = _Store([SessionStatus.FINALIZING])
-
-    assignment = await conversation_lifecycle.ensure_active_session_placeholder(
-        store,
-        session_id="session-1",
-        user_id="user-1",
-        client_id="client-1",
-    )
-
-    assert assignment is None
-    assert model.inserted == []
-    assert store.assignments == []
+async def test_detected_materialization_requires_a_capture_session():
+    with pytest.raises(RuntimeError, match="does not exist"):
+        await conversation_lifecycle.materialize_detected_conversation(
+            capture_session_id="capture-1",
+            user_id="user-1",
+            client_id="client-1",
+            speech_detected_at=1_786_528_800.0,
+        )
 
 
 @pytest.mark.asyncio
-async def test_active_session_creation_publishes_one_assignment(monkeypatch):
-    model = _conversation_model()
-    monkeypatch.setattr(conversation_lifecycle, "Conversation", model)
-    store = _Store([SessionStatus.ACTIVE, SessionStatus.ACTIVE])
-
-    assignment = await conversation_lifecycle.ensure_active_session_placeholder(
-        store,
-        session_id="session-1",
-        user_id="user-1",
+async def test_detected_materialization_rejects_capture_identity_mismatch():
+    _CaptureModel.result = SimpleNamespace(
+        user_id="other-user",
         client_id="client-1",
+        started_at=datetime(2026, 8, 12, 10, tzinfo=timezone.utc),
     )
 
-    assert assignment.conversation_id == "placeholder-1"
-    assert assignment.created is True
-    assert model.inserted == ["placeholder-1"]
-    assert store.assignments == [("session-1", "placeholder-1", None)]
+    with pytest.raises(RuntimeError, match="does not match"):
+        await conversation_lifecycle.materialize_detected_conversation(
+            capture_session_id="capture-1",
+            user_id="user-1",
+            client_id="client-1",
+            speech_detected_at=1_786_528_800.0,
+        )
 
 
 @pytest.mark.asyncio
-async def test_finalization_during_mongo_insert_rolls_back_candidate(monkeypatch):
-    model = _conversation_model()
-    monkeypatch.setattr(conversation_lifecycle, "Conversation", model)
-    store = _Store([SessionStatus.ACTIVE, SessionStatus.FINALIZING])
+async def test_detected_materialization_creates_only_after_speech(monkeypatch):
+    captured_at = datetime(2026, 8, 12, 10, tzinfo=timezone.utc)
+    _CaptureModel.result = SimpleNamespace(
+        user_id="user-1", client_id="client-1", started_at=captured_at
+    )
+    created = SimpleNamespace(conversation_id="conversation-1", insert=AsyncMock())
+    factory = Mock(return_value=created)
+    monkeypatch.setattr(conversation_lifecycle, "create_conversation", factory)
 
-    assignment = await conversation_lifecycle.ensure_active_session_placeholder(
-        store,
-        session_id="session-1",
+    result = await conversation_lifecycle.materialize_detected_conversation(
+        capture_session_id="capture-1",
         user_id="user-1",
         client_id="client-1",
+        speech_detected_at=captured_at.timestamp() + 20,
+        pre_roll_seconds=5,
     )
 
-    assert assignment is None
-    assert model.deleted_candidates == ["placeholder-1"]
-    assert store.assignments == []
+    assert result.created is True
+    assert result.conversation is created
+    created.insert.assert_awaited_once()
+    kwargs = factory.call_args.kwargs
+    assert kwargs["origin"] == "detected"
+    assert kwargs["started_at"] == captured_at.replace(second=15)
+    assert kwargs["segmentation_key"].startswith("detected:capture-1:")
 
 
 @pytest.mark.asyncio
-async def test_finalization_after_lost_claim_does_not_return_competing_pointer(
-    monkeypatch,
-):
-    existing = SimpleNamespace(
-        processing_status="active",
-        deleted=False,
-        always_persist=True,
-        has_meaningful_transcript=False,
+async def test_detected_materialization_is_idempotent(monkeypatch):
+    captured_at = datetime(2026, 8, 12, 10, tzinfo=timezone.utc)
+    _CaptureModel.result = SimpleNamespace(
+        user_id="user-1", client_id="client-1", started_at=captured_at
     )
-    model = _conversation_model(existing=existing)
-    monkeypatch.setattr(conversation_lifecycle, "Conversation", model)
+    existing = SimpleNamespace(conversation_id="conversation-existing")
+    _ConversationModel.result = existing
+    factory = Mock()
+    monkeypatch.setattr(conversation_lifecycle, "create_conversation", factory)
 
-    class FinalizingStore(_Store):
-        async def assign_current_conversation_if_active(
-            self, session_id, conversation_id, *, ttl=86400
-        ):
-            self.current_id = "late-pointer"
-            return False
-
-    store = FinalizingStore(
-        [SessionStatus.ACTIVE, SessionStatus.FINALIZING], current_id=None
-    )
-
-    assignment = await conversation_lifecycle.ensure_active_session_placeholder(
-        store,
-        session_id="session-1",
+    result = await conversation_lifecycle.materialize_detected_conversation(
+        capture_session_id="capture-1",
         user_id="user-1",
         client_id="client-1",
+        speech_detected_at=captured_at.timestamp() + 20,
     )
 
-    assert assignment is None
-    assert model.deleted_candidates == ["placeholder-1"]
+    assert result.created is False
+    assert result.conversation is existing
+    factory.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_active_rotation_swaps_owner_without_unassigned_gap(monkeypatch):
-    model = _conversation_model()
-    monkeypatch.setattr(conversation_lifecycle, "Conversation", model)
-    store = _Store(
-        [SessionStatus.ACTIVE, SessionStatus.ACTIVE],
-        current_id="conversation-1",
+async def test_duplicate_insert_race_returns_segmentation_winner(monkeypatch):
+    captured_at = datetime(2026, 8, 12, 10, tzinfo=timezone.utc)
+    _CaptureModel.result = SimpleNamespace(
+        user_id="user-1", client_id="client-1", started_at=captured_at
+    )
+    candidate = SimpleNamespace(
+        conversation_id="candidate",
+        insert=AsyncMock(side_effect=DuplicateKeyError("duplicate")),
+    )
+    winner = SimpleNamespace(conversation_id="winner")
+    calls = 0
+
+    async def find_one(_query):
+        nonlocal calls
+        calls += 1
+        return None if calls == 1 else winner
+
+    monkeypatch.setattr(_ConversationModel, "find_one", find_one)
+    monkeypatch.setattr(
+        conversation_lifecycle, "create_conversation", Mock(return_value=candidate)
     )
 
-    assignment = await conversation_lifecycle.rotate_active_session_placeholder(
-        store,
-        session_id="session-1",
-        expected_conversation_id="conversation-1",
+    result = await conversation_lifecycle.materialize_detected_conversation(
+        capture_session_id="capture-1",
         user_id="user-1",
         client_id="client-1",
+        speech_detected_at=captured_at.timestamp() + 20,
     )
 
-    assert assignment.conversation_id == "placeholder-1"
-    assert assignment.created is True
-    assert store.current_id == "placeholder-1"
-    assert store.clears == []
-    assert store.assignments == [("session-1", "placeholder-1", None)]
-
-
-@pytest.mark.asyncio
-async def test_terminal_rotation_does_not_create_successor(monkeypatch):
-    model = _conversation_model()
-    monkeypatch.setattr(conversation_lifecycle, "Conversation", model)
-    store = _Store([SessionStatus.FINALIZING], current_id="conversation-1")
-
-    assignment = await conversation_lifecycle.rotate_active_session_placeholder(
-        store,
-        session_id="session-1",
-        expected_conversation_id="conversation-1",
-        user_id="user-1",
-        client_id="client-1",
-    )
-
-    assert assignment is None
-    assert model.inserted == []
-    assert store.current_id == "conversation-1"
+    assert result.created is False
+    assert result.conversation is winner
 
 
 class _EndRedis:
@@ -239,66 +168,51 @@ class _EndRedis:
 
 class _EndStore:
     status = SessionStatus.ACTIVE
+    last_instance = None
 
-    def __init__(self, redis_client):
+    def __init__(self, _redis_client):
+        self.cleared = []
         self.expired = False
         self.persisted = False
+        type(self).last_instance = self
 
-    @asynccontextmanager
-    async def conversation_create_lock(self, session_id):
-        yield True
-
-    async def clear_current_conversation(self, session_id, *, expected_id=None):
+    async def clear_active_conversation(self, session_id, *, expected_id=None):
+        self.cleared.append((session_id, expected_id))
         return True
 
-    async def increment_conversation_count(self, session_id):
+    async def increment_conversation_count(self, _session_id):
         return 1
 
-    async def get_status_ws_reason(self, session_id):
+    async def get_status_ws_reason(self, _session_id):
         return self.status, self.status == SessionStatus.ACTIVE, ""
 
-    async def persist_session(self, session_id):
+    async def persist_session(self, _session_id):
         self.persisted = True
 
-    async def expire_session(self, session_id, ttl):
+    async def expire_session(self, _session_id, _ttl):
         self.expired = True
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status", "expects_placeholder", "expects_restart"),
-    (
-        (SessionStatus.ACTIVE, True, True),
-        (SessionStatus.FINALIZING, False, False),
-    ),
+    ("status", "expects_restart"),
+    ((SessionStatus.ACTIVE, True), (SessionStatus.FINALIZING, False)),
 )
-async def test_conversation_end_assigns_successor_only_for_active_session(
-    monkeypatch, status, expects_placeholder, expects_restart
+async def test_conversation_end_clears_semantic_pointer_and_rearms_only_active_session(
+    monkeypatch, status, expects_restart
 ):
     class FakeConversationModel:
         conversation_id = _QueryField()
         EndReason = conversation_jobs.Conversation.EndReason
 
         @classmethod
-        async def find_one(cls, query):
-            return SimpleNamespace(
-                always_persist=True,
-                end_reason=None,
-                completed_at=None,
-                save=AsyncMock(),
-            )
+        async def find_one(cls, _query):
+            return SimpleNamespace(end_reason=None, completed_at=None, save=AsyncMock())
 
     _EndStore.status = status
-    ensure_placeholder = AsyncMock(
-        return_value=SimpleNamespace(conversation_id="next-placeholder")
-    )
     enqueue_speech = Mock()
-
     monkeypatch.setattr(conversation_jobs, "SessionStore", _EndStore)
     monkeypatch.setattr(conversation_jobs, "Conversation", FakeConversationModel)
-    monkeypatch.setattr(
-        conversation_jobs, "ensure_active_session_placeholder", ensure_placeholder
-    )
     monkeypatch.setattr(conversation_jobs, "enqueue_speech_detection", enqueue_speech)
     monkeypatch.setattr(conversation_jobs, "publish_sse_event", lambda *args: None)
 
@@ -314,5 +228,6 @@ async def test_conversation_end_assigns_successor_only_for_active_session(
         end_reason="inactivity_timeout",
     )
 
-    assert ensure_placeholder.await_count == int(expects_placeholder)
+    store = _EndStore.last_instance
+    assert store.cleared == [("session-1", "conversation-1")]
     assert enqueue_speech.call_count == int(expects_restart)
