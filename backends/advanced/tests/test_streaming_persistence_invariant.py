@@ -336,11 +336,12 @@ async def test_interactive_phone_audio_start_activates_protocol_v1_after_ack(
     monkeypatch,
 ):
     state = ClientState("client-1", "user-1")
+    state.socket_id = "socket-1"
     producer = AsyncMock()
+    producer.redis_client = fake_aioredis.FakeRedis(decode_responses=False)
     websocket = SimpleNamespace(send_json=AsyncMock())
     model = SimpleNamespace(model_provider="deepgram", name="stt")
     registry = SimpleNamespace(get_default=lambda model_type: model)
-    activation = AsyncMock()
     monkeypatch.setattr(websocket_controller, "get_models_registry", lambda: registry)
     monkeypatch.setattr(
         websocket_controller,
@@ -354,7 +355,6 @@ async def test_interactive_phone_audio_start_activates_protocol_v1_after_ack(
     monkeypatch.setattr(
         websocket_controller, "subscribe_to_interim_results", _ignore_sse
     )
-    monkeypatch.setattr(websocket_controller, "request_voice_session_start", activation)
 
     await websocket_controller._initialize_streaming_session(
         state,
@@ -388,14 +388,14 @@ async def test_interactive_phone_audio_start_activates_protocol_v1_after_ack(
         websocket=websocket,
     )
 
-    assert (
-        websocket.send_json.await_args_list[0].args[0]["type"]
-        == "audio-session.started"
-    )
-    activation.assert_awaited_once_with(
-        client_state=state,
-        audio_stream_producer=producer,
-    )
+    capture_voice_session_id = producer.init_session.await_args.kwargs[
+        "voice_session_id"
+    ]
+    acknowledgment = websocket.send_json.await_args_list[0].args[0]
+    assert capture_voice_session_id
+    assert acknowledgment["type"] == "audio-session.started"
+    assert acknowledgment["voice_session_id"] == capture_voice_session_id
+    assert state.voice_session_id == capture_voice_session_id
 
 
 @pytest.mark.asyncio

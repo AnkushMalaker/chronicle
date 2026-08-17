@@ -1026,17 +1026,17 @@ async def _initialize_streaming_session(
         effects,
         voice_session_id,
     ) = _capture_provenance_from_audio_format(audio_format)
+    interactive_profile = processing_profile in {
+        "duplex_aec",
+        "duplex_isolated",
+        "half_duplex",
+    }
+    voice_sessions = VoiceSessionCoordinator(audio_stream_producer.redis_client)
 
     if voice_session_id is not None:
-        if processing_profile not in {
-            "duplex_aec",
-            "duplex_isolated",
-            "half_duplex",
-        }:
+        if not interactive_profile:
             raise ValueError("a voice session requires an interactive capture profile")
-        active_voice = await VoiceSessionCoordinator(
-            audio_stream_producer.redis_client
-        ).get_active(user_id, client_id)
+        active_voice = await voice_sessions.get_active(user_id, client_id)
         same_ready_socket = (
             active_voice is not None
             and active_voice.socket_id == client_state.socket_id
@@ -1083,22 +1083,55 @@ async def _initialize_streaming_session(
     session_id = f"{client_id}-{uuid.uuid4().hex}"
     application_logger.info(f"🆔 Creating stream session: {session_id}")
 
+    pending_voice_start = None
+    if voice_session_id is None and interactive_profile:
+        if websocket is None:
+            raise ValueError("interactive capture requires a WebSocket transport")
+        pending_voice_start = await voice_sessions.start(
+            user_id=user_id,
+            client_id=client_id,
+            audio_session_id=session_id,
+            capture_epoch=capture_epoch,
+            socket_id=client_state.socket_id,
+            advertised_protocol=protocol,
+        )
+        voice_session_id = pending_voice_start.session.voice_session_id
+        audio_format = {**audio_format, "voice_session_id": voice_session_id}
+
     # Initialize session tracking in Redis (SINGLE SOURCE OF TRUTH for session metadata)
     # This includes user_email, connection info, audio format, chunk counters, job IDs, etc.
     connection_id = client_state.socket_id
-    await audio_stream_producer.init_session(
-        session_id=session_id,
-        user_id=user_id,
-        client_id=client_id,
-        user_email=user_email,
-        connection_id=connection_id,
-        mode="streaming",
-        provider=provider,
-        capture_epoch=capture_epoch,
-        processing_profile=processing_profile,
-        effects=effects,
-        voice_session_id=voice_session_id,
-    )
+    try:
+        await audio_stream_producer.init_session(
+            session_id=session_id,
+            user_id=user_id,
+            client_id=client_id,
+            user_email=user_email,
+            connection_id=connection_id,
+            mode="streaming",
+            provider=provider,
+            capture_epoch=capture_epoch,
+            processing_profile=processing_profile,
+            effects=effects,
+            voice_session_id=voice_session_id,
+        )
+    except Exception:
+        if pending_voice_start is not None:
+            try:
+                await voice_sessions.end(
+                    voice_session_id=pending_voice_start.session.voice_session_id,
+                    user_id=user_id,
+                    client_id=client_id,
+                    audio_session_id=session_id,
+                    capture_epoch=capture_epoch,
+                    socket_id=client_state.socket_id,
+                    reason="capture_initialization_failed",
+                )
+            except Exception:
+                application_logger.exception(
+                    "Failed to end voice session after capture initialization failed"
+                )
+        raise
     # Publish the connection's active-session pointer only after the durable Redis
     # session and producer buffer both exist. A failed CONNECTING attempt therefore
     # cannot masquerade as an active capture during cleanup/reconnect.
@@ -1160,12 +1193,9 @@ async def _initialize_streaming_session(
             sent_at=datetime.now(timezone.utc),
         )
         await websocket.send_json(started.model_dump(mode="json", exclude_none=False))
-        if voice_session_id is None and processing_profile in {
-            "duplex_aec",
-            "duplex_isolated",
-            "half_duplex",
-        }:
-            await request_voice_session_start(
+        if pending_voice_start is not None:
+            await _publish_voice_session_start(
+                started=pending_voice_start,
                 client_state=client_state,
                 audio_stream_producer=audio_stream_producer,
             )
