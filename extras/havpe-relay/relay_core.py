@@ -6,7 +6,6 @@ relay (main.py) and the macOS menu bar relay (menu_relay.py).
 """
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -15,14 +14,33 @@ from dataclasses import dataclass
 
 import websockets
 from chronicle_client import ClientConfig, acheck_credentials
+from chronicle_client.voice_session import ServerUpgradeRequired, WearableVoiceSession
 from device_controller import DeviceController
-from tone_server import serve_audio_bytes
+from voice_playback import HavpePlaybackTarget
 
-# Max backend→relay WS frame. Bumped above the websockets 1 MiB default so larger
-# inline TTS audio payloads (play-audio audio_b64) are not rejected.
+# Max backend→relay WS frame. Protocol-v1 response WAVs can exceed the websockets
+# default before the relay stages them for the LAN-only media player.
 _WS_MAX_SIZE = 16 * 1024 * 1024
 
 logger = logging.getLogger(__name__)
+
+
+async def send_audio_start(
+    ws,
+    ws_lock: asyncio.Lock,
+    voice_session: WearableVoiceSession,
+    template: dict,
+) -> dict:
+    """Start a fresh backend capture from a device's cached source format."""
+    header = {
+        **template,
+        "data": voice_session.audio_start_data(),
+        "payload_length": 0,
+    }
+    async with ws_lock:
+        await ws.send(json.dumps(header, separators=(",", ":")))
+    await voice_session.wait_until_ready()
+    return header
 
 
 @dataclass
@@ -64,6 +82,8 @@ async def forward_tcp_to_ws(
     on_audio_chunk: Callable[[bytes, int], None] | None = None,
     on_audio_event: Callable[[str, dict], None] | None = None,
     idle_timeout: float | None = None,
+    voice_session: WearableVoiceSession | None = None,
+    on_device_audio_start: Callable[[dict], None] | None = None,
 ) -> None:
     """Forward Wyoming messages from device TCP to backend WebSocket.
 
@@ -104,6 +124,13 @@ async def forward_tcp_to_ws(
             )
             break
 
+        msg_type = header.get("type", "")
+        if msg_type == "audio-start" and voice_session is not None:
+            if on_device_audio_start is not None:
+                on_device_audio_start(
+                    {**header, "data": dict(header.get("data") or {})}
+                )
+
         payload_length = header.get("payload_length", 0)
         payload: bytes | None = None
 
@@ -118,12 +145,15 @@ async def forward_tcp_to_ws(
             logger.info("TCP→WS: device disconnected mid-payload — ending")
             break
 
-        async with ws_lock:
-            await ws.send(line_str)
+        if msg_type == "audio-start" and voice_session is not None:
             if payload is not None:
-                await ws.send(payload)
-
-        msg_type = header.get("type", "")
+                raise ValueError("audio-start must not have a binary payload")
+            header = await send_audio_start(ws, ws_lock, voice_session, header)
+        else:
+            async with ws_lock:
+                await ws.send(line_str)
+                if payload is not None:
+                    await ws.send(payload)
 
         if msg_type == "audio-chunk":
             if on_audio_chunk and payload is not None:
@@ -134,11 +164,13 @@ async def forward_tcp_to_ws(
                 on_audio_event(msg_type, header)
 
 
-async def handle_backend_messages(ws, device: DeviceController) -> None:
-    """Process messages from backend WebSocket, dispatch to device."""
+async def handle_backend_messages(
+    ws, voice_session: WearableVoiceSession, device: DeviceController | None = None
+) -> None:
+    """Process bound protocol-v1 responses from the backend."""
     async for raw in ws:
         if isinstance(raw, bytes):
-            logger.debug("Backend binary message (%d bytes), discarded", len(raw))
+            await voice_session.handle_binary(raw)
             continue
 
         try:
@@ -150,32 +182,12 @@ async def handle_backend_messages(ws, device: DeviceController) -> None:
         msg_type = msg.get("type", "")
         data = msg.get("data", {})
 
-        if msg_type == "play-audio":
-            announcement = data.get("announcement", True)
-            url = data.get("url", "")
-            audio_b64 = data.get("audio_b64", "")
-            if audio_b64:
-                # Backend-generated audio (e.g. TTS): the device can't reach the
-                # backend, so serve the bytes locally on the LAN.
-                try:
-                    audio = base64.b64decode(audio_b64)
-                    url = serve_audio_bytes(audio, ext=data.get("format", "wav"))
-                    logger.info(
-                        "Backend→device: play-audio (%d bytes) → %s", len(audio), url
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Backend→device: failed to stage play-audio bytes: %s", e
-                    )
-                    url = ""
-            else:
-                logger.info("Backend→device: play-audio %s", url)
-            if url:
-                await device.play_audio(url, announcement=announcement)
-            else:
-                logger.warning("Backend→device: play-audio with no url/audio_b64")
-
-        elif msg_type == "led-control":
+        if await voice_session.handle_event(msg):
+            continue
+        if msg_type == "led-control":
+            if device is None:
+                logger.warning("Backend LED control ignored: device API unavailable")
+                continue
             r = float(data.get("r", 0))
             g = float(data.get("g", 0))
             b = float(data.get("b", 0))
@@ -336,6 +348,13 @@ async def run_device_session(
     _MIN_HEALTHY_DURATION = 30.0
     backoff = _BACKOFF_INITIAL
     session_ended = False
+    capture_epoch = 0
+    device_audio_start: dict | None = None
+    interactive_disabled = False
+
+    def remember_device_audio_start(header: dict) -> None:
+        nonlocal device_audio_start
+        device_audio_start = header
 
     try:
         while not session_ended:
@@ -353,23 +372,42 @@ async def run_device_session(
                     logger.info("Backend WS connected, starting bidirectional bridge")
 
                     ws_lock = asyncio.Lock()
-                    tasks = [
-                        asyncio.create_task(
-                            forward_tcp_to_ws(
-                                reader,
-                                ws,
-                                ws_lock,
-                                on_audio_chunk=on_audio_chunk,
-                                on_audio_event=on_audio_event,
-                                idle_timeout=config.device_idle_timeout,
-                            ),
-                            name="tcp→ws",
+                    playback_target = None
+                    if not interactive_disabled and device.supports_voice_protocol_v1():
+                        playback_target = HavpePlaybackTarget(device)
+                        capture_epoch += 1
+                    voice_session = WearableVoiceSession(
+                        ws,
+                        capture_epoch=capture_epoch,
+                        playback_target=playback_target,
+                        send_lock=ws_lock,
+                    )
+                    backend_task = asyncio.create_task(
+                        handle_backend_messages(ws, voice_session, device),
+                        name="ws→device",
+                    )
+                    tasks = [backend_task]
+                    if device_audio_start is not None:
+                        await send_audio_start(
+                            ws,
+                            ws_lock,
+                            voice_session,
+                            device_audio_start,
+                        )
+                    tcp_task = asyncio.create_task(
+                        forward_tcp_to_ws(
+                            reader,
+                            ws,
+                            ws_lock,
+                            on_audio_chunk=on_audio_chunk,
+                            on_audio_event=on_audio_event,
+                            idle_timeout=config.device_idle_timeout,
+                            voice_session=voice_session,
+                            on_device_audio_start=remember_device_audio_start,
                         ),
-                        asyncio.create_task(
-                            handle_backend_messages(ws, device),
-                            name="ws→device",
-                        ),
-                    ]
+                        name="tcp→ws",
+                    )
+                    tasks.insert(0, tcp_task)
                     if device.connected:
                         tasks.append(
                             asyncio.create_task(
@@ -378,7 +416,6 @@ async def run_device_session(
                             )
                         )
 
-                    tcp_task = tasks[0]
                     done, pending = await asyncio.wait(
                         tasks, return_when=asyncio.FIRST_COMPLETED
                     )
@@ -403,12 +440,18 @@ async def run_device_session(
                         session_ended = True
                         break
 
-                    if drop_exc is not None and not isinstance(
+                    if isinstance(drop_exc, ServerUpgradeRequired):
+                        interactive_disabled = True
+                        logger.error("%s; reconnecting HAVPE as capture-only", drop_exc)
+                    elif drop_exc is not None and not isinstance(
                         drop_exc, websockets.WebSocketException
                     ):
                         # Unexpected error (not a WS drop) — surface it.
                         raise drop_exc
 
+            except ServerUpgradeRequired as error:
+                interactive_disabled = True
+                logger.error("%s; reconnecting HAVPE as capture-only", error)
             except (websockets.WebSocketException, OSError) as e:
                 # Backend WS connect/stream failed — reconnect, keep device alive.
                 logger.warning(

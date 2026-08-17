@@ -1,12 +1,9 @@
 """Local HTTP server for serving backend-generated audio to the HAVPE device.
 
 The ESP32 media_player plays audio by fetching an HTTP URL, but the device is
-LAN-only and can't reach the (possibly remote) backend. So audio pushed from the
-backend — wake-word tones and TTS replies, both arriving as ``play-audio`` bytes —
-is written to a local staging dir and served from this tiny on-LAN HTTP server.
-
-The relay no longer bundles any tone assets of its own: the wake-word service is
-the single source of tone audio and sends it inline as ``play-audio``.
+LAN-only and can't reach the (possibly remote) backend. Protocol-v1 response WAVs
+therefore go into a short-lived local staging directory served by this tiny on-LAN
+HTTP server. The response binding remains owned by the relay.
 """
 
 import itertools

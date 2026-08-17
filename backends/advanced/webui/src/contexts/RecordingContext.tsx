@@ -2,7 +2,6 @@ import { createContext, useContext, useState, useRef, useCallback, useEffect, us
 import { BACKEND_URL } from '../services/api'
 import { getStorageKey } from '../utils/storage'
 import { useAuth } from './AuthContext'
-import { playDownlinkAudio } from '../utils/audioPlayback'
 import { setActiveWakeClientId } from '../hooks/useWakeFeedback'
 
 const log = import.meta.env.DEV ? console.log.bind(console) : () => {}
@@ -496,12 +495,6 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
           // so wake-word SSE feedback can be scoped to this device (see useSSE).
           else if (message.type === 'ready') {
             if (message.client_id) setActiveWakeClientId(message.client_id)
-          }
-
-          // Backend→device downlink: wake-word tones and Hermes TTS replies, forwarded
-          // down this device's own WebSocket. Play them out the browser's speaker.
-          else if (message.type === 'play-audio') {
-            playDownlinkAudio(message.data)
           }
 
           // Handle other message types (interim_transcript, etc.)

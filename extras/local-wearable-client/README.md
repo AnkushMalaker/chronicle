@@ -2,6 +2,14 @@
 
 macOS client that scans for BLE wearable devices (OMI, Neo1, Friend), connects, and streams audio to the Chronicle backend. Runs as a **menu bar app** with device selection, or headless for background use.
 
+Ordinary pendant capture still uses Chronicle's base Wyoming transport. Interactive
+output uses voice protocol v1. Speakerless OMI/Neo devices play through the tray host:
+verified headphones keep capture live, while speakers gate capture during TTS. Elato
+playback requires firmware implementing the bound BLE status contract; old Elato
+firmware remains capture-only. See the
+[audio WebSocket protocol](../../docs/backend/audio-websocket-protocol.md) for the
+client matrix and [Elato firmware contract](../../docs/firmware/elato-speaker-protocol-v1.md).
+
 > **Unified tray:** device scan/connect/stream now also lives as the *Pendant*
 > section of the [Chronicle tray](../chronicle-tray/) (`chronicle-tray install
 > --pendant`), which depends on this project's `chronicle_wearable` package.
@@ -49,6 +57,8 @@ Running `./start.sh` (or `./start.sh menu`) puts an icon in the macOS menu bar:
 Click the icon to see:
 - Connection status
 - List of nearby devices (click to connect/disconnect)
+- Actual host voice route and TTS playback/interruption state
+- Voice output policy: Automatic, Require headphones, or Always speaker-safe
 - "Scan Now" to trigger an immediate BLE scan
 
 ## Auto-Start on Login (launchd)
@@ -95,7 +105,15 @@ auto_discover: true
 
 # Seconds between scans when no device is connected
 scan_interval: 10
+
+# auto, require_headphones, or always_half_duplex
+voice_output_policy: auto
 ```
+
+`auto` is the default. The client treats a route as isolated only when macOS reports
+an explicit headphone/earbud device name; generic Bluetooth and USB outputs remain
+speaker-safe because they may feed speakers. Changing the policy or the default macOS
+output ends the current voice session and starts a new capture epoch.
 
 ## Architecture
 

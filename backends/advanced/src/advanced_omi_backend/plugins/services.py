@@ -5,14 +5,14 @@ Plugins use this interface (via context.services) to interact with the core syst
 (e.g., close a conversation) or with other plugins (e.g., call Home Assistant to toggle lights).
 """
 
-import json
 import logging
 from typing import TYPE_CHECKING, Optional
 
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.redis_factory import create_async_redis
-from advanced_omi_backend.redis_keys import ClientId, device_downlink_channel
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
+from advanced_omi_backend.services.response_coordinator import ResponseCoordinator
+from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
 from advanced_omi_backend.users import User
 
 from .base import PluginContext, PluginResult
@@ -115,31 +115,18 @@ class PluginServices:
         # toggle_star returns a dict on success, JSONResponse on error
         return isinstance(result, dict) and "starred" in result
 
-    async def stop_playback(self, client_id: str) -> bool:
-        """Stop any TTS currently playing on a device (barge-in).
-
-        Publishes a ``stop-audio`` control frame to the device's downlink channel.
-        The WebSocket handler that owns the device connection picks it up and, for
-        Opus-streaming clients, cancels the in-flight stream and tells the device to
-        flush (see ``device_audio.stop_play_audio``). Decoupled via Redis so this
-        works from any process (the button handler runs in the backend, but wake
-        handlers run in the workers).
-
-        Args:
-            client_id: The device/client whose playback should stop.
-
-        Returns:
-            True if the stop request was published.
-        """
-        if not client_id:
-            logger.warning("stop_playback called with no client_id")
-            return False
-        message = json.dumps({"type": "stop-audio", "data": {}})
-        client_ref = ClientId.from_value(client_id)
-        await self._async_redis.publish(
-            str(device_downlink_channel(client_ref)), message
+    async def stop_playback(self, user_id: str, client_id: str) -> bool:
+        """Cancel the client's current protocol-v1 response at its generation fence."""
+        if not user_id or not client_id:
+            raise ValueError("stop_playback requires user_id and client_id")
+        coordinator = ResponseCoordinator(
+            self._async_redis,
+            VoiceSessionCoordinator(self._async_redis),
         )
-        logger.info(f"⏹ Requested stop-audio for {client_id}")
+        await coordinator.begin_turn(user_id, client_id, reason="barge_in")
+        logger.info(
+            "Button requested coordinated playback cancellation for %s", client_id
+        )
         return True
 
     async def call_plugin(

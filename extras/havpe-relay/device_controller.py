@@ -23,6 +23,8 @@ class DeviceController:
     def __init__(self):
         self._client: aioesphomeapi.APIClient | None = None
         self._event_queue: asyncio.Queue = asyncio.Queue()
+        self._playback_state: str | None = None
+        self._playback_waiters: list[tuple[str, asyncio.Future[None]]] = []
         self._entity_keys: dict[str, int] = {}  # object_id -> key
         self._connected = False
 
@@ -30,12 +32,21 @@ class DeviceController:
     def connected(self) -> bool:
         return self._connected
 
+    def supports_voice_protocol_v1(self) -> bool:
+        """True only when firmware exposes media output and physical state."""
+        return (
+            self._connected
+            and "_media_player" in self._entity_keys
+            and "playback_state" in self._entity_keys
+        )
+
     async def connect(self, device_ip: str, port: int = 6053) -> bool:
         """Connect to device, discover entities, subscribe to states.
 
         Returns True on success, False on failure (relay continues without API).
         """
         try:
+            self._entity_keys.clear()
             self._client = aioesphomeapi.APIClient(
                 address=device_ip,
                 port=port,
@@ -96,7 +107,7 @@ class DeviceController:
                 logger.warning("No media_player entity found on device")
 
             # Check text_sensors
-            for name in ["button_action", "dial_action"]:
+            for name in ["button_action", "dial_action", "playback_state"]:
                 if name in self._entity_keys:
                     logger.info(
                         "Text sensor '%s' found (key=%d)", name, self._entity_keys[name]
@@ -138,7 +149,13 @@ class DeviceController:
             return
 
         # Match key to our known text_sensors
-        if key == self._entity_keys.get("button_action"):
+        if key == self._entity_keys.get("playback_state"):
+            if value not in {"started", "stopped"}:
+                logger.warning("Unknown firmware playback state: %s", value)
+                return
+            self._publish_playback_state(value)
+            logger.info("Physical playback state: %s", value)
+        elif key == self._entity_keys.get("button_action"):
             event = {"type": "button-event", "state": value}
             self._event_queue.put_nowait(event)
             logger.info("Button event: %s", value)
@@ -236,11 +253,10 @@ class DeviceController:
             logger.warning("LED effect command failed: %s", e)
 
     async def play_audio(self, url: str, announcement: bool = True) -> None:
-        """Play audio URL via media_player. No-op if not connected."""
+        """Play audio URL via the firmware media player."""
         key = self._entity_keys.get("_media_player")
         if not self._connected or not self._client or key is None:
-            logger.debug("play_audio skipped: not connected or no media_player entity")
-            return
+            raise RuntimeError("HAVPE media player is unavailable")
 
         try:
             self._client.media_player_command(
@@ -250,7 +266,53 @@ class DeviceController:
             )
             logger.info("Play audio: %s (announcement=%s)", url, announcement)
         except Exception as e:
-            logger.warning("Play audio command failed: %s", e)
+            raise RuntimeError("HAVPE play command failed") from e
+
+    async def stop_audio(self) -> None:
+        """Stop the current response; firmware later confirms ``stopped``."""
+        key = self._entity_keys.get("_media_player")
+        if not self._connected or not self._client or key is None:
+            raise RuntimeError("HAVPE media player is unavailable")
+        self._client.media_player_command(
+            key=key,
+            command=aioesphomeapi.MediaPlayerCommand.STOP,
+        )
+
+    def clear_playback_states(self) -> None:
+        """Drop state notifications left over from an earlier response."""
+        self._playback_state = None
+        for _expected, waiter in self._playback_waiters:
+            if not waiter.done():
+                waiter.cancel()
+        self._playback_waiters.clear()
+
+    def _publish_playback_state(self, observed: str) -> None:
+        """Broadcast one physical state to every matching response waiter."""
+        self._playback_state = observed
+        remaining = []
+        for expected, waiter in self._playback_waiters:
+            if waiter.done():
+                continue
+            if observed == expected:
+                waiter.set_result(None)
+            else:
+                remaining.append((expected, waiter))
+        self._playback_waiters = remaining
+
+    async def wait_playback_state(self, expected: str, timeout: float) -> None:
+        """Wait until firmware reports the requested physical player state."""
+        if expected not in {"started", "stopped"}:
+            raise ValueError("invalid HAVPE playback state")
+        if self._playback_state == expected:
+            return
+        waiter = asyncio.get_running_loop().create_future()
+        entry = (expected, waiter)
+        self._playback_waiters.append(entry)
+        try:
+            await asyncio.wait_for(waiter, timeout=timeout)
+        finally:
+            if entry in self._playback_waiters:
+                self._playback_waiters.remove(entry)
 
     async def disconnect(self) -> None:
         """Disconnect from device."""

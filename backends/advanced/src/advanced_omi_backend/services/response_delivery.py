@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import time
 import uuid
 import wave
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 
 import redis.asyncio as redis
 
-from advanced_omi_backend.redis_keys import ClientId, SessionId
+from advanced_omi_backend.redis_keys import ClientId, SessionId, device_downlink_channel
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 from advanced_omi_backend.services.response_coordinator import (
     ResponseCoordinator,
@@ -18,7 +19,10 @@ from advanced_omi_backend.services.response_coordinator import (
     StaleResponse,
 )
 from advanced_omi_backend.services.tts_client import synthesize_speech
-from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
+from advanced_omi_backend.services.voice_sessions import (
+    ClientUpgradeRequired,
+    VoiceSessionCoordinator,
+)
 
 if TYPE_CHECKING:
     from advanced_omi_backend.services.wakeword.timing import WakeTimer
@@ -66,6 +70,21 @@ async def deliver_wav_response(
         or not view.connection_id
     ):
         raise StaleResponse("response target is not an authenticated audio session")
+    if not view.voice_session_id:
+        await redis_client.publish(
+            str(device_downlink_channel(client_id)),
+            json.dumps(
+                {
+                    "type": "error",
+                    "error": "client_upgrade_required",
+                    "message": "Interactive voice requires voice protocol v1",
+                },
+                separators=(",", ":"),
+            ),
+        )
+        raise ClientUpgradeRequired(
+            "interactive responses require voice_duplex_protocol 1"
+        )
 
     voice_sessions = VoiceSessionCoordinator(redis_client)
     coordinator = ResponseCoordinator(redis_client, voice_sessions)
@@ -78,37 +97,24 @@ async def deliver_wav_response(
     response_turn_id = turn_id or str(uuid.uuid4())
     trace_id = str(uuid.uuid4())
 
-    if view.voice_session_id:
-        voice = await voice_sessions.get(view.voice_session_id)
-        if voice is None:
-            raise StaleResponse("protocol-v1 response has no voice session")
-        response = await coordinator.queue(
-            user_id=view.user_id,
-            client_id=view.client_id,
-            audio_session_id=view.session_id,
-            voice_session_id=view.voice_session_id,
-            capture_epoch=view.capture_epoch,
-            socket_id=view.connection_id,
-            turn_id=response_turn_id,
-            turn_revision=turn_revision,
-            generation=generation,
-            kind=kind,
-            barge_in_allowed=barge_in_allowed if kind == "speech" else False,
-            trace_id=trace_id,
-            causation_id=response_turn_id,
-        )
-    else:
-        response = await coordinator.queue_adapter(
-            user_id=view.user_id,
-            client_id=view.client_id,
-            audio_session_id=view.session_id,
-            turn_id=response_turn_id,
-            turn_revision=turn_revision,
-            generation=generation,
-            kind=kind,
-            trace_id=trace_id,
-            causation_id=response_turn_id,
-        )
+    voice = await voice_sessions.get(view.voice_session_id)
+    if voice is None:
+        raise StaleResponse("protocol-v1 response has no voice session")
+    response = await coordinator.queue(
+        user_id=view.user_id,
+        client_id=view.client_id,
+        audio_session_id=view.session_id,
+        voice_session_id=view.voice_session_id,
+        capture_epoch=view.capture_epoch,
+        socket_id=view.connection_id,
+        turn_id=response_turn_id,
+        turn_revision=turn_revision,
+        generation=generation,
+        kind=kind,
+        barge_in_allowed=barge_in_allowed if kind == "speech" else False,
+        trace_id=trace_id,
+        causation_id=response_turn_id,
+    )
 
     started = time.perf_counter()
     try:
@@ -122,10 +128,7 @@ async def deliver_wav_response(
             duration_ms=duration_ms,
             sample_rate=sample_rate,
         )
-        if response.transport == "voice_v1":
-            delivered = await coordinator.offer(response.response_id, wav)
-        else:
-            delivered = await coordinator.offer_adapter(response.response_id, wav)
+        delivered = await coordinator.offer(response.response_id, wav)
         if timer is not None:
             timer.est_play_secs = duration_ms / 1000
             timer.mark_downlink()

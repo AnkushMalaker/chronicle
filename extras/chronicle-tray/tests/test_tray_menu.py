@@ -91,6 +91,33 @@ def test_tray_menu_offers_view_logs():
         app.processEvents()
 
 
+def test_pendant_voice_output_menu_uses_explicit_safe_route_policies():
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    # Imported after the skip guard because the section imports PySide6 at module scope.
+    from chronicle_tray.sections.pendant import PendantSection
+
+    class FakeBle:
+        selected = None
+
+        def request_voice_output_policy(self, value):
+            self.selected = value
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    section = PendantSection()
+    section.ble = FakeBle()
+    menu = QtWidgets.QMenu()
+    section._add_voice_output_controls(menu)
+
+    output = section.voice_policy_menu
+    assert [action.text() for action in output.actions()] == [
+        "Automatic (recommended)",
+        "Require headphones",
+        "Always speaker-safe",
+    ]
+    output.actions()[1].trigger()
+    assert section.ble.selected == "require_headphones"
+
+
 def test_capture_warning_uses_recorder_owned_portal_state():
     failed = {
         "vision_capture": {

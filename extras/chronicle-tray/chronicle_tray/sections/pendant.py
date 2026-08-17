@@ -9,7 +9,7 @@ import importlib.util
 import logging
 
 from chronicle_tray.sections import Section
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import QMenu
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,11 @@ class PendantSection(Section):
         self.state = None
         self.ble = None
         self.status_item = None
+        self.voice_status_item = None
         self.devices_menu = None
+        self.voice_policy_menu = None
+        self.voice_policy_actions = {}
+        self.voice_policy_group = None
 
     def available(self) -> tuple[bool, str]:
         if importlib.util.find_spec("chronicle_wearable") is None:
@@ -46,15 +50,44 @@ class PendantSection(Section):
 
         self.status_item = menu.addAction("Pendant: starting…")
         self.status_item.setEnabled(False)
+        self.voice_status_item = menu.addAction("Voice: waiting for pendant")
+        self.voice_status_item.setEnabled(False)
         self.devices_menu = menu.addMenu("Devices")
+        self._add_voice_output_controls(menu)
         menu.addAction("Scan now", self.ble.request_scan)
         menu.addAction("Disconnect pendant", self.ble.request_disconnect)
+
+    def _add_voice_output_controls(self, menu: QMenu) -> None:
+        output_menu = menu.addMenu("Voice output")
+        self.voice_policy_menu = output_menu
+        self.voice_policy_group = QActionGroup(output_menu)
+        self.voice_policy_group.setExclusive(True)
+        options = (
+            ("auto", "Automatic (recommended)"),
+            ("require_headphones", "Require headphones"),
+            ("always_half_duplex", "Always speaker-safe"),
+        )
+        for value, label in options:
+            action = QAction(label, output_menu)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda _checked=False, selected=value: (
+                    self.ble.request_voice_output_policy(selected)
+                )
+            )
+            self.voice_policy_group.addAction(action)
+            output_menu.addAction(action)
+            self.voice_policy_actions[value] = action
 
     def refresh(self) -> None:
         if self.ble is None:
             return
         snap = self.state.snapshot()
         self.status_item.setText(f"Pendant: {self._summary(snap)}")
+        self.voice_status_item.setText(f"Voice: {snap['voice_output_status']}")
+        selected = self.voice_policy_actions.get(snap["voice_output_policy"])
+        if selected is not None:
+            selected.setChecked(True)
         self._rebuild_devices(snap)
 
     def _summary(self, snap: dict) -> str:

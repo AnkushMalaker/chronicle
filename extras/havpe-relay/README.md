@@ -14,6 +14,13 @@ The relay:
 - Converts 32-bit stereo I2S data to 16-bit mono PCM
 - Authenticates with the Chronicle backend (JWT)
 - Streams audio over WebSocket using the Wyoming protocol
+- Terminates Chronicle voice protocol v1 and reports native half-duplex capabilities
+- Delivers bound response WAVs through ESPHome and ACKs physical playback state
+
+Interactive output requires both the updated relay and the included firmware from
+the same revision. During an announcement the firmware stops microphone capture,
+publishes `started/stopped` through ESPHome, then restores capture. A relay paired
+with older firmware remains capture-only; it does not fall back to `play-audio`.
 
 ## Quick Start
 

@@ -98,7 +98,7 @@ class ButtonControlPlugin(BasePlugin):
             logger.warning("No client_id in button event data, cannot stop playback")
             return PluginResult(success=False, message="No device for this event")
 
-        await context.services.stop_playback(client_id)
+        await context.services.stop_playback(context.user_id, client_id)
         logger.info(f"Button press stopped playback on {client_id}")
         return PluginResult(
             success=True,

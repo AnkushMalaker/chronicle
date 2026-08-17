@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fakeredis import aioredis as fake_aioredis
 
+from advanced_omi_backend.plugins.services import PluginServices
 from advanced_omi_backend.redis_keys import ClientId, SessionId, device_downlink_channel
 from advanced_omi_backend.services import response_delivery
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
@@ -15,7 +16,10 @@ from advanced_omi_backend.services.response_coordinator import (
     StaleResponse,
 )
 from advanced_omi_backend.services.response_delivery import deliver_text_response
-from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
+from advanced_omi_backend.services.voice_sessions import (
+    ClientUpgradeRequired,
+    VoiceSessionCoordinator,
+)
 from advanced_omi_backend.voice_protocol import VoiceCapabilities
 
 pytestmark = pytest.mark.unit
@@ -243,6 +247,67 @@ async def test_only_one_response_can_reach_playing(coordinator, voice_coordinato
     assert second.state == "queued"
 
 
+async def test_physical_cancellation_ack_is_idempotent_after_generation_fence(
+    coordinator, voice_coordinator
+):
+    voice = await _ready_voice(voice_coordinator)
+    response = await _queued_response(coordinator, voice)
+    await coordinator.mark_ready(
+        response.response_id, byte_length=12, duration_ms=250, sample_rate=24000
+    )
+    await coordinator.offer(response.response_id, b"RIFF12345678")
+    await coordinator.playback(
+        response_id=response.response_id,
+        generation=response.generation,
+        state="started",
+        user_id="user-1",
+        client_id="client-1",
+        audio_session_id="audio-1",
+        voice_session_id=voice.voice_session_id,
+        capture_epoch=3,
+        socket_id="socket-1",
+        monotonic_timestamp_ms=10,
+    )
+
+    await coordinator.begin_turn("user-1", "client-1", reason="barge_in")
+    acknowledged = await coordinator.playback(
+        response_id=response.response_id,
+        generation=response.generation,
+        state="cancelled",
+        user_id="user-1",
+        client_id="client-1",
+        audio_session_id="audio-1",
+        voice_session_id=voice.voice_session_id,
+        capture_epoch=3,
+        socket_id="socket-1",
+        monotonic_timestamp_ms=20,
+    )
+
+    assert acknowledged.state == "cancelled"
+    assert acknowledged.terminal_reason == "barge_in"
+    assert acknowledged.playback_monotonic_ms == 20
+
+
+async def test_plugin_stop_playback_uses_generation_fenced_v1_cancellation(
+    coordinator, voice_coordinator, redis_client
+):
+    voice = await _ready_voice(voice_coordinator)
+    response = await _queued_response(coordinator, voice)
+    await coordinator.mark_ready(
+        response.response_id, byte_length=12, duration_ms=250, sample_rate=24_000
+    )
+    await coordinator.offer(response.response_id, b"RIFF12345678")
+    services = PluginServices.__new__(PluginServices)
+    services._async_redis = redis_client
+
+    assert await services.stop_playback("user-1", "client-1")
+
+    cancelled = await coordinator.get(response.response_id)
+    assert cancelled is not None
+    assert cancelled.state == "cancelled"
+    assert cancelled.terminal_reason == "barge_in"
+
+
 def _wav() -> bytes:
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as writer:
@@ -253,8 +318,8 @@ def _wav() -> bytes:
     return buffer.getvalue()
 
 
-async def test_wearable_adapter_requires_full_capture_binding_and_settles_once(
-    coordinator, redis_client
+async def test_capture_only_client_must_upgrade_before_interactive_delivery(
+    redis_client, monkeypatch
 ):
     await SessionStore(redis_client).init_session(
         "audio-wearable",
@@ -270,51 +335,23 @@ async def test_wearable_adapter_requires_full_capture_binding_and_settles_once(
         },
         voice_session_id=None,
     )
-    generation = await coordinator.begin_turn("user-1", "wearable-1")
-    response = await coordinator.queue_adapter(
-        user_id="user-1",
-        client_id="wearable-1",
-        audio_session_id="audio-wearable",
-        turn_id="turn-1",
-        turn_revision=0,
-        generation=generation,
-        kind="speech",
-        trace_id="trace-1",
-        causation_id="turn-1",
-    )
-    wav = _wav()
-    await coordinator.mark_ready(
-        response.response_id,
-        byte_length=len(wav),
-        duration_ms=100,
-        sample_rate=16_000,
-    )
+    synthesize = AsyncMock(return_value=_wav())
+    monkeypatch.setattr(response_delivery, "synthesize_speech", synthesize)
     channel = str(device_downlink_channel(ClientId.from_value("wearable-1")))
     pubsub = redis_client.pubsub()
     await pubsub.subscribe(channel)
     await pubsub.get_message(timeout=1)
 
-    done = await coordinator.offer_adapter(response.response_id, wav)
-    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
-
-    assert done.state == "done"
-    payload = json.loads(message["data"])
-    assert payload["type"] == "play-audio"
-    assert payload["data"]["audio_session_id"] == "audio-wearable"
-    assert payload["data"]["generation"] == generation
-
-    with pytest.raises(StaleResponse):
-        await coordinator.queue_adapter(
-            user_id="user-1",
-            client_id="different-client",
-            audio_session_id="audio-wearable",
-            turn_id="turn-2",
-            turn_revision=0,
-            generation=generation,
-            kind="tone",
-            trace_id="trace-2",
-            causation_id="turn-2",
+    with pytest.raises(ClientUpgradeRequired):
+        await deliver_text_response(
+            redis_client,
+            ClientId.from_value("wearable-1"),
+            SessionId.from_value("audio-wearable"),
+            "hello",
         )
+    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
+    assert json.loads(message["data"])["error"] == "client_upgrade_required"
+    synthesize.assert_not_awaited()
 
 
 async def test_text_delivery_uses_response_audio_for_protocol_v1_phone(

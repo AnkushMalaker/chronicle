@@ -18,12 +18,17 @@ NEO1_CTRL_CHAR_UUID = "19B10003-E8F2-537E-4F6C-D104768A1214"
 # no speaker. The relay writes opcode-framed Opus (24 kHz mono) here; the firmware reassembles
 # fragments and plays them. Byte 0 of every write is an opcode (see SPEAKER_OP_* below).
 ELATO_SPEAKER_CHAR_UUID = "19B10004-E8F2-537E-4F6C-D104768A1214"
-SPEAKER_OP_START = 0x01  # speak-start: reset + arm playback (no payload)
-SPEAKER_OP_END = 0x02  # speak-end: drain then stop (no payload)
-SPEAKER_OP_STOP = 0x03  # speak-stop / barge-in: flush now (no payload)
+ELATO_SPEAKER_STATUS_CHAR_UUID = "19B10005-E8F2-537E-4F6C-D104768A1214"
+SPEAKER_OP_START = 0x01  # reset + arm; response UUID + generation payload
+SPEAKER_OP_END = 0x02  # drain then stop; response UUID + generation payload
+SPEAKER_OP_STOP = 0x03  # flush now; response UUID + cancellation generation
 SPEAKER_OP_AUDIO = (
     0x10  # [0x10][flags][opus...]; flags bit0 = final fragment of a packet
 )
+SPEAKER_STATUS_STARTED = 0x81
+SPEAKER_STATUS_DONE = 0x82
+SPEAKER_STATUS_CANCELLED = 0x83
+SPEAKER_STATUS_FAILED = 0x84
 
 # Features service
 FEATURES_SERVICE_UUID = "19B10020-E8F2-537E-4F6C-D104768A1214"

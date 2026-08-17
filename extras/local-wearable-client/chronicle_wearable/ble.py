@@ -21,6 +21,7 @@ from chronicle_wearable.cli import (
     detect_device_type,
     load_config,
 )
+from chronicle_wearable.output_route import HostOutputPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,9 @@ class SharedState:
     error: Optional[str] = None
     chunks_sent: int = 0
     battery_level: int = -1  # -1 = unknown
+    voice_output_policy: str = HostOutputPolicy.AUTO.value
+    voice_output_status: str = "waiting for pendant"
+    capture_epoch: int = 0
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -50,6 +54,9 @@ class SharedState:
                 "error": self.error,
                 "chunks_sent": self.chunks_sent,
                 "battery_level": self.battery_level,
+                "voice_output_policy": self.voice_output_policy,
+                "voice_output_status": self.voice_output_status,
+                "capture_epoch": self.capture_epoch,
             }
 
     def update(self, **kwargs) -> None:
@@ -91,6 +98,13 @@ class BLEManager:
         self.config = load_config()
         self.backend_enabled = check_config()
         self._scan_interval = self.config.get("scan_interval", 10)
+        try:
+            output_policy = HostOutputPolicy(
+                self.config.get("voice_output_policy", HostOutputPolicy.AUTO.value)
+            )
+        except ValueError:
+            output_policy = HostOutputPolicy.AUTO
+        self.state.update(voice_output_policy=output_policy.value)
         self._connecting = False  # Guard against concurrent _connect() calls
         self._running_task: Optional[asyncio.Task] = None
         # Strong refs to fire-and-forget futures: a task whose only reference
@@ -126,6 +140,19 @@ class BLEManager:
             logger.info("Saved last_connected: %s", mac)
         except Exception as e:
             logger.error("Failed to save last_connected: %s", e)
+
+    def _save_voice_output_policy(self, policy: HostOutputPolicy) -> None:
+        """Persist the tray's local route policy in gitignored client config."""
+        try:
+            with open(CONFIG_PATH) as config_file:
+                data = yaml.safe_load(config_file) or {}
+            data["voice_output_policy"] = policy.value
+            with open(CONFIG_PATH, "w") as config_file:
+                yaml.dump(data, config_file, default_flow_style=False)
+            self.config = data
+            logger.info("Saved voice_output_policy: %s", policy.value)
+        except Exception as error:
+            logger.error("Failed to save voice output policy: %s", error)
 
     def _spawn(self, coro) -> None:
         """Schedule background work, holding a reference until it completes."""
@@ -249,7 +276,12 @@ class BLEManager:
         finally:
             self._running_task = None
             self._connecting = False
-            self.state.update(status="idle", connected_device=None, battery_level=-1)
+            self.state.update(
+                status="idle",
+                connected_device=None,
+                battery_level=-1,
+                voice_output_status="waiting for pendant",
+            )
             logger.info("Disconnected from %s", device["name"])
 
             # Backoff logic: if connection was very short, it likely failed
@@ -283,6 +315,12 @@ class BLEManager:
             device,
             backend_enabled=self.backend_enabled,
             on_battery_level=lambda level: self.state.update(battery_level=level),
+            voice_output_policy=self.state.snapshot()["voice_output_policy"],
+            on_voice_output_status=lambda value: self.state.update(
+                voice_output_status=value
+            ),
+            initial_capture_epoch=self.state.snapshot()["capture_epoch"],
+            on_capture_epoch=lambda value: self.state.update(capture_epoch=value),
         )
 
     def request_connect(self, mac: str) -> None:
@@ -310,6 +348,18 @@ class BLEManager:
         self._backoff_seconds = 0  # Reset backoff on user-initiated disconnect
         self._save_last_connected(None)
         # Cancel the dedicated connection task on the asyncio thread
+        task = self._running_task
+        if task and self.bg.loop:
+            self.bg.loop.call_soon_threadsafe(task.cancel)
+
+    def request_voice_output_policy(self, value: str) -> None:
+        """Apply a route policy at the next capture epoch and persist it locally."""
+        policy = HostOutputPolicy(value)
+        self.state.update(
+            voice_output_policy=policy.value,
+            voice_output_status="applying route policy…",
+        )
+        self._save_voice_output_policy(policy)
         task = self._running_task
         if task and self.bg.loop:
             self.bg.loop.call_soon_threadsafe(task.cancel)

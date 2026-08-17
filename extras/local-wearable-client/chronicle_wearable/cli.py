@@ -27,6 +27,7 @@ from typing import Any, Callable
 import yaml
 from bleak import BleakScanner
 from chronicle_wearable.backend import send_button_event, stream_to_backend
+from chronicle_wearable.output_route import HostOutputPolicy
 from chronicle_wearable.service import install, kickstart, logs, status, uninstall
 from chronicle_wearable.wifi_join import get_current_wifi, join_wifi_ap
 from chronicle_wearable.wifi_receiver import WifiAudioReceiver
@@ -55,8 +56,8 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(_REPO_ROOT / ".env")
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "devices.yml")
-CONFIG_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "devices.yml.template")
+CONFIG_PATH = str(Path(__file__).resolve().parents[1] / "devices.yml")
+CONFIG_TEMPLATE_PATH = str(Path(__file__).resolve().parents[1] / "devices.yml.template")
 ENV_PATH = str(_REPO_ROOT / ".env")
 
 
@@ -192,6 +193,10 @@ async def connect_and_stream(
     device: dict,
     backend_enabled: bool = True,
     on_battery_level: Callable[[int], None] | None = None,
+    voice_output_policy: HostOutputPolicy | str = HostOutputPolicy.AUTO,
+    on_voice_output_status: Callable[[str], None] | None = None,
+    initial_capture_epoch: int = 0,
+    on_capture_epoch: Callable[[int], None] | None = None,
 ) -> None:
     """Connect to a device, subscribe to audio (and buttons for OMI),
     and stream to the Chronicle backend until disconnected."""
@@ -272,7 +277,13 @@ async def connect_and_stream(
         speaker = conn if isinstance(conn, OmiConnection) else None
         try:
             await stream_to_backend(
-                queue_to_stream(), device_name=device_name, speaker=speaker
+                queue_to_stream(),
+                device_name=device_name,
+                speaker=speaker,
+                output_policy=voice_output_policy,
+                on_voice_status=on_voice_output_status,
+                initial_capture_epoch=initial_capture_epoch,
+                on_capture_epoch=on_capture_epoch,
             )
         except Exception as e:
             logger.error("Backend streaming error: %s", e, exc_info=True)
@@ -614,6 +625,11 @@ async def run(target_mac: str | None = None) -> None:
     BACKOFF_MAX = 300.0
     MIN_HEALTHY_DURATION = 30.0
     backoff = 0.0  # 0 = no backoff active
+    capture_epoch = 0
+
+    def remember_capture_epoch(value: int) -> None:
+        nonlocal capture_epoch
+        capture_epoch = value
 
     logger.info("Local wearable client started — scanning for devices...")
 
@@ -649,7 +665,15 @@ async def run(target_mac: str | None = None) -> None:
                 device["type"],
             )
             connected_at = asyncio.get_running_loop().time()
-            await connect_and_stream(device, backend_enabled=backend_enabled)
+            await connect_and_stream(
+                device,
+                backend_enabled=backend_enabled,
+                voice_output_policy=config.get(
+                    "voice_output_policy", HostOutputPolicy.AUTO.value
+                ),
+                initial_capture_epoch=capture_epoch,
+                on_capture_epoch=remember_capture_epoch,
+            )
             elapsed = asyncio.get_running_loop().time() - connected_at
             if elapsed >= MIN_HEALTHY_DURATION:
                 # Healthy session — reset backoff.

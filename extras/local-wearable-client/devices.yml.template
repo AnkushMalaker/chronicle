@@ -10,5 +10,9 @@ auto_discover: true
 # Seconds between scans when no device is connected
 scan_interval: 10
 
+# Host output safety. "auto" allows verified headphones and otherwise gates
+# capture while speakers play. Other values: require_headphones, always_half_duplex.
+voice_output_policy: auto
+
 # Last connected device MAC (auto-populated on successful connection)
 # last_connected: "AA:BB:CC:DD:EE:FF"

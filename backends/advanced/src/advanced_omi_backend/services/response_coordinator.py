@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import time
 import uuid
@@ -22,7 +21,6 @@ from advanced_omi_backend.redis_keys import (
     voice_response,
     voice_response_media,
 )
-from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
 from advanced_omi_backend.voice_protocol import (
     MAX_RESPONSE_BYTES,
@@ -48,7 +46,7 @@ ResponseState = Literal[
     "failed",
 ]
 ResponseKind = Literal["speech", "tone"]
-ResponseTransport = Literal["voice_v1", "device_adapter"]
+ResponseTransport = Literal["voice_v1"]
 T = TypeVar("T")
 
 
@@ -372,87 +370,6 @@ class ResponseCoordinator:
         await self.assert_current(record)
         return record
 
-    async def queue_adapter(
-        self,
-        *,
-        user_id: str,
-        client_id: str,
-        audio_session_id: str,
-        turn_id: str,
-        turn_revision: int,
-        generation: int,
-        kind: ResponseKind,
-        trace_id: str,
-        causation_id: str,
-    ) -> ResponseRecord:
-        """Queue a wearable response through an authenticated capture adapter."""
-
-        view = await SessionStore(self.redis).read(audio_session_id)
-        if (
-            view is None
-            or view.user_id != user_id
-            or view.client_id != client_id
-            or view.voice_session_id
-            or not view.connection_id
-            or not view.websocket_connected
-        ):
-            raise StaleResponse(
-                "device adapter target is not an active capture binding"
-            )
-
-        generation_key = self._generation_key(user_id, client_id)
-        current_key = self._current_key(user_id, client_id)
-        while True:
-            async with self.redis.pipeline(transaction=True) as pipe:
-                try:
-                    await pipe.watch(generation_key, current_key)
-                    stored_generation = int(
-                        _decode(await pipe.get(generation_key)) or 0
-                    )
-                    if stored_generation != generation:
-                        raise StaleResponse("response generation was superseded")
-                    if await pipe.get(current_key) is not None:
-                        raise InvalidResponseTransition(
-                            "a response is already current; supersede it first"
-                        )
-                    now = time.time()
-                    record = ResponseRecord(
-                        response_id=str(uuid.uuid4()),
-                        user_id=user_id,
-                        client_id=client_id,
-                        audio_session_id=audio_session_id,
-                        voice_session_id="",
-                        capture_epoch=view.capture_epoch,
-                        socket_id=view.connection_id,
-                        turn_id=turn_id,
-                        turn_revision=turn_revision,
-                        generation=generation,
-                        kind=kind,
-                        transport="device_adapter",
-                        barge_in_allowed=False,
-                        trace_id=trace_id,
-                        causation_id=causation_id,
-                        state="queued",
-                        created_at=now,
-                        updated_at=now,
-                    )
-                    record_key = voice_response(record.response_id)
-                    pipe.multi()
-                    pipe.hset(record_key, mapping=_record_mapping(record))
-                    pipe.expire(record_key, RESPONSE_RETENTION_SECONDS)
-                    pipe.set(
-                        current_key,
-                        record.response_id,
-                        ex=RESPONSE_RETENTION_SECONDS,
-                    )
-                    await pipe.execute()
-                    break
-                except WatchError:
-                    continue
-
-        await self.assert_current(record)
-        return record
-
     async def assert_current(self, record: ResponseRecord) -> None:
         generation = await self.current_generation(record.user_id, record.client_id)
         current_id = _decode(
@@ -651,61 +568,6 @@ class ResponseCoordinator:
         await self.assert_current(offered)
         return offered
 
-    async def offer_adapter(self, response_id: str, wav: bytes) -> ResponseRecord:
-        """Publish one bound legacy device frame and terminally settle it."""
-
-        record = await self.get(response_id)
-        if (
-            record is None
-            or record.state != "ready"
-            or record.transport != "device_adapter"
-        ):
-            raise InvalidResponseTransition(
-                "only a ready device-adapter response can be offered"
-            )
-        await self.assert_current(record)
-        view = await SessionStore(self.redis).read(record.audio_session_id)
-        if (
-            view is None
-            or view.user_id != record.user_id
-            or view.client_id != record.client_id
-            or view.connection_id != record.socket_id
-            or view.capture_epoch != record.capture_epoch
-            or view.voice_session_id
-            or not view.websocket_connected
-        ):
-            raise StaleResponse("device adapter binding became stale before offer")
-        if record.byte_length is None or len(wav) != record.byte_length:
-            raise ValueError("WAV body does not match response metadata")
-
-        offered = await self._set_state(
-            response_id,
-            expected={"ready"},
-            state="offered",
-        )
-        payload = {
-            "type": "play-audio",
-            "data": {
-                "audio_b64": base64.b64encode(wav).decode("ascii"),
-                "format": "wav",
-                "response_id": offered.response_id,
-                "generation": offered.generation,
-                "audio_session_id": offered.audio_session_id,
-            },
-        }
-        await self._publish(offered.client_id, payload)
-        await self.assert_current(offered)
-        playing = await self._set_state(
-            response_id,
-            expected={"offered"},
-            state="playing",
-        )
-        return await self._set_state(
-            playing.response_id,
-            expected={"playing"},
-            state="done",
-        )
-
     async def read_media(self, response_id: str) -> bytes | None:
         return await self.redis.get(voice_response_media(response_id))
 
@@ -743,6 +605,22 @@ class ResponseCoordinator:
             )
         ):
             raise StaleResponse("playback acknowledgment binding is stale")
+
+        # Generation fencing terminally cancels the response before the physical
+        # player can report that it actually stopped. Accept that later observation
+        # without reviving the response or replacing the coordinator's reason.
+        if state == "cancelled" and record.state == "cancelled":
+            await self.redis.hset(
+                voice_response(response_id),
+                mapping={
+                    "playback_monotonic_ms": str(monotonic_timestamp_ms),
+                    "updated_at": str(time.time()),
+                },
+            )
+            acknowledged = await self.get(response_id)
+            if acknowledged is None:
+                raise StaleResponse("response disappeared during cancellation ACK")
+            return acknowledged
 
         transitions: dict[str, tuple[set[ResponseState], ResponseState]] = {
             "started": ({"offered"}, "playing"),

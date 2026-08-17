@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from typing import Callable, Optional
 
 from bleak import BleakClient, BleakScanner
@@ -6,6 +7,7 @@ from bleak import BleakClient, BleakScanner
 from .uuids import (
     BATTERY_LEVEL_CHAR_UUID,
     ELATO_SPEAKER_CHAR_UUID,
+    ELATO_SPEAKER_STATUS_CHAR_UUID,
     FEATURE_HAPTIC,
     FEATURE_WIFI,
     FEATURES_CHAR_UUID,
@@ -16,6 +18,10 @@ from .uuids import (
     SPEAKER_OP_END,
     SPEAKER_OP_START,
     SPEAKER_OP_STOP,
+    SPEAKER_STATUS_CANCELLED,
+    SPEAKER_STATUS_DONE,
+    SPEAKER_STATUS_FAILED,
+    SPEAKER_STATUS_STARTED,
     STORAGE_DATA_STREAM_CHAR_UUID,
     STORAGE_READ_CONTROL_CHAR_UUID,
     STORAGE_WIFI_CHAR_UUID,
@@ -131,24 +137,77 @@ class OmiConnection(WearableConnection):
         mtu = getattr(self._client, "mtu_size", 0) or 0
         return max(mtu - 3 - 2, 18)
 
-    async def _speaker_control(self, opcode: int) -> None:
+    def supports_speaker_protocol_v1(self) -> bool:
+        """Whether firmware exposes bound playback-status notifications."""
+        if self._client is None:
+            raise RuntimeError("Not connected to device")
+        return (
+            self._client.services.get_characteristic(ELATO_SPEAKER_STATUS_CHAR_UUID)
+            is not None
+        )
+
+    @staticmethod
+    def _speaker_binding(response_id: str, generation: int) -> bytes:
+        if generation < 0:
+            raise ValueError("generation must be non-negative")
+        return uuid.UUID(response_id).bytes + generation.to_bytes(8, "little")
+
+    async def _speaker_control(
+        self, opcode: int, response_id: str, generation: int
+    ) -> None:
         if self._client is None:
             raise RuntimeError("Not connected to device")
         await self._client.write_gatt_char(
-            ELATO_SPEAKER_CHAR_UUID, bytes([opcode]), response=False
+            ELATO_SPEAKER_CHAR_UUID,
+            bytes([opcode]) + self._speaker_binding(response_id, generation),
+            response=True,
         )
 
-    async def speaker_start(self) -> None:
-        """Begin a speaker clip (resets the device's playback ring)."""
-        await self._speaker_control(SPEAKER_OP_START)
+    async def speaker_start(self, response_id: str, generation: int) -> None:
+        """Begin one bound speaker clip and reset the playback ring."""
+        await self._speaker_control(SPEAKER_OP_START, response_id, generation)
 
-    async def speaker_end(self) -> None:
-        """End a speaker clip (device drains its buffer then stops)."""
-        await self._speaker_control(SPEAKER_OP_END)
+    async def speaker_end(self, response_id: str, generation: int) -> None:
+        """End a bound clip; firmware drains then reports ``done``."""
+        await self._speaker_control(SPEAKER_OP_END, response_id, generation)
 
-    async def speaker_stop(self) -> None:
-        """Barge-in: stop playback now and drop buffered audio."""
-        await self._speaker_control(SPEAKER_OP_STOP)
+    async def speaker_stop(
+        self, response_id: str, cancellation_generation: int
+    ) -> None:
+        """Stop a bound response when the cancellation generation is current."""
+        await self._speaker_control(
+            SPEAKER_OP_STOP, response_id, cancellation_generation
+        )
+
+    async def subscribe_speaker_status(
+        self, callback: Callable[[str, int, str], None]
+    ) -> None:
+        """Subscribe to firmware-confirmed playback state for protocol v1.
+
+        Notifications are ``status | response UUID | response generation``.  A
+        cancellation notification carries the original response generation; the
+        newer cancellation generation is used only by firmware's stale-command gate.
+        """
+        if self._client is None:
+            raise RuntimeError("Not connected to device")
+        states = {
+            SPEAKER_STATUS_STARTED: "started",
+            SPEAKER_STATUS_DONE: "done",
+            SPEAKER_STATUS_CANCELLED: "cancelled",
+            SPEAKER_STATUS_FAILED: "failed",
+        }
+
+        def _on_notify(_sender: int, data: bytearray) -> None:
+            if len(data) != 25:
+                raise ValueError("invalid Elato speaker status length")
+            state = states.get(data[0])
+            if state is None:
+                raise ValueError("invalid Elato speaker status opcode")
+            response_id = str(uuid.UUID(bytes=bytes(data[1:17])))
+            generation = int.from_bytes(data[17:25], "little")
+            callback(response_id, generation, state)
+
+        await self._client.start_notify(ELATO_SPEAKER_STATUS_CHAR_UUID, _on_notify)
 
     async def write_speaker_audio(self, opus_packet: bytes) -> None:
         """Write one Opus packet (24 kHz mono) to the speaker, fragmented to the MTU.

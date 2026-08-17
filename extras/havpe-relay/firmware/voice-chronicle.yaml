@@ -5,6 +5,7 @@
 #   - Speaker output via ESPHome API media_player (for TTS playback)
 #   - LED ring status indicators
 #   - HTTP audio source for playing audio from URLs
+#   - Chronicle voice protocol v1 native half-duplex playback reporting
 #
 # Flash with:
 #   cd extras/havpe-relay/firmware
@@ -143,6 +144,10 @@ globals:
     initial_value: '0'
   # True while the dial is being turned (drives the Volume Display animation).
   - id: dial_touched
+    type: bool
+    initial_value: 'false'
+  # Prevent media-player state chatter from publishing a false playback stop.
+  - id: response_playing
     type: bool
     initial_value: 'false'
 
@@ -406,6 +411,11 @@ text_sensor:
   - platform: template
     id: dial_action
     name: "Dial Action"
+  # Consumed by the relay to acknowledge physical response playback. The relay,
+  # not the MCU, owns the authenticated WebSocket voice-session binding.
+  - platform: template
+    id: playback_state
+    name: "Playback State"
 
 # ─────────── LED Hold Duration (set by backend before light command) ───────────
 number:
@@ -689,6 +699,13 @@ media_player:
     sources:
       - http_source
     on_announcement:
+      # HAVPE has no verified acoustic echo cancellation on this graph. Firmware
+      # therefore owns explicit half duplex: no microphone frames while TTS plays.
+      - lambda: 'id(response_playing) = true;'
+      - microphone.stop_capture: mic_in
+      - text_sensor.template.publish:
+          id: playback_state
+          state: "started"
       - mixer_speaker.apply_ducking:
           id: media_mixing_input
           decibel_reduction: 20
@@ -696,9 +713,16 @@ media_player:
     on_state:
       if:
         condition:
-          not:
-            media_player.is_announcing: chronicle_media_player
+          and:
+            - not:
+                media_player.is_announcing: chronicle_media_player
+            - lambda: 'return id(response_playing);'
         then:
+          - lambda: 'id(response_playing) = false;'
+          - text_sensor.template.publish:
+              id: playback_state
+              state: "stopped"
+          - microphone.capture: mic_in
           - mixer_speaker.apply_ducking:
               id: media_mixing_input
               decibel_reduction: 0

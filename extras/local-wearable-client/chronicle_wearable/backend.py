@@ -1,18 +1,25 @@
 """Backend streaming module — sends audio to Chronicle via Wyoming WebSocket protocol."""
 
 import asyncio
-import base64
 import json
 import logging
 import os
 import ssl
-import tempfile
-from typing import AsyncGenerator, Optional
+import sys
+from collections.abc import Callable
+from typing import AsyncGenerator
 from urllib.parse import quote
 
-import httpx
 import websockets
 from chronicle_client import ClientConfig
+from chronicle_client.voice_session import (
+    ServerUpgradeRequired,
+    WearableVoiceProtocolError,
+    WearableVoiceSession,
+)
+
+from .output_route import HostOutputPolicy, MacOutputRouteDetector, resolve_host_output
+from .playback import AfplayPlaybackTarget, ElatoPlaybackTarget
 
 logger = logging.getLogger(__name__)
 
@@ -20,47 +27,8 @@ logger = logging.getLogger(__name__)
 # config (repository-root .env), so this module no longer derives any of them.
 _config = ClientConfig.from_env()
 VERIFY_SSL = _config.verify_ssl
-# Play backend TTS ("play-audio") responses on the laptop speaker. The wearable
-# has no speaker, so the relay laptop acts as the output device.
+# Use the tray host as a route-verified v1 output for speakerless devices.
 PLAY_BACKEND_AUDIO = os.getenv("PLAY_BACKEND_AUDIO", "true").lower() == "true"
-
-
-async def play_audio_on_laptop(audio_b64: str, fmt: str = "wav") -> None:
-    """Decode base64 audio from a backend play-audio frame and play it on the
-    laptop speaker via macOS `afplay`. Runs as a non-blocking subprocess so the
-    WebSocket keepalive/receive loop is never stalled."""
-    try:
-        audio = base64.b64decode(audio_b64)
-    except Exception as e:
-        logger.warning("play-audio: failed to decode base64 audio: %s", e)
-        return
-
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False) as tmp:
-            tmp.write(audio)
-            tmp_path = tmp.name
-
-        logger.info("play-audio: playing %d bytes on laptop speaker", len(audio))
-        proc = await asyncio.create_subprocess_exec(
-            "afplay",
-            tmp_path,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.wait()
-        if proc.returncode != 0:
-            logger.warning("play-audio: afplay exited with code %s", proc.returncode)
-    except FileNotFoundError:
-        logger.error("play-audio: `afplay` not found (macOS only); cannot play audio")
-    except Exception as e:
-        logger.error("play-audio: playback failed: %s", e, exc_info=True)
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
 
 
 backend_url = _config.backend_url
@@ -72,11 +40,12 @@ logger.info("Wearable backend resolved: %s (ws: %s)", backend_url, websocket_uri
 
 # Module-level websocket reference for sending control messages (e.g., button events)
 _active_websocket = None
+_active_send_lock: asyncio.Lock | None = None
 
 
 async def send_button_event(button_state: str) -> None:
     """Send a button event to the backend via the active WebSocket connection."""
-    if _active_websocket is None:
+    if _active_websocket is None or _active_send_lock is None:
         logger.debug("No active websocket, dropping button event: %s", button_state)
         return
 
@@ -85,48 +54,34 @@ async def send_button_event(button_state: str) -> None:
         "data": {"state": button_state},
         "payload_length": None,
     }
-    await _active_websocket.send(json.dumps(event) + "\n")
+    async with _active_send_lock:
+        await _active_websocket.send(json.dumps(event) + "\n")
     logger.info("Sent button event to backend: %s", button_state)
 
 
-async def receive_handler(websocket, logger, speaker=None) -> None:
+async def receive_handler(
+    websocket, logger, voice_session: WearableVoiceSession
+) -> None:
     """Background task to receive messages from backend.
 
     Processes pongs (keepalive), interim transcripts, and other messages.
     Critical for WebSocket stability.
 
-    *speaker*: optional object exposing speaker_start/speaker_end/speaker_stop/
-    write_speaker_audio (an OmiConnection). When set, the backend's Opus speaker
-    downlink (speak-start text → binary Opus frames → speak-end, plus speak-stop
-    for barge-in) is forwarded to the device over BLE instead of the laptop.
+    Protocol-v1 owns interactive response playback. A binary frame is accepted
+    only after a fully bound ``response.audio`` header.
     """
     try:
         while True:
             message = await websocket.recv()
-            # Binary frame = one Opus speaker packet (Elato downlink). Forward to BLE.
             if isinstance(message, (bytes, bytearray)):
-                if speaker is not None:
-                    try:
-                        await speaker.write_speaker_audio(bytes(message))
-                    except Exception as e:
-                        logger.debug("speaker audio write failed: %s", e)
+                await voice_session.handle_binary(bytes(message))
                 continue
             try:
                 data = json.loads(message)
                 msg_type = data.get("type", "unknown")
-                if msg_type in ("speak-start", "speak-end", "speak-stop"):
-                    # Opus speaker downlink control (Elato). Forward to the device.
-                    if speaker is not None:
-                        try:
-                            if msg_type == "speak-start":
-                                await speaker.speaker_start()
-                            elif msg_type == "speak-end":
-                                await speaker.speaker_end()
-                            else:
-                                await speaker.speaker_stop()
-                        except Exception as e:
-                            logger.debug("speaker control %s failed: %s", msg_type, e)
-                elif msg_type == "interim_transcript":
+                if await voice_session.handle_event(data):
+                    continue
+                if msg_type == "interim_transcript":
                     text = data.get("data", {}).get("text", "")[:50]
                     is_final = data.get("data", {}).get("is_final", False)
                     logger.debug(
@@ -134,26 +89,20 @@ async def receive_handler(websocket, logger, speaker=None) -> None:
                         "FINAL" if is_final else "partial",
                         text,
                     )
-                elif msg_type == "play-audio":
-                    # Backend TTS response — play it on the laptop speaker since
-                    # the wearable has none. Spawned as a task so playback
-                    # doesn't block receiving further frames / keepalive.
-                    payload = data.get("data", {})
-                    audio_b64 = payload.get("audio_b64", "")
-                    if PLAY_BACKEND_AUDIO and audio_b64:
-                        asyncio.create_task(
-                            play_audio_on_laptop(
-                                audio_b64, payload.get("format", "wav")
-                            )
-                        )
-                    elif not audio_b64:
-                        logger.debug("play-audio frame without audio_b64; ignoring")
                 elif msg_type == "ready":
                     logger.info("Backend ready message: %s", data.get("message"))
+                elif msg_type == "error" and data.get("error") in {
+                    "client_upgrade_required",
+                    "server_upgrade_required",
+                }:
+                    logger.error("Voice protocol upgrade required: %s", data)
                 else:
                     logger.debug("Received message type: %s", msg_type)
             except json.JSONDecodeError:
                 logger.debug("Received non-JSON message: %s", str(message)[:50])
+            except WearableVoiceProtocolError as error:
+                logger.error("Voice protocol violation: %s", error)
+                raise
     except websockets.exceptions.ConnectionClosed:
         logger.info("Backend connection closed")
     except asyncio.CancelledError:
@@ -161,6 +110,10 @@ async def receive_handler(websocket, logger, speaker=None) -> None:
         raise
     except Exception as e:
         logger.error("Receive handler error: %s", e, exc_info=True)
+        await websocket.close(code=1002, reason="voice protocol error")
+        raise
+    finally:
+        await voice_session.close()
 
 
 # Reconnect backoff tuning for the backend WebSocket. Mirrors the BLE-side
@@ -172,10 +125,25 @@ _BACKOFF_MAX = 30.0
 _MIN_HEALTHY_DURATION = 30.0
 
 
+async def _monitor_host_output(route_detector, initial_route, on_change) -> None:
+    """End a capture epoch when the host output route changes."""
+
+    while True:
+        await asyncio.sleep(1.0)
+        observed = await route_detector.detect()
+        if observed != initial_route:
+            await on_change(observed)
+            return
+
+
 async def stream_to_backend(
     stream: AsyncGenerator[bytes, None],
     device_name: str = "wearable",
     speaker=None,
+    output_policy: HostOutputPolicy | str = HostOutputPolicy.AUTO,
+    on_voice_status: Callable[[str], None] | None = None,
+    initial_capture_epoch: int = 0,
+    on_capture_epoch: Callable[[int], None] | None = None,
 ) -> None:
     """Stream raw Opus audio to backend using Wyoming protocol with JWT authentication.
 
@@ -197,11 +165,29 @@ async def stream_to_backend(
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
 
-    global _active_websocket
+    global _active_send_lock, _active_websocket
+
+    policy = HostOutputPolicy(output_policy)
+    status = on_voice_status or (lambda _status: None)
 
     backoff = _BACKOFF_INITIAL
     session_ended = False
     chunk_count = 0
+    device_playback_target = None
+    if speaker is not None:
+        candidate = ElatoPlaybackTarget(speaker, on_status=status)
+        try:
+            await candidate.prepare()
+            device_playback_target = candidate
+            status("Elato speaker · ready")
+            logger.info("Elato speaker protocol v1 is available")
+        except RuntimeError as error:
+            logger.warning("Elato interactive speaker disabled: %s", error)
+    capture_allowed = asyncio.Event()
+    capture_allowed.set()
+    route_detector = MacOutputRouteDetector()
+    capture_epoch = initial_capture_epoch
+    interactive_disabled = False
 
     while not session_ended:
         # The API key does not expire, so a re-dial needs no token refresh.
@@ -222,27 +208,75 @@ async def stream_to_backend(
             ) as websocket:
                 connected_at = asyncio.get_running_loop().time()
                 _active_websocket = websocket
+                _active_send_lock = asyncio.Lock()
+                playback_target = None
+                route_monitor_task = None
+                if not interactive_disabled:
+                    playback_target = device_playback_target
+                if (
+                    playback_target is None
+                    and not interactive_disabled
+                    and PLAY_BACKEND_AUDIO
+                    and sys.platform == "darwin"
+                ):
+                    route = await route_detector.detect()
+                    selection = resolve_host_output(policy, route)
+                    status(selection.status)
+                    if selection.enabled:
+
+                        async def route_changed(_observed) -> None:
+                            status(f"OMI mic → {route.name} · route changed")
+                            asyncio.get_running_loop().call_later(
+                                0.05,
+                                lambda: asyncio.create_task(
+                                    websocket.close(
+                                        code=1012,
+                                        reason="audio output route changed",
+                                    )
+                                ),
+                            )
+
+                        playback_target = AfplayPlaybackTarget(
+                            selection=selection,
+                            route=route,
+                            route_detector=route_detector,
+                            capture_allowed=capture_allowed,
+                            on_status=status,
+                            on_route_change=route_changed,
+                        )
+                        route_monitor_task = asyncio.create_task(
+                            _monitor_host_output(route_detector, route, route_changed),
+                            name="mac-output-route-monitor",
+                        )
+                        logger.info("Host voice output: %s", selection.status)
+                if playback_target is not None:
+                    capture_epoch += 1
+                    if on_capture_epoch is not None:
+                        on_capture_epoch(capture_epoch)
+                voice_session = WearableVoiceSession(
+                    websocket,
+                    capture_epoch=capture_epoch,
+                    playback_target=playback_target,
+                    send_lock=_active_send_lock,
+                )
 
                 ready_msg = await websocket.recv()
                 logger.info("Backend ready: %s", ready_msg)
 
                 receive_task = asyncio.create_task(
-                    receive_handler(websocket, logger, speaker=speaker)
+                    receive_handler(websocket, logger, voice_session)
                 )
 
                 try:
                     audio_start = {
                         "type": "audio-start",
-                        "data": {
-                            "rate": 16000,
-                            "width": 2,
-                            "channels": 1,
-                            "mode": "streaming",
-                        },
+                        "data": voice_session.audio_start_data(),
                         "payload_length": None,
                     }
-                    await websocket.send(json.dumps(audio_start) + "\n")
+                    async with _active_send_lock:
+                        await websocket.send(json.dumps(audio_start) + "\n")
                     logger.info("Sent audio-start event")
+                    await voice_session.wait_until_ready()
 
                     # Reset backoff once we've been streaming long enough to call
                     # this connection healthy (mirrors MIN_HEALTHY_DURATION).
@@ -257,6 +291,9 @@ async def stream_to_backend(
                         ):
                             backoff = _BACKOFF_INITIAL
 
+                        if not capture_allowed.is_set():
+                            continue
+
                         audio_chunk_header = {
                             "type": "audio-chunk",
                             "data": {
@@ -266,8 +303,9 @@ async def stream_to_backend(
                             },
                             "payload_length": len(opus_data),
                         }
-                        await websocket.send(json.dumps(audio_chunk_header) + "\n")
-                        await websocket.send(opus_data)
+                        async with _active_send_lock:
+                            await websocket.send(json.dumps(audio_chunk_header) + "\n")
+                            await websocket.send(opus_data)
 
                         if chunk_count % 100 == 0:
                             logger.info("Sent %d chunks", chunk_count)
@@ -280,17 +318,28 @@ async def stream_to_backend(
                         "data": {},
                         "payload_length": None,
                     }
-                    await websocket.send(json.dumps(audio_stop) + "\n")
+                    async with _active_send_lock:
+                        await websocket.send(json.dumps(audio_stop) + "\n")
                     logger.info("Sent audio-stop event. Total chunks: %d", chunk_count)
 
                 finally:
                     _active_websocket = None
+                    _active_send_lock = None
+                    if route_monitor_task is not None:
+                        route_monitor_task.cancel()
+                        await asyncio.gather(route_monitor_task, return_exceptions=True)
                     receive_task.cancel()
                     try:
                         await receive_task
                     except asyncio.CancelledError:
                         logger.info("Receive task cancelled successfully")
 
+        except ServerUpgradeRequired as error:
+            _active_websocket = None
+            _active_send_lock = None
+            interactive_disabled = True
+            status("Voice output unavailable · backend upgrade required")
+            logger.error("%s; reconnecting as capture-only", error)
         except (websockets.exceptions.WebSocketException, OSError) as e:
             # Transient WS/connection drop while audio is still flowing → reconnect
             # without ending the BLE session. Re-dial with capped backoff.

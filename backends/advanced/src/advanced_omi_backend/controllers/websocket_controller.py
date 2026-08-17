@@ -66,11 +66,6 @@ from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
 )
-from advanced_omi_backend.services.device_audio import (
-    is_opus_streaming_client,
-    stop_play_audio,
-    stream_play_audio_as_opus,
-)
 from advanced_omi_backend.services.observability import record_event_sync
 from advanced_omi_backend.services.plugin_service import get_plugin_router
 from advanced_omi_backend.services.response_coordinator import (
@@ -519,10 +514,8 @@ async def subscribe_to_device_downlink(
 ) -> None:
     """Forward backend→device control messages from Redis Pub/Sub to the device WebSocket.
 
-    Any backend component (wake-word service, plugins) can push a message to a
-    specific device by publishing to ``device:downlink:{client_id}``. Each message
-    is a Wyoming-style control frame (e.g. ``{"type": "play-audio", "data": {...}}``)
-    which the HAVPE relay's ``handle_backend_messages`` dispatches to the device.
+    Any backend component can push a bound voice event or non-audio device control
+    message to ``device:downlink:{client_id}``.
 
     Runs as a background task for the lifetime of the WebSocket connection.
     """
@@ -532,7 +525,6 @@ async def subscribe_to_device_downlink(
     channel = str(device_downlink_channel(client_id))
     redis_client = None
     pubsub = None
-    opus_stream = is_opus_streaming_client(client_id_value)
     ack_deadline_tasks: set[asyncio.Task] = set()
 
     try:
@@ -541,10 +533,7 @@ async def subscribe_to_device_downlink(
         responses = ResponseCoordinator(redis_client, voice_sessions)
         pubsub = redis_client.pubsub()
         await pubsub.subscribe(channel)
-        logger.info(
-            f"🔊 Subscribed to device downlink channel: {channel}"
-            f"{' (opus streaming)' if opus_stream else ''}"
-        )
+        logger.info(f"🔊 Subscribed to device downlink channel: {channel}")
 
         while True:
             try:
@@ -607,23 +596,6 @@ async def subscribe_to_device_downlink(
                                 )
                                 ack_deadline_tasks.add(task)
                                 task.add_done_callback(ack_deadline_tasks.discard)
-                    elif msg_type == "stop-audio":
-                        # Barge-in: stop whatever TTS is playing on the device. For
-                        # Opus clients this cancels the in-flight stream + flushes the
-                        # device; for others there's nothing streaming to cancel, so
-                        # just forward the control frame best-effort.
-                        if opus_stream:
-                            await stop_play_audio(websocket, client_id_value)
-                        else:
-                            await websocket.send_json(payload)
-                    elif opus_stream and msg_type == "play-audio":
-                        # RAM-limited devices can't take a big base64 WAV frame;
-                        # transcode + stream it as small Opus packets instead.
-                        streamed = await stream_play_audio_as_opus(
-                            websocket, payload.get("data") or {}, client_id_value
-                        )
-                        if not streamed:
-                            await websocket.send_json(payload)  # fallback
                     else:
                         await websocket.send_json(payload)
                     data = payload.get("data")
