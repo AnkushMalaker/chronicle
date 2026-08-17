@@ -5,7 +5,7 @@
 **AVAILABLE AUTOMATED GATES GREEN — NOT CUTOVER-READY.**
 
 The implementation candidate is commit
-`210a213b984a4b124a70a35324393cfd05d2830f` on
+`4e27b7e7f02f25aaeb9d98c364f30ab5db3263c2` on
 `feature/full-duplex-voice-cutover`. This report is the only change after that
 candidate revision.
 
@@ -23,7 +23,7 @@ backfill apply, app release, live Swiggy request, or payment was performed.
 | Item | Value |
 | --- | --- |
 | Branch | `feature/full-duplex-voice-cutover` |
-| Implementation candidate | `210a213b984a4b124a70a35324393cfd05d2830f` |
+| Implementation candidate | `4e27b7e7f02f25aaeb9d98c364f30ab5db3263c2` |
 | Base lineage | `dev`, with curated source changes committed at `210e0c73` |
 | Host | `Kraken` |
 | OS | Linux 6.6.87.2 WSL2, x86_64 |
@@ -89,6 +89,41 @@ validation passed for all 34 suites.
 | `npm run test:phone-duplex` | PASS |
 | `npm run check:theme` | PASS |
 | `npx expo-modules-autolinking verify` | Duplex module found; PASS with the repository's pre-existing duplicate `@expo/log-box` warning |
+
+### Post-audit TestFlight corrections — 2026-08-17
+
+A max-effort pre-upload audit found that `response.cancel` correctly carries the new
+superseding generation while both native engines required equality with the older
+playing generation. That would have silently ignored ordinary barge-in cancellation.
+The candidate now applies the shared rule on iOS and Android: a matching response ID
+(or the native wildcard used during shutdown) is cancelled when the cancellation
+generation is at least the playing generation; stale or mismatched cancellation is
+ignored. Production native code calls the same Swift/Kotlin policy covered by the new
+tests, and the JavaScript orchestration test now uses generation 1 audio followed by
+generation 2 cancellation.
+
+The audit also found an unimplemented iOS `processing` background mode. It was removed;
+the resolved public Expo configuration now reports only `UIBackgroundModes=["audio"]`.
+This is asserted by the phone-duplex orchestration test.
+
+Portable post-fix checks passed:
+
+- `npm run typecheck`
+- `npm run test:voice-protocol`
+- `npm run test:phone-duplex`
+- `npm run check:theme`
+- `npx --no-install expo config --type public --json`
+- `npx --no-install expo-modules-autolinking verify --platform ios --verbose`
+
+`app/modules/chronicle-duplex-audio/ios/Package.swift` now makes the production-used
+Swift cancellation/state policy tests directly runnable with `swift test`. They remain
+unexecuted on this Linux host and are a required Rainbow gate. The Android policy tests
+likewise remain unexecuted until an Android toolchain is available.
+
+The executable `scripts/rainbow-testflight-handoff.sh` fetches an exact remote SHA into
+a new detached worktree, runs the portable checks and Swift package tests, and prints
+the explicit TestFlight workflow-dispatch command. It does not contain credentials or
+upload a build by itself.
 
 ## Attempts and resolved failures
 
