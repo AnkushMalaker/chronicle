@@ -12,6 +12,7 @@ import {
   cancelResponse,
   scheduleResponse,
   stopVoiceSession,
+  type NativePlaybackState,
 } from '../../modules/chronicle-duplex-audio';
 import {
   PhoneDuplexController,
@@ -31,6 +32,7 @@ interface UseAudioStreamer {
   isStreaming: boolean;
   isConnecting: boolean;
   error: string | null;
+  phonePlaybackState: NativePlaybackState['state'] | null;
   startStreaming: (url: string, config?: StreamStartConfig) => Promise<void>;
   getWebSocketReadyState: () => number | undefined;
   stopStreaming: () => Promise<void>;
@@ -162,6 +164,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [phonePlaybackState, setPhonePlaybackState] = useState<
+    NativePlaybackState['state'] | null
+  >(null);
 
   const websocketRef = useRef<WebSocket | null>(null);
   const manuallyStoppedRef = useRef<boolean>(false);
@@ -368,6 +373,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     activeAudioFormatRef.current = AMBIENT_AUDIO_FORMAT;
     streamConfigRef.current = undefined;
     duplexUnsupportedRef.current = false;
+    setStateSafe(setPhonePlaybackState, null);
     await stopForegroundServiceNotification();
   }, [clearDuplexSocketState, sendWyomingEvent, setStateSafe]);
 
@@ -436,6 +442,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     }
     currentUrlRef.current = trimmed;
     streamConfigRef.current = requestedConfig;
+    if (requestedConfig?.phoneVoice) {
+      setStateSafe(setPhonePlaybackState, null);
+    }
     activeAudioFormatRef.current = requestedConfig?.phoneVoice
       ? phoneAudioFormat(
           requestedConfig.phoneVoice,
@@ -535,6 +544,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
             duplexControllerRef.current = controller;
             duplexSubscriptionsRef.current = [
               addPlaybackStateListener((state) => {
+                setStateSafe(setPhonePlaybackState, state.state);
                 controller.nativePlaybackChanged(state).catch((cause) =>
                   console.error('[AudioStreamer] Playback ACK failed:', cause)
                 );
@@ -848,6 +858,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     isStreaming,
     isConnecting,
     error,
+    phonePlaybackState,
     startStreaming,
     getWebSocketReadyState,
     stopStreaming,

@@ -2,6 +2,11 @@ import React from 'react';
 import { View, StyleSheet } from 'react-native';
 
 import { Button, Caption, type ButtonVariant } from '@/components/ui';
+import type { NativePlaybackState } from '../../modules/chronicle-duplex-audio';
+import {
+  phoneVoiceStatus,
+  type PhoneVoiceStatusTone,
+} from '@/protocol/phoneVoiceStatus';
 import { useTheme, type Theme } from '@/theme';
 
 interface PhoneAudioButtonProps {
@@ -10,6 +15,7 @@ interface PhoneAudioButtonProps {
   isDisabled: boolean;
   audioLevel: number;
   error: string | null;
+  playbackState: NativePlaybackState['state'] | null;
   onPress: () => void;
 }
 
@@ -19,10 +25,22 @@ const PhoneAudioButton: React.FC<PhoneAudioButtonProps> = ({
   isDisabled,
   audioLevel,
   error,
+  playbackState,
   onPress,
 }) => {
   const t = useTheme();
   const s = createStyles(t);
+  const voiceStatus = phoneVoiceStatus(isRecording, playbackState);
+
+  const statusColor = (tone: PhoneVoiceStatusTone): string => {
+    switch (tone) {
+      case 'accent': return t.color.accent.fg;
+      case 'warning': return t.color.status.warning.fg;
+      case 'success': return t.color.status.success.fg;
+      case 'danger': return t.color.status.danger.fg;
+      default: return t.color.text.muted;
+    }
+  };
 
   const getButtonVariant = (): ButtonVariant => {
     // `secondary` is the neutral chip fill, which is the old `disabled` grey;
@@ -60,11 +78,15 @@ const PhoneAudioButton: React.FC<PhoneAudioButtonProps> = ({
             <View style={[s.audioLevelBar, { width: `${Math.min(audioLevel * 100, 100)}%` }]} />
           </View>
           <Caption style={s.audioLevelText}>Audio Level</Caption>
+          {voiceStatus && (
+            <Caption
+              accessibilityLiveRegion="polite"
+              style={[s.voiceStatusText, { color: statusColor(voiceStatus.tone) }]}
+            >
+              {voiceStatus.label}
+            </Caption>
+          )}
         </View>
-      )}
-
-      {isRecording && (
-        <Caption style={s.statusText}>Streaming audio to backend...</Caption>
       )}
 
       {error && !isRecording && (
@@ -84,10 +106,6 @@ const createStyles = (t: Theme) => StyleSheet.create({
   },
   buttonWrapper: {
     alignSelf: 'stretch',
-  },
-  statusText: {
-    textAlign: 'center',
-    marginTop: t.space[2],
   },
   errorText: {
     textAlign: 'center',
@@ -117,6 +135,10 @@ const createStyles = (t: Theme) => StyleSheet.create({
   },
   audioLevelText: {
     marginTop: t.space[1],
+  },
+  voiceStatusText: {
+    marginTop: t.space[1],
+    fontWeight: t.weight.medium,
   },
 });
 

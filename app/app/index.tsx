@@ -323,6 +323,7 @@ export default function App() {
                 isDisabled={!!deviceConnection.connectedDeviceId || deviceConnection.isConnecting}
                 audioLevel={phoneAudioRecorder.audioLevel}
                 error={phoneAudioRecorder.error}
+                playbackState={audioStreamer.phonePlaybackState}
                 onPress={orchestrator.handleTogglePhoneAudio}
               />
             </>

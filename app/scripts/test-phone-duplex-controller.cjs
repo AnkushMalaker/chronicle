@@ -30,6 +30,8 @@ const controllerPath = path.join(__dirname, '../src/protocol/phoneDuplexControll
 const { PhoneDuplexController } = loadTypeScript(controllerPath, {
   './voiceProtocol': protocol,
 });
+const statusPath = path.join(__dirname, '../src/protocol/phoneVoiceStatus.ts');
+const { phoneVoiceStatus } = loadTypeScript(statusPath);
 
 const capabilities = {
   mode: 'duplex_full',
@@ -58,6 +60,28 @@ const bound = (type, eventId) => ({
 });
 
 (async () => {
+  assert.equal(phoneVoiceStatus(false, null), null);
+  assert.deepEqual(phoneVoiceStatus(true, null), {
+    label: 'Listening',
+    tone: 'muted',
+  });
+  assert.deepEqual(phoneVoiceStatus(true, 'started'), {
+    label: 'Chronicle speaking',
+    tone: 'accent',
+  });
+  assert.deepEqual(phoneVoiceStatus(true, 'cancelled'), {
+    label: 'Speech interrupted',
+    tone: 'warning',
+  });
+  assert.deepEqual(phoneVoiceStatus(true, 'done'), {
+    label: 'Response complete',
+    tone: 'success',
+  });
+  assert.deepEqual(phoneVoiceStatus(true, 'failed'), {
+    label: 'Playback failed',
+    tone: 'danger',
+  });
+
   const appConfig = JSON.parse(
     fs.readFileSync(path.join(__dirname, '../app.json'), 'utf8'),
   );
