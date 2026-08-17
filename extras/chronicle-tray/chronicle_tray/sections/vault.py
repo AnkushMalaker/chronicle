@@ -16,6 +16,7 @@ from urllib.parse import quote
 
 import httpx
 from chronicle_client import load_client_env
+from chronicle_tray.macos import activate_for_dialog
 from chronicle_tray.sections import Section
 from chronicle_vault_sync import (
     SyncthingManager,
@@ -193,6 +194,7 @@ class VaultSection(Section):
 
     def _choose_folder(self) -> None:
         current = self.state.snapshot()["vault_dir"]
+        activate_for_dialog()
         chosen = QFileDialog.getExistingDirectory(
             None, "Choose Chronicle vault", current
         )

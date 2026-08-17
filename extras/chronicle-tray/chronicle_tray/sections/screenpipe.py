@@ -20,6 +20,7 @@ from pathlib import Path
 
 from chronicle_tray import recorder_update
 from chronicle_tray.capture_settings_dialog import CaptureSettingsDialog
+from chronicle_tray.macos import activate_for_dialog
 from chronicle_tray.paths import add_repo_root
 from chronicle_tray.screenpipe_settings import (
     _audio_modes,
@@ -275,6 +276,7 @@ class ScreenPipeSection(Section):
                 _audio_sources(forwarding_mode, forwarding=True),
                 screen_enabled,
             )
+            activate_for_dialog()
             if not dialog.exec():
                 return None
             captured, forwarded, screen_enabled = dialog.settings()

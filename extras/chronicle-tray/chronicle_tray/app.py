@@ -10,6 +10,7 @@ import logging
 import sys
 
 from chronicle_tray.logs import configure_logging, log_buffer
+from chronicle_tray.macos import activate_for_dialog, hide_dock_icon
 from chronicle_tray.sections.pendant import PendantSection
 from chronicle_tray.sections.screenpipe import ScreenPipeSection
 from chronicle_tray.sections.vault import VaultSection
@@ -139,6 +140,7 @@ class ChronicleTray(QSystemTrayIcon):
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
+        activate_for_dialog()
         dialog.exec()
 
     def shutdown(self) -> None:
@@ -152,17 +154,9 @@ class ChronicleTray(QSystemTrayIcon):
 def run() -> None:
     configure_logging()
 
-    if sys.platform == "darwin":
-        # Menu-bar-only app: no Dock icon for a non-bundled Python process.
-        try:
-            from AppKit import NSApplication
-
-            NSApplication.sharedApplication().setActivationPolicy_(1)
-        except ImportError:
-            pass
-
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    hide_dock_icon()  # after QApplication: Qt promotes us to a Dock app first
     if not QSystemTrayIcon.isSystemTrayAvailable():
         raise SystemExit("No system tray is available in this desktop session")
 
