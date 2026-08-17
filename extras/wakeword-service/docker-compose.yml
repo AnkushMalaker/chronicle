@@ -76,6 +76,8 @@ services:
       - ./samples.py:/app/samples.py:ro
       - ./verifier.py:/app/verifier.py:ro
       - ./hubert_detector.py:/app/hubert_detector.py:ro
+      - ./active_turn_consumer.py:/app/active_turn_consumer.py:ro
+      - ./turn_segmenter.py:/app/turn_segmenter.py:ro
     restart: unless-stopped
     # The "hermes" word runs the HuBERT .pt model on GPU. docker compose v2 honors
     # this reservation for `docker compose up` (no swarm needed).

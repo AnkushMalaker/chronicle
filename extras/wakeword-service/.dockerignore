@@ -1,10 +1,12 @@
 *
 !app.py
+!active_turn_consumer.py
 !consumer.py
 !detector.py
 !identities.py
 !hubert_detector.py
 !samples.py
+!turn_segmenter.py
 !verifier.py
 !pyproject.toml
 !README.md
