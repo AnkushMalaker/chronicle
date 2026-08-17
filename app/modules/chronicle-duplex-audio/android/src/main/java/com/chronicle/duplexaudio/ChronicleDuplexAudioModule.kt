@@ -46,9 +46,7 @@ class ChronicleDuplexAudioModule : Module() {
   private var captureSuppressed = false
 
   @Volatile
-  private var currentResponse: ResponseBinding? = null
-
-  private data class ResponseBinding(val id: String, val generation: Int)
+  private var currentResponse: EpochResponse? = null
 
   override fun definition() = ModuleDefinition {
     Name("ChronicleDuplexAudio")
@@ -76,9 +74,7 @@ class ChronicleDuplexAudioModule : Module() {
 
     AsyncFunction("cancelResponse") { responseId: String, generation: Int ->
       val current = currentResponse
-      if (current != null && (
-          responseId == "*" || (current.id == responseId && current.generation == generation)
-        )) {
+      if (DuplexAudioPolicy.shouldCancel(current, responseId, generation)) {
         cancelCurrent(null)
       }
     }
@@ -210,13 +206,14 @@ class ChronicleDuplexAudioModule : Module() {
     val activePlayer = player
       ?: throw CodedException("playback_unavailable", "AudioTrack unavailable", null)
     cancelCurrent(null)
-    currentResponse = ResponseBinding(responseId, generation)
+    val binding = EpochResponse(responseId, generation, epoch)
+    currentResponse = binding
     captureSuppressed = capabilities()["mode"] == "duplex_half"
     activePlayer.play()
     emitPlayback(responseId, generation, "started", null)
     playbackExecutor.execute {
       var offset = 0
-      while (offset < pcm.size && currentResponse == ResponseBinding(responseId, generation)) {
+      while (offset < pcm.size && currentResponse == binding) {
         val written = activePlayer.write(pcm, offset, pcm.size - offset, AudioTrack.WRITE_BLOCKING)
         if (written <= 0) {
           emitPlayback(responseId, generation, "failed", "playback_unavailable")
@@ -226,7 +223,7 @@ class ChronicleDuplexAudioModule : Module() {
         }
         offset += written
       }
-      if (currentResponse == ResponseBinding(responseId, generation)) {
+      if (currentResponse == binding) {
         currentResponse = null
         captureSuppressed = false
         emitPlayback(responseId, generation, "done", null)

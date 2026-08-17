@@ -22,8 +22,7 @@
         "NSCameraUsageDescription": "Chronicle uses the camera to scan QR codes for backend connection setup.",
         "NSMicrophoneUsageDescription": "Chronicle needs access to your microphone to stream audio to the backend for processing.",
         "UIBackgroundModes": [
-          "audio",
-          "processing"
+          "audio"
         ],
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true,

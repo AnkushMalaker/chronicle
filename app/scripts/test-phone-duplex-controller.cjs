@@ -58,6 +58,15 @@ const bound = (type, eventId) => ({
 });
 
 (async () => {
+  const appConfig = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '../app.json'), 'utf8'),
+  );
+  assert.deepEqual(
+    appConfig.expo.ios.infoPlist.UIBackgroundModes,
+    ['audio'],
+    'the phone engine must not advertise an unimplemented iOS background-processing mode',
+  );
+
   const sent = [];
   const scheduled = [];
   const cancelled = [];
@@ -151,10 +160,10 @@ const bound = (type, eventId) => ({
   await controller.receiveControl({
     ...bound('response.cancel'),
     response_id: 'response-1',
-    generation: 1,
+    generation: 2,
     reason: 'barge_in',
   });
-  assert.deepEqual(cancelled, [{ responseId: 'response-1', generation: 1 }]);
+  assert.deepEqual(cancelled, [{ responseId: 'response-1', generation: 2 }]);
 
   await controller.nativeRouteChanged({
     captureEpoch: 4,
@@ -215,7 +224,7 @@ const bound = (type, eventId) => ({
   });
   assert.equal(sent.at(-1).type, 'voice-session.resume');
   assert.equal(sent.at(-1).previous_capture_epoch, 5);
-  assert.equal(sent.at(-1).last_response_generation, 2);
+  assert.equal(sent.at(-1).last_response_generation, 3);
   await reconnected.receiveControl({
     ...base('voice-session.start'),
     audio_session_id: 'audio-3',

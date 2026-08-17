@@ -32,6 +32,17 @@ class DuplexAudioPolicyTest {
     assertNull(gate.systemChanged())
   }
 
+  @Test fun newerCancellationGenerationStopsOlderPlayingResponse() {
+    val response = EpochResponse("response-1", 7, 4)
+    assertEquals(true, DuplexAudioPolicy.shouldCancel(response, "response-1", 8))
+  }
+
+  @Test fun staleOrMismatchedCancellationCannotStopCurrentResponse() {
+    val response = EpochResponse("response-1", 7, 4)
+    assertEquals(false, DuplexAudioPolicy.shouldCancel(response, "response-1", 6))
+    assertEquals(false, DuplexAudioPolicy.shouldCancel(response, "other", 8))
+  }
+
   @Test fun onlyOneAudioTrackResponseCanBeScheduled() {
     val gate = ResponseEpochGate()
     gate.start(4)

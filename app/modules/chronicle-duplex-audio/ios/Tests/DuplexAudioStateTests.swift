@@ -25,6 +25,35 @@ final class DuplexAudioStateTests: XCTestCase {
     XCTAssertNil(state.cancel())
   }
 
+  func testNewGenerationCancellationStopsOlderPlayingResponse() {
+    let response = DuplexResponseBinding(id: "one", generation: 7, captureEpoch: 4)
+    XCTAssertTrue(
+      DuplexCancellationPolicy.shouldCancel(
+        current: response,
+        responseId: "one",
+        cancellationGeneration: 8
+      )
+    )
+  }
+
+  func testStaleOrMismatchedCancellationCannotStopCurrentResponse() {
+    let response = DuplexResponseBinding(id: "one", generation: 7, captureEpoch: 4)
+    XCTAssertFalse(
+      DuplexCancellationPolicy.shouldCancel(
+        current: response,
+        responseId: "one",
+        cancellationGeneration: 6
+      )
+    )
+    XCTAssertFalse(
+      DuplexCancellationPolicy.shouldCancel(
+        current: response,
+        responseId: "other",
+        cancellationGeneration: 8
+      )
+    )
+  }
+
   func testRouteInterruptionAndResetFlushScheduledResponse() throws {
     for _ in 0..<3 {
       let state = DuplexAudioState()

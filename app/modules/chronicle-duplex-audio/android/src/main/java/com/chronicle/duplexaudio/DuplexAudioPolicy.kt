@@ -12,6 +12,14 @@ internal object DuplexAudioPolicy {
     speakerphone && aecEnabled -> DuplexMode.FULL
     else -> DuplexMode.HALF
   }
+
+  fun shouldCancel(
+    current: EpochResponse?,
+    responseId: String,
+    cancellationGeneration: Int,
+  ): Boolean = current != null &&
+    (responseId == "*" || responseId == current.id) &&
+    cancellationGeneration >= current.generation
 }
 
 internal data class EpochResponse(

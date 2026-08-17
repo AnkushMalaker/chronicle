@@ -11,6 +11,18 @@ struct DuplexResponseBinding: Equatable {
   let captureEpoch: Int
 }
 
+enum DuplexCancellationPolicy {
+  static func shouldCancel(
+    current: DuplexResponseBinding?,
+    responseId: String,
+    cancellationGeneration: Int
+  ) -> Bool {
+    guard let current,
+          responseId == "*" || responseId == current.id else { return false }
+    return cancellationGeneration >= current.generation
+  }
+}
+
 final class DuplexAudioState {
   private(set) var captureEpoch = -1
   private(set) var response: DuplexResponseBinding?

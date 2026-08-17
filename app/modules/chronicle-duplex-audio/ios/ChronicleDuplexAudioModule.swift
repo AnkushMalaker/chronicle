@@ -54,9 +54,18 @@ public final class ChronicleDuplexAudioModule: Module {
 
     AsyncFunction("cancelResponse") { (responseId: String, generation: Int) async in
       await self.onControlQueueNoThrow {
-        guard let current = self.currentResponse,
-              (responseId == "*" || current.id == responseId),
-              (responseId == "*" || current.generation == generation) else { return }
+        let current = self.currentResponse.map {
+          DuplexResponseBinding(
+            id: $0.id,
+            generation: $0.generation,
+            captureEpoch: self.captureEpoch
+          )
+        }
+        guard DuplexCancellationPolicy.shouldCancel(
+          current: current,
+          responseId: responseId,
+          cancellationGeneration: generation
+        ) else { return }
         self.cancelCurrent(errorCode: nil)
       }
     }
