@@ -9,11 +9,13 @@ The implementation candidate is commit
 `feature/full-duplex-voice-cutover`. This report is the only change after that
 candidate revision.
 
-The Linux/WSL2 host used for validation has no Apple or Android native build
-toolchain and no required physical phones or acoustic replay rig. Consequently,
-XCTest, Android unit/instrumentation, physical-route, and automated acoustic gates
-were not run. The branch must not be merged, deployed, released, or described as
-cutover-ready until those gates pass and this report is updated with their results.
+The Linux/WSL2 host used for validation has no local Apple or Android native build
+toolchain and no required physical phones or acoustic replay rig. EAS subsequently
+compiled the production iOS archive and submitted build 58 to App Store Connect, but
+the standalone Swift tests, Android unit/instrumentation tests, physical-route tests,
+and automated acoustic gates were not run. The branch must not be merged, deployed,
+released, or described as cutover-ready until those gates pass and this report is
+updated with their results.
 
 No production deployment, maintenance window, archive operation, provenance
 backfill apply, app release, live Swiggy request, or payment was performed.
@@ -131,8 +133,17 @@ validated App Store Connect credentials, created EAS build
 compilation then failed because the engine observer used the nonexistent
 `AVAudioEngine.configurationChangeNotification` member. Candidate `678e9027` replaces
 it with Apple's documented `NSNotification.Name.AVAudioEngineConfigurationChange`.
-Build 57 was not submitted to TestFlight; a fresh EAS build is required to verify the
-fix.
+Build 57 was not submitted to TestFlight.
+
+The replacement workflow, GitHub Actions run
+[`32040033093`](https://github.com/SimpleOpenSoftware/chronicle/actions/runs/32040033093),
+completed successfully. EAS build
+[`5b286316-68e4-48f8-8f53-ff773329a3ab`](https://expo.dev/accounts/cupbearer5517/projects/friend-lite-app/builds/5b286316-68e4-48f8-8f53-ff773329a3ab)
+compiled app version 1.12.0, build number 58, from candidate `678e9027`. EAS submission
+[`7360a0f0-298c-417c-86a2-e2a0414e7672`](https://expo.dev/accounts/cupbearer5517/projects/friend-lite-app/submissions/7360a0f0-298c-417c-86a2-e2a0414e7672)
+then uploaded the binary successfully to App Store Connect. Apple reported that the
+binary was processing; processing and TestFlight installation are not evidence for
+the outstanding physical-device or acoustic gates.
 
 ## Attempts and resolved failures
 
@@ -163,11 +174,13 @@ the result recorded above.
 ## Unavailable required gates
 
 Native tools `xcodebuild`, `swift`, `gradle`, `adb`, `emulator`, and `sdkmanager` were
-not present on the validation host.
+not present on the validation host. The cloud iOS archive compile and App Store Connect
+upload passed as recorded above; local test execution remains outstanding.
 
 | Required gate | Status | Required evidence before cutover |
 | --- | --- | --- |
-| iOS native build and XCTest | NOT RUN | Engine state, route/interruption/reset, resampling, epoch rejection, and native cancellation ACK |
+| iOS production archive compile | PASS | EAS build 58 compiled and uploaded to App Store Connect |
+| iOS Swift/XCTest behavior suites | NOT RUN | Engine state, route/interruption/reset, resampling, epoch rejection, and native cancellation ACK |
 | Android unit/instrumentation | NOT RUN | Focus/mode/device restoration, AEC/NS, recorder/player failures, route changes, and cancellation ACK |
 | iPhone speakerphone | NOT RUN | 20 no-user trials, 20 interruption trials, route-change checks |
 | iPhone HFP/AirPods | NOT RUN | Same matrix |
