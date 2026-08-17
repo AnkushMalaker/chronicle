@@ -369,7 +369,7 @@ public final class ChronicleDuplexAudioModule: Module {
       queue: nil
     ) { [weak self] _ in self?.handleSystemChange(reason: "interruption", errorCode: "playback_unavailable") })
     observers.append(center.addObserver(
-      forName: AVAudioEngine.configurationChangeNotification,
+      forName: NSNotification.Name.AVAudioEngineConfigurationChange,
       object: engine,
       queue: nil
     ) { [weak self] _ in self?.handleSystemChange(reason: "engine_reset", errorCode: "engine_reset") })
