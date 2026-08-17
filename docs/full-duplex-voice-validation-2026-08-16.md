@@ -139,7 +139,9 @@ The replacement workflow, GitHub Actions run
 [`32040033093`](https://github.com/SimpleOpenSoftware/chronicle/actions/runs/32040033093),
 completed successfully. EAS build
 [`5b286316-68e4-48f8-8f53-ff773329a3ab`](https://expo.dev/accounts/cupbearer5517/projects/friend-lite-app/builds/5b286316-68e4-48f8-8f53-ff773329a3ab)
-compiled app version 1.12.0, build number 58, from candidate `678e9027`. EAS submission
+compiled app version 1.12.0, build number 58, from workflow head
+`80a64ef73ec63d1433f46de310f505bbca519378`. That revision differs from implementation
+candidate `678e9027` only by this validation report. EAS submission
 [`7360a0f0-298c-417c-86a2-e2a0414e7672`](https://expo.dev/accounts/cupbearer5517/projects/friend-lite-app/submissions/7360a0f0-298c-417c-86a2-e2a0414e7672)
 then uploaded the binary successfully to App Store Connect. Apple reported that the
 binary was processing; processing and TestFlight installation are not evidence for
