@@ -5,7 +5,7 @@
 **AVAILABLE AUTOMATED GATES GREEN — NOT CUTOVER-READY.**
 
 The implementation candidate is commit
-`e161b5862e651c19d97c71c4904d9ee7b4db7fd4` on
+`678e9027685d8ebb2912cf0776378849c250bfb8` on
 `feature/full-duplex-voice-cutover`. This report is the only change after that
 candidate revision.
 
@@ -23,7 +23,7 @@ backfill apply, app release, live Swiggy request, or payment was performed.
 | Item | Value |
 | --- | --- |
 | Branch | `feature/full-duplex-voice-cutover` |
-| Implementation candidate | `e161b5862e651c19d97c71c4904d9ee7b4db7fd4` |
+| Implementation candidate | `678e9027685d8ebb2912cf0776378849c250bfb8` |
 | Base lineage | `dev`, with curated source changes committed at `210e0c73` |
 | Host | `Kraken` |
 | OS | Linux 6.6.87.2 WSL2, x86_64 |
@@ -124,6 +124,15 @@ The executable `scripts/rainbow-testflight-handoff.sh` fetches an exact remote S
 a new detached worktree, runs the portable checks and Swift package tests, and prints
 the explicit TestFlight workflow-dispatch command. It does not contain credentials or
 upload a build by itself.
+
+The first TestFlight workflow attempt, GitHub Actions run `32039648755`, successfully
+validated App Store Connect credentials, created EAS build
+`c694b727-545a-4370-9b3f-fb5aa44d16d2`, and allocated build number 57. Native
+compilation then failed because the engine observer used the nonexistent
+`AVAudioEngine.configurationChangeNotification` member. Candidate `678e9027` replaces
+it with Apple's documented `NSNotification.Name.AVAudioEngineConfigurationChange`.
+Build 57 was not submitted to TestFlight; a fresh EAS build is required to verify the
+fix.
 
 ## Attempts and resolved failures
 
