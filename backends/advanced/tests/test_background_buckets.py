@@ -143,7 +143,7 @@ def test_duplicate_imports_share_a_content_signature():
 
 
 def test_known_people_are_excluded_from_bulk_background_review():
-    assert _is_known_foreground({"current_label": "Ankush"})
+    assert _is_known_foreground({"current_label": "Alex"})
     assert not _is_known_foreground({"current_label": "Speaker 3"})
     assert not _is_known_foreground({"current_label": "Unknown Speaker 5"})
     assert not _is_known_foreground({"current_label": None})
@@ -446,13 +446,13 @@ async def test_background_reference_overrides_weaker_foreground_match(monkeypatc
         {
             "start": 0.0,
             "end": 3.0,
-            "identified_as": "Ankush",
+            "identified_as": "Alex",
             "confidence": 0.55,
         },
         {
             "start": 4.0,
             "end": 7.0,
-            "identified_as": "Ankush",
+            "identified_as": "Alex",
             "confidence": 0.30,
         },
     ]
@@ -488,7 +488,7 @@ async def test_background_reference_overrides_weaker_foreground_match(monkeypatc
     )
 
     # Strong identification survives; the conflict is queued for review.
-    assert segments[0]["identified_as"] == "Ankush"
+    assert segments[0]["identified_as"] == "Alex"
     assert "status" not in segments[0]
     # Weak identification is overridden outright.
     assert segments[1]["identified_as"] == "Background Speech"
@@ -497,7 +497,7 @@ async def test_background_reference_overrides_weaker_foreground_match(monkeypatc
     # (or challenged) so a restore can put it back.
     records = sorted(ledger, key=lambda r: r["segment_start"])
     assert [r["zone"] for r in records] == ["unsure", "confident_background"]
-    assert all(r["previous_identified_as"] == "Ankush" for r in records)
+    assert all(r["previous_identified_as"] == "Alex" for r in records)
     assert resolved_calls == ["conversation"]
 
 
@@ -507,7 +507,7 @@ async def test_background_reference_does_not_override_stronger_foreground(monkey
         {
             "start": 0.0,
             "end": 3.0,
-            "identified_as": "Ankush",
+            "identified_as": "Alex",
             "confidence": 0.8,
         }
     ]
@@ -538,7 +538,7 @@ async def test_background_reference_does_not_override_stronger_foreground(monkey
         "conversation", segments, _StubUser(), SpeakerClient()
     )
 
-    assert segments[0]["identified_as"] == "Ankush"
+    assert segments[0]["identified_as"] == "Alex"
     # The foreground identification wins outright — nothing recorded, not even
     # as unsure: a familiar voice beating the bucket is not a close call.
     assert ledger == []
@@ -597,7 +597,7 @@ async def test_background_reference_reconstructs_large_turn_sets_in_bounded_batc
         {
             "start": float(index * 3),
             "end": float(index * 3 + 2),
-            "identified_as": "Ankush",
+            "identified_as": "Alex",
             "confidence": 0.9,
         }
         for index in range(205)

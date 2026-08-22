@@ -286,9 +286,9 @@ def test_long_string_reports_its_true_length_not_the_truncated_one():
 
 
 def test_lists_keep_their_type_so_join_and_indexing_still_work():
-    out = summarize_job_result({"identified_speakers": ["ankush", "sam"]})
+    out = summarize_job_result({"identified_speakers": ["alex", "sam"]})
 
-    assert out["identified_speakers"] == ["ankush", "sam"]
+    assert out["identified_speakers"] == ["alex", "sam"]
 
 
 def test_oversized_list_is_cut_but_stays_a_list():

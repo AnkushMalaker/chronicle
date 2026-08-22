@@ -6,7 +6,7 @@ from advanced_omi_backend.workers.speaker_benchmark_jobs import FRACTIONS, _eval
 def test_learning_curve_uses_disjoint_conversation_folds():
     samples = []
     for speaker, base in (
-        ("ankush", np.array([1.0, 0.0])),
+        ("alex", np.array([1.0, 0.0])),
         ("janhavi", np.array([0.0, 1.0])),
     ):
         for conversation in range(10):

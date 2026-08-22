@@ -14,8 +14,8 @@ from advanced_omi_backend.controllers.guided_enrollment_controller import (
 
 
 def test_pipeline_identification_wins_over_speaker_field():
-    seg = {"identified_as": "ankush", "speaker": "daksh"}
-    assert _effective_label(seg) == "ankush"
+    seg = {"identified_as": "alex", "speaker": "daksh"}
+    assert _effective_label(seg) == "alex"
     assert not _is_manual_label(seg)
 
 

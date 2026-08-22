@@ -291,13 +291,13 @@ async def test_speaker_identification_uses_session_metadata_user_id(consumer):
     async def identify_segment(*, audio_wav_bytes, user_id):
         seen["user_id"] = user_id
         seen["audio_wav_bytes"] = audio_wav_bytes
-        return {"found": True, "speaker_name": "Ankush", "confidence": 0.9}
+        return {"found": True, "speaker_name": "Alex", "confidence": 0.9}
 
     c.speaker_client = SimpleNamespace(enabled=True, identify_segment=identify_segment)
 
     speaker_name, confidence = await c._identify_speaker(session_id)
 
-    assert speaker_name == "Ankush"
+    assert speaker_name == "Alex"
     assert confidence == pytest.approx(0.9)
     assert seen["user_id"] == "user-1"
     assert seen["audio_wav_bytes"].startswith(b"RIFF")

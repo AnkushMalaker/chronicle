@@ -51,7 +51,7 @@ STATUS_LOGGED_OUT = json.dumps(
 # off-by-one-day constant silently weakens every expiry assertion below.
 KEY_EXPIRY_EPOCH = datetime(2027, 1, 28, 5, 28, 38, tzinfo=timezone.utc).timestamp()
 
-PREFS_WITH_OPERATOR = json.dumps({"WantRunning": True, "OperatorUser": "ankush"})
+PREFS_WITH_OPERATOR = json.dumps({"WantRunning": True, "OperatorUser": "alex"})
 # After `tailscale login`, OperatorUser is silently absent — this is what broke Caddy.
 PREFS_WITHOUT_OPERATOR = json.dumps({"WantRunning": True, "LoggedOut": False})
 
@@ -301,14 +301,14 @@ def test_key_expiry_ok_when_disabled(monkeypatch, have_all_binaries):
 
 def test_operator_ok_when_set(monkeypatch, have_all_binaries):
     install(monkeypatch, FakeRunner([(["prefs"], (0, PREFS_WITH_OPERATOR, ""))]))
-    result = checks.check_tailscale_operator(CheckContext(operator_user="ankush"))
+    result = checks.check_tailscale_operator(CheckContext(operator_user="alex"))
     assert result.status == OK
 
 
 def test_operator_fails_when_cleared_by_login(monkeypatch, have_all_binaries):
     """Reproduces the second half of the outage: login silently dropped the pref."""
     install(monkeypatch, FakeRunner([(["prefs"], (0, PREFS_WITHOUT_OPERATOR, ""))]))
-    result = checks.check_tailscale_operator(CheckContext(operator_user="ankush"))
+    result = checks.check_tailscale_operator(CheckContext(operator_user="alex"))
     assert result.status == FAIL
     assert "unset" in result.detail
     assert result.repair is not None
@@ -479,8 +479,8 @@ def test_tls_not_applicable_when_https_disabled(monkeypatch, have_all_binaries):
 
 def test_repair_operator_tries_unprivileged_before_sudo(monkeypatch, have_all_binaries):
     runner = install(monkeypatch, FakeRunner([(["set"], (0, "", ""))]))
-    assert checks.repair_tailscale_operator("ankush") is True
-    assert runner.calls == [["tailscale", "set", "--operator=ankush"]]
+    assert checks.repair_tailscale_operator("alex") is True
+    assert runner.calls == [["tailscale", "set", "--operator=alex"]]
 
 
 def test_repair_operator_falls_back_to_sudo(monkeypatch, have_all_binaries):
@@ -490,8 +490,8 @@ def test_repair_operator_falls_back_to_sudo(monkeypatch, have_all_binaries):
             [(["sudo"], (0, "", "")), (["set"], (1, "", "access denied"))],
         ),
     )
-    assert checks.repair_tailscale_operator("ankush") is True
-    assert runner.calls[-1] == ["sudo", "-n", "tailscale", "set", "--operator=ankush"]
+    assert checks.repair_tailscale_operator("alex") is True
+    assert runner.calls[-1] == ["sudo", "-n", "tailscale", "set", "--operator=alex"]
 
 
 def test_repair_restart_restarts_each_container(monkeypatch, have_all_binaries):

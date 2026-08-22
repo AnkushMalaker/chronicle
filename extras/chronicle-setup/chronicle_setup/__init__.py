@@ -25,6 +25,7 @@ from .checks import (
     worst_status,
 )
 from .chronicle_api import mint_chronicle_api_key
+from .compose import update_caddy_socket_override
 from .config_manager import ConfigManager
 from .env import is_placeholder, mask_value, read_env_value, resolve_ingest_config
 from .prompts import (
@@ -81,5 +82,6 @@ __all__ = [
     "run_all_checks",
     "tailscale_socket_path",
     "tailscaled_enabled_at_boot",
+    "update_caddy_socket_override",
     "worst_status",
 ]

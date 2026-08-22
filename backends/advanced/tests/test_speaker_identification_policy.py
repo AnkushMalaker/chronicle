@@ -13,28 +13,28 @@ from advanced_omi_backend.speaker_recognition_client import _select_label_mappin
 
 def test_single_low_confidence_clip_does_not_name_speaker():
     mappings = _select_label_mappings(
-        {"Speaker 0": [("Ankush", 0.55)]}, similarity_threshold=0.5
+        {"Speaker 0": [("Alex", 0.55)]}, similarity_threshold=0.5
     )
     assert mappings == {}
 
 
 def test_two_agreeing_clips_name_speaker():
     mappings = _select_label_mappings(
-        {"Speaker 0": [("Ankush", 0.56), ("Ankush", 0.61)]},
+        {"Speaker 0": [("Alex", 0.56), ("Alex", 0.61)]},
         similarity_threshold=0.5,
     )
-    assert mappings["Speaker 0"][0] == "Ankush"
+    assert mappings["Speaker 0"][0] == "Alex"
 
 
 def test_one_identity_cannot_be_assigned_to_two_labels():
     mappings = _select_label_mappings(
         {
-            "Speaker 0": [("Ankush", 0.75), ("Ankush", 0.72)],
-            "Speaker 1": [("Ankush", 0.61), ("Ankush", 0.60)],
+            "Speaker 0": [("Alex", 0.75), ("Alex", 0.72)],
+            "Speaker 1": [("Alex", 0.61), ("Alex", 0.60)],
         },
         similarity_threshold=0.5,
     )
-    assert mappings == {"Speaker 0": ("Ankush", pytest.approx(0.735))}
+    assert mappings == {"Speaker 0": ("Alex", pytest.approx(0.735))}
 
 
 # ---------------------------------------------------------------------------
@@ -69,24 +69,24 @@ def _seg(cluster, start, identified=None, confidence=None):
 
 def test_cluster_inherits_from_two_agreeing_votes():
     segments = [
-        _seg("SPEAKER_00", 1.0, "ankush", 0.53),
-        _seg("SPEAKER_00", 5.0, "ankush", 0.57),
+        _seg("SPEAKER_00", 1.0, "alex", 0.53),
+        _seg("SPEAKER_00", 5.0, "alex", 0.57),
         _seg("SPEAKER_00", 9.0),
     ]
     assert _propagate_cluster_identities(segments, set()) == 1
-    assert segments[2]["identified_as"] == "ankush"
+    assert segments[2]["identified_as"] == "alex"
     assert segments[2]["confidence"] == pytest.approx(0.55)
 
 
 def test_single_vote_does_not_propagate():
-    segments = [_seg("SPEAKER_00", 1.0, "ankush", 0.6), _seg("SPEAKER_00", 5.0)]
+    segments = [_seg("SPEAKER_00", 1.0, "alex", 0.6), _seg("SPEAKER_00", 5.0)]
     assert _propagate_cluster_identities(segments, set()) == 0
     assert segments[1]["identified_as"] is None
 
 
 def test_conflicting_votes_do_not_propagate():
     segments = [
-        _seg("SPEAKER_00", 1.0, "ankush", 0.6),
+        _seg("SPEAKER_00", 1.0, "alex", 0.6),
         _seg("SPEAKER_00", 5.0, "daksh", 0.55),
         _seg("SPEAKER_00", 9.0),
     ]
@@ -176,7 +176,7 @@ def test_human_speaker_label_survives_reprocess_and_records_model_miss():
     ]
 
 
-def _projected(start, end, text, speaker="ankush", segment_type="speech"):
+def _projected(start, end, text, speaker="alex", segment_type="speech"):
     return Conversation.SpeakerSegment(
         start=start,
         end=end,

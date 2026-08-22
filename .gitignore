@@ -131,9 +131,16 @@ backends/advanced/ssl/*
 extras/speaker-recognition/nginx.conf
 extras/speaker-recognition/Caddyfile
 
-# Generated compose overrides (e.g. Tailscale socket mount for Caddy-managed certs)
-backends/advanced/docker-compose.override.yml
-extras/speaker-recognition/docker-compose.override.yml
+# Machine-local Compose overrides and ad-hoc backups. Overrides may contain host
+# paths, device mappings, and other operator-specific configuration.
+docker-compose.override.yml
+docker-compose.override.yaml
+compose.override.yml
+compose.override.yaml
+docker-compose*.bak-*
+docker-compose*.pre-*
+compose*.bak-*
+compose*.pre-*
 
 # Cache
 extras/speaker-recognition/cache/*

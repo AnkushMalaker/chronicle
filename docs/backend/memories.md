@@ -199,8 +199,8 @@ finisher also scans the complete regenerated vault as one final structural gate.
 **Redundancy cannot be.** Structural verification passes on a perfectly well-formed
 bullet that re-records something the vault already holds — which is exactly how a
 DeepSeek V4 Pro day write finished with *Vault verification passed* after restating the
-phone stand, the chai, and the air-fryer fries that `People/ankush.md` and
-`People/anushpa.md` already carried. Deciding that means reading the surrounding notes
+phone stand, the chai, and the air-fryer fries that `People/alex.md` and
+`People/blair.md` already carried. Deciding that means reading the surrounding notes
 and judging whether two differently worded sentences carry the same fact, so a second
 agent does it (`agent/review_agent.py`):
 

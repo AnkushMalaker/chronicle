@@ -409,9 +409,9 @@ The React UI is configured with HTTPS enabled by default (`REACT_UI_HTTPS=true`)
 
 **Caddy/HTTPS not serving a valid certificate?**
 - HTTPS is handled by **Caddy** (auto-managed certs); there is no manual cert step.
-- For a Tailscale (`*.ts.net`) address, confirm the socket is mounted into Caddy:
+- For a Tailscale (`*.ts.net`) address, confirm the runtime directory is mounted into Caddy:
   `docker inspect speaker-recognition-caddy-1 --format '{{range .Mounts}}{{.Destination}} {{end}}'`
-  should list `/var/run/tailscale/tailscaled.sock`.
+  should list `/var/run/tailscale`.
 - Confirm the served cert: `echo | openssl s_client -connect localhost:8444 -servername <your-name> 2>/dev/null | openssl x509 -noout -issuer -enddate`
 - See [../../docs/ssl-certificates.md](../../docs/ssl-certificates.md) for details.
 

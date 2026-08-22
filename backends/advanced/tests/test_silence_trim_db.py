@@ -110,7 +110,7 @@ async def _make_conversation_with_chunks(n_chunks, *, segments=None):
             words=[],
             segments=[
                 Conversation.SpeakerSegment(
-                    speaker="ankush", start=start, end=end, text=text
+                    speaker="alex", start=start, end=end, text=text
                 )
                 for start, end, text in segments
             ],

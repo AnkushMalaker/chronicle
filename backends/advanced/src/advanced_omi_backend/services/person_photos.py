@@ -33,7 +33,7 @@ def match_person(name: str, people: list[dict[str, Any]]) -> dict[str, Any] | No
     """Pick the Immich person a vault note name refers to, or None.
 
     An exact (casefolded) name match wins. Otherwise a vault first name matches
-    a single Immich full name that starts with it ("Ankush" → "Ankush Malaker");
+    a single Immich full name that starts with it ("Alex" → "Alex Morgan");
     multiple such candidates are ambiguous and match nothing.
     """
     wanted = name.casefold().strip()

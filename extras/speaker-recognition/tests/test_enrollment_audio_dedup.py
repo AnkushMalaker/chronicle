@@ -18,7 +18,7 @@ def test_existing_hashes_detect_same_audio_under_a_different_filename(
     tmp_path, monkeypatch
 ):
     enrollment_dir = tmp_path / "enrollment_audio"
-    speaker_dir = enrollment_dir / "1" / "ankush"
+    speaker_dir = enrollment_dir / "1" / "alex"
     speaker_dir.mkdir(parents=True)
     audio = b"RIFF duplicate clip"
     (speaker_dir / "005150.wav").write_bytes(audio)
@@ -28,6 +28,6 @@ def test_existing_hashes_detect_same_audio_under_a_different_filename(
         lambda: SimpleNamespace(enrollment_audio_dir=enrollment_dir),
     )
 
-    hashes = existing_enrollment_hashes(1, "ankush")
+    hashes = existing_enrollment_hashes(1, "alex")
 
     assert audio_content_hash(audio) in hashes

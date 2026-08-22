@@ -9,22 +9,22 @@ afterEach(cleanup)
 describe('speaker filter', () => {
   it('renders one semantic unknown option instead of numbered local labels', () => {
     const Editor = speakersFilter.Editor!
-    render(<Editor value={{}} onChange={vi.fn()} ctx={{ speakers: ['Ankush'], datasets: [] }} />)
+    render(<Editor value={{}} onChange={vi.fn()} ctx={{ speakers: ['Alex'], datasets: [] }} />)
 
     expect(screen.getByRole('button', { name: 'Unknown speakers' })).toBeInTheDocument()
     expect(screen.queryByText('Unknown Speaker 1')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Ankush' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Alex' })).toBeInTheDocument()
   })
 
   it('serializes unknown tri-state separately from named identities', () => {
     expect(
       speakersFilter.toParams({
         [UNKNOWN_SPEAKERS_FILTER_KEY]: 'include',
-        Ankush: 'exclude',
+        Alex: 'exclude',
       })
     ).toEqual({
       include_speakers: [],
-      exclude_speakers: ['Ankush'],
+      exclude_speakers: ['Alex'],
       unknown_speakers: 'include',
     })
   })

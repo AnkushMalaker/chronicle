@@ -46,8 +46,8 @@ def _parent() -> Conversation:
         version_id="speaker",
         transcript="hello there general",
         segments=[
-            _segment(0.0, 10.0, "ankush", "hello there"),
-            _segment(60.0, 70.0, "anushpa", "general"),
+            _segment(0.0, 10.0, "alex", "hello there"),
+            _segment(60.0, 70.0, "blair", "general"),
         ],
         provider="deepgram",
         metadata={
@@ -80,7 +80,7 @@ def test_child_receives_every_version_and_keeps_the_chain():
     assert speaker_slice.metadata["origin_version_id"] == "speaker"
     # Only the in-range segment survives, on both versions alike.
     assert [segment.text for segment in asr_slice.segments] == ["hello there"]
-    assert [segment.speaker for segment in speaker_slice.segments] == ["ankush"]
+    assert [segment.speaker for segment in speaker_slice.segments] == ["alex"]
 
 
 def test_active_falls_back_when_the_active_version_slices_to_nothing():
@@ -89,7 +89,7 @@ def test_active_falls_back_when_the_active_version_slices_to_nothing():
     parent.add_transcript_version(
         version_id="tail-only",
         transcript="general",
-        segments=[_segment(60.0, 70.0, "anushpa", "general")],
+        segments=[_segment(60.0, 70.0, "blair", "general")],
         metadata={"source_version_id": "speaker"},
         set_as_active=True,
     )
@@ -113,8 +113,8 @@ def test_a_range_with_no_speech_produces_no_versions():
 
 def test_a_cut_inside_a_speech_segment_moves_to_its_nearest_edge():
     segments = [
-        _segment(0.0, 10.0, "ankush", "hello there"),
-        _segment(12.0, 40.0, "anushpa", "a long stretch of talking"),
+        _segment(0.0, 10.0, "alex", "hello there"),
+        _segment(12.0, 40.0, "blair", "a long stretch of talking"),
     ]
 
     adjusted, moved = _avoid_speech_segments([35.0], segments)
@@ -125,8 +125,8 @@ def test_a_cut_inside_a_speech_segment_moves_to_its_nearest_edge():
 
 def test_a_cut_in_a_gap_is_left_alone():
     segments = [
-        _segment(0.0, 10.0, "ankush", "hello there"),
-        _segment(60.0, 70.0, "anushpa", "general"),
+        _segment(0.0, 10.0, "alex", "hello there"),
+        _segment(60.0, 70.0, "blair", "general"),
     ]
 
     adjusted, moved = _avoid_speech_segments([30.0], segments)
@@ -180,7 +180,7 @@ def test_asr_source_stops_when_the_chain_points_outside_the_conversation():
     conversation.add_transcript_version(
         version_id="speaker-slice",
         transcript="hello",
-        segments=[_segment(0.0, 5.0, "ankush", "hello")],
+        segments=[_segment(0.0, 5.0, "alex", "hello")],
         metadata={
             "reprocessing_type": "speaker_diarization",
             "source_version_id": "lives-on-a-dead-parent",

@@ -75,7 +75,7 @@ def test_near_identical_frames_of_the_same_window_collapse():
 def test_a_genuinely_different_screen_is_kept():
     kept, dropped = select(
         [
-            frame(0, "inbox unread 3 messages from ankush about the collector"),
+            frame(0, "inbox unread 3 messages from alex about the collector"),
             frame(
                 1, "vad gate rejected the silent output session before transcription"
             ),

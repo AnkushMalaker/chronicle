@@ -4,7 +4,7 @@
 decide. It cannot answer "does the vault already know this?", which is the failure that
 matters most: DeepSeek V4 Pro finished a 2026-08-04 day write with *Vault verification
 passed* after re-recording the magnetic phone stand, the chai, and the air-fryer fries,
-every one of which was already in ``People/ankush.md`` and ``People/anushpa.md`` — and
+every one of which was already in ``People/alex.md`` and ``People/blair.md`` — and
 which the local Qwen cited by name when it declined to write anything at all.
 
 Judging that means reading the surrounding notes and deciding whether two differently
@@ -262,8 +262,8 @@ def _parse_findings(
     """Findings the model reported, dropping anything malformed with a warning.
 
     ``real_paths`` maps casefolded path to the path as it exists on disk. Models title-case
-    note names — every measured run reported ``People/Ankush.md`` for a note stored as
-    ``People/ankush.md`` — and a finding that names a note nobody can open sends the
+    note names — every measured run reported ``People/Alex.md`` for a note stored as
+    ``People/alex.md`` — and a finding that names a note nobody can open sends the
     repair pass looking for the wrong file.
     """
 

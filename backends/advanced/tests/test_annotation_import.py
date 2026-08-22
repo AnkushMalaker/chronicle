@@ -51,8 +51,8 @@ def _record() -> dict:
                 {
                     "start": 0.2,
                     "end": 3.0,
-                    "speaker": "ankush",
-                    "identified_as": "ankush",
+                    "speaker": "alex",
+                    "identified_as": "alex",
                     "text": "human transcript",
                 }
             ],
@@ -69,7 +69,7 @@ def test_parse_export_uses_human_annotation_as_active_transcript():
     clip = dataset.clips[0]
     assert clip.transcript == "human transcript"
     assert clip.transcript_source == "human_annotation"
-    assert clip.segments[0]["speaker"] == "ankush"
+    assert clip.segments[0]["speaker"] == "alex"
     assert clip.audio_bytes == b"RIFF-test-wav"
 
 

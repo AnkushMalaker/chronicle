@@ -199,7 +199,7 @@ export default function Settings() {
                 type="text"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
-                placeholder="e.g. Ankush"
+                placeholder="e.g. Alex"
               />
             </div>
             <div>

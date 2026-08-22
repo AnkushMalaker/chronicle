@@ -69,7 +69,7 @@ for the largest Verizon/Galileo conversation.
 
 ### Still weak or worse
 
-1. **Important omissions remain.** `a4ed37ac` still omits Ankush's father not attending
+1. **Important omissions remain.** `a4ed37ac` still omits the vault owner's father not attending
    the wedding and the surrounding estrangement. `d0de4521` captures UPI, insurance,
    medication reminders, journaling, and the scam, but still omits the sickness/Prayal
    portion. The customer-escalation/anger dynamic around Asif's email in `ea282e40`

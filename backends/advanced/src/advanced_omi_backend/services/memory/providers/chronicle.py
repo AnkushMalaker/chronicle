@@ -1365,7 +1365,7 @@ class MemoryService(MemoryServiceBase):
     # Diarization placeholders ("Speaker 0", "Unknown Speaker 1") — the only labels a
     # conversation-scoped diff may globally rename. A person note under a real name
     # aggregates facts from many conversations, so renaming it from one conversation's
-    # relabel merges the wrong person's whole history (ankush.md -> roshan.md, 2026-07-17).
+    # relabel merges the wrong person's whole history (alex.md -> roshan.md, 2026-07-17).
     _PLACEHOLDER_SPEAKER_RE = re.compile(
         r"^(unknown\s+)?speaker[\s_]*\d+$", re.IGNORECASE
     )

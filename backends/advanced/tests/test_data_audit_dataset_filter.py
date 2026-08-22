@@ -92,7 +92,7 @@ async def test_unknown_placeholders_are_one_filter_facet_not_global_identities(
 ):
     collection = _Collection(
         [
-            _conversation("one", ["Unknown Speaker 1", "Ankush"]),
+            _conversation("one", ["Unknown Speaker 1", "Alex"]),
             _conversation("two", ["unknown_speaker_1", "Unknown Speaker 7"]),
             _conversation("three", ["Daksh"]),
         ]
@@ -102,9 +102,9 @@ async def test_unknown_placeholders_are_one_filter_facet_not_global_identities(
 
     result = await data_audit_controller.list_for_audit(user)
 
-    assert result["speakers"] == ["Ankush", "Daksh"]
+    assert result["speakers"] == ["Alex", "Daksh"]
     assert result["has_unknown_speakers"] is True
-    assert result["conversations"][0]["speakers"] == ["Ankush", "Unknown Speaker 1"]
+    assert result["conversations"][0]["speakers"] == ["Alex", "Unknown Speaker 1"]
 
 
 @pytest.mark.asyncio
@@ -114,7 +114,7 @@ async def test_unknown_filter_includes_all_local_placeholders_and_combines_with_
     collection = _Collection(
         [
             _conversation("unknown", ["Unknown Speaker 3"]),
-            _conversation("named", ["Ankush"]),
+            _conversation("named", ["Alex"]),
             _conversation("other", ["Daksh"]),
         ]
     )
@@ -122,7 +122,7 @@ async def test_unknown_filter_includes_all_local_placeholders_and_combines_with_
     user = SimpleNamespace(is_superuser=False, user_id="user-1")
 
     result = await data_audit_controller.list_for_audit(
-        user, include_speakers=["Ankush"], unknown_speakers="include"
+        user, include_speakers=["Alex"], unknown_speakers="include"
     )
 
     assert {row["conversation_id"] for row in result["conversations"]} == {
@@ -137,7 +137,7 @@ async def test_unknown_filter_excludes_every_placeholder_variant(monkeypatch):
         [
             _conversation("one", ["Unknown"]),
             _conversation("two", ["Unknown Speaker 9"]),
-            _conversation("named", ["Ankush"]),
+            _conversation("named", ["Alex"]),
         ]
     )
     monkeypatch.setattr(Conversation, "get_pymongo_collection", lambda: collection)

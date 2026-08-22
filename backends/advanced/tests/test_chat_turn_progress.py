@@ -89,7 +89,7 @@ async def _collect(cs, rounds):
         return [
             event
             async for event in cs._generate_response_tool_mode(
-                session_id="sess-1", user_id="user-1", message_content="who is Ankush?"
+                session_id="sess-1", user_id="user-1", message_content="who is Alex?"
             )
         ]
 
@@ -107,12 +107,12 @@ async def test_search_then_answer_emits_progress_before_any_text():
         },
     )()
     note = type(
-        "E", (), {"id": "People/ankush.md", "content": "note body", "metadata": {}}
+        "E", (), {"id": "People/alex.md", "content": "note body", "metadata": {}}
     )()
     cs = _service([entry, note])
 
     events = await _collect(
-        cs, [_tool_round("Ankush"), _text_round("He is ", "an AI engineer.")]
+        cs, [_tool_round("Alex"), _text_round("He is ", "an AI engineer.")]
     )
 
     stages = [_stage(e) for e in events if e["type"] == "status"]
@@ -124,11 +124,11 @@ async def test_search_then_answer_emits_progress_before_any_text():
     assert first_status < first_token
 
     searching = next(e for e in events if _stage(e) == "searching")
-    assert searching["data"]["query"] == "Ankush"
+    assert searching["data"]["query"] == "Alex"
     searched = next(e for e in events if _stage(e) == "searched")
     assert searched["data"] == {
         "stage": "searched",
-        "query": "Ankush",
+        "query": "Alex",
         "note_count": 1,
         "found": True,
     }
@@ -149,7 +149,7 @@ async def test_tool_round_prose_is_retracted_before_the_search_runs():
     events = await _collect(
         cs,
         [
-            _tool_round("Ankush", prose="Let me check your vault."),
+            _tool_round("Alex", prose="Let me check your vault."),
             _text_round("Nothing found."),
         ],
     )
@@ -174,7 +174,7 @@ async def test_empty_search_is_reported_as_not_found():
     """An empty result set must surface as found=False, not a silent zero."""
     cs = _service([])
 
-    events = await _collect(cs, [_tool_round("Ankush"), _text_round("No luck.")])
+    events = await _collect(cs, [_tool_round("Alex"), _text_round("No luck.")])
 
     searched = next(e for e in events if _stage(e) == "searched")
     assert searched["data"]["found"] is False
@@ -209,12 +209,12 @@ async def test_broken_search_is_never_presented_as_an_empty_vault():
 
     with patch(
         "advanced_omi_backend.chat_service.async_chat_with_tools_stream",
-        _capture([_tool_round("Ankush"), _text_round("The search failed.")]),
+        _capture([_tool_round("Alex"), _text_round("The search failed.")]),
     ), patch("advanced_omi_backend.chat_service.set_trace_io"):
         events = [
             e
             async for e in cs._generate_response_tool_mode(
-                session_id="sess-1", user_id="user-1", message_content="who is Ankush?"
+                session_id="sess-1", user_id="user-1", message_content="who is Alex?"
             )
         ]
 

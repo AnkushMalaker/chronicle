@@ -13,7 +13,7 @@ No external service management required.
 
 Run with:
   # Run the test (service management is automatic)
-  cd /home/ankush/workspaces/chronicle/extras/asr-services
+  cd /home/alex/workspaces/chronicle/extras/asr-services
   uv run pytest tests/test_parakeet_service.py -v -s
 """
 

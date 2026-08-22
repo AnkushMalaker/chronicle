@@ -328,7 +328,7 @@ def test_timestamped_transcript_blocks_give_the_agent_real_internal_cut_points()
             end=60.0,
             text="First topic",
             speaker="Speaker 1",
-            identified_as="Ankush",
+            identified_as="Alex",
             segment_type="speech",
         ),
         SimpleNamespace(
@@ -344,7 +344,7 @@ def test_timestamped_transcript_blocks_give_the_agent_real_internal_cut_points()
             end=420.0,
             text="New topic after a real gap",
             speaker="Speaker 1",
-            identified_as="Ankush",
+            identified_as="Alex",
             segment_type="speech",
         ),
     ]
@@ -372,7 +372,7 @@ def test_timestamped_transcript_blocks_give_the_agent_real_internal_cut_points()
         (captured, captured + timedelta(minutes=3)),
         (captured + timedelta(minutes=6), captured + timedelta(minutes=7)),
     ]
-    assert "Ankush: First topic" in items[0].excerpt
+    assert "Alex: First topic" in items[0].excerpt
     assert "Aryan: Still first topic" in items[0].excerpt
     assert all(item.metadata["conversation_id"] == "conv-long" for item in items)
     assert [item.metadata["segment_count"] for item in items] == [2, 1]

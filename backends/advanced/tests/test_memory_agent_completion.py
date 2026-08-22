@@ -915,7 +915,7 @@ def test_conversation_note_canonicalization_uses_trusted_metadata(tmp_path):
 categories: ["[[Conversations]]"]
 conversation_id: hallucinated
 date: 2026-07-16
-people: ["[[Ankush]]", "[[Unknown Speaker 4]]", "[[Hermes]]"]
+people: ["[[Alex]]", "[[Unknown Speaker 4]]", "[[Hermes]]"]
 topics: ["[[Memory systems]]"]
 duration_minutes: 999
 ---
@@ -948,7 +948,7 @@ The conversation covered a reliable memory rebuild process.
     assert "duration_minutes: 2.5" in content
     assert "## Model supplied title" in content
     assert "Unknown Speaker" not in content
-    assert 'people:\n  - "[[Ankush]]"' in content
+    assert 'people:\n  - "[[Alex]]"' in content
     assert '  - "[[Hermes]]"' in content
     assert content.count("- The rebuild must preserve source metadata.") == 1
 

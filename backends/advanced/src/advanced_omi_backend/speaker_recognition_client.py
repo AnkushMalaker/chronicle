@@ -1240,7 +1240,7 @@ class SpeakerRecognitionClient:
 
         Returns:
             Dictionary mapping generic speaker labels to identified names
-            e.g., {"Speaker 0": "ankush", "Speaker 1": "unknown_speaker_0"}
+            e.g., {"Speaker 0": "alex", "Speaker 1": "unknown_speaker_0"}
         """
         if not self.enabled:
             return {}

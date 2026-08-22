@@ -356,7 +356,7 @@ def test_processing_cutover_separates_stt_diarization_and_every_revision():
                 "segments": [
                     {
                         "speaker": "SPEAKER_00",
-                        "identified_as": "Ankush",
+                        "identified_as": "Alex",
                         "text": "hello",
                         "start": 0.5,
                         "end": 10.0,
@@ -395,7 +395,7 @@ def test_processing_cutover_separates_stt_diarization_and_every_revision():
     )
     diarization = processing.diarization_artifacts[0]
     assert diarization["provider"] == "legacy-pyannote-derived"
-    assert diarization["turns"][0]["identified_as"] == "Ankush"
+    assert diarization["turns"][0]["identified_as"] == "Alex"
     assert diarization["turns"][0]["start_seconds"] == 0.5
     assert diarization["turns"][0]["end_seconds"] == 10.0
     assert diarization["turns"][0]["audio_spans"]

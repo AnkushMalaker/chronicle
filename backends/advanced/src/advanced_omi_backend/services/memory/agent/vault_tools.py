@@ -880,8 +880,8 @@ class VaultTools:
                 )
             # ``_abs`` deliberately resolves paths case-insensitively so a Linux
             # writer cannot create two notes that collide on macOS/Windows. The same
-            # rule means a model's harmless casing normalization (``anushpa`` ->
-            # ``Anushpa``) resolves both arguments to the one existing note. Treat
+            # rule means a model's harmless casing normalization (``blair`` ->
+            # ``Blair``) resolves both arguments to the one existing note. Treat
             # that repeated request as success: routing it through the merge service
             # raises ``PersonMergeError`` and consumes a repair round even though no
             # vault mutation is needed.
@@ -1204,7 +1204,7 @@ _GLOB_TOOL = {
     "function": {
         "name": "glob",
         "description": (
-            "Find notes by FILENAME pattern (e.g. 'People/*.md', '**/*ankush*'). "
+            "Find notes by FILENAME pattern (e.g. 'People/*.md', '**/*alex*'). "
             "Returns matching paths. Use to locate a person/topic note before reading "
             "it, or to list a folder."
         ),

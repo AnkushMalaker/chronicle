@@ -37,8 +37,9 @@ renewal cron. The Caddyfile has no `tls` directive; Caddy picks the right source
 the site address:
 
 - **`*.ts.net` (Tailscale)** → fetched from the local `tailscaled` at TLS-handshake
-  time. The wizard mounts the host `tailscaled.sock` into the Caddy container via a
-  generated `docker-compose.override.yml`. Trusted on all devices in your tailnet.
+  time. The wizard adds a read-only mount of the host Tailscale runtime directory to
+  the machine-local `docker-compose.override.yml`; unrelated local overrides are
+  preserved. Trusted on all devices in your tailnet.
 - **Real domain** → Let's Encrypt via ACME (requires ports 80/443 reachable). Trusted
   everywhere.
 - **IP address / `localhost`** → Caddy's internal CA (self-signed). Browsers show a
@@ -111,7 +112,7 @@ repairs the socket and operator faults automatically.
 **HTTPS not working**:
 - Check the Caddy containers are running: `docker compose ps` (look for `caddy`)
 - Confirm the served cert: `echo | openssl s_client -connect localhost:443 -servername <your-name> 2>/dev/null | openssl x509 -noout -issuer -enddate`
-- For Caddy-managed Tailscale, confirm the socket is mounted: `docker inspect <caddy-container> --format '{{range .Mounts}}{{.Destination}} {{end}}'` should list `/var/run/tailscale/tailscaled.sock`
+- For Caddy-managed Tailscale, confirm the runtime directory is mounted: `docker inspect <caddy-container> --format '{{range .Mounts}}{{.Destination}} {{end}}'` should list `/var/run/tailscale`
 - Check you're using `https://` not `http://`
 
 **Tailscale cert won't issue** (`500 ... failed to create DNS record`):

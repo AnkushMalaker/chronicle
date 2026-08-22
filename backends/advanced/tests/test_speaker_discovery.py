@@ -31,30 +31,30 @@ def test_automatic_label_disagreement_remains_reviewable():
         "conversation_id": "conversation-1",
         "start": 10.0,
         "duration": 8.0,
-        "current_label": "anushpa",
+        "current_label": "blair",
         "speaker_name": "Janhavi",
         "scores": {
             "sim_centroid": 0.52,
             "max_clip_sim": 0.35,
-            "best_other": {"name": "anushpa", "score": 0.49},
+            "best_other": {"name": "blair", "score": 0.49},
         },
     }
 
     scored = _information_score(candidate, threshold=0.5)
 
     assert scored is not None
-    assert "currently labeled anushpa — possible mismatch" in scored["reasons"]
+    assert "currently labeled blair — possible mismatch" in scored["reasons"]
 
 
 def test_clear_other_speaker_is_gated_out():
     candidate = {
         "duration": 8.0,
-        "current_label": "anushpa",
+        "current_label": "blair",
         "speaker_name": "Janhavi",
         "scores": {
             "sim_centroid": 0.40,
             "max_clip_sim": 0.35,
-            "best_other": {"name": "anushpa", "score": 0.55},
+            "best_other": {"name": "blair", "score": 0.55},
         },
     }
 

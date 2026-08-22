@@ -14,7 +14,7 @@ from advanced_omi_backend.services.memory.agent.review_agent import (
 )
 
 PERSON_NOTE = """## About
-- On 2026-08-04, discussed a suction-style phone stand with [[anushpa]].
+- On 2026-08-04, discussed a suction-style phone stand with [[blair]].
 
 ## Conversations
 ![[Conversations.base#Person]]
@@ -75,12 +75,10 @@ def test_added_lines_treats_a_brand_new_note_as_all_added():
 
 
 def test_render_added_bounds_a_huge_write_and_says_so(tmp_path):
-    _write(tmp_path, "People/Ankush.md", "- x\n")
+    _write(tmp_path, "People/Alex.md", "- x\n")
     _write(tmp_path, "Daily/2026-08-04.md", "- y\n" * 20_000)
 
-    added, count = render_added(
-        tmp_path, {}, ["People/Ankush.md", "Daily/2026-08-04.md"]
-    )
+    added, count = render_added(tmp_path, {}, ["People/Alex.md", "Daily/2026-08-04.md"])
 
     assert len(added) < MAX_DIFF_BYTES + 200
     assert "further notes omitted" in added
@@ -99,11 +97,11 @@ async def test_a_redundant_bullet_the_reviewer_finds_becomes_a_finding(
     landed in can decide it, which is why the reviewer is an agent.
     """
 
-    _write(tmp_path, "People/ankush.md", PERSON_NOTE)
-    before = {"People/ankush.md": PERSON_NOTE}
+    _write(tmp_path, "People/alex.md", PERSON_NOTE)
+    before = {"People/alex.md": PERSON_NOTE}
     _write(
         tmp_path,
-        "People/ankush.md",
+        "People/alex.md",
         PERSON_NOTE.replace(
             "## Conversations",
             "- On 2026-08-04, called a magnetic phone stand cheap.\n\n## Conversations",
@@ -111,7 +109,7 @@ async def test_a_redundant_bullet_the_reviewer_finds_becomes_a_finding(
     )
     seen = _chat(
         monkeypatch,
-        _response(_message([_tool_call("read_note", {"path": "People/ankush.md"})])),
+        _response(_message([_tool_call("read_note", {"path": "People/alex.md"})])),
         _response(
             _message(
                 [
@@ -120,7 +118,7 @@ async def test_a_redundant_bullet_the_reviewer_finds_becomes_a_finding(
                         {
                             "findings": [
                                 {
-                                    "path": "People/ankush.md",
+                                    "path": "People/alex.md",
                                     "rule": "redundant",
                                     "detail": "already recorded as 'discussed a "
                                     "suction-style phone stand'",
@@ -135,17 +133,17 @@ async def test_a_redundant_bullet_the_reviewer_finds_becomes_a_finding(
 
     result = await review_vault_write(
         tmp_path,
-        source="Ankush and Anushpa talked about a phone stand.",
+        source="Alex and Blair talked about a phone stand.",
         before=before,
-        touched=["People/ankush.md"],
+        touched=["People/alex.md"],
         record="day",
     )
 
     assert result.reported is True
     assert [(f.path, f.rule) for f in result.findings] == [
-        ("People/ankush.md", "redundant")
+        ("People/alex.md", "redundant")
     ]
-    assert result.notes_read == ["People/ankush.md"]
+    assert result.notes_read == ["People/alex.md"]
     # The reviewer is shown the added line and the source, never the writer's reasoning.
     task = seen[0][-1]["content"]
     assert "magnetic phone stand" in task and "<source" in task
@@ -153,9 +151,7 @@ async def test_a_redundant_bullet_the_reviewer_finds_becomes_a_finding(
 
 @pytest.mark.asyncio
 async def test_a_clean_write_produces_no_findings(tmp_path, monkeypatch):
-    _write(
-        tmp_path, "People/ankush.md", PERSON_NOTE + "- On 2026-08-06, adopted a cat."
-    )
+    _write(tmp_path, "People/alex.md", PERSON_NOTE + "- On 2026-08-06, adopted a cat.")
     _chat(
         monkeypatch,
         _response(_message([_tool_call("report_findings", {"findings": []})])),
@@ -163,9 +159,9 @@ async def test_a_clean_write_produces_no_findings(tmp_path, monkeypatch):
 
     result = await review_vault_write(
         tmp_path,
-        source="Ankush adopted a cat.",
-        before={"People/ankush.md": PERSON_NOTE},
-        touched=["People/ankush.md"],
+        source="Alex adopted a cat.",
+        before={"People/alex.md": PERSON_NOTE},
+        touched=["People/alex.md"],
         record="day",
     )
 
@@ -181,7 +177,7 @@ async def test_an_invented_rule_is_dropped_rather_than_repaired(tmp_path, monkey
     in the system defines.
     """
 
-    _write(tmp_path, "People/ankush.md", PERSON_NOTE + "- a new fact\n")
+    _write(tmp_path, "People/alex.md", PERSON_NOTE + "- a new fact\n")
     _chat(
         monkeypatch,
         _response(
@@ -192,12 +188,12 @@ async def test_an_invented_rule_is_dropped_rather_than_repaired(tmp_path, monkey
                         {
                             "findings": [
                                 {
-                                    "path": "People/ankush.md",
+                                    "path": "People/alex.md",
                                     "rule": "wording",
                                     "detail": "could be phrased more concisely",
                                 },
                                 {
-                                    "path": "People/ankush.md",
+                                    "path": "People/alex.md",
                                     "rule": "unsupported",
                                     "detail": "the source never mentions this",
                                 },
@@ -212,8 +208,8 @@ async def test_an_invented_rule_is_dropped_rather_than_repaired(tmp_path, monkey
     result = await review_vault_write(
         tmp_path,
         source="unrelated",
-        before={"People/ankush.md": PERSON_NOTE},
-        touched=["People/ankush.md"],
+        before={"People/alex.md": PERSON_NOTE},
+        touched=["People/alex.md"],
         record="day",
     )
 
@@ -230,7 +226,7 @@ async def test_a_reviewer_that_answers_in_prose_is_asked_for_the_verdict(
     Discarding the review there throws away the whole thing over its last step.
     """
 
-    _write(tmp_path, "People/ankush.md", PERSON_NOTE + "- a new fact\n")
+    _write(tmp_path, "People/alex.md", PERSON_NOTE + "- a new fact\n")
     seen = _chat(
         monkeypatch,
         _response(_message(None, content="The Tokyo line is not in the source.")),
@@ -242,7 +238,7 @@ async def test_a_reviewer_that_answers_in_prose_is_asked_for_the_verdict(
                         {
                             "findings": [
                                 {
-                                    "path": "People/ankush.md",
+                                    "path": "People/alex.md",
                                     "rule": "unsupported",
                                     "detail": "the source never mentions Tokyo",
                                 }
@@ -257,8 +253,8 @@ async def test_a_reviewer_that_answers_in_prose_is_asked_for_the_verdict(
     result = await review_vault_write(
         tmp_path,
         source="unrelated",
-        before={"People/ankush.md": PERSON_NOTE},
-        touched=["People/ankush.md"],
+        before={"People/alex.md": PERSON_NOTE},
+        touched=["People/alex.md"],
         record="day",
     )
 
@@ -276,7 +272,7 @@ async def test_a_forced_verdict_that_still_refuses_to_report_yields_nothing(
 ):
     """A review that cannot be acted on is the same as no review — never a block."""
 
-    _write(tmp_path, "People/ankush.md", PERSON_NOTE + "- a new fact\n")
+    _write(tmp_path, "People/alex.md", PERSON_NOTE + "- a new fact\n")
     _chat(
         monkeypatch,
         _response(_message(None, content="Looks fine to me.")),
@@ -286,8 +282,8 @@ async def test_a_forced_verdict_that_still_refuses_to_report_yields_nothing(
     result = await review_vault_write(
         tmp_path,
         source="unrelated",
-        before={"People/ankush.md": PERSON_NOTE},
-        touched=["People/ankush.md"],
+        before={"People/alex.md": PERSON_NOTE},
+        touched=["People/alex.md"],
         record="day",
     )
 
@@ -298,7 +294,7 @@ async def test_a_forced_verdict_that_still_refuses_to_report_yields_nothing(
 
 @pytest.mark.asyncio
 async def test_a_reviewer_that_crashes_never_fails_the_write(tmp_path, monkeypatch):
-    _write(tmp_path, "People/ankush.md", PERSON_NOTE + "- a new fact\n")
+    _write(tmp_path, "People/alex.md", PERSON_NOTE + "- a new fact\n")
 
     async def boom(*_args, **_kwargs):
         raise RuntimeError("model unreachable")
@@ -308,8 +304,8 @@ async def test_a_reviewer_that_crashes_never_fails_the_write(tmp_path, monkeypat
     result = await review_vault_write(
         tmp_path,
         source="unrelated",
-        before={"People/ankush.md": PERSON_NOTE},
-        touched=["People/ankush.md"],
+        before={"People/alex.md": PERSON_NOTE},
+        touched=["People/alex.md"],
         record="day",
     )
 
@@ -327,7 +323,7 @@ async def test_the_round_cap_still_collects_what_the_reviewer_already_confirmed(
     to ask for one.
     """
 
-    _write(tmp_path, "People/ankush.md", PERSON_NOTE + "- a new fact\n")
+    _write(tmp_path, "People/alex.md", PERSON_NOTE + "- a new fact\n")
     grep_forever = _response(_message([_tool_call("grep", {"pattern": "fact"})]))
     seen = _chat(
         monkeypatch,
@@ -341,7 +337,7 @@ async def test_the_round_cap_still_collects_what_the_reviewer_already_confirmed(
                         {
                             "findings": [
                                 {
-                                    "path": "People/ankush.md",
+                                    "path": "People/alex.md",
                                     "rule": "redundant",
                                     "detail": "the note already says this",
                                 }
@@ -356,8 +352,8 @@ async def test_the_round_cap_still_collects_what_the_reviewer_already_confirmed(
     result = await review_vault_write(
         tmp_path,
         source="unrelated",
-        before={"People/ankush.md": PERSON_NOTE},
-        touched=["People/ankush.md"],
+        before={"People/alex.md": PERSON_NOTE},
+        touched=["People/alex.md"],
         record="day",
         max_rounds=2,
     )
@@ -375,7 +371,7 @@ async def test_a_write_that_added_nothing_is_not_sent_to_the_model(
 ):
     """A rename or a deletion has no added lines; spending an agent run on it is waste."""
 
-    _write(tmp_path, "People/ankush.md", PERSON_NOTE)
+    _write(tmp_path, "People/alex.md", PERSON_NOTE)
 
     async def never(*_args, **_kwargs):
         raise AssertionError("the reviewer must not be invoked with nothing to review")
@@ -385,8 +381,8 @@ async def test_a_write_that_added_nothing_is_not_sent_to_the_model(
     result = await review_vault_write(
         tmp_path,
         source="unrelated",
-        before={"People/ankush.md": PERSON_NOTE},
-        touched=["People/ankush.md"],
+        before={"People/alex.md": PERSON_NOTE},
+        touched=["People/alex.md"],
         record="day",
     )
 
@@ -407,7 +403,7 @@ async def test_a_truncated_source_withdraws_the_unsupported_verdict(
     Redundancy is unaffected: that is judged against the vault, which it saw whole.
     """
 
-    _write(tmp_path, "People/ankush.md", PERSON_NOTE + "- a new fact\n")
+    _write(tmp_path, "People/alex.md", PERSON_NOTE + "- a new fact\n")
     seen = _chat(
         monkeypatch,
         _response(
@@ -418,12 +414,12 @@ async def test_a_truncated_source_withdraws_the_unsupported_verdict(
                         {
                             "findings": [
                                 {
-                                    "path": "People/ankush.md",
+                                    "path": "People/alex.md",
                                     "rule": "unsupported",
                                     "detail": "I could not find this in the source",
                                 },
                                 {
-                                    "path": "People/ankush.md",
+                                    "path": "People/alex.md",
                                     "rule": "redundant",
                                     "detail": "the note already records this",
                                 },
@@ -438,8 +434,8 @@ async def test_a_truncated_source_withdraws_the_unsupported_verdict(
     result = await review_vault_write(
         tmp_path,
         source="x" * (review_agent.MAX_SOURCE_BYTES + 1),
-        before={"People/ankush.md": PERSON_NOTE},
-        touched=["People/ankush.md"],
+        before={"People/alex.md": PERSON_NOTE},
+        touched=["People/alex.md"],
         record="day",
     )
 
@@ -453,12 +449,12 @@ async def test_a_truncated_source_withdraws_the_unsupported_verdict(
 async def test_a_title_cased_path_is_resolved_to_the_note_that_exists(
     tmp_path, monkeypatch
 ):
-    """Every measured run reported People/Ankush.md for a note stored as ankush.md.
+    """Every measured run reported People/Alex.md for a note stored as alex.md.
 
     A finding that names a note nobody can open sends the repair pass at the wrong file.
     """
 
-    _write(tmp_path, "People/ankush.md", PERSON_NOTE + "- a new fact\n")
+    _write(tmp_path, "People/alex.md", PERSON_NOTE + "- a new fact\n")
     _chat(
         monkeypatch,
         _response(
@@ -469,7 +465,7 @@ async def test_a_title_cased_path_is_resolved_to_the_note_that_exists(
                         {
                             "findings": [
                                 {
-                                    "path": "People/Ankush.md",
+                                    "path": "People/Alex.md",
                                     "rule": "redundant",
                                     "detail": "the note already records this",
                                 }
@@ -484,9 +480,9 @@ async def test_a_title_cased_path_is_resolved_to_the_note_that_exists(
     result = await review_vault_write(
         tmp_path,
         source="unrelated",
-        before={"People/ankush.md": PERSON_NOTE},
-        touched=["People/ankush.md"],
+        before={"People/alex.md": PERSON_NOTE},
+        touched=["People/alex.md"],
         record="day",
     )
 
-    assert [f.path for f in result.findings] == ["People/ankush.md"]
+    assert [f.path for f in result.findings] == ["People/alex.md"]

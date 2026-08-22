@@ -8,14 +8,14 @@ from advanced_omi_backend.routers.modules.finetuning_routes import (
 
 def test_processed_speech_insert_resolves_to_active_segment_after_apply_sort():
     segments = [
-        SimpleNamespace(start=8.0, end=11.0, speaker="ankush", text="before"),
+        SimpleNamespace(start=8.0, end=11.0, speaker="alex", text="before"),
         SimpleNamespace(
             start=12.367411915438822,
             end=13.597392696989111,
             speaker="jit bahadur",
             text="thoda thoda dalna padega bhaiya",
         ),
-        SimpleNamespace(start=19.0, end=22.0, speaker="ankush", text="after"),
+        SimpleNamespace(start=19.0, end=22.0, speaker="alex", text="after"),
     ]
     annotation = SimpleNamespace(
         annotation_type=AnnotationType.INSERT,

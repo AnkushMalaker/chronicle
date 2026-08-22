@@ -89,7 +89,7 @@ function ProviderRow({ label, model, onSaved }: {
             value={context}
             onChange={e => setContext(e.target.value)}
             rows={2}
-            placeholder="e.g. A tech podcast about ASR, wearables, and the Chronicle app. Speakers: Ankush, Hermes."
+            placeholder="e.g. A tech podcast about ASR, wearables, and the Chronicle app. Speakers: Alex, Hermes."
           />
           <div className="mt-2 flex items-center gap-3">
             <Button

@@ -110,15 +110,15 @@ class TestRenamePersonMove:
         tools = VaultTools(tmp_path)
         people = tmp_path / "People"
         people.mkdir(parents=True, exist_ok=True)
-        source = people / "anushpa.md"
+        source = people / "blair.md"
         original = _person(about="- fact.", mentions="- mention.")
         source.write_text(original, encoding="utf-8")
 
-        message = tools.rename_person("anushpa", "Anushpa")
+        message = tools.rename_person("blair", "Blair")
 
         assert "already resolves" in message
         assert source.read_text(encoding="utf-8") == original
-        assert not (people / "Anushpa.md").exists()
+        assert not (people / "Blair.md").exists()
         assert tools.touched == set()
         assert tools.removed == []
 

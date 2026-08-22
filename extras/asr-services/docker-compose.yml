@@ -708,7 +708,7 @@ services:
       - CHRONICLE_INGEST_TOKEN=${CHRONICLE_INGEST_TOKEN:-}
       - CHRONICLE_SERVICE_NAME=${CHRONICLE_SERVICE_NAME:-}
     volumes:
-      - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock:ro
+      - /var/run/tailscale:/var/run/tailscale:ro
     restart: unless-stopped
     profiles:
       - edge

@@ -134,12 +134,10 @@ class TestPlaceSegments:
     def test_identified_speaker_wins_over_the_diarization_label(self):
         anchors = anchors_from([chunk(0.0, T0)])
         placed = place_segments(
-            conversation(
-                [segment(1.0, 2.0, "hi", "Speaker 1", identified_as="Anushpa")]
-            ),
+            conversation([segment(1.0, 2.0, "hi", "Speaker 1", identified_as="Blair")]),
             anchors,
         )
-        assert placed[0].label == "Anushpa"
+        assert placed[0].label == "Blair"
 
     def test_no_anchors_yields_nothing(self):
         placed = place_segments(
@@ -209,12 +207,12 @@ class TestRangeTranscript:
                     T0 + timedelta(seconds=5),
                     "hi back",
                     "Speaker 1",
-                    identified_as="Anushpa",
+                    identified_as="Blair",
                 ),
             ],
         )
         assert result.render() == (
-            "[12:00:00] Speaker 0: hello\n[12:00:03] Anushpa: hi back"
+            "[12:00:00] Speaker 0: hello\n[12:00:03] Blair: hi back"
         )
 
     def test_render_uses_the_requested_timezone(self):

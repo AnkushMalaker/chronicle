@@ -27,20 +27,20 @@ def test_exact_pcm_prefers_normal_audio_record_and_retires_derivatives() -> None
         [
             record(
                 "normal",
-                transcript="My wife is Anushpa",
+                transcript="My partner is Blair",
                 pcm_sha256="same",
                 has_audio=True,
             ),
             record(
                 "old-copy",
-                transcript="My wife is Anushpa",
+                transcript="My partner is Blair",
                 pcm_sha256="same",
                 has_audio=True,
                 deleted=True,
             ),
             record(
                 "mined",
-                transcript="My wife is Anushpa",
+                transcript="My partner is Blair",
                 pcm_sha256="same",
                 has_audio=True,
                 data_purpose="annotation",
@@ -58,8 +58,8 @@ def test_exact_pcm_prefers_normal_audio_record_and_retires_derivatives() -> None
 def test_transcript_only_exact_alias_joins_audio_canonical() -> None:
     manifest = build_manifest(
         [
-            record("audio", transcript="Hello, my wife is Anushpa.", has_audio=True),
-            record("alias", transcript="hello my wife is anushpa", has_audio=False),
+            record("audio", transcript="Hello, my partner is Blair.", has_audio=True),
+            record("alias", transcript="hello my partner is blair", has_audio=False),
         ]
     )
     assert manifest["canonical_by_source"]["alias"] == "audio"
@@ -80,7 +80,7 @@ def test_ambiguous_transcript_alias_blocks_activation() -> None:
 
 def test_conservative_match_rejects_short_or_materially_different_text() -> None:
     matched, _ = conservative_transcript_match(
-        "my wife is anushpa", "my wife is anushpa"
+        "my partner is blair", "my partner is blair"
     )
     # Distinctive five-gram coverage intentionally prevents short fuzzy aliases.
     assert not matched

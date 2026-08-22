@@ -26,20 +26,20 @@ def person(identifier: str, name: str, hidden: bool = False):
 
 
 def test_match_person_prefers_exact_name():
-    people = [person("a", "Ankush Malaker"), person("b", "Ankush")]
-    assert match_person("ankush", people)["id"] == "b"
+    people = [person("a", "Alex Malaker"), person("b", "Alex")]
+    assert match_person("alex", people)["id"] == "b"
 
 
 def test_match_person_accepts_unique_first_name_prefix():
-    people = [person("a", "Ankush Malaker"), person("b", "Daksh")]
-    assert match_person("Ankush", people)["id"] == "a"
+    people = [person("a", "Alex Malaker"), person("b", "Daksh")]
+    assert match_person("Alex", people)["id"] == "a"
 
 
 def test_match_person_rejects_ambiguous_and_hidden():
-    ambiguous = [person("a", "Ankush Malaker"), person("b", "Ankush Kumar")]
-    assert match_person("Ankush", ambiguous) is None
-    assert match_person("Ankush", [person("a", "Ankush", hidden=True)]) is None
-    assert match_person("Ankush", [person("a", "")]) is None
+    ambiguous = [person("a", "Alex Malaker"), person("b", "Alex Kumar")]
+    assert match_person("Alex", ambiguous) is None
+    assert match_person("Alex", [person("a", "Alex", hidden=True)]) is None
+    assert match_person("Alex", [person("a", "")]) is None
 
 
 def test_embed_photo_inserts_below_frontmatter():

@@ -18,14 +18,14 @@ def _profile(name: str) -> bytes:
 
 
 def test_airpods_are_verified_as_isolated_output():
-    route = parse_system_profiler_audio(_profile("Ankush’s AirPods Pro"))
+    route = parse_system_profiler_audio(_profile("Alex’s AirPods Pro"))
     selection = resolve_host_output(HostOutputPolicy.AUTO, route)
 
     assert selection.enabled
     assert selection.processing_profile == "duplex_isolated"
     assert selection.capabilities.mode == "duplex_isolated"
     assert selection.capabilities.output_route == "headphones"
-    assert selection.status == "OMI mic → Ankush’s AirPods Pro · headphones"
+    assert selection.status == "OMI mic → Alex’s AirPods Pro · headphones"
 
 
 def test_builtin_speakers_fall_back_to_capture_gated_half_duplex():

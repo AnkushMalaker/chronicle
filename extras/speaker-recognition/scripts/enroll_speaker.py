@@ -4,22 +4,22 @@ Helper script for enrolling speakers in the speaker recognition system.
 
 Usage:
     # Enroll from single audio file
-    python enroll_speaker.py --file my_voice.wav --id ankush --name "Ankush"
+    python enroll_speaker.py --file my_voice.wav --id alex --name "Alex"
 
     # Enroll from multiple files (better accuracy)
-    python enroll_speaker.py --files voice1.wav voice2.wav voice3.wav --id ankush --name "Ankush"
+    python enroll_speaker.py --files voice1.wav voice2.wav voice3.wav --id alex --name "Alex"
 
     # Enroll from directory of audio files
-    python enroll_speaker.py --dir ~/voice_samples/ --id ankush --name "Ankush"
+    python enroll_speaker.py --dir ~/voice_samples/ --id alex --name "Alex"
 
     # Enroll from YouTube video with timestamp
-    python enroll_speaker.py --youtube "https://youtube.com/watch?v=..." --start 10 --end 60 --id ankush --name "Ankush"
+    python enroll_speaker.py --youtube "https://youtube.com/watch?v=..." --start 10 --end 60 --id alex --name "Alex"
 
     # List enrolled speakers
     python enroll_speaker.py --list
 
     # Delete a speaker
-    python enroll_speaker.py --delete ankush
+    python enroll_speaker.py --delete alex
 """
 
 import argparse

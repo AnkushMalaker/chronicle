@@ -24,7 +24,7 @@ def _document():
                         "end": 3.0,
                         "text": "first",
                         "speaker": "SPEAKER_00",
-                        "identified_as": "Ankush",
+                        "identified_as": "Alex",
                         "confidence": 0.91,
                         "segment_type": "speech",
                     },
@@ -42,7 +42,7 @@ def _document():
                         "end": 8.0,
                         "text": "third",
                         "speaker": "SPEAKER_00",
-                        "identified_as": "Ankush",
+                        "identified_as": "Alex",
                         "confidence": 0.93,
                         "segment_type": "speech",
                     },
@@ -56,9 +56,9 @@ def test_review_queue_includes_every_identity_claim_without_anomaly_heuristics()
     candidates = _speaker_review_candidates(_document(), set())
 
     assert [candidate["claimed_speaker"] for candidate in candidates] == [
-        "Ankush",
+        "Alex",
         "Kaushik",
-        "Ankush",
+        "Alex",
     ]
     assert [item["position"] for item in candidates[1]["context"]] == [
         "before",
@@ -73,8 +73,8 @@ def test_reviewed_claim_is_removed_by_conversation_and_start_key():
     candidates = _speaker_review_candidates(_document(), reviewed)
 
     assert [candidate["claimed_speaker"] for candidate in candidates] == [
-        "Ankush",
-        "Ankush",
+        "Alex",
+        "Alex",
     ]
 
 
@@ -86,7 +86,7 @@ def test_non_speech_and_unidentified_segments_are_not_identity_claims():
 
     candidates = _speaker_review_candidates(doc, set())
 
-    assert [candidate["claimed_speaker"] for candidate in candidates] == ["Ankush"]
+    assert [candidate["claimed_speaker"] for candidate in candidates] == ["Alex"]
 
 
 def test_human_relabel_clears_rejected_model_identity():
@@ -111,7 +111,7 @@ def test_review_batch_never_repeats_a_conversation_and_diversifies_speakers():
         {
             "review_key": f"c{i}:{i}",
             "conversation_id": f"c{i}",
-            "claimed_speaker": "Ankush" if i < 3 else f"Speaker {i}",
+            "claimed_speaker": "Alex" if i < 3 else f"Speaker {i}",
             "confidence": 0.5 + i * 0.03,
         }
         for i in range(8)
@@ -129,7 +129,7 @@ def test_review_batch_prioritizes_conversations_not_reviewed_before():
         {
             "review_key": f"{conversation}:0",
             "conversation_id": conversation,
-            "claimed_speaker": "Ankush",
+            "claimed_speaker": "Alex",
             "confidence": confidence,
         }
         for conversation, confidence in (("already", 0.5), ("fresh", 0.7))
@@ -140,7 +140,7 @@ def test_review_batch_prioritizes_conversations_not_reviewed_before():
         1,
         0.5,
         {"already": 10},
-        {"Ankush": 10},
+        {"Alex": 10},
     )
 
     assert batch[0]["conversation_id"] == "fresh"

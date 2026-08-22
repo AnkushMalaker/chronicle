@@ -39,7 +39,7 @@ Eight high-worthiness conversations were audited fact-by-fact (4 technical/work:
   build on.
 - Frontmatter date/duration metadata is now exact (10/10 spot-checks matched to
   the microsecond).
-- `People/ankush.md` and `People/Anushpa.md` rollups are accurate and are the one
+- `People/alex.md` and `People/Blair.md` rollups are accurate and are the one
   reliable retrieval surface today.
 - Action items, where populated, are mostly real commitments (best case
   `7620c7b4`: 5/5 grounded).
@@ -49,10 +49,10 @@ Eight high-worthiness conversations were audited fact-by-fact (4 technical/work:
 1. **Under-coverage (~half the substance dropped), biased toward the safe
    surface.** Notes summarize the opening topic and truncate. What gets dropped
    is precisely what a personal-memory system exists for:
-   - `a4ed37ac`: omits that ankush's father is not attending his wedding and the
+   - `a4ed37ac`: omits that the vault owner's father is not attending his wedding and the
      family estrangement around it (~40% of the conversation).
    - `19f5a281`: omits the genetic marker → no synthetic folic acid health fact.
-   - `d0de4521`: omits ankush being sick 4-5 days, Prayal visiting, his
+   - `d0de4521`: omits the vault owner being sick 4-5 days, Prayal visiting, his
      journaling/meds-reminder workflow, and two real helping-commitments (set up
      the maid's UPI account, renew जितबहादुर's insurance) — the Action Items
      section shipped as an empty `- [ ]`.
@@ -63,7 +63,7 @@ Eight high-worthiness conversations were audited fact-by-fact (4 technical/work:
 2. **Attribution smears from broken diarization** — the top correctness lever
    given inventions are zero. `ea282e40` assigns Tanmay's A100/H100 conclusion to
    Shiva (the customer who was pushing back); `7620c7b4` turns Vipul's RabbitMQ
-   hypothesis into Ankush's assertion; `d0de4521` collapses two distinct third
+   hypothesis into the vault owner's assertion; `d0de4521` collapses two distinct third
    parties into "the person."
 3. **Titles: 9 notes use the raw first ASR line** ("So, the chronicle. I forgot.
    Yeah," / "Question. Do you-- whenever you have") and ~15-20 more are fully
