@@ -13,6 +13,7 @@ export interface StartVoiceSessionOptions {
 
 export interface NativePcmFrame {
   captureEpoch: number;
+  capturedAtMs: number;
   monotonicTimestampMs: number;
   sampleRate: 16000;
   channels: 1;

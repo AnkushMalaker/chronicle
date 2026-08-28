@@ -24,10 +24,10 @@ function loadTypeScript(sourcePath, mocks = {}) {
   return loaded.exports;
 }
 
-const protocolPath = path.join(__dirname, '../src/protocol/voiceProtocol.ts');
+const protocolPath = path.join(__dirname, '../../contracts/voice_protocol/v1/typescript/voiceProtocol.ts');
 const protocol = loadTypeScript(protocolPath);
-const controllerPath = path.join(__dirname, '../src/protocol/phoneDuplexController.ts');
-const { PhoneDuplexController } = loadTypeScript(controllerPath, {
+const controllerPath = path.join(__dirname, '../../contracts/voice_protocol/v1/typescript/voiceSessionController.ts');
+const { VoiceSessionController } = loadTypeScript(controllerPath, {
   './voiceProtocol': protocol,
 });
 const statusPath = path.join(__dirname, '../src/protocol/phoneVoiceStatus.ts');
@@ -101,7 +101,7 @@ const bound = (type, eventId) => ({
     stopVoiceSession: async () => ({ restorationSucceeded: true, failureCode: null }),
   };
   let phoneEvent = 0;
-  const controller = new PhoneDuplexController({
+  const controller = new VoiceSessionController({
     capabilities,
     captureEpoch: 4,
     native,
@@ -232,7 +232,7 @@ const bound = (type, eventId) => ({
   await controller.receiveBinary(Uint8Array.from([9]));
   assert.equal(scheduled.length, beforeStaleDelivery, 'closed socket cannot deliver stale media');
 
-  const reconnected = new PhoneDuplexController({
+  const reconnected = new VoiceSessionController({
     capabilities,
     captureEpoch: 6,
     native,
@@ -265,7 +265,7 @@ const bound = (type, eventId) => ({
     'a reconnect never inherits pending response media',
   );
 
-  const expired = new PhoneDuplexController({
+  const expired = new VoiceSessionController({
     capabilities,
     captureEpoch: 6,
     native,

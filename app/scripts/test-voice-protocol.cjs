@@ -5,8 +5,10 @@ const path = require('node:path');
 const ts = require('typescript');
 
 const appRoot = path.resolve(__dirname, '..');
-const sourcePath = path.join(appRoot, 'src', 'protocol', 'voiceProtocol.ts');
 const contractRoot = path.resolve(appRoot, '..', 'contracts', 'voice_protocol', 'v1');
+const sourcePath = path.join(contractRoot, 'typescript', 'voiceProtocol.ts');
+const pcmSourcePath = path.join(contractRoot, 'typescript', 'interactivePcm.ts');
+const nativeAdapterPath = path.join(appRoot, 'src', 'protocol', 'nativePcmFrame.ts');
 
 function loadTypeScriptModule(filename) {
   const source = fs.readFileSync(filename, 'utf8');
@@ -35,8 +37,14 @@ function fixtures(directory) {
 }
 
 const { parseVoiceProtocolEvent } = loadTypeScriptModule(sourcePath);
+const {
+  InteractivePcmFrameEncoder,
+  selectInteractivePcmBufferSize,
+} = loadTypeScriptModule(pcmSourcePath);
+const { capturedPcmFrameFromNative } = loadTypeScriptModule(nativeAdapterPath);
 
 for (const [name, fixture] of fixtures(path.join(contractRoot, 'golden'))) {
+  if (fixture.type === 'audio-chunk') continue;
   assert.deepEqual(parseVoiceProtocolEvent(fixture), fixture, `${name} should be accepted`);
 }
 
@@ -49,5 +57,67 @@ assert.throws(
   () => parseVoiceProtocolEvent({ ...forgedIdentity, user_id: 'attacker-selected-user' }),
   /unknown protocol field: user_id/,
 );
+
+const goldenFrame = JSON.parse(
+  fs.readFileSync(path.join(contractRoot, 'golden', 'interactive-pcm-frame.json'), 'utf8'),
+);
+const encoder = new InteractivePcmFrameEncoder(4);
+const encoded = encoder.encode({
+  captureEpoch: 4,
+  pcm: new Uint8Array(1280),
+  sampleRate: 16000,
+  channels: 1,
+  sampleWidth: 2,
+  capturedAtMs: 1770000000125,
+  monotonicTimestampMs: 4000,
+});
+assert.deepEqual(encoded.header, goldenFrame);
+assert.equal(encoded.payload.byteLength, 1280);
+assert.equal(selectInteractivePcmBufferSize(16000), 512);
+assert.equal(selectInteractivePcmBufferSize(48000), 2048);
+assert.throws(
+  () => encoder.encode({
+    captureEpoch: 4,
+    pcm: new Uint8Array(8192),
+    sampleRate: 16000,
+    channels: 1,
+    sampleWidth: 2,
+    capturedAtMs: 1770000000165,
+    monotonicTimestampMs: 4040,
+  }),
+  /20-100 ms/,
+);
+
+encoder.reset(5);
+const reset = encoder.encode({
+  captureEpoch: 5,
+  pcm: new Uint8Array(640),
+  sampleRate: 16000,
+  channels: 1,
+  sampleWidth: 2,
+  capturedAtMs: 1770000001000,
+  monotonicTimestampMs: 5000,
+});
+assert.equal(reset.header.data.frame_sequence, 0);
+assert.equal(reset.header.data.monotonic_offset_ms, 0);
+
+const nativeFrame = capturedPcmFrameFromNative({
+  captureEpoch: 7,
+  capturedAtMs: 1770000002000,
+  monotonicTimestampMs: 6000,
+  sampleRate: 16000,
+  channels: 1,
+  sampleWidth: 2,
+  pcmBase64: 'AAECAw==',
+}, value => Uint8Array.from(Buffer.from(value, 'base64')));
+assert.deepEqual(nativeFrame, {
+  captureEpoch: 7,
+  capturedAtMs: 1770000002000,
+  monotonicTimestampMs: 6000,
+  sampleRate: 16000,
+  channels: 1,
+  sampleWidth: 2,
+  pcm: Uint8Array.from([0, 1, 2, 3]),
+});
 
 console.log('voice protocol contract tests passed');

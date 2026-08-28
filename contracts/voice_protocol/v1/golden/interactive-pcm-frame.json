@@ -1,0 +1,13 @@
+{
+  "type": "audio-chunk",
+  "data": {
+    "rate": 16000,
+    "width": 2,
+    "channels": 1,
+    "time_basis": "captured",
+    "frame_sequence": 0,
+    "monotonic_offset_ms": 0,
+    "captured_at_ms": 1770000000125
+  },
+  "payload_length": 1280
+}

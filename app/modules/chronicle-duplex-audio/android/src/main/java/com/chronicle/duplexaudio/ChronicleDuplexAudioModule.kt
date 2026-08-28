@@ -177,11 +177,13 @@ class ChronicleDuplexAudioModule : Module() {
     while (capturing.get() && recorder === activeRecorder && captureEpoch == epoch) {
       val count = activeRecorder.read(frame, 0, frame.size, AudioRecord.READ_BLOCKING)
       if (count <= 0 || captureSuppressed) continue
+      val durationMs = count.toDouble() / (16_000 * 2) * 1_000
       sendEvent(
         "onPcmFrame",
         bundleOf(
           "captureEpoch" to epoch,
-          "monotonicTimestampMs" to SystemClock.elapsedRealtime().toDouble(),
+          "capturedAtMs" to System.currentTimeMillis().toDouble() - durationMs,
+          "monotonicTimestampMs" to SystemClock.elapsedRealtime().toDouble() - durationMs,
           "sampleRate" to 16_000,
           "channels" to 1,
           "sampleWidth" to 2,

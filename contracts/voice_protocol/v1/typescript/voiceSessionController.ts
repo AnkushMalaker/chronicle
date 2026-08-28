@@ -1,9 +1,29 @@
-import type {
-  NativePlaybackState,
-  NativeResponse,
-  NativeRouteChange,
-  NativeStopResult,
-} from '../../modules/chronicle-duplex-audio';
+export interface NativeResponse {
+  responseId: string;
+  generation: number;
+  captureEpoch: number;
+  wavBase64: string;
+}
+
+export interface NativePlaybackState {
+  responseId: string;
+  generation: number;
+  captureEpoch: number;
+  state: 'started' | 'done' | 'cancelled' | 'failed';
+  monotonicTimestampMs: number;
+  errorCode: 'decode_failed' | 'route_changed' | 'engine_reset' | 'playback_unavailable' | null;
+}
+
+export interface NativeRouteChange {
+  captureEpoch: number;
+  reason: 'route_changed' | 'interruption' | 'engine_reset' | 'effect_failed' | 'audio_focus_lost';
+  capabilities: VoiceCapabilities;
+}
+
+export interface NativeStopResult {
+  restorationSucceeded: boolean;
+  failureCode: 'far_field_restore_failed' | 'permission_denied' | 'engine_unavailable' | null;
+}
 import {
   parseVoiceProtocolEvent,
   type AudioSessionStarted,
@@ -20,29 +40,29 @@ interface NativeDuplexPort {
   stopVoiceSession(): Promise<NativeStopResult>;
 }
 
-export interface PhoneCaptureBinding {
+export interface VoiceCaptureBinding {
   captureEpoch: number;
   capabilities: VoiceCapabilities;
 }
 
-export interface PhoneResumeProof {
+export interface VoiceResumeProof {
   previousVoiceSessionId: string;
   previousCaptureEpoch: number;
   resumeToken: string;
   lastResponseGeneration: number;
 }
 
-export interface PhoneDuplexControllerOptions {
+export interface VoiceSessionControllerOptions {
   capabilities: VoiceCapabilities;
   captureEpoch: number;
   native: NativeDuplexPort;
   send: (event: PhoneVoiceProtocolEvent) => Promise<void> | void;
-  restartCapture?: () => Promise<PhoneCaptureBinding>;
+  restartCapture?: () => Promise<VoiceCaptureBinding>;
   replaceAudioSession?: (
-    binding: PhoneCaptureBinding,
+    binding: VoiceCaptureBinding,
     voiceSessionId: string
   ) => Promise<void>;
-  resumeProof?: PhoneResumeProof | null;
+  resumeProof?: VoiceResumeProof | null;
   createEventId?: () => string;
   now?: () => Date;
 }
@@ -71,25 +91,25 @@ function toBase64(bytes: Uint8Array): string {
   return encoded;
 }
 
-export class PhoneDuplexController {
+export class VoiceSessionController {
   private capabilities: VoiceCapabilities;
   private captureEpoch: number;
   private readonly native: NativeDuplexPort;
-  private readonly sendEvent: PhoneDuplexControllerOptions['send'];
-  private readonly restartCapture?: PhoneDuplexControllerOptions['restartCapture'];
-  private readonly replaceAudioSession?: PhoneDuplexControllerOptions['replaceAudioSession'];
+  private readonly sendEvent: VoiceSessionControllerOptions['send'];
+  private readonly restartCapture?: VoiceSessionControllerOptions['restartCapture'];
+  private readonly replaceAudioSession?: VoiceSessionControllerOptions['replaceAudioSession'];
   private readonly createEventId: () => string;
   private readonly now: () => Date;
   private audioSession: AudioSessionStarted | null = null;
   private voiceSession: VoiceSessionStart | null = null;
-  private resumeState: PhoneResumeProof | null;
+  private resumeState: VoiceResumeProof | null;
   private routeTransition: NativeRouteChange | null = null;
   private lastResponseGeneration = 0;
   private pendingAudio: ResponseAudio | null = null;
   private seenEvents = new Set<string>();
   private closed = false;
 
-  constructor(options: PhoneDuplexControllerOptions) {
+  constructor(options: VoiceSessionControllerOptions) {
     this.capabilities = options.capabilities;
     this.captureEpoch = options.captureEpoch;
     this.native = options.native;
@@ -105,7 +125,7 @@ export class PhoneDuplexController {
     return this.audioSession !== null;
   }
 
-  get resumeProof(): PhoneResumeProof | null {
+  get resumeProof(): VoiceResumeProof | null {
     if (this.voiceSession) {
       return {
         previousVoiceSessionId: this.voiceSession.voice_session_id,
@@ -268,7 +288,7 @@ export class PhoneDuplexController {
     this.resumeState = null;
   }
 
-  prepareFreshCapture(binding: PhoneCaptureBinding): void {
+  prepareFreshCapture(binding: VoiceCaptureBinding): void {
     if (this.closed || this.voiceSession) {
       throw new Error('cannot replace an active voice session without stopping it');
     }

@@ -15,11 +15,15 @@ import {
   type NativePlaybackState,
 } from '../../modules/chronicle-duplex-audio';
 import {
-  PhoneDuplexController,
-  type PhoneCaptureBinding,
-  type PhoneResumeProof,
-} from '../protocol/phoneDuplexController';
+  VoiceSessionController,
+  type VoiceCaptureBinding,
+  type VoiceResumeProof,
+} from '../protocol/voiceSessionController';
 import type { VoiceCapabilities } from '../protocol/voiceProtocol';
+import {
+  InteractivePcmFrameEncoder,
+  type CapturedPcmFrame,
+} from '../../../contracts/voice_protocol/v1/typescript/interactivePcm';
 
 interface UseAudioStreamerOptions {
   /** Called when a new JWT token is obtained via auto-re-login */
@@ -36,7 +40,8 @@ interface UseAudioStreamer {
   startStreaming: (url: string, config?: StreamStartConfig) => Promise<void>;
   getWebSocketReadyState: () => number | undefined;
   stopStreaming: () => Promise<void>;
-  sendAudio: (audioBytes: Uint8Array, durable?: boolean) => void;
+  sendDurableAudio: (audioBytes: Uint8Array) => void;
+  sendInteractiveFrame: (frame: CapturedPcmFrame) => void;
 }
 
 export interface StreamStartConfig {
@@ -179,11 +184,12 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   const deferredLivePacketsRef = useRef<SpoolPacket[]>([]);
   const activeAudioFormatRef = useRef<Record<string, unknown>>(AMBIENT_AUDIO_FORMAT);
   const streamConfigRef = useRef<StreamStartConfig | undefined>(undefined);
-  const duplexControllerRef = useRef<PhoneDuplexController | null>(null);
-  const duplexResumeRef = useRef<PhoneResumeProof | null>(null);
+  const duplexControllerRef = useRef<VoiceSessionController | null>(null);
+  const duplexResumeRef = useRef<VoiceResumeProof | null>(null);
   const duplexUnsupportedRef = useRef(false);
   const duplexSubscriptionsRef = useRef<Array<{ remove: () => void }>>([]);
   const protocolHandshakeTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const interactiveFrameEncoderRef = useRef<InteractivePcmFrameEncoder | null>(null);
 
   // backoff: 3s, 6s, 12s, ... capped at 30s; up to 10 attempts before showing an error notification
   const reconnectAttemptsRef = useRef<number>(0);
@@ -371,6 +377,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     setStateSafe(setIsStreaming, false);
     setStateSafe(setIsConnecting, false);
     activeAudioFormatRef.current = AMBIENT_AUDIO_FORMAT;
+    interactiveFrameEncoderRef.current = null;
     streamConfigRef.current = undefined;
     duplexUnsupportedRef.current = false;
     setStateSafe(setPhonePlaybackState, null);
@@ -451,6 +458,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           duplexResumeRef.current?.previousVoiceSessionId ?? null
         )
       : AMBIENT_AUDIO_FORMAT;
+    interactiveFrameEncoderRef.current = requestedConfig?.phoneVoice
+      ? new InteractivePcmFrameEncoder(requestedConfig.phoneVoice.captureEpoch)
+      : null;
     manuallyStoppedRef.current = false;
     authFailedRef.current = false;
 
@@ -504,14 +514,14 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
 
           const phoneVoice = streamConfigRef.current?.phoneVoice;
           if (phoneVoice) {
-            const controller = new PhoneDuplexController({
+            const controller = new VoiceSessionController({
               capabilities: phoneVoice.capabilities,
               captureEpoch: phoneVoice.captureEpoch,
               native: { scheduleResponse, cancelResponse, stopVoiceSession },
               resumeProof: duplexResumeRef.current,
               restartCapture: phoneVoice.restartCapture,
               replaceAudioSession: async (
-                binding: PhoneCaptureBinding,
+                binding: VoiceCaptureBinding,
                 voiceSessionId: string
               ) => {
                 if (ws.readyState !== WebSocket.OPEN) {
@@ -530,6 +540,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
                 activeAudioFormatRef.current = phoneAudioFormat(
                   nextPhoneVoice,
                   voiceSessionId
+                );
+                interactiveFrameEncoderRef.current = new InteractivePcmFrameEncoder(
+                  nextPhoneVoice.captureEpoch
                 );
                 await sendWyomingEvent({
                   type: 'audio-start',
@@ -660,6 +673,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
               });
               streamConfigRef.current = { phoneVoice: replacement };
               activeAudioFormatRef.current = phoneAudioFormat(replacement);
+              interactiveFrameEncoderRef.current = new InteractivePcmFrameEncoder(
+                replacement.captureEpoch
+              );
               await sendWyomingEvent({
                 type: 'audio-start',
                 data: activeAudioFormatRef.current,
@@ -763,39 +779,40 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     });
   }, [attemptReconnect, attemptReLogin, clearDuplexSocketState, drainDurableSpool, notifyInfo, sendWyomingEvent, setStateSafe, stopStreaming, logEvent]);
 
-  const sendAudio = useCallback(async (audioBytes: Uint8Array, durable = true) => {
+  const sendDurableAudio = useCallback((audioBytes: Uint8Array) => {
     if (!audioBytes.length) return;
-
-    if (durable) {
-      const packet = durableAudioSpool.append(audioBytes);
-      if (drainingSpoolRef.current) {
-        deferredLivePacketsRef.current.push(packet);
-      } else {
-        sendDurablePacket(packet);
-      }
-      return;
+    const packet = durableAudioSpool.append(audioBytes);
+    if (drainingSpoolRef.current) {
+      deferredLivePacketsRef.current.push(packet);
+    } else {
+      sendDurablePacket(packet);
     }
+  }, [sendDurablePacket]);
+
+  const sendInteractiveFrame = useCallback(async (frame: CapturedPcmFrame) => {
     if (websocketRef.current && websocketRef.current.readyState === WebSocket.OPEN) {
       try {
-        console.log(`[AudioStreamer] 📤 Sending audio chunk: ${audioBytes.length} bytes`);
-        const audioChunkEvent: WyomingEvent = {
+        const encoder = interactiveFrameEncoderRef.current;
+        if (!encoder) throw new Error('interactive PCM encoder is not active');
+        const encoded = encoder.encode(frame);
+        console.log(`[AudioStreamer] 📤 Sending interactive frame: ${encoded.payload.length} bytes`);
+        await sendWyomingEvent({
           type: 'audio-chunk',
-          data: activeAudioFormatRef.current,
-        };
-        await sendWyomingEvent(audioChunkEvent, audioBytes);
+          data: encoded.header.data,
+        }, encoded.payload);
       } catch (e) {
         const msg = (e as any).message || 'Error sending audio data.';
-        console.error('[AudioStreamer] sendAudio error:', msg);
+        console.error('[AudioStreamer] sendInteractiveFrame error:', msg);
         setStateSafe(setError, msg);
       }
     } else {
       console.log(
         `[AudioStreamer] NOT sending audio. hasWS=${!!websocketRef.current
         } ready=${websocketRef.current?.readyState === WebSocket.OPEN
-        } bytes=${audioBytes.length} actualReady=${websocketRef.current?.readyState}`
+        } bytes=${frame.pcm.length} actualReady=${websocketRef.current?.readyState}`
       );
     }
-  }, [sendDurablePacket, sendWyomingEvent, setStateSafe]);
+  }, [sendWyomingEvent, setStateSafe]);
 
   const getWebSocketReadyState = useCallback(() => websocketRef.current?.readyState, []);
 
@@ -862,6 +879,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     startStreaming,
     getWebSocketReadyState,
     stopStreaming,
-    sendAudio,
+    sendDurableAudio,
+    sendInteractiveFrame,
   };
 };

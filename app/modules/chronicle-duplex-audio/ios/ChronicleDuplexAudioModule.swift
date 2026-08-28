@@ -195,9 +195,11 @@ public final class ChronicleDuplexAudioModule: Module {
           output.frameLength > 0,
           let samples = output.int16ChannelData?.pointee else { return }
     let data = Data(bytes: samples, count: Int(output.frameLength) * MemoryLayout<Int16>.size)
+    let durationMs = Double(output.frameLength) / 16_000 * 1_000
     sendEvent("onPcmFrame", [
       "captureEpoch": captureEpoch,
-      "monotonicTimestampMs": ProcessInfo.processInfo.systemUptime * 1_000,
+      "capturedAtMs": Date().timeIntervalSince1970 * 1_000 - durationMs,
+      "monotonicTimestampMs": ProcessInfo.processInfo.systemUptime * 1_000 - durationMs,
       "sampleRate": 16_000,
       "channels": 1,
       "sampleWidth": 2,

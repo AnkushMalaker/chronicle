@@ -9,6 +9,8 @@ import {
   stopVoiceSession,
 } from '../../modules/chronicle-duplex-audio';
 import type { VoiceCapabilities } from '../protocol/voiceProtocol';
+import type { CapturedPcmFrame } from '../../../contracts/voice_protocol/v1/typescript/interactivePcm';
+import { capturedPcmFrameFromNative } from '../protocol/nativePcmFrame';
 
 export interface PhoneCaptureSession {
   captureEpoch: number;
@@ -23,7 +25,7 @@ interface UsePhoneAudioRecorder {
   error: string | null;
   audioLevel: number;
   startRecording: (
-    onAudioData: (pcmBuffer: Uint8Array) => void
+    onAudioData: (frame: CapturedPcmFrame) => void
   ) => Promise<PhoneCaptureSession>;
   stopRecording: () => Promise<void>;
 }
@@ -58,7 +60,7 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
   const mountedRef = useRef(true);
   const captureEpochRef = useRef(0);
   const frameSubscriptionRef = useRef<{ remove: () => void } | null>(null);
-  const onAudioDataRef = useRef<((pcmBuffer: Uint8Array) => void) | null>(null);
+  const onAudioDataRef = useRef<((frame: CapturedPcmFrame) => void) | null>(null);
 
   const markCaptureStopped = useCallback(() => {
     frameSubscriptionRef.current?.remove();
@@ -92,7 +94,7 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
   }, [stopRecording]);
 
   const startRecording = useCallback(async (
-    onAudioData: (pcmBuffer: Uint8Array) => void
+    onAudioData: (frame: CapturedPcmFrame) => void
   ): Promise<PhoneCaptureSession> => {
     if (isRecording) await stopRecording();
     if (mountedRef.current) {
@@ -112,10 +114,10 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
       onAudioDataRef.current = onAudioData;
       frameSubscriptionRef.current = addPcmFrameListener((frame) => {
         if (!mountedRef.current || frame.captureEpoch !== captureEpochRef.current) return;
-        const pcm = decodeBase64(frame.pcmBase64);
-        if (!pcm.length) return;
-        setAudioLevel(rmsPcm16(pcm));
-        onAudioDataRef.current?.(pcm);
+        const captured = capturedPcmFrameFromNative(frame, decodeBase64);
+        if (!captured.pcm.length) return;
+        setAudioLevel(rmsPcm16(captured.pcm));
+        onAudioDataRef.current?.(captured);
       });
       const capture = await startNativeCapture();
       if (mountedRef.current) {
