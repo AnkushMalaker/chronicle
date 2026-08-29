@@ -12,6 +12,10 @@ public final class ChronicleDuplexAudioModule: Module {
   private var currentResponse: (id: String, generation: Int, file: URL)?
   private var observers: [NSObjectProtocol] = []
   private var tapInstalled = false
+  // AVAudioSession posts route/configuration notifications while this module is
+  // configuring its own engine. Capture whether audio was genuinely running at
+  // notification time so those queued startup notifications cannot tear the
+  // newly started engine down after startEngine returns.
   private var sessionRunning = false
   private var sessionConfigured = false
   private var previousCategory: AVAudioSession.Category?
@@ -179,7 +183,7 @@ public final class ChronicleDuplexAudioModule: Module {
     tapInstalled = true
     engine.prepare()
     try engine.start()
-    sessionRunning = true
+    setSessionRunning(true)
     emitCaptureDiagnostic(
       stage: "engine_started",
       details: "input=\(Int(inputFormat.sampleRate))Hz/\(inputFormat.channelCount)ch voice_processing=\(voiceProcessingEnabled)"
@@ -253,15 +257,29 @@ public final class ChronicleDuplexAudioModule: Module {
     return first
   }
 
-  private func captureMetrics() -> (tap: Int, pcm: Int, failures: Int) {
+  private func captureMetrics() -> (running: Bool, tap: Int, pcm: Int, failures: Int) {
     captureMetricsLock.lock()
     let snapshot = (
+      running: sessionRunning,
       tap: tapFrameCount,
       pcm: pcmFrameCount,
       failures: conversionFailureCount
     )
     captureMetricsLock.unlock()
     return snapshot
+  }
+
+  private func setSessionRunning(_ running: Bool) {
+    captureMetricsLock.lock()
+    sessionRunning = running
+    captureMetricsLock.unlock()
+  }
+
+  private func isSessionRunning() -> Bool {
+    captureMetricsLock.lock()
+    let running = sessionRunning
+    captureMetricsLock.unlock()
+    return running
   }
 
   private func emitCaptureDiagnostic(stage: String, details: String) {
@@ -281,7 +299,7 @@ public final class ChronicleDuplexAudioModule: Module {
     let epoch = captureEpoch
     controlQueue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
       guard let self,
-            self.sessionRunning,
+            self.isSessionRunning(),
             self.captureEpoch == epoch,
             self.captureWatchdogGeneration == generation else { return }
       let metrics = self.captureMetrics()
@@ -427,7 +445,7 @@ public final class ChronicleDuplexAudioModule: Module {
     var restored = true
     captureWatchdogGeneration += 1
     cancelCurrent(errorCode: nil)
-    sessionRunning = false
+    setSessionRunning(false)
     if tapInstalled {
       engine.inputNode.removeTap(onBus: 0)
       tapInstalled = false
@@ -470,22 +488,31 @@ public final class ChronicleDuplexAudioModule: Module {
       forName: AVAudioSession.routeChangeNotification,
       object: nil,
       queue: nil
-    ) { [weak self] _ in self?.handleSystemChange(reason: "route_changed", errorCode: "route_changed") })
+    ) { [weak self] _ in self?.systemChangePosted(reason: "route_changed", errorCode: "route_changed") })
     observers.append(center.addObserver(
       forName: AVAudioSession.interruptionNotification,
       object: nil,
       queue: nil
-    ) { [weak self] _ in self?.handleSystemChange(reason: "interruption", errorCode: "playback_unavailable") })
+    ) { [weak self] _ in self?.systemChangePosted(reason: "interruption", errorCode: "playback_unavailable") })
     observers.append(center.addObserver(
       forName: NSNotification.Name.AVAudioEngineConfigurationChange,
       object: engine,
       queue: nil
-    ) { [weak self] _ in self?.handleSystemChange(reason: "engine_reset", errorCode: "engine_reset") })
+    ) { [weak self] _ in self?.systemChangePosted(reason: "engine_reset", errorCode: "engine_reset") })
+  }
+
+  private func systemChangePosted(reason: String, errorCode: String) {
+    let snapshot = captureMetrics()
+    guard DuplexSystemNotificationPolicy.shouldHandle(
+      sessionWasRunningWhenPosted: snapshot.running,
+      pcmFrameCountWhenPosted: snapshot.pcm
+    ) else { return }
+    handleSystemChange(reason: reason, errorCode: errorCode)
   }
 
   private func handleSystemChange(reason: String, errorCode: String) {
     controlQueue.async { [weak self] in
-      guard let self, self.sessionRunning else { return }
+      guard let self, self.isSessionRunning() else { return }
       let changedCapabilities = self.capabilities()
       self.cancelCurrent(errorCode: errorCode)
       self.tearDownEngine(deactivateSession: false)

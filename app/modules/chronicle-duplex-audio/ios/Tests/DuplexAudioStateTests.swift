@@ -127,6 +127,33 @@ final class DuplexAudioStateTests: XCTestCase {
     )
   }
 
+  func testSystemNotificationPostedDuringEngineStartupIsIgnored() {
+    XCTAssertFalse(
+      DuplexSystemNotificationPolicy.shouldHandle(
+        sessionWasRunningWhenPosted: false,
+        pcmFrameCountWhenPosted: 0
+      )
+    )
+  }
+
+  func testSystemNotificationCannotTearDownEngineBeforeFirstPcm() {
+    XCTAssertFalse(
+      DuplexSystemNotificationPolicy.shouldHandle(
+        sessionWasRunningWhenPosted: true,
+        pcmFrameCountWhenPosted: 0
+      )
+    )
+  }
+
+  func testSystemNotificationAfterCaptureStartsIsHandled() {
+    XCTAssertTrue(
+      DuplexSystemNotificationPolicy.shouldHandle(
+        sessionWasRunningWhenPosted: true,
+        pcmFrameCountWhenPosted: 1
+      )
+    )
+  }
+
   func testStopRestoresInactiveEngineState() {
     let state = DuplexAudioState()
     state.start(captureEpoch: 4)

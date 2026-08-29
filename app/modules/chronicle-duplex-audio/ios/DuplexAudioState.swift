@@ -86,3 +86,12 @@ enum DuplexCaptureWatchdog {
     return voiceProcessingEnabled ? .disableVoiceProcessing : .reportFailure
   }
 }
+
+enum DuplexSystemNotificationPolicy {
+  static func shouldHandle(
+    sessionWasRunningWhenPosted: Bool,
+    pcmFrameCountWhenPosted: Int
+  ) -> Bool {
+    sessionWasRunningWhenPosted && pcmFrameCountWhenPosted > 0
+  }
+}
