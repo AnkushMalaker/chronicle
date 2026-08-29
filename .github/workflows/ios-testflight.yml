@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       build_id:
-        description: 'Existing EAS build ID to submit without rebuilding'
+        description: 'Existing EAS build ID to submit, or status to inspect TestFlight'
         required: false
         type: string
 
@@ -102,7 +102,7 @@ jobs:
           --wait
 
       - name: Submit existing build to TestFlight
-        if: inputs.build_id != ''
+        if: inputs.build_id != '' && inputs.build_id != 'status'
         env:
           EAS_BUILD_ID: ${{ inputs.build_id }}
         run: >-
@@ -112,3 +112,12 @@ jobs:
           --id "$EAS_BUILD_ID"
           --non-interactive
           --wait
+
+      - name: Check TestFlight status
+        if: inputs.build_id == 'status'
+        run: >-
+          eas submit:status
+          --platform ios
+          --profile testflight
+          --json
+          --non-interactive
