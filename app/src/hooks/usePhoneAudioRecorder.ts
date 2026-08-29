@@ -4,11 +4,13 @@ import { PermissionsAndroid, Platform } from 'react-native';
 import base64 from 'react-native-base64';
 
 import {
+  addCaptureDiagnosticListener,
   addPcmFrameListener,
   startVoiceSession,
   stopVoiceSession,
 } from '../../modules/chronicle-duplex-audio';
 import type { VoiceCapabilities } from '../protocol/voiceProtocol';
+import { useConnectionLog } from '../contexts/ConnectionLogContext';
 
 export interface PhoneCaptureSession {
   captureEpoch: number;
@@ -58,11 +60,15 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
   const mountedRef = useRef(true);
   const captureEpochRef = useRef(0);
   const frameSubscriptionRef = useRef<{ remove: () => void } | null>(null);
+  const diagnosticSubscriptionRef = useRef<{ remove: () => void } | null>(null);
   const onAudioDataRef = useRef<((pcmBuffer: Uint8Array) => void) | null>(null);
+  const { addEvent } = useConnectionLog();
 
   const markCaptureStopped = useCallback(() => {
     frameSubscriptionRef.current?.remove();
     frameSubscriptionRef.current = null;
+    diagnosticSubscriptionRef.current?.remove();
+    diagnosticSubscriptionRef.current = null;
     onAudioDataRef.current = null;
     if (mountedRef.current) {
       setIsRecording(false);
@@ -110,6 +116,13 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
 
     try {
       onAudioDataRef.current = onAudioData;
+      diagnosticSubscriptionRef.current = addCaptureDiagnosticListener((diagnostic) => {
+        const type = diagnostic.stage === 'capture_failed' ? 'error' : 'audio_start';
+        addEvent(
+          type,
+          `Phone capture ${diagnostic.stage}: ${diagnostic.details}`,
+        );
+      });
       frameSubscriptionRef.current = addPcmFrameListener((frame) => {
         if (!mountedRef.current || frame.captureEpoch !== captureEpochRef.current) return;
         const pcm = decodeBase64(frame.pcmBase64);
@@ -126,6 +139,8 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
     } catch (cause) {
       frameSubscriptionRef.current?.remove();
       frameSubscriptionRef.current = null;
+      diagnosticSubscriptionRef.current?.remove();
+      diagnosticSubscriptionRef.current = null;
       const message = cause instanceof Error ? cause.message : 'Failed to start duplex audio';
       if (mountedRef.current) {
         setError(message);
@@ -134,12 +149,14 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
       }
       throw cause;
     }
-  }, [isRecording, startNativeCapture, stopRecording]);
+  }, [addEvent, isRecording, startNativeCapture, stopRecording]);
 
   useEffect(() => () => {
     mountedRef.current = false;
     frameSubscriptionRef.current?.remove();
     frameSubscriptionRef.current = null;
+    diagnosticSubscriptionRef.current?.remove();
+    diagnosticSubscriptionRef.current = null;
     stopVoiceSession().catch(() => undefined);
   }, []);
 

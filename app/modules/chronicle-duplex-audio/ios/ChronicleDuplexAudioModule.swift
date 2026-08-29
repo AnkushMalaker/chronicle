@@ -17,10 +17,16 @@ public final class ChronicleDuplexAudioModule: Module {
   private var previousCategory: AVAudioSession.Category?
   private var previousMode: AVAudioSession.Mode?
   private var previousOptions: AVAudioSession.CategoryOptions = []
+  private let captureMetricsLock = NSLock()
+  private var tapFrameCount = 0
+  private var pcmFrameCount = 0
+  private var conversionFailureCount = 0
+  private var captureWatchdogGeneration = 0
+  private var voiceProcessingFallbackForced = false
 
   public func definition() -> ModuleDefinition {
     Name("ChronicleDuplexAudio")
-    Events("onPcmFrame", "onPlaybackState", "onRouteChange")
+    Events("onPcmFrame", "onPlaybackState", "onRouteChange", "onCaptureDiagnostic")
 
     OnCreate { [weak self] in
       self?.installObservers()
@@ -72,7 +78,9 @@ public final class ChronicleDuplexAudioModule: Module {
 
     AsyncFunction("stopVoiceSession") { () async -> [String: Any?] in
       let restored = await self.onControlQueueValue {
-        self.tearDownEngine(deactivateSession: true)
+        let restored = self.tearDownEngine(deactivateSession: true)
+        self.voiceProcessingFallbackForced = false
+        return restored
       }
       return [
         "restorationSucceeded": restored,
@@ -144,11 +152,16 @@ public final class ChronicleDuplexAudioModule: Module {
     engine.connect(player, to: engine.mainMixerNode, format: outputFormat)
 
     let input = engine.inputNode
-    do {
-      try input.setVoiceProcessingEnabled(true)
-      voiceProcessingEnabled = input.isVoiceProcessingEnabled
-    } catch {
+    if voiceProcessingFallbackForced {
+      try? input.setVoiceProcessingEnabled(false)
       voiceProcessingEnabled = false
+    } else {
+      do {
+        try input.setVoiceProcessingEnabled(true)
+        voiceProcessingEnabled = input.isVoiceProcessingEnabled
+      } catch {
+        voiceProcessingEnabled = false
+      }
     }
 
     // iOS input taps must be installed with the hardware input format. The node's
@@ -159,6 +172,7 @@ public final class ChronicleDuplexAudioModule: Module {
       throw Exception(name: "engine_unavailable", description: "Cannot create the 16 kHz PCM converter")
     }
     self.pcmConverter = pcmConverter
+    resetCaptureMetrics()
     input.installTap(onBus: 0, bufferSize: 960, format: inputFormat) { [weak self] buffer, _ in
       self?.emitPcm(buffer)
     }
@@ -166,21 +180,136 @@ public final class ChronicleDuplexAudioModule: Module {
     engine.prepare()
     try engine.start()
     sessionRunning = true
+    emitCaptureDiagnostic(
+      stage: "engine_started",
+      details: "input=\(Int(inputFormat.sampleRate))Hz/\(inputFormat.channelCount)ch voice_processing=\(voiceProcessingEnabled)"
+    )
+    scheduleCaptureWatchdog()
   }
 
   private func emitPcm(_ input: AVAudioPCMBuffer) {
-    guard !captureSuppressed,
-          engine.isRunning,
-          let data = pcmConverter?.convert(input),
-          !data.isEmpty else { return }
-    sendEvent("onPcmFrame", [
-      "captureEpoch": captureEpoch,
-      "monotonicTimestampMs": ProcessInfo.processInfo.systemUptime * 1_000,
-      "sampleRate": 16_000,
-      "channels": 1,
-      "sampleWidth": 2,
-      "pcmBase64": data.base64EncodedString(),
-    ])
+    let firstTap = observeTapFrame()
+    if firstTap {
+      emitCaptureDiagnostic(
+        stage: "first_tap",
+        details: "frames=\(input.frameLength) rate=\(Int(input.format.sampleRate))"
+      )
+    }
+    guard !captureSuppressed else { return }
+    guard let data = pcmConverter?.convert(input), !data.isEmpty else {
+      if observeConversionFailure() {
+        emitCaptureDiagnostic(stage: "conversion_failed", details: "first tap conversion returned no PCM")
+      }
+      return
+    }
+    let firstPcm = observePcmFrame()
+    if firstPcm {
+      emitCaptureDiagnostic(stage: "first_pcm", details: "bytes=\(data.count)")
+    }
+    let epoch = captureEpoch
+    let timestamp = ProcessInfo.processInfo.systemUptime * 1_000
+    let encoded = data.base64EncodedString()
+    DispatchQueue.main.async { [weak self] in
+      self?.sendEvent("onPcmFrame", [
+        "captureEpoch": epoch,
+        "monotonicTimestampMs": timestamp,
+        "sampleRate": 16_000,
+        "channels": 1,
+        "sampleWidth": 2,
+        "pcmBase64": encoded,
+      ])
+    }
+  }
+
+  private func resetCaptureMetrics() {
+    captureMetricsLock.lock()
+    tapFrameCount = 0
+    pcmFrameCount = 0
+    conversionFailureCount = 0
+    captureMetricsLock.unlock()
+  }
+
+  private func observeTapFrame() -> Bool {
+    captureMetricsLock.lock()
+    tapFrameCount += 1
+    let first = tapFrameCount == 1
+    captureMetricsLock.unlock()
+    return first
+  }
+
+  private func observePcmFrame() -> Bool {
+    captureMetricsLock.lock()
+    pcmFrameCount += 1
+    let first = pcmFrameCount == 1
+    captureMetricsLock.unlock()
+    return first
+  }
+
+  private func observeConversionFailure() -> Bool {
+    captureMetricsLock.lock()
+    conversionFailureCount += 1
+    let first = conversionFailureCount == 1
+    captureMetricsLock.unlock()
+    return first
+  }
+
+  private func captureMetrics() -> (tap: Int, pcm: Int, failures: Int) {
+    captureMetricsLock.lock()
+    let snapshot = (
+      tap: tapFrameCount,
+      pcm: pcmFrameCount,
+      failures: conversionFailureCount
+    )
+    captureMetricsLock.unlock()
+    return snapshot
+  }
+
+  private func emitCaptureDiagnostic(stage: String, details: String) {
+    let epoch = captureEpoch
+    DispatchQueue.main.async { [weak self] in
+      self?.sendEvent("onCaptureDiagnostic", [
+        "captureEpoch": epoch,
+        "stage": stage,
+        "details": details,
+      ])
+    }
+  }
+
+  private func scheduleCaptureWatchdog() {
+    captureWatchdogGeneration += 1
+    let generation = captureWatchdogGeneration
+    let epoch = captureEpoch
+    controlQueue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+      guard let self,
+            self.sessionRunning,
+            self.captureEpoch == epoch,
+            self.captureWatchdogGeneration == generation else { return }
+      let metrics = self.captureMetrics()
+      switch DuplexCaptureWatchdog.recoveryAction(
+        pcmFrameCount: metrics.pcm,
+        voiceProcessingEnabled: self.voiceProcessingEnabled
+      ) {
+      case .none:
+        return
+      case .disableVoiceProcessing:
+        self.voiceProcessingFallbackForced = true
+        self.emitCaptureDiagnostic(
+          stage: "voice_processing_fallback",
+          details: "no PCM after 1500ms taps=\(metrics.tap) failures=\(metrics.failures)"
+        )
+        self.tearDownEngine(deactivateSession: false)
+        self.sendEvent("onRouteChange", [
+          "captureEpoch": epoch,
+          "reason": "effect_failed",
+          "capabilities": self.capabilities(),
+        ])
+      case .reportFailure:
+        self.emitCaptureDiagnostic(
+          stage: "capture_failed",
+          details: "no PCM after fallback taps=\(metrics.tap) failures=\(metrics.failures)"
+        )
+      }
+    }
   }
 
   private func schedule(response: [String: Any]) throws {
@@ -296,6 +425,7 @@ public final class ChronicleDuplexAudioModule: Module {
   @discardableResult
   private func tearDownEngine(deactivateSession: Bool) -> Bool {
     var restored = true
+    captureWatchdogGeneration += 1
     cancelCurrent(errorCode: nil)
     sessionRunning = false
     if tapInstalled {

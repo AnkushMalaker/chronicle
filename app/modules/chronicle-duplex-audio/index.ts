@@ -47,6 +47,18 @@ export interface NativeStopResult {
   failureCode: 'far_field_restore_failed' | 'permission_denied' | 'engine_unavailable' | null;
 }
 
+export interface NativeCaptureDiagnostic {
+  captureEpoch: number;
+  stage:
+    | 'engine_started'
+    | 'first_tap'
+    | 'first_pcm'
+    | 'conversion_failed'
+    | 'voice_processing_fallback'
+    | 'capture_failed';
+  details: string;
+}
+
 type ChronicleDuplexAudioNative = NativeModule & {
   startVoiceSession(options: StartVoiceSessionOptions): Promise<VoiceCapabilities>;
   scheduleResponse(response: NativeResponse): Promise<void>;
@@ -63,6 +75,10 @@ type ChronicleDuplexAudioNative = NativeModule & {
   addListener(
     eventName: 'onRouteChange',
     listener: (event: NativeRouteChange) => void
+  ): EventSubscription;
+  addListener(
+    eventName: 'onCaptureDiagnostic',
+    listener: (event: NativeCaptureDiagnostic) => void
   ): EventSubscription;
 };
 
@@ -103,6 +119,12 @@ export function addRouteChangeListener(
   listener: (event: NativeRouteChange) => void
 ): EventSubscription {
   return requireNative().addListener('onRouteChange', listener);
+}
+
+export function addCaptureDiagnosticListener(
+  listener: (event: NativeCaptureDiagnostic) => void
+): EventSubscription {
+  return requireNative().addListener('onCaptureDiagnostic', listener);
 }
 
 export function scheduleResponse(response: NativeResponse): Promise<void> {

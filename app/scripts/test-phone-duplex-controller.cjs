@@ -108,6 +108,21 @@ const bound = (type, eventId) => ({
     /let inputFormat = input\.outputFormat\(forBus: 0\)/,
     'using the input node output format can install a silent iOS tap',
   );
+  assert.match(
+    iosDuplexSource,
+    /scheduleCaptureWatchdog\(/,
+    'the iOS engine must recover instead of silently running without PCM',
+  );
+
+  const nativeBridgeSource = fs.readFileSync(
+    path.join(__dirname, '../modules/chronicle-duplex-audio/index.ts'),
+    'utf8',
+  );
+  assert.match(
+    nativeBridgeSource,
+    /export function addCaptureDiagnosticListener\(/,
+    'native capture stages must be observable from uploaded client diagnostics',
+  );
 
   const sent = [];
   const scheduled = [];

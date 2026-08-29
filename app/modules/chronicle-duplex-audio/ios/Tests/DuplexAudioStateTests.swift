@@ -97,6 +97,36 @@ final class DuplexAudioStateTests: XCTestCase {
     }
   }
 
+  func testCaptureWatchdogFallsBackWhenVoiceProcessingProducesNoPcm() {
+    XCTAssertEqual(
+      DuplexCaptureWatchdog.recoveryAction(
+        pcmFrameCount: 0,
+        voiceProcessingEnabled: true
+      ),
+      .disableVoiceProcessing
+    )
+  }
+
+  func testCaptureWatchdogDoesNothingAfterFirstPcmFrame() {
+    XCTAssertEqual(
+      DuplexCaptureWatchdog.recoveryAction(
+        pcmFrameCount: 1,
+        voiceProcessingEnabled: true
+      ),
+      .none
+    )
+  }
+
+  func testCaptureWatchdogReportsFailureAfterFallbackAlsoProducesNoPcm() {
+    XCTAssertEqual(
+      DuplexCaptureWatchdog.recoveryAction(
+        pcmFrameCount: 0,
+        voiceProcessingEnabled: false
+      ),
+      .reportFailure
+    )
+  }
+
   func testStopRestoresInactiveEngineState() {
     let state = DuplexAudioState()
     state.start(captureEpoch: 4)

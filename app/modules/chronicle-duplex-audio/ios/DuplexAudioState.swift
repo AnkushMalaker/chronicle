@@ -70,3 +70,19 @@ enum ChronicleDuplexResampler {
     AVAudioFrameCount(max(1, ceil(Double(inputFrames) * outputRate / inputRate)))
   }
 }
+
+enum DuplexCaptureRecoveryAction: Equatable {
+  case none
+  case disableVoiceProcessing
+  case reportFailure
+}
+
+enum DuplexCaptureWatchdog {
+  static func recoveryAction(
+    pcmFrameCount: Int,
+    voiceProcessingEnabled: Bool
+  ) -> DuplexCaptureRecoveryAction {
+    guard pcmFrameCount == 0 else { return .none }
+    return voiceProcessingEnabled ? .disableVoiceProcessing : .reportFailure
+  }
+}
