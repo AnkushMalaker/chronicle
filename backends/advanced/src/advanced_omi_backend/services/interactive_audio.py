@@ -24,6 +24,7 @@ class InteractiveOpusChunkHeader(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     type: Literal["audio-chunk"]
+    version: Literal["1.0.0"]
     data: InteractiveOpusMetadata
     payload_length: int = Field(gt=0, le=MAX_RAW_OPUS_PACKET_BYTES)
 

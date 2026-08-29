@@ -37,6 +37,9 @@ async def test_interactive_opus_packet_decodes_before_fanout_and_durable_wal(
         producer,
         {
             "type": "audio-chunk",
+            # The shared Wyoming sender stamps every outbound event with the
+            # protocol version before serializing it onto the socket.
+            "version": "1.0.0",
             "data": {
                 "codec": "opus",
                 "rate": 16_000,
@@ -79,6 +82,7 @@ async def test_interactive_opus_header_rejects_container_or_mismatched_payload()
     )
     header = {
         "type": "audio-chunk",
+        "version": "1.0.0",
         "data": {
             "codec": "opus",
             "rate": 16_000,
