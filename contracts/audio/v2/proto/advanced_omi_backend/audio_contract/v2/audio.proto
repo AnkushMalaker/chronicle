@@ -1,0 +1,323 @@
+syntax = "proto3";
+
+package chronicle.audio.v2;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+
+message EventId { string value = 1; }
+message ClientId { string value = 1; }
+message ConnectionId { string value = 1; }
+message CaptureSourceId { string value = 1; }
+message CaptureSessionId { string value = 1; }
+message VoiceSessionId { string value = 1; }
+message TurnId { string value = 1; }
+message ResponseId { string value = 1; }
+
+enum AudioCodec {
+  AUDIO_CODEC_UNSPECIFIED = 0;
+  AUDIO_CODEC_OPUS = 1;
+  AUDIO_CODEC_PCM_S16LE = 2;
+}
+
+enum DeliveryClass {
+  DELIVERY_CLASS_UNSPECIFIED = 0;
+  DELIVERY_CLASS_LIVE = 1;
+  DELIVERY_CLASS_RECOVERED = 2;
+}
+
+enum DeviceKind {
+  DEVICE_KIND_UNSPECIFIED = 0;
+  DEVICE_KIND_IOS_PHONE = 1;
+  DEVICE_KIND_ANDROID_PHONE = 2;
+  DEVICE_KIND_WEB_BROWSER = 3;
+  DEVICE_KIND_OMI = 4;
+  DEVICE_KIND_NEO = 5;
+  DEVICE_KIND_HAVPE = 6;
+  DEVICE_KIND_SCREENPIPE = 7;
+  DEVICE_KIND_PROBE = 8;
+}
+
+enum ProcessingProfile {
+  PROCESSING_PROFILE_UNSPECIFIED = 0;
+  PROCESSING_PROFILE_AMBIENT = 1;
+  PROCESSING_PROFILE_SOURCE_NATIVE = 2;
+  PROCESSING_PROFILE_DUPLEX_AEC = 3;
+  PROCESSING_PROFILE_DUPLEX_ISOLATED = 4;
+  PROCESSING_PROFILE_HALF_DUPLEX = 5;
+  PROCESSING_PROFILE_IMPORTED = 6;
+}
+
+enum DataPurpose {
+  DATA_PURPOSE_UNSPECIFIED = 0;
+  DATA_PURPOSE_NORMAL_CAPTURE = 1;
+  DATA_PURPOSE_ANNOTATION = 2;
+}
+
+enum DuplexMode {
+  DUPLEX_MODE_UNSPECIFIED = 0;
+  DUPLEX_MODE_FULL = 1;
+  DUPLEX_MODE_ISOLATED = 2;
+  DUPLEX_MODE_HALF = 3;
+}
+
+enum InputRoute {
+  INPUT_ROUTE_UNSPECIFIED = 0;
+  INPUT_ROUTE_BUILT_IN_MIC = 1;
+  INPUT_ROUTE_BLUETOOTH_HFP = 2;
+  INPUT_ROUTE_WIRED_MIC = 3;
+  INPUT_ROUTE_USB = 4;
+  INPUT_ROUTE_REMOTE = 5;
+}
+
+enum OutputRoute {
+  OUTPUT_ROUTE_UNSPECIFIED = 0;
+  OUTPUT_ROUTE_SPEAKERPHONE = 1;
+  OUTPUT_ROUTE_EARPIECE = 2;
+  OUTPUT_ROUTE_HEADPHONES = 3;
+  OUTPUT_ROUTE_BLUETOOTH_HFP = 4;
+  OUTPUT_ROUTE_USB = 5;
+  OUTPUT_ROUTE_REMOTE = 6;
+}
+
+enum StopReason {
+  STOP_REASON_UNSPECIFIED = 0;
+  STOP_REASON_USER_REQUESTED = 1;
+  STOP_REASON_AUDIO_DISCONNECT = 2;
+  STOP_REASON_INTERACTION_COMPLETE = 3;
+  STOP_REASON_TEMPORARILY_UNAVAILABLE = 4;
+}
+
+enum PlaybackState {
+  PLAYBACK_STATE_UNSPECIFIED = 0;
+  PLAYBACK_STATE_STARTED = 1;
+  PLAYBACK_STATE_DONE = 2;
+  PLAYBACK_STATE_CANCELLED = 3;
+  PLAYBACK_STATE_FAILED = 4;
+}
+
+enum ButtonState {
+  BUTTON_STATE_UNSPECIFIED = 0;
+  BUTTON_STATE_SINGLE_PRESS = 1;
+  BUTTON_STATE_DOUBLE_PRESS = 2;
+  BUTTON_STATE_LONG_PRESS = 3;
+}
+
+enum ProtocolErrorCode {
+  PROTOCOL_ERROR_CODE_UNSPECIFIED = 0;
+  PROTOCOL_ERROR_CODE_AUTHENTICATION_FAILED = 1;
+  PROTOCOL_ERROR_CODE_INVALID_TRANSITION = 2;
+  PROTOCOL_ERROR_CODE_INVALID_MEDIA = 3;
+  PROTOCOL_ERROR_CODE_STALE_BINDING = 4;
+  PROTOCOL_ERROR_CODE_UNSUPPORTED_AUDIO_FORMAT = 5;
+  PROTOCOL_ERROR_CODE_MESSAGE_TOO_LARGE = 6;
+  PROTOCOL_ERROR_CODE_INTERNAL = 7;
+}
+
+message AudioSpec {
+  AudioCodec codec = 1;
+  uint32 sample_rate_hz = 2;
+  uint32 channel_count = 3;
+  google.protobuf.Duration frame_duration = 4;
+  uint32 bitrate_bps = 5;
+}
+
+message CaptureBinding {
+  CaptureSessionId capture_session_id = 1;
+  VoiceSessionId voice_session_id = 2;
+  uint64 capture_epoch = 3;
+}
+
+message EffectStatus {
+  bool requested = 1;
+  bool available = 2;
+  bool enabled = 3;
+}
+
+message CaptureCapabilities {
+  DuplexMode duplex_mode = 1;
+  InputRoute input_route = 2;
+  OutputRoute output_route = 3;
+  uint32 native_sample_rate_hz = 4;
+  EffectStatus acoustic_echo_cancellation = 5;
+  EffectStatus noise_suppression = 6;
+}
+
+message ClientHello {
+  string bearer_token = 1;
+  CaptureSourceId source_id = 2;
+  DeviceKind device_kind = 3;
+  string display_name = 4;
+  repeated AudioSpec supported_uplink = 5;
+  repeated AudioSpec supported_downlink = 6;
+}
+
+message StartCapture {
+  uint64 capture_epoch = 1;
+  ProcessingProfile processing_profile = 2;
+  DataPurpose data_purpose = 3;
+  DeliveryClass delivery_class = 4;
+  AudioSpec audio_spec = 5;
+  CaptureCapabilities capabilities = 6;
+  string recovery_batch_id = 7;
+}
+
+message StopCapture {
+  CaptureBinding binding = 1;
+  StopReason reason = 2;
+}
+
+message VoiceReady {
+  CaptureBinding binding = 1;
+  CaptureCapabilities capabilities = 2;
+}
+
+message PlaybackAcknowledgement {
+  CaptureBinding binding = 1;
+  ResponseId response_id = 2;
+  uint64 generation = 3;
+  PlaybackState state = 4;
+  uint64 monotonic_timestamp_us = 5;
+  ProtocolErrorCode error_code = 6;
+}
+
+message Heartbeat { uint64 monotonic_timestamp_us = 1; }
+
+message ButtonEvent { ButtonState state = 1; }
+
+message ClientControl {
+  EventId event_id = 1;
+  google.protobuf.Timestamp sent_at = 2;
+  oneof event {
+    ClientHello hello = 10;
+    StartCapture start_capture = 11;
+    StopCapture stop_capture = 12;
+    VoiceReady voice_ready = 13;
+    PlaybackAcknowledgement playback_acknowledgement = 14;
+    Heartbeat heartbeat = 15;
+    ButtonEvent button_event = 16;
+  }
+}
+
+message ServerHello {
+  ClientId client_id = 1;
+  ConnectionId connection_id = 2;
+}
+
+message CaptureStarted {
+  CaptureBinding binding = 1;
+  AudioSpec audio_spec = 2;
+}
+
+message CaptureStopped { CaptureBinding binding = 1; }
+
+message CapturePacketAccepted {
+  CaptureBinding binding = 1;
+  uint64 sequence = 2;
+}
+
+message PlaybackOffer {
+  CaptureBinding binding = 1;
+  TurnId turn_id = 2;
+  ResponseId response_id = 3;
+  uint64 generation = 4;
+  AudioSpec audio_spec = 5;
+  google.protobuf.Duration duration = 6;
+  bool barge_in_allowed = 7;
+}
+
+message CancelPlayback {
+  CaptureBinding binding = 1;
+  ResponseId response_id = 2;
+  uint64 generation = 3;
+  StopReason reason = 4;
+}
+
+message ProtocolError {
+  ProtocolErrorCode code = 1;
+  string detail = 2;
+  EventId rejected_event_id = 3;
+}
+
+message ServerControl {
+  EventId event_id = 1;
+  google.protobuf.Timestamp sent_at = 2;
+  oneof event {
+    ServerHello hello = 10;
+    CaptureStarted capture_started = 11;
+    CaptureStopped capture_stopped = 12;
+    PlaybackOffer playback_offer = 13;
+    CancelPlayback cancel_playback = 14;
+    Heartbeat heartbeat = 15;
+    ProtocolError error = 16;
+    CapturePacketAccepted capture_packet_accepted = 17;
+  }
+}
+
+message CaptureMediaPacket {
+  CaptureBinding binding = 1;
+  uint64 sequence = 2;
+  google.protobuf.Timestamp captured_at = 3;
+  uint64 monotonic_offset_us = 4;
+  DeliveryClass delivery_class = 5;
+  bytes opus_payload = 6;
+}
+
+message PlaybackMediaPacket {
+  ResponseId response_id = 1;
+  uint64 generation = 2;
+  uint64 sequence = 3;
+  bool final_packet = 4;
+  bytes opus_payload = 5;
+}
+
+message MediaEnvelope {
+  oneof media {
+    CaptureMediaPacket capture = 1;
+    PlaybackMediaPacket playback = 2;
+  }
+}
+
+// The single cross-process backend-to-device boundary. Redis carries this
+// generated message verbatim; the bound WebSocket adapter only validates and
+// forwards it.
+message DeviceDownlinkEvent {
+  oneof event {
+    PlaybackOffer playback_offer = 1;
+    PlaybackMediaPacket playback = 2;
+    CancelPlayback cancel_playback = 3;
+  }
+}
+
+message CaptureStreamOpened {
+  CaptureBinding binding = 1;
+  ClientId client_id = 2;
+  CaptureSourceId source_id = 3;
+  AudioSpec source_spec = 4;
+  ProcessingProfile processing_profile = 5;
+  DataPurpose data_purpose = 6;
+}
+
+message CanonicalPcmFrame {
+  CaptureBinding binding = 1;
+  uint64 sequence = 2;
+  google.protobuf.Timestamp captured_at = 3;
+  uint64 monotonic_offset_us = 4;
+  DeliveryClass delivery_class = 5;
+  bytes pcm_s16le = 6;
+  DataPurpose data_purpose = 7;
+}
+
+message CaptureStreamEnded {
+  CaptureBinding binding = 1;
+  StopReason reason = 2;
+}
+
+message CaptureStreamEvent {
+  oneof event {
+    CaptureStreamOpened opened = 1;
+    CanonicalPcmFrame frame = 2;
+    CaptureStreamEnded ended = 3;
+    ProtocolError failed = 4;
+  }
+}

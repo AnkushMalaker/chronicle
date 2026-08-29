@@ -1,9 +1,10 @@
-"""Route only complete protocol-v1 audio turns into interaction modes."""
+"""Route only complete audio-v2 turns into interaction modes."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable
@@ -16,6 +17,10 @@ from advanced_omi_backend.services.audio_stream.session_store import SessionStor
 from advanced_omi_backend.services.response_coordinator import ResponseCoordinator
 from advanced_omi_backend.services.transcription import get_transcription_provider
 from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
+from advanced_omi_backend.services.wakeword.activations import (
+    WakeActivation,
+    WakeActivationStore,
+)
 from advanced_omi_backend.utils.audio_utils import pcm_to_wav_bytes
 
 from .contracts import AudioInterval
@@ -30,6 +35,8 @@ STT_POLL_SECONDS = 0.05
 STT_WATERMARK_WAIT_SECONDS = 1.5
 PENDING_CLAIM_MIN_IDLE_MS = 130_000
 PENDING_RECOVERY_INTERVAL_SECONDS = 15
+
+logger = logging.getLogger(__name__)
 
 
 def _value(fields: dict, key: str):
@@ -102,7 +109,7 @@ class TranscriptResolution:
 
 ExactTranscriber = Callable[[bytes, int, int, int], Awaitable[str]]
 CommittedCommandDispatcher = Callable[
-    [CommittedAudioTurn, str, str, str, int], Awaitable[None]
+    [CommittedAudioTurn, str, str, str, int, WakeActivation], Awaitable[None]
 ]
 
 
@@ -201,6 +208,7 @@ class CommittedTurnRouter:
         *,
         transcript_assembler: CommittedTranscriptAssembler | None = None,
         command_dispatcher: CommittedCommandDispatcher | None = None,
+        activation_store: WakeActivationStore | None = None,
     ):
         self.redis = redis_client
         self.ingress = InteractionIngress(redis_client, registry)
@@ -208,6 +216,7 @@ class CommittedTurnRouter:
             redis_client
         )
         self.command_dispatcher = command_dispatcher
+        self.activations = activation_store or WakeActivationStore(redis_client)
         self.running = False
 
     async def route(self, fields: dict) -> InteractionIngressResult:
@@ -251,9 +260,6 @@ class CommittedTurnRouter:
                 accepted=False,
                 reason="episode_already_claimed",
             )
-        response_generation = await ResponseCoordinator(
-            self.redis, VoiceSessionCoordinator(self.redis)
-        ).begin_turn(voice.user_id, voice.client_id)
         transcript = await self.transcripts.resolve(turn)
         if not transcript.text:
             return InteractionIngressResult(
@@ -265,21 +271,31 @@ class CommittedTurnRouter:
             audio_interval=turn.interval,
             text=transcript.text,
             source="committed",
-            response_generation=response_generation,
             episode_claim=claimed.claim,
         )
-        if not result.consumed and self.command_dispatcher is not None:
-            await self.command_dispatcher(
-                turn,
-                transcript.text,
-                voice.user_id,
-                voice.client_id,
-                response_generation,
-            )
+        if not result.consumed:
+            activation = await self.activations.claim(turn.interval)
+            if activation is not None and self.command_dispatcher is not None:
+                response_generation = await ResponseCoordinator(
+                    self.redis, VoiceSessionCoordinator(self.redis)
+                ).begin_turn(voice.user_id, voice.client_id)
+                await self.command_dispatcher(
+                    turn,
+                    transcript.text,
+                    voice.user_id,
+                    voice.client_id,
+                    response_generation,
+                    activation,
+                )
+                return InteractionIngressResult(
+                    consumed=True,
+                    accepted=True,
+                    reason="wake_command",
+                )
             return InteractionIngressResult(
                 consumed=True,
-                accepted=True,
-                reason="ordinary_command",
+                accepted=False,
+                reason="not_addressed",
             )
         return result
 
@@ -355,8 +371,24 @@ class CommittedTurnRouter:
         return recovered
 
     async def _handle_entry(self, message_id, fields: dict) -> None:
-        await self.route(fields)
-        await self.redis.xack(COMMITTED_TURNS_STREAM, GROUP_NAME, message_id)
+        try:
+            await self.route(fields)
+        except ValueError as exc:
+            # Schema/binding failures are permanent poison entries. Acknowledge
+            # them after logging so one stale turn cannot kill and restart the
+            # process forever.
+            logger.warning("Dropping invalid committed voice turn: %s", exc)
+            await self.redis.xack(COMMITTED_TURNS_STREAM, GROUP_NAME, message_id)
+        except Exception as exc:  # noqa: BLE001 - retry transient dependencies later
+            # Keep transient failures pending for the bounded recovery sweep, but
+            # isolate them from the long-lived worker loop.
+            logger.error(
+                "Committed voice turn routing failed; leaving it pending: %s",
+                exc,
+                exc_info=True,
+            )
+        else:
+            await self.redis.xack(COMMITTED_TURNS_STREAM, GROUP_NAME, message_id)
 
     async def stop(self) -> None:
         self.running = False

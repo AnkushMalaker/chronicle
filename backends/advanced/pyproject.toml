@@ -5,6 +5,7 @@ description = "AI-powered wearable ecosystem for audio capture, transcription, a
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "protobuf>=5.29.0,<6",
     "easy-audio-interfaces>=0.7.1", # we need to add local-audio for scripts/local-audio.py | If we don't need that, we can remove this, and then remove portaudio19-dev from Dockerfile
     "fastapi>=0.115.12",
     "fastmcp>=0.5.0", # MCP server for conversation access

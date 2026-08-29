@@ -116,7 +116,7 @@ class PluginServices:
         return isinstance(result, dict) and "starred" in result
 
     async def stop_playback(self, user_id: str, client_id: str) -> bool:
-        """Cancel the client's current protocol-v1 response at its generation fence."""
+        """Cancel the client's current audio-v2 response at its generation fence."""
         if not user_id or not client_id:
             raise ValueError("stop_playback requires user_id and client_id")
         coordinator = ResponseCoordinator(

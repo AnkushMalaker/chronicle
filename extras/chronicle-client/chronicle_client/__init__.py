@@ -19,20 +19,10 @@ from chronicle_client.config import (
     resolve_backend_url,
     websocket_url,
 )
-from chronicle_client.voice_session import (
-    ServerUpgradeRequired,
-    VoiceTargetCapabilities,
-    WearableVoiceProtocolError,
-    WearableVoiceSession,
-)
 
 __all__ = [
     "ClientConfig",
     "REPO_ROOT",
-    "ServerUpgradeRequired",
-    "VoiceTargetCapabilities",
-    "WearableVoiceProtocolError",
-    "WearableVoiceSession",
     "acheck_credentials",
     "auth_headers",
     "bearer_query_param",

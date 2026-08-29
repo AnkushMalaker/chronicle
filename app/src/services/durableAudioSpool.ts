@@ -38,9 +38,10 @@ const makeSegmentId = (): string =>
  * are retained until the backend acknowledges the packet sequence after writing
  * the decoded audio to its Redis WAL. Old files are discovered after app restart.
  */
-class DurableAudioSpool {
+export class DurableAudioSpool {
   private readonly directory = new Directory(Paths.document, 'chronicle-audio-spool');
   private active: ActiveSegment | null = null;
+  private readonly acknowledgmentChains = new Map<string, Promise<void>>();
 
   private ensureDirectory(): void {
     if (!this.directory.exists) {
@@ -103,6 +104,7 @@ class DurableAudioSpool {
       .filter((entry): entry is File => entry instanceof File && entry.name.endsWith('.spool'));
 
     for (const file of files) {
+      await this.acknowledgmentChains.get(file.name)?.catch(() => undefined);
       const segmentId = file.name.slice(0, -'.spool'.length);
       const acknowledged = Number(await AsyncStorage.getItem(`${ACK_PREFIX}${file.name}`) ?? '-1');
       const bytes = file.bytesSync();
@@ -139,16 +141,23 @@ class DurableAudioSpool {
     return packets.sort((a, b) => a.capturedAtMs - b.capturedAtMs);
   }
 
-  async acknowledge(packet: SpoolPacket): Promise<void> {
+  private async acknowledgeInOrder(packet: SpoolPacket): Promise<void> {
     const ackKey = `${ACK_PREFIX}${packet.fileName}`;
+    const isActive = this.active?.file.name === packet.fileName;
+    const file = isActive ? null : new File(this.directory, packet.fileName);
+    if (file && !file.exists) {
+      // A higher ACK may already have retired this closed segment. Do not let a
+      // later, lower ACK recreate its watermark after the file is gone.
+      await AsyncStorage.removeItem(ackKey);
+      return;
+    }
+
     const previous = Number(await AsyncStorage.getItem(ackKey) ?? '-1');
     const acknowledged = Math.max(previous, packet.sequence);
     await AsyncStorage.setItem(ackKey, String(acknowledged));
-    if (this.active?.file.name === packet.fileName) return;
+    if (isActive) return;
 
-    const file = new File(this.directory, packet.fileName);
-    if (!file.exists) return;
-    const bytes = file.bytesSync();
+    const bytes = file!.bytesSync();
     let offset = 0;
     let finalSequence = -1;
     while (offset + HEADER_BYTES <= bytes.length) {
@@ -161,8 +170,25 @@ class DurableAudioSpool {
       offset = end;
     }
     if (finalSequence >= 0 && acknowledged >= finalSequence) {
-      file.delete();
+      file!.delete();
       await AsyncStorage.removeItem(ackKey);
+    }
+  }
+
+  async acknowledge(packet: SpoolPacket): Promise<void> {
+    const previous = this.acknowledgmentChains.get(packet.fileName) ?? Promise.resolve();
+    const operation = previous
+      // A transient storage failure must be reported to its own caller, but it
+      // must not permanently poison retirement for every later ACK in the file.
+      .catch(() => undefined)
+      .then(() => this.acknowledgeInOrder(packet));
+    this.acknowledgmentChains.set(packet.fileName, operation);
+    try {
+      await operation;
+    } finally {
+      if (this.acknowledgmentChains.get(packet.fileName) === operation) {
+        this.acknowledgmentChains.delete(packet.fileName);
+      }
     }
   }
 

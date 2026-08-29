@@ -5,26 +5,27 @@ import {
 } from 'expo-modules-core';
 import { Platform } from 'react-native';
 
-import type { VoiceCapabilities } from '../../src/protocol/voiceProtocol';
+import type { VoiceCapabilities } from '../../src/protocol/audioCapabilities';
 
 export interface StartVoiceSessionOptions {
   captureEpoch: number;
 }
 
-export interface NativePcmFrame {
+export interface NativeOpusFrame {
   captureEpoch: number;
+  capturedAtMs: number;
   monotonicTimestampMs: number;
   sampleRate: 16000;
   channels: 1;
-  sampleWidth: 2;
-  pcmBase64: string;
+  frameDurationMs: number;
+  opusBase64: string;
 }
 
 export interface NativeResponse {
   responseId: string;
   generation: number;
   captureEpoch: number;
-  wavBase64: string;
+  opusPacketsBase64: string[];
 }
 
 export interface NativePlaybackState {
@@ -53,8 +54,8 @@ type ChronicleDuplexAudioNative = NativeModule & {
   cancelResponse(responseId: string, generation: number): Promise<void>;
   stopVoiceSession(): Promise<NativeStopResult>;
   addListener(
-    eventName: 'onPcmFrame',
-    listener: (event: NativePcmFrame) => void
+    eventName: 'onOpusFrame',
+    listener: (event: NativeOpusFrame) => void
   ): EventSubscription;
   addListener(
     eventName: 'onPlaybackState',
@@ -87,10 +88,10 @@ export function startVoiceSession(
   return requireNative().startVoiceSession(options);
 }
 
-export function addPcmFrameListener(
-  listener: (event: NativePcmFrame) => void
+export function addOpusFrameListener(
+  listener: (event: NativeOpusFrame) => void
 ): EventSubscription {
-  return requireNative().addListener('onPcmFrame', listener);
+  return requireNative().addListener('onOpusFrame', listener);
 }
 
 export function addPlaybackStateListener(

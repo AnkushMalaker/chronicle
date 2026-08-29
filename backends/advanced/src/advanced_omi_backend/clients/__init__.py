@@ -1,11 +1,7 @@
-"""Client implementations for Chronicle backend.
+"""Backend-local clients.
 
-This module provides reusable client implementations that can be used for:
-- Integration testing
-- CLI tools
-- External integrations
+Audio producers use the generated V2 adapter from ``extras/chronicle-client``;
+the backend package intentionally owns no second wire implementation.
 """
 
-from advanced_omi_backend.clients.audio_stream_client import AudioStreamClient
-
-__all__ = ["AudioStreamClient"]
+__all__: list[str] = []

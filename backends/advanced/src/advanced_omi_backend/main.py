@@ -2,10 +2,10 @@
 """
 Unified Omi-audio service
 
- * Accepts audio over a unified WebSocket endpoint (`/ws`) with codec parameter (pcm or opus).
+ * Accepts bound raw-Opus media over the generated audio-v2 endpoint (`/ws/audio`).
  * Uses a central queue to decouple audio ingestion from processing.
  * Audio persistence stores compressed chunks in MongoDB.
- * A transcription consumer sends each chunk to a Wyoming ASR service.
+ * A transcription consumer sends canonical PCM to the selected ASR provider.
  * The transcript is stored in **mem0** and MongoDB.
 
 Refactored to use a modular architecture with proper separation of concerns:

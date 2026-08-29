@@ -108,26 +108,18 @@ Reference in `AndroidManifest.xml`:
 
 ## Backend Configuration
 
-### Supported Backends
+### Supported Backend
 
-The app connects to any backend that accepts OPUS audio streams:
-
-1. **Simple Backend** (`backends/simple/`)
-   - Basic audio capture and storage
-   - Good for testing and development
-   - WebSocket endpoint: `/ws`
-
-2. **Advanced Backend** (`backends/advanced/`)
-   - Full transcription and memory features
-   - Real-time processing with speaker recognition
-   - WebSocket endpoint: `/ws?codec=pcm`
+The app connects to Chronicle's advanced backend using audio protocol v2 at
+`/ws/audio` with the `chronicle.audio.v2` WebSocket subprotocol. Capture and
+playback media are atomic raw-Opus envelopes generated from the shared contract.
 
 ### Connection Setup
 
 #### Local Development
 ```
-Backend URL: ws://[machine-ip]:8000/ws?codec=pcm
-Example: ws://192.168.1.100:8000/ws?codec=pcm
+Backend URL: ws://[machine-ip]:8000/ws/audio
+Example: ws://192.168.1.100:8000/ws/audio
 ```
 
 #### Public Access (Production)
@@ -138,7 +130,7 @@ Use ngrok or similar tunneling service:
 ngrok http 8000
 
 # Use provided URL in app
-Backend URL: wss://[ngrok-subdomain].ngrok.io/ws?codec=pcm
+Backend URL: wss://[ngrok-subdomain].ngrok.io/ws/audio
 ```
 
 ### Configuration Steps
@@ -147,14 +139,14 @@ Backend URL: wss://[ngrok-subdomain].ngrok.io/ws?codec=pcm
 2. **Open the mobile app**
 3. **Navigate to Settings**
 4. **Enter Backend URL**:
-   - Local: `ws://[your-ip]:8000/ws?codec=pcm`
-   - Public: `wss://[your-domain]/ws?codec=pcm`
+   - Local: `ws://[your-ip]:8000/ws/audio`
+   - Public: `wss://[your-domain]/ws/audio`
 5. **Save configuration**
 
 ## Duplex Phone Voice
 
 ### Overview
-The phone is a protocol-v1 Chronicle voice endpoint. One native engine owns microphone
+The phone is an audio-v2 Chronicle voice endpoint. One native engine owns microphone
 capture and Chronicle response playback while the session is active. The backend binds
 every response to the authenticated socket, audio session, voice session, capture
 epoch, and response generation.
@@ -163,7 +155,7 @@ epoch, and response generation.
 - **Barge-in**: Verified speakerphone AEC and isolated headphone routes capture while Chronicle speaks
 - **Safe fallback**: Unsupported routes report native half duplex instead of claiming simultaneous capture
 - **Native cancellation**: Socket loss, route changes, interruptions, and engine resets flush playback immediately
-- **Session fencing**: Reconnects create new audio and voice sessions and require short-lived resume proof
+- **Session fencing**: Reconnects create an exact physical-connection lease and a new capture binding
 - **Cross-platform replacement**: One `chronicle-duplex-audio` interface backs iOS and Android
 
 ### Setup & Usage
@@ -179,7 +171,7 @@ epoch, and response generation.
 - **iOS**: A native development or release build with microphone permission
 - **Android**: Android API 31+ native build with microphone permission
 - **Network**: Stable connection to Chronicle backend
-- **Backend**: Advanced backend with voice duplex protocol v1 at `/ws?codec=pcm`
+- **Backend**: Advanced backend with audio protocol v2 at `/ws/audio`
 
 #### Switching Audio Sources
 - **Mutual Exclusion**: Cannot use Bluetooth and phone audio simultaneously
@@ -202,7 +194,7 @@ JavaScript layer does not create a second player or gate microphone buffers.
 
 #### Audio Not Streaming
 - **Check Permissions**: Ensure microphone access granted
-- **Verify Backend URL**: Confirm `ws://[ip]:8000/ws?codec=pcm` format
+- **Verify Backend URL**: Confirm `ws://[ip]:8000/ws/audio` format
 - **Network Connection**: Test backend connectivity
 - **Authentication**: Verify JWT token is valid
 
@@ -307,7 +299,7 @@ curl -i -N -H "Connection: Upgrade" \
      -H "Upgrade: websocket" \
      -H "Sec-WebSocket-Key: test" \
      -H "Sec-WebSocket-Version: 13" \
-     http://[backend-ip]:8000/ws?codec=pcm
+     http://[backend-ip]:8000/ws/audio
 ```
 
 ## Development
@@ -353,10 +345,9 @@ npx expo build:android
 ### WebSocket Communication
 ```javascript
 // Connect to backend
-const ws = new WebSocket('ws://backend-url:8000/ws?codec=pcm');
+const ws = new WebSocket('ws://backend-url:8000/ws/audio', 'chronicle.audio.v2');
 
-// Send audio data
-ws.send(audioBuffer);
+// Send generated ClientControl JSON and atomic binary MediaEnvelope packets.
 
 // Handle responses
 ws.onmessage = (event) => {

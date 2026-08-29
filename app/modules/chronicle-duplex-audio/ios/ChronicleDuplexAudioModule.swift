@@ -6,10 +6,11 @@ public final class ChronicleDuplexAudioModule: Module {
   private let player = AVAudioPlayerNode()
   private let controlQueue = DispatchQueue(label: "chronicle.duplex.audio")
   private var converter: AVAudioConverter?
+  private var opusConverter: AVAudioConverter?
   private var captureEpoch = 0
   private var voiceProcessingEnabled = false
   private var captureSuppressed = false
-  private var currentResponse: (id: String, generation: Int, file: URL)?
+  private var currentResponse: (id: String, generation: Int)?
   private var observers: [NSObjectProtocol] = []
   private var tapInstalled = false
   private var sessionRunning = false
@@ -20,7 +21,7 @@ public final class ChronicleDuplexAudioModule: Module {
 
   public func definition() -> ModuleDefinition {
     Name("ChronicleDuplexAudio")
-    Events("onPcmFrame", "onPlaybackState", "onRouteChange")
+    Events("onOpusFrame", "onPlaybackState", "onRouteChange")
 
     OnCreate { [weak self] in
       self?.installObservers()
@@ -160,9 +161,20 @@ public final class ChronicleDuplexAudioModule: Module {
     ), let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
       throw Exception(name: "engine_unavailable", description: "Cannot create the 16 kHz PCM converter")
     }
+    guard let opusFormat = AVAudioFormat(settings: [
+      AVFormatIDKey: kAudioFormatOpus,
+      AVSampleRateKey: 16_000,
+      AVNumberOfChannelsKey: 1,
+      AVEncoderBitRateKey: 24_000,
+    ]), let opusConverter = AVAudioConverter(from: targetFormat, to: opusFormat) else {
+      throw Exception(name: "engine_unavailable", description: "Cannot create the raw Opus encoder")
+    }
+    opusConverter.bitRate = 24_000
     self.converter = converter
-    input.installTap(onBus: 0, bufferSize: 960, format: inputFormat) { [weak self] buffer, _ in
-      self?.emitPcm(buffer)
+    self.opusConverter = opusConverter
+    let inputFrameCount = AVAudioFrameCount(round(inputFormat.sampleRate * 0.02))
+    input.installTap(onBus: 0, bufferSize: inputFrameCount, format: inputFormat) { [weak self] buffer, _ in
+      self?.emitOpus(buffer)
     }
     tapInstalled = true
     engine.prepare()
@@ -170,8 +182,11 @@ public final class ChronicleDuplexAudioModule: Module {
     sessionRunning = true
   }
 
-  private func emitPcm(_ input: AVAudioPCMBuffer) {
-    guard !captureSuppressed, engine.isRunning, let converter else { return }
+  private func emitOpus(_ input: AVAudioPCMBuffer) {
+    guard !captureSuppressed,
+          engine.isRunning,
+          let converter,
+          let opusConverter else { return }
     let capacity = ChronicleDuplexResampler.outputCapacity(
       inputFrames: input.frameLength,
       inputRate: input.format.sampleRate
@@ -192,16 +207,37 @@ public final class ChronicleDuplexAudioModule: Module {
     }
     guard status != .error,
           conversionError == nil,
-          output.frameLength > 0,
-          let samples = output.int16ChannelData?.pointee else { return }
-    let data = Data(bytes: samples, count: Int(output.frameLength) * MemoryLayout<Int16>.size)
-    sendEvent("onPcmFrame", [
+          output.frameLength > 0 else { return }
+    let compressed = AVAudioCompressedBuffer(
+      format: opusConverter.outputFormat,
+      packetCapacity: 1,
+      maximumPacketSize: 1_275
+    )
+    var opusSupplied = false
+    var opusError: NSError?
+    let opusStatus = opusConverter.convert(to: compressed, error: &opusError) { _, state in
+      if opusSupplied {
+        state.pointee = .noDataNow
+        return nil
+      }
+      opusSupplied = true
+      state.pointee = .haveData
+      return output
+    }
+    guard opusStatus != .error,
+          opusError == nil,
+          compressed.packetCount == 1,
+          compressed.byteLength > 0 else { return }
+    let data = Data(bytes: compressed.data, count: Int(compressed.byteLength))
+    let durationMs = Double(output.frameLength) / 16_000 * 1_000
+    sendEvent("onOpusFrame", [
       "captureEpoch": captureEpoch,
-      "monotonicTimestampMs": ProcessInfo.processInfo.systemUptime * 1_000,
+      "capturedAtMs": Date().timeIntervalSince1970 * 1_000 - durationMs,
+      "monotonicTimestampMs": ProcessInfo.processInfo.systemUptime * 1_000 - durationMs,
       "sampleRate": 16_000,
       "channels": 1,
-      "sampleWidth": 2,
-      "pcmBase64": data.base64EncodedString(),
+      "frameDurationMs": durationMs,
+      "opusBase64": data.base64EncodedString(),
     ])
   }
 
@@ -210,35 +246,95 @@ public final class ChronicleDuplexAudioModule: Module {
           let generation = response["generation"] as? Int,
           let epoch = response["captureEpoch"] as? Int,
           epoch == captureEpoch,
-          let wavBase64 = response["wavBase64"] as? String,
-          let wav = Data(base64Encoded: wavBase64) else {
-      throw Exception(name: "decode_failed", description: "Response binding or WAV payload is invalid")
+          let encodedPackets = response["opusPacketsBase64"] as? [String],
+          !encodedPackets.isEmpty else {
+      throw Exception(name: "decode_failed", description: "Response binding or Opus packets are invalid")
     }
     guard engine.isRunning else {
       throw Exception(name: "playback_unavailable", description: "Audio engine is not running")
     }
     cancelCurrent(errorCode: nil)
-
-    let file = FileManager.default.temporaryDirectory
-      .appendingPathComponent("chronicle-response-\(UUID().uuidString).wav")
-    try wav.write(to: file, options: .atomic)
-    let audioFile = try AVAudioFile(forReading: file)
-    currentResponse = (responseId, generation, file)
+    let packets = try encodedPackets.map { value -> Data in
+      guard let packet = Data(base64Encoded: value), !packet.isEmpty else {
+        throw Exception(name: "decode_failed", description: "Response contains an invalid Opus packet")
+      }
+      return packet
+    }
+    guard let opusFormat = AVAudioFormat(settings: [
+      AVFormatIDKey: kAudioFormatOpus,
+      AVSampleRateKey: 24_000,
+      AVNumberOfChannelsKey: 1,
+    ]) else {
+      throw Exception(name: "decode_failed", description: "Cannot create the Opus playback format")
+    }
+    let outputFormat = engine.mainMixerNode.outputFormat(forBus: 0)
+    guard let decoder = AVAudioConverter(from: opusFormat, to: outputFormat) else {
+      throw Exception(name: "decode_failed", description: "Cannot create the Opus playback decoder")
+    }
+    let decoded = try packets.map { packet in
+      try decodePlaybackPacket(packet, decoder: decoder, opusFormat: opusFormat, outputFormat: outputFormat)
+    }
+    currentResponse = (responseId, generation)
     captureSuppressed = capabilities()["mode"] as? String == "duplex_half"
-    player.scheduleFile(audioFile, at: nil, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-      self?.controlQueue.async {
-        guard let self,
-              let current = self.currentResponse,
-              current.id == responseId,
-              current.generation == generation else { return }
-        self.currentResponse = nil
-        self.captureSuppressed = false
-        try? FileManager.default.removeItem(at: file)
-        self.emitPlayback(responseId, generation, state: "done", errorCode: nil)
+    for (index, buffer) in decoded.enumerated() {
+      let isLast = index == decoded.count - 1
+      player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+        guard isLast else { return }
+        self?.controlQueue.async {
+          guard let self,
+                let current = self.currentResponse,
+                current.id == responseId,
+                current.generation == generation else { return }
+          self.currentResponse = nil
+          self.captureSuppressed = false
+          self.emitPlayback(responseId, generation, state: "done", errorCode: nil)
+        }
       }
     }
     player.play()
     emitPlayback(responseId, generation, state: "started", errorCode: nil)
+  }
+
+  private func decodePlaybackPacket(
+    _ packet: Data,
+    decoder: AVAudioConverter,
+    opusFormat: AVAudioFormat,
+    outputFormat: AVAudioFormat
+  ) throws -> AVAudioPCMBuffer {
+    let compressed = AVAudioCompressedBuffer(
+      format: opusFormat,
+      packetCapacity: 1,
+      maximumPacketSize: packet.count
+    )
+    packet.copyBytes(to: compressed.data.assumingMemoryBound(to: UInt8.self), count: packet.count)
+    compressed.byteLength = UInt32(packet.count)
+    compressed.packetCount = 1
+    if let descriptions = compressed.packetDescriptions {
+      descriptions[0] = AudioStreamPacketDescription(
+        mStartOffset: 0,
+        mVariableFramesInPacket: 480,
+        mDataByteSize: UInt32(packet.count)
+      )
+    }
+    let capacity = AVAudioFrameCount(ceil(outputFormat.sampleRate / 50.0))
+    guard let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: capacity) else {
+      throw Exception(name: "decode_failed", description: "Cannot allocate playback PCM")
+    }
+    var supplied = false
+    var conversionError: NSError?
+    let status = decoder.convert(to: output, error: &conversionError) { _, state in
+      if supplied {
+        state.pointee = .noDataNow
+        return nil
+      }
+      supplied = true
+      state.pointee = .haveData
+      return compressed
+    }
+    guard status != .error, conversionError == nil, output.frameLength > 0 else {
+      throw Exception(name: "decode_failed", description: "Cannot decode an Opus playback packet")
+    }
+    return output
   }
 
   private func cancelCurrent(errorCode: String?) {
@@ -246,7 +342,6 @@ public final class ChronicleDuplexAudioModule: Module {
     player.stop()
     currentResponse = nil
     captureSuppressed = false
-    try? FileManager.default.removeItem(at: current.file)
     emitPlayback(current.id, current.generation, state: "cancelled", errorCode: errorCode)
   }
 
@@ -328,6 +423,7 @@ public final class ChronicleDuplexAudioModule: Module {
     engine.stop()
     if player.engine != nil { engine.detach(player) }
     converter = nil
+    opusConverter = nil
     voiceProcessingEnabled = false
     captureSuppressed = false
     if deactivateSession {

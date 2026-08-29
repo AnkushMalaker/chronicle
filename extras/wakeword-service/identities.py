@@ -53,6 +53,33 @@ class DeviceDownlinkChannel(_Identity):
 class AudioSessionRef:
     session_id: SessionId
     client_id: ClientId
+    capture_epoch: int
+    started_at: float
+
+    def __post_init__(self) -> None:
+        if self.capture_epoch < 0:
+            raise ValueError("capture_epoch must be non-negative")
+        if self.started_at <= 0:
+            raise ValueError("audio session started_at must be positive")
+
+
+@dataclass(frozen=True)
+class AudioChunkRef:
+    """Authoritative time metadata attached to one raw-audio WAL chunk."""
+
+    captured_at: float
+    time_basis: str
+    sample_rate: int
+    channels: int
+    sample_width: int
+
+    def __post_init__(self) -> None:
+        if self.captured_at <= 0:
+            raise ValueError("captured_at must be positive")
+        if self.time_basis not in {"captured", "recorded", "received"}:
+            raise ValueError("unknown audio chunk time_basis")
+        if min(self.sample_rate, self.channels, self.sample_width) <= 0:
+            raise ValueError("audio chunk format values must be positive")
 
 
 def _identity_value(identity: _Identity | str) -> str:
@@ -74,7 +101,7 @@ def audio_session_key(session_id: SessionId) -> AudioSessionKey:
 
 def parse_audio_stream_name(stream_name: str | AudioStreamName) -> SessionId:
     value = _identity_value(stream_name)
-    prefix = "audio:stream:"
+    prefix = "audio:v2:realtime:"
     if not value.startswith(prefix):
         raise ValueError(f"not an audio stream name: {value!r}")
     return SessionId.from_value(value.removeprefix(prefix), "session_id")

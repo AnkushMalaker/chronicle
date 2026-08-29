@@ -181,12 +181,6 @@ def voice_response(response_id: str) -> str:
     return f"voice:response:{response_id}"
 
 
-def voice_response_media(response_id: str) -> str:
-    """Short-lived binary WAV body referenced by a ``response.audio`` header."""
-
-    return f"voice:response:media:{response_id}"
-
-
 def timeline_evidence_revision(user_id: str | UserId) -> str:
     """Per-user monotonic evidence-revision counter (INCR) for dirty-range fencing."""
     return f"timeline:evidence_revision:{_identity_value(user_id)}"

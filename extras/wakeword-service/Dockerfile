@@ -19,6 +19,7 @@ RUN uv pip install --system --no-cache \
         "fastapi>=0.115,<1" \
         "uvicorn[standard]>=0.30,<1" \
         "redis>=5.0,<6" \
+        "protobuf>=5.29,<6" \
         "numpy>=1.26,<3" \
         "onnxruntime>=1.20,<2" \
         "pipecat-ai==0.0.108" \
@@ -43,6 +44,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # models/ also carries the second-stage verifier weights (hey_hermes_verifier.npz).
 COPY app.py consumer.py detector.py identities.py samples.py verifier.py hubert_detector.py \
     active_turn_consumer.py turn_segmenter.py ./
+COPY audio_contract ./audio_contract
 COPY models ./models
 COPY tones ./tones
 

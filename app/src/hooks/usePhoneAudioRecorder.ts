@@ -4,11 +4,15 @@ import { PermissionsAndroid, Platform } from 'react-native';
 import base64 from 'react-native-base64';
 
 import {
-  addPcmFrameListener,
+  addOpusFrameListener,
   startVoiceSession,
   stopVoiceSession,
 } from '../../modules/chronicle-duplex-audio';
-import type { VoiceCapabilities } from '../protocol/voiceProtocol';
+import type { VoiceCapabilities } from '../protocol/audioCapabilities';
+import {
+  capturedOpusFrameFromNative,
+  type CapturedOpusFrame,
+} from '../protocol/capturedOpusFrame';
 
 export interface PhoneCaptureSession {
   captureEpoch: number;
@@ -23,7 +27,7 @@ interface UsePhoneAudioRecorder {
   error: string | null;
   audioLevel: number;
   startRecording: (
-    onAudioData: (pcmBuffer: Uint8Array) => void
+    onAudioData: (frame: CapturedOpusFrame) => void
   ) => Promise<PhoneCaptureSession>;
   stopRecording: () => Promise<void>;
 }
@@ -37,19 +41,6 @@ function decodeBase64(value: string): Uint8Array {
   return bytes;
 }
 
-function rmsPcm16(bytes: Uint8Array): number {
-  if (bytes.length < 2) return 0;
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let sum = 0;
-  let samples = 0;
-  for (let offset = 0; offset + 1 < bytes.length; offset += 2) {
-    const value = view.getInt16(offset, true) / 32_768;
-    sum += value * value;
-    samples += 1;
-  }
-  return samples ? Math.sqrt(sum / samples) : 0;
-}
-
 export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
   const [isRecording, setIsRecording] = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
@@ -58,7 +49,7 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
   const mountedRef = useRef(true);
   const captureEpochRef = useRef(0);
   const frameSubscriptionRef = useRef<{ remove: () => void } | null>(null);
-  const onAudioDataRef = useRef<((pcmBuffer: Uint8Array) => void) | null>(null);
+  const onAudioDataRef = useRef<((frame: CapturedOpusFrame) => void) | null>(null);
 
   const markCaptureStopped = useCallback(() => {
     frameSubscriptionRef.current?.remove();
@@ -92,7 +83,7 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
   }, [stopRecording]);
 
   const startRecording = useCallback(async (
-    onAudioData: (pcmBuffer: Uint8Array) => void
+    onAudioData: (frame: CapturedOpusFrame) => void
   ): Promise<PhoneCaptureSession> => {
     if (isRecording) await stopRecording();
     if (mountedRef.current) {
@@ -110,12 +101,11 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
 
     try {
       onAudioDataRef.current = onAudioData;
-      frameSubscriptionRef.current = addPcmFrameListener((frame) => {
+      frameSubscriptionRef.current = addOpusFrameListener((frame) => {
         if (!mountedRef.current || frame.captureEpoch !== captureEpochRef.current) return;
-        const pcm = decodeBase64(frame.pcmBase64);
-        if (!pcm.length) return;
-        setAudioLevel(rmsPcm16(pcm));
-        onAudioDataRef.current?.(pcm);
+        const captured = capturedOpusFrameFromNative(frame, decodeBase64);
+        if (!captured.opus.length) return;
+        onAudioDataRef.current?.(captured);
       });
       const capture = await startNativeCapture();
       if (mountedRef.current) {

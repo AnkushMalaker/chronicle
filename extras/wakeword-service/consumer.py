@@ -1,8 +1,7 @@
 """Redis stream consumer for the Hermes wake-word service.
 
-Consumes ``audio:stream:*`` with a dedicated consumer group
-``wakeword_detection`` (registered in the backend's ``_EXPECTED_GROUPS`` so the
-streaming consumer won't delete streams out from under our pending entries).
+Consumes generated events from ``audio:v2:realtime:*`` with the dedicated
+``wakeword-v2`` consumer group.
 
 For each session stream it maintains per-session wake state in
 :class:`HermesDetector`. On a captured turn it resolves the command text from
@@ -13,13 +12,16 @@ for the backend-side dispatcher to forward to the Hermes plugin.
 
 import asyncio
 import base64
+import dataclasses
 import json
 import logging
 import os
 import time
+import uuid
 from typing import Dict
 
 import redis.asyncio as redis
+from audio_contract.v2 import audio_pb2
 from detector import (
     RECEPTIVE_FIELD_SECONDS,
     SAMPLE_RATE,
@@ -28,6 +30,7 @@ from detector import (
     WakeEvent,
 )
 from identities import (
+    AudioChunkRef,
     AudioSessionRef,
     AudioStreamName,
     ClientId,
@@ -41,8 +44,8 @@ from samples import PENDING, SampleStore
 
 logger = logging.getLogger(__name__)
 
-STREAM_PATTERN = "audio:stream:*"
-GROUP_NAME = "wakeword_detection"
+STREAM_PATTERN = "audio:v2:realtime:*"
+GROUP_NAME = "wakeword-v2"
 DETECTIONS_STREAM = "wakeword:detections"
 
 # Stop processing a stream after this long with no new chunks (zombie guard).
@@ -56,6 +59,23 @@ SAVE_BUFFER_STATE = os.getenv("WAKEWORD_SAVE_BUFFER_STATE", "1").lower() not in 
     "false",
     "no",
 )
+
+PROBE_RESULT_RETENTION_SECONDS = 300
+
+
+@dataclasses.dataclass
+class WakeProbe:
+    probe_id: str
+    client_id: ClientId
+    session_id: SessionId
+    wakeword: str
+    status: str
+    created_at: float
+    deadline_at: float
+    created_monotonic: float
+    deadline_monotonic: float
+    completed_at: float | None = None
+    detection: dict | None = None
 
 
 class WakeWordConsumer:
@@ -83,6 +103,123 @@ class WakeWordConsumer:
         self._states: Dict[SessionId, ClientWakeState] = {}
         # session_id -> stable device client_id, resolved from session metadata.
         self._client_ids: Dict[SessionId, ClientId] = {}
+        self._probes: dict[str, WakeProbe] = {}
+        self._active_probe_by_session: dict[SessionId, str] = {}
+        self._monotonic = time.monotonic
+        self._wall_time = time.time
+
+    def start_probe(
+        self,
+        client_id: str,
+        audio_session_id: str,
+        wakeword: str,
+        *,
+        timeout_seconds: float = 15,
+    ) -> dict:
+        """Start one production-equivalent, side-effect-free probe on a live stream."""
+        if wakeword not in self.detector.wakewords:
+            raise ValueError(f"unknown wake word '{wakeword}'")
+        if wakeword in getattr(self.detector, "disabled", set()):
+            raise ValueError(f"wake word '{wakeword}' is disabled")
+        if not 1 <= timeout_seconds <= 60:
+            raise ValueError("timeout_seconds must be between 1 and 60")
+        self._expire_probes()
+        client_ref = ClientId.from_value(client_id)
+        session_id = SessionId.from_value(audio_session_id)
+        task = self._stream_tasks.get(session_id)
+        state = self._states.get(session_id)
+        if (
+            self._client_ids.get(session_id) != client_ref
+            or state is None
+            or task is None
+            or task.done()
+        ):
+            raise LookupError("no active stream for client and audio session")
+        if getattr(state, "armed", False) or getattr(state, "priming", False):
+            raise ValueError("stream is already armed or priming")
+        if session_id in self._active_probe_by_session:
+            raise ValueError("a wake probe is already active for this session")
+        now_mono = self._monotonic()
+        now_wall = self._wall_time()
+        probe = WakeProbe(
+            probe_id=str(uuid.uuid4()),
+            client_id=client_ref,
+            session_id=session_id,
+            wakeword=wakeword,
+            status="listening",
+            created_at=now_wall,
+            deadline_at=now_wall + timeout_seconds,
+            created_monotonic=now_mono,
+            deadline_monotonic=now_mono + timeout_seconds,
+        )
+        self._probes[probe.probe_id] = probe
+        self._active_probe_by_session[session_id] = probe.probe_id
+        return self._probe_payload(probe)
+
+    def get_probe(self, probe_id: str) -> dict:
+        self._expire_probes()
+        probe = self._probes.get(probe_id)
+        if probe is None:
+            raise LookupError("wake probe not found")
+        return self._probe_payload(probe)
+
+    def cancel_probe(self, probe_id: str) -> dict:
+        self._expire_probes()
+        probe = self._probes.get(probe_id)
+        if probe is None:
+            raise LookupError("wake probe not found")
+        if probe.status == "listening":
+            self._complete_probe(probe, "cancelled")
+        return self._probe_payload(probe)
+
+    def _probe_payload(self, probe: WakeProbe) -> dict:
+        return {
+            "probe_id": probe.probe_id,
+            "client_id": str(probe.client_id),
+            "session_id": str(probe.session_id),
+            "wakeword": probe.wakeword,
+            "status": probe.status,
+            "created_at_ms": round(probe.created_at * 1000),
+            "deadline_at_ms": round(probe.deadline_at * 1000),
+            "completed_at_ms": (
+                round(probe.completed_at * 1000)
+                if probe.completed_at is not None
+                else None
+            ),
+            "detection": probe.detection,
+        }
+
+    def _expire_probes(self) -> None:
+        now_mono = self._monotonic()
+        now_wall = self._wall_time()
+        for probe in list(self._probes.values()):
+            if probe.status == "listening" and now_mono >= probe.deadline_monotonic:
+                self._complete_probe(probe, "timed_out")
+            elif (
+                probe.completed_at is not None
+                and now_wall - probe.completed_at > PROBE_RESULT_RETENTION_SECONDS
+            ):
+                self._probes.pop(probe.probe_id, None)
+
+    def _complete_probe(
+        self, probe: WakeProbe, status: str, detection: dict | None = None
+    ) -> None:
+        if probe.status != "listening":
+            return
+        probe.status = status
+        probe.completed_at = self._wall_time()
+        probe.detection = detection
+        self._active_probe_by_session.pop(probe.session_id, None)
+
+    def _active_probe(self, session_id: SessionId) -> WakeProbe | None:
+        self._expire_probes()
+        probe_id = self._active_probe_by_session.get(session_id)
+        return self._probes.get(probe_id) if probe_id else None
+
+    def _close_probe_for_session(self, session_id: SessionId) -> None:
+        probe = self._active_probe(session_id)
+        if probe is not None:
+            self._complete_probe(probe, "stream_closed")
 
     def active_clients(self) -> list[dict]:
         """List currently-processing streams (for the data-collection UI)."""
@@ -298,7 +435,14 @@ class WakeWordConsumer:
                             else message_id
                         )
                         try:
-                            if fields.get(b"end_marker") or fields.get("end_marker"):
+                            event = audio_pb2.CaptureStreamEvent()
+                            if set(fields) != {b"event"}:
+                                raise RuntimeError(
+                                    f"audio-v2 entry {msg_id} has untyped fields"
+                                )
+                            event.ParseFromString(fields[b"event"])
+                            event_kind = event.WhichOneof("event")
+                            if event_kind in {"ended", "failed"}:
                                 await self.redis_client.xack(
                                     str(stream_name), GROUP_NAME, msg_id
                                 )
@@ -306,29 +450,98 @@ class WakeWordConsumer:
                                 logger.info(f"End marker on '{stream_name}' — ending")
                                 return
 
-                            pcm = fields.get(b"audio_data") or fields.get("audio_data")
+                            pcm = (
+                                event.frame.pcm_s16le if event_kind == "frame" else b""
+                            )
                             if pcm:
                                 last_activity = time.time()
-                                was_armed = state.armed
-                                event = await self.detector.process_frame(
-                                    state, session_ref, pcm
+                                chunk_ref = AudioChunkRef(
+                                    captured_at=(
+                                        event.frame.captured_at.ToMilliseconds()
+                                        / 1000.0
+                                    ),
+                                    time_basis="captured",
+                                    sample_rate=16000,
+                                    channels=1,
+                                    sample_width=2,
                                 )
-                                # Real acoustic arm transition -> push an immediate
-                                # UI pulse (skip deliberate training primes).
-                                if state.armed and not was_armed and not state.priming:
-                                    await self._on_armed(state, session_ref)
-                                if event is not None:
-                                    await self._handle_event(event)
+                                await self._process_detector_frame(
+                                    state, session_ref, chunk_ref, pcm
+                                )
                         finally:
                             await self.redis_client.xack(
                                 str(stream_name), GROUP_NAME, msg_id
                             )
         finally:
+            self._close_probe_for_session(session_id)
             self._states.pop(session_id, None)
             self._client_ids.pop(session_id, None)
 
+    async def _process_detector_frame(
+        self,
+        state: ClientWakeState,
+        session_ref: AudioSessionRef,
+        chunk_ref: AudioChunkRef,
+        pcm: bytes,
+    ) -> None:
+        """Run production detection, with the probe intercept at the arm seam."""
+        was_armed = state.armed
+        probe = self._active_probe(session_ref.session_id)
+        if probe is None:
+            event = await self.detector.process_frame(
+                state, session_ref, chunk_ref, pcm
+            )
+        else:
+            event = await self.detector.process_frame(
+                state,
+                session_ref,
+                chunk_ref,
+                pcm,
+                probe_wakeword=probe.wakeword,
+            )
+        if event is not None and getattr(event, "collect_only", False) and probe:
+            # Collect-only is deliberately not production-equivalent: it bypasses the
+            # verifier. Ignore and suppress its sample-farming side effect during a probe.
+            return
+        if state.armed and not was_armed and not state.priming:
+            if probe is not None:
+                detected_word = state.armed_wakeword or ""
+                self._complete_probe(
+                    probe,
+                    "detected" if detected_word == probe.wakeword else "wrong_word",
+                    {
+                        "wakeword": detected_word,
+                        "score": round(state.arm_score, 6),
+                        "verifier_passed": state.arm_verifier_passed,
+                        "verifier_score": (
+                            round(state.arm_verifier_score, 6)
+                            if state.arm_verifier_score is not None
+                            else None
+                        ),
+                        "wake_trace_id": state.wake_trace_id,
+                        "capture_epoch": state.arm_capture_epoch,
+                        "armed_at_ms": (
+                            round(state.arm_occurred_at * 1000)
+                            if state.arm_occurred_at is not None
+                            else None
+                        ),
+                        "arm_offset_ms": state.arm_offset_ms,
+                    },
+                )
+                self.detector.reset_armed_state(state)
+                return
+            await self._on_armed(state, session_ref)
+        if event is not None:
+            await self._handle_event(event)
+
     async def _flush(self, state, session_ref: AudioSessionRef) -> None:
         """Finalize an armed-but-uncaptured turn when the stream ends/goes idle."""
+        probe = self._active_probe(session_ref.session_id)
+        if probe is not None:
+            self._complete_probe(probe, "stream_closed")
+            if state.armed:
+                self.detector.reset_armed_state(state)
+            return
         event = self.detector.flush(state, session_ref)
         if event is not None:
             await self._handle_event(event)
@@ -421,6 +634,17 @@ class WakeWordConsumer:
         timestamp alignment against the transcription results stream.
         """
         user_id = await self._lookup_user_id(event.session_id)
+        if (
+            not event.wake_trace_id
+            or event.capture_epoch is None
+            or event.armed_at is None
+            or event.end_of_turn_at is None
+            or event.trigger_interval is None
+            or event.command_interval is None
+        ):
+            raise RuntimeError(
+                "dispatch wake event lacks absolute interaction identity"
+            )
         # Immediate UI pulse for end-of-turn, before the (slower) batch ASR + plugin
         # dispatch the backend does — keeps the live-recording feedback snappy.
         await self._publish_sse(
@@ -461,13 +685,16 @@ class WakeWordConsumer:
             "sample_rate": SAMPLE_RATE,
             "audio_b64": base64.b64encode(event.audio).decode("ascii"),
             "has_speech": event.has_speech,
-            "detected_at": time.time(),
+            "wake_trace_id": event.wake_trace_id,
+            "capture_epoch": event.capture_epoch,
+            "armed_at": event.armed_at,
+            "end_of_turn_at": event.end_of_turn_at,
+            "trigger_interval": dataclasses.asdict(event.trigger_interval),
+            "command_interval": dataclasses.asdict(event.command_interval),
         }
         await self.redis_client.xadd(
             DETECTIONS_STREAM,
             {b"event": json.dumps(payload).encode()},
-            maxlen=200,
-            approximate=True,
         )
         logger.info(
             f"📤 Published wake_word.detected for '{event.client_id}' "
@@ -585,13 +812,31 @@ class WakeWordConsumer:
         """Resolve the stable device id from authoritative session metadata."""
         if self.redis_client is None:
             raise RuntimeError("Redis is not connected")
-        value = await self.redis_client.hget(
-            str(audio_session_key(session_id)), "client_id"
+        client_value, epoch_value, started_value = await self.redis_client.hmget(
+            str(audio_session_key(session_id)),
+            "client_id",
+            "capture_epoch",
+            "started_at",
         )
-        if value is None:
-            raise RuntimeError(f"Audio session '{session_id}' has no client_id")
-        client_id = ClientId.from_value(value, "client_id")
-        return AudioSessionRef(session_id=session_id, client_id=client_id)
+        if client_value is None or epoch_value is None or started_value is None:
+            raise RuntimeError(
+                f"Audio session '{session_id}' lacks client/epoch/start identity"
+            )
+        client_id = ClientId.from_value(client_value, "client_id")
+        epoch = int(
+            epoch_value.decode() if isinstance(epoch_value, bytes) else epoch_value
+        )
+        started_at = float(
+            started_value.decode()
+            if isinstance(started_value, bytes)
+            else started_value
+        )
+        return AudioSessionRef(
+            session_id=session_id,
+            client_id=client_id,
+            capture_epoch=epoch,
+            started_at=started_at,
+        )
 
     async def _shutdown(self) -> None:
         for task in self._stream_tasks.values():
@@ -599,6 +844,8 @@ class WakeWordConsumer:
         self._stream_tasks.clear()
         self._states.clear()
         self._client_ids.clear()
+        for probe in list(self._probes.values()):
+            self._complete_probe(probe, "stream_closed")
         if self.redis_client is not None:
             await self.redis_client.aclose()
         logger.info("WakeWordConsumer stopped")

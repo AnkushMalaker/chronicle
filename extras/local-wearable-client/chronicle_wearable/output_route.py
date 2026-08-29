@@ -8,9 +8,34 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
-from chronicle_client.voice_session import VoiceTargetCapabilities
-
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class VoiceTargetCapabilities:
+    processing_profile: str
+    mode: str
+    native_sample_rate: int
+    output_route: str
+    fallback_reason: str | None = None
+
+    @classmethod
+    def isolated(cls, *, native_sample_rate: int, output_route: str):
+        return cls(
+            "duplex_isolated", "duplex_isolated", native_sample_rate, output_route
+        )
+
+    @classmethod
+    def half_duplex(
+        cls, *, native_sample_rate: int, output_route: str, fallback_reason: str
+    ):
+        return cls(
+            "half_duplex",
+            "duplex_half",
+            native_sample_rate,
+            output_route,
+            fallback_reason,
+        )
 
 
 class HostOutputPolicy(str, Enum):

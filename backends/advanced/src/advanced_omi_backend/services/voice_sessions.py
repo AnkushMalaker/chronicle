@@ -14,6 +14,7 @@ from typing import Literal
 import redis.asyncio as redis
 from redis.exceptions import WatchError
 
+from advanced_omi_backend.models.audio_capabilities import VoiceCapabilities
 from advanced_omi_backend.redis_keys import (
     ClientId,
     UserId,
@@ -21,7 +22,8 @@ from advanced_omi_backend.redis_keys import (
     response_generation,
     voice_session,
 )
-from advanced_omi_backend.voice_protocol import VOICE_DUPLEX_PROTOCOL, VoiceCapabilities
+
+AUDIO_CONTRACT_VERSION = 2
 
 RESUME_GRACE_SECONDS = 15
 ACTIVE_SESSION_TTL_SECONDS = 60 * 60
@@ -191,9 +193,9 @@ class VoiceSessionCoordinator:
     ) -> VoiceSessionStartResult:
         """Start a fresh voice session, terminally replacing any old binding."""
 
-        if advertised_protocol != VOICE_DUPLEX_PROTOCOL:
+        if advertised_protocol != AUDIO_CONTRACT_VERSION:
             raise ClientUpgradeRequired(
-                "interactive voice requires voice_duplex_protocol 1"
+                "interactive voice requires Chronicle audio contract v2"
             )
         if capture_epoch < 0:
             raise ValueError("capture_epoch must be non-negative")

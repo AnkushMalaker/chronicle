@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fakeredis import aioredis as fake_aioredis
 
+from advanced_omi_backend.models.audio_capabilities import VoiceCapabilities
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 from advanced_omi_backend.services.interaction_modes.committed_turns import (
     CommittedAudioTurn,
@@ -24,7 +25,10 @@ from advanced_omi_backend.services.interaction_modes.registry import Interaction
 from advanced_omi_backend.services.interaction_modes.store import InteractionStore
 from advanced_omi_backend.services.response_coordinator import ResponseCoordinator
 from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
-from advanced_omi_backend.voice_protocol import VoiceCapabilities
+from advanced_omi_backend.services.wakeword.activations import (
+    WakeActivation,
+    WakeActivationStore,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -154,7 +158,7 @@ async def test_real_committed_router_validates_binding_and_enqueues_complete_tur
         audio_session_id="audio-1",
         capture_epoch=4,
         socket_id="socket-1",
-        advertised_protocol=1,
+        advertised_protocol=2,
     )
     voice_id = started.session.voice_session_id
     await voice_coordinator.ready(
@@ -223,6 +227,7 @@ async def test_real_committed_router_validates_binding_and_enqueues_complete_tur
         )
         == 1
     )
+
     active = await InteractionStore(redis_client).get_active("user-1", "client-1")
     await InteractionStore(redis_client).end(active, reason="test_complete")
 
@@ -246,14 +251,47 @@ async def test_real_committed_router_validates_binding_and_enqueues_complete_tur
 
     ordinary = await ordinary_router.route(ordinary_fields)
 
-    assert ordinary.accepted and ordinary.reason == "ordinary_command"
-    dispatched_turn = CommittedAudioTurn.from_fields(ordinary_fields)
+    assert ordinary.consumed and not ordinary.accepted
+    assert ordinary.reason == "not_addressed"
+    command_dispatcher.assert_not_awaited()
+    assert (
+        await ResponseCoordinator(redis_client, voice_coordinator).current_generation(
+            "user-1", "client-1"
+        )
+        == 1
+    )
+
+    activation = WakeActivation(
+        wake_trace_id="7ce4d46b-232f-47f9-8148-d595ed344cf2",
+        user_id="user-1",
+        client_id="client-1",
+        audio_session_id="audio-1",
+        capture_epoch=4,
+        wakeword="hey_hermes",
+        armed_at=1_770_000_001.0,
+        end_of_turn_at=1_770_000_002.0,
+        command_start_ms=3_200,
+        command_end_ms=4_000,
+    )
+    await WakeActivationStore(redis_client).register(activation)
+    addressed_fields = _turn_fields(
+        voice_id,
+        turn_id="turn-3",
+        start_ms=3_000,
+        end_ms=4_400,
+    )
+
+    addressed = await ordinary_router.route(addressed_fields)
+
+    assert addressed.accepted and addressed.reason == "wake_command"
+    dispatched_turn = CommittedAudioTurn.from_fields(addressed_fields)
     command_dispatcher.assert_awaited_once_with(
         dispatched_turn,
         "turn on the lights",
         "user-1",
         "client-1",
         2,
+        activation,
     )
 
 
@@ -295,3 +333,25 @@ async def test_committed_router_redelivers_pending_turn_before_new_work():
     )
     first_read = redis_client.xreadgroup.await_args_list[0]
     assert first_read.args[2] == {"voice:turns:committed": "0"}
+
+
+async def test_committed_router_acks_invalid_binary_turn_without_killing_worker():
+    redis_client = AsyncMock()
+    router = CommittedTurnRouter(redis_client, InteractionRegistry())
+    router.route = AsyncMock(side_effect=ValueError("stale voice binding"))
+
+    await router._handle_entry(b"1-0", _turn_fields())
+
+    redis_client.xack.assert_awaited_once_with(
+        "voice:turns:committed", "committed-turn-router", b"1-0"
+    )
+
+
+async def test_committed_router_leaves_transient_failure_pending_without_exiting():
+    redis_client = AsyncMock()
+    router = CommittedTurnRouter(redis_client, InteractionRegistry())
+    router.route = AsyncMock(side_effect=RuntimeError("provider unavailable"))
+
+    await router._handle_entry(b"1-0", _turn_fields())
+
+    redis_client.xack.assert_not_awaited()

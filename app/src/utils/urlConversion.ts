@@ -2,9 +2,9 @@
  * Converts an HTTP(S) URL to the corresponding WebSocket URL for the Chronicle backend.
  *
  * Examples:
- *   https://100.64.1.5       → wss://100.64.1.5/ws
- *   http://localhost:8000     → ws://localhost:8000/ws
- *   https://my.server.com    → wss://my.server.com/ws
+ *   https://100.64.1.5       → wss://100.64.1.5/ws/audio
+ *   http://localhost:8000     → ws://localhost:8000/ws/audio
+ *   https://my.server.com    → wss://my.server.com/ws/audio
  */
 export function httpUrlToWebSocketUrl(httpUrl: string): string {
   let url = httpUrl.trim().replace(/\/+$/, '')
@@ -18,12 +18,12 @@ export function httpUrlToWebSocketUrl(httpUrl: string): string {
     url = 'wss://' + url
   }
 
-  // Append /ws if not already present
-  if (!url.endsWith('/ws')) {
-    url += '/ws'
-  }
+  const parsed = new URL(url)
+  parsed.pathname = '/ws/audio'
+  parsed.search = ''
+  parsed.hash = ''
 
-  return url
+  return parsed.toString()
 }
 
 /** A backend configuration parsed from a scanned QR code. */

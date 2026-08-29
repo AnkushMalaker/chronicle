@@ -32,6 +32,10 @@ from advanced_omi_backend.services.plugin_service import (
     initialize_plugins,
     run_plugin_recovery,
 )
+from advanced_omi_backend.services.response_coordinator import (
+    WAKE_INTERACTION_EVENTS_STREAM,
+)
+from advanced_omi_backend.services.wakeword.activations import WakeActivation
 from advanced_omi_backend.services.wakeword.executor import (
     execute_voice_command,
     publish_sse,
@@ -68,7 +72,38 @@ class InteractionModeWorker:
         user_id: str,
         client_id: str,
         generation: int,
+        activation: WakeActivation,
     ) -> None:
+        base_event = {
+            "wake_trace_id": activation.wake_trace_id,
+            "user_id": user_id,
+            "client_id": client_id,
+            "audio_session_id": turn.interval.audio_session_id,
+            "capture_epoch": turn.interval.capture_epoch,
+            "voice_session_id": turn.interval.voice_session_id,
+            "turn_id": turn.interval.turn_id or str(turn.start_sequence),
+            "turn_revision": turn.interval.turn_revision,
+            "wakeword": activation.wakeword,
+        }
+
+        async def publish_stage(
+            stage: str, payload: dict, *, occurred_at: float | None = None
+        ) -> None:
+            event = {
+                **base_event,
+                "stage": stage,
+                "occurred_at": occurred_at or time.time(),
+                "payload": payload,
+            }
+            await self.redis.xadd(
+                WAKE_INTERACTION_EVENTS_STREAM,
+                {"event": json.dumps(event, separators=(",", ":"), sort_keys=True)},
+            )
+
+        await publish_stage(
+            "command_resolved",
+            {"source": "committed", "character_count": len(text)},
+        )
         await execute_voice_command(
             self.redis,
             self.plugin_router,
@@ -82,6 +117,9 @@ class InteractionModeWorker:
             response_generation=generation,
             response_turn_id=turn.interval.turn_id or str(turn.start_sequence),
             response_turn_revision=turn.interval.turn_revision,
+            wakeword=activation.wakeword,
+            wake_trace_id=activation.wake_trace_id,
+            interaction_stage_callback=publish_stage,
         )
 
     async def stop(self) -> None:
@@ -253,7 +291,10 @@ class InteractionModeWorker:
 async def main() -> None:
     logger.info("Starting interaction-mode worker")
     init_otel()
-    redis_client = create_async_redis(decode_responses=True)
+    # This worker consumes committed voice turns containing raw PCM. A text-decoding
+    # Redis client tries to UTF-8 decode that binary field before the router can
+    # inspect it, killing the whole worker on ordinary audio bytes.
+    redis_client = create_async_redis(decode_responses=False)
     logger.info("Connected to Redis: %s", REDIS_URL)
     initialize_redis_for_client_manager()
 

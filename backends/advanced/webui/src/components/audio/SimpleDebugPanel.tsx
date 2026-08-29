@@ -66,8 +66,8 @@ export default function SimpleDebugPanel({ recording }: SimpleDebugPanelProps) {
       )}
 
       <div className="mt-3 text-xs text-gray-500 dark:text-gray-500">
-        <p>• Protocol: Wyoming (JSON headers + binary payloads)</p>
-        <p>• Audio Format: 16kHz, Mono, PCM Int16</p>
+        <p>• Protocol: Chronicle audio v2 (generated control + atomic media)</p>
+        <p>• Network Audio: 16kHz, mono, 20ms raw Opus</p>
         <p>• Sequential Flow: Mic → WebSocket → Audio-Start → Streaming</p>
         <p>• Security: {recording.canAccessMicrophone ? '✅ HTTPS/Localhost' : '❌ Insecure Connection'}</p>
       </div>

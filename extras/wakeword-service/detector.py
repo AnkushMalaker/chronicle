@@ -36,12 +36,13 @@ import importlib.resources as ir
 import logging
 import os
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
-from identities import AudioSessionRef, ClientId, SessionId
+from identities import AudioChunkRef, AudioSessionRef, ClientId, SessionId
 from nanowakeword import NanoInterpreter
 from pipecat.audio.turn.base_turn_analyzer import EndOfTurnState
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
@@ -101,6 +102,16 @@ class ClientWakeState:
     also_fired: list = field(default_factory=list)
     arm_time: float = 0.0
     arm_score: float = 0.0
+    # Outcome from the production second-stage verifier at the accepted arm.
+    # None means no verifier was configured/enabled for the arming word.
+    arm_verifier_passed: Optional[bool] = None
+    arm_verifier_score: Optional[float] = None
+    # Durable interaction identity and capture-clock coordinates. Monotonic
+    # ``arm_time`` remains the runtime timeout/debounce clock only.
+    wake_trace_id: Optional[str] = None
+    arm_occurred_at: Optional[float] = None
+    arm_offset_ms: Optional[float] = None
+    arm_capture_epoch: Optional[int] = None
     # Single shared arm gate: one arm per debounce window across all DISPATCH words.
     last_detection_time: float = 0.0
     # Separate debounce for collect-only (shadow) firings, so they neither spam
@@ -119,11 +130,13 @@ class ClientWakeState:
     vad_remainder: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int16)
     )
+    vad_remainder_started_at: Optional[float] = None
     # Leftover PCM not yet aligned to a 1280-sample wake-interpreter frame
     # (shared across wake words — the reframing is identical for all).
     wake_remainder: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int16)
     )
+    wake_remainder_started_at: Optional[float] = None
     # Raw int16 PCM of the armed command turn (arm -> EOT), for batch ASR.
     capture_chunks: list = field(default_factory=list)
     # Count of VAD speech frames seen during this armed capture. Used to gate the
@@ -160,6 +173,22 @@ class ClientWakeState:
 
 
 @dataclass
+class WakeEventInterval:
+    """One event audio span in session-native milliseconds and absolute seconds."""
+
+    start_ms: float
+    end_ms: float
+    started_at: float
+    ended_at: float
+
+    def __post_init__(self) -> None:
+        if self.start_ms < 0 or self.end_ms <= self.start_ms:
+            raise ValueError("wake event interval must have ordered native bounds")
+        if self.started_at <= 0 or self.ended_at <= self.started_at:
+            raise ValueError("wake event interval must have ordered absolute bounds")
+
+
+@dataclass
 class WakeEvent:
     """Emitted when a turn is captured.
 
@@ -185,6 +214,12 @@ class WakeEvent:
     eot_time: float
     score: float
     reason: str  # "smart_turn" | "max_duration" | "stream_end" | "primed" | ...
+    wake_trace_id: Optional[str] = None
+    capture_epoch: Optional[int] = None
+    armed_at: Optional[float] = None
+    end_of_turn_at: Optional[float] = None
+    trigger_interval: Optional[WakeEventInterval] = None
+    command_interval: Optional[WakeEventInterval] = None
     kind: str = "command"  # "command" | "primed_positive"
     also_fired: list = field(default_factory=list)
     # Collect-only (shadow) firing: the model fired but the word is in collect-only
@@ -398,13 +433,20 @@ class HermesDetector:
         )
 
     async def process_frame(
-        self, state: ClientWakeState, session_ref: AudioSessionRef, pcm: bytes
+        self,
+        state: ClientWakeState,
+        session_ref: AudioSessionRef,
+        chunk_ref: AudioChunkRef,
+        pcm: bytes,
+        *,
+        probe_wakeword: str | None = None,
     ) -> Optional[WakeEvent]:
         """Process one PCM frame for a client; returns a WakeEvent on capture.
 
         Args:
             state: This client's wake state.
             session_ref: Stable client identity plus unique audio session identity.
+            chunk_ref: Authoritative capture time and format for ``pcm``.
             pcm: Raw int16 PCM bytes (any length; 0.25 s = 8000 bytes typical).
 
         Returns:
@@ -413,6 +455,12 @@ class HermesDetector:
         audio = np.frombuffer(pcm, dtype=np.int16)
         if audio.size == 0:
             return None
+        if (
+            chunk_ref.sample_rate != SAMPLE_RATE
+            or chunk_ref.channels != 1
+            or chunk_ref.sample_width != 2
+        ):
+            raise ValueError("wake detector requires 16 kHz mono int16 PCM")
 
         # Keep recent audio so an arm can snapshot the window that triggered it
         # (and so a primed capture has a short lead-in before speech onset).
@@ -432,13 +480,20 @@ class HermesDetector:
         if not state.armed:
             # _run_wake arms dispatch words (event comes later from capture) and
             # returns a shadow event immediately for collect-only words.
-            return await asyncio.to_thread(self._run_wake, state, session_ref, audio)
+            return await asyncio.to_thread(
+                self._run_wake,
+                state,
+                session_ref,
+                chunk_ref,
+                audio,
+                probe_wakeword,
+            )
 
         # Armed: drive VAD + Smart Turn to capture the command turn. Left inline —
         # it's async (awaits the Smart Turn model, which already yields), capture is
         # a brief per-turn phase, and a to_thread per 32 ms VAD frame would cost more
         # in handoff than it saves.
-        return await self._run_capture(state, session_ref, audio)
+        return await self._run_capture(state, session_ref, chunk_ref, audio)
 
     def _push_preroll(self, state: ClientWakeState, audio: np.ndarray) -> None:
         """Append audio to the rolling pre-roll, trimming to PREROLL_SAMPLES."""
@@ -474,22 +529,37 @@ class HermesDetector:
         return buf[start:end]
 
     def _run_wake(
-        self, state: ClientWakeState, session_ref: AudioSessionRef, audio: np.ndarray
+        self,
+        state: ClientWakeState,
+        session_ref: AudioSessionRef,
+        chunk_ref: AudioChunkRef,
+        audio: np.ndarray,
+        probe_wakeword: str | None = None,
     ) -> Optional[WakeEvent]:
         client_id = session_ref.client_id
         # Reframe to exactly 1280-sample frames (carry a remainder across calls);
         # the interpreters score 0.0 on any other frame size.
+        remainder_samples = state.wake_remainder.size
         buf = (
             np.concatenate([state.wake_remainder, audio])
-            if state.wake_remainder.size
+            if remainder_samples
             else audio
+        )
+        buf_started_at = (
+            state.wake_remainder_started_at
+            if remainder_samples and state.wake_remainder_started_at is not None
+            else chunk_ref.captured_at - remainder_samples / SAMPLE_RATE
         )
         n_full = (buf.size // WAKE_FRAME_SAMPLES) * WAKE_FRAME_SAMPLES
         state.wake_remainder = buf[n_full:].copy()
+        state.wake_remainder_started_at = (
+            buf_started_at + n_full / SAMPLE_RATE if state.wake_remainder.size else None
+        )
 
         for i in range(0, n_full, WAKE_FRAME_SAMPLES):
             frame = buf[i : i + WAKE_FRAME_SAMPLES]
             now = time.monotonic()
+            frame_end_at = buf_started_at + (i + WAKE_FRAME_SAMPLES) / SAMPLE_RATE
 
             # Score EVERY wake word on this frame; update each patience counter.
             scores: dict[str, float] = {}
@@ -507,8 +577,23 @@ class HermesDetector:
             for w in ready:
                 if w in self.disabled:
                     state.consec[w] = 0
-            collect_ready = [w for w in enabled_ready if w in self.collect_only]
-            dispatch_ready = [w for w in enabled_ready if w not in self.collect_only]
+            # A scoped probe promotes only its requested word through the normal
+            # dispatch/verifier arm path. This lets us acceptance-test a word that
+            # is globally collect-only without mutating shared runtime mode or
+            # letting the resulting arm reach dispatch.
+            collect_ready = [
+                w
+                for w in enabled_ready
+                if w in self.collect_only and w != probe_wakeword
+            ]
+            dispatch_ready = []
+            if probe_wakeword in enabled_ready:
+                dispatch_ready.append(probe_wakeword)
+            dispatch_ready.extend(
+                w
+                for w in enabled_ready
+                if w not in self.collect_only and w != probe_wakeword
+            )
 
             # 1) Collect-only (shadow) firing: snapshot the trigger window for FP
             # review, but DON'T enter the shared armed/capture state (so it never
@@ -559,6 +644,8 @@ class HermesDetector:
                 continue
 
             arm_word = None
+            arm_verifier_passed = None
+            arm_verifier_score = None
             trigger_features, trigger_context = None, b""
             for cand in dispatch_ready:
                 # Snapshot the interpreter's streaming buffer that produced this
@@ -597,6 +684,8 @@ class HermesDetector:
                         f"✅ verifier confirmed '{cand}' '{client_id}' "
                         f"(verify={vprob:.3f})"
                     )
+                    arm_verifier_passed = True
+                    arm_verifier_score = float(vprob)
                 arm_word = cand
                 trigger_features, trigger_context = tf, tc
                 break
@@ -615,6 +704,12 @@ class HermesDetector:
             state.also_fired = also_fired
             state.arm_time = now
             state.arm_score = scores[arm_word]
+            state.arm_verifier_passed = arm_verifier_passed
+            state.arm_verifier_score = arm_verifier_score
+            state.wake_trace_id = str(uuid.uuid4())
+            state.arm_occurred_at = frame_end_at
+            state.arm_offset_ms = (frame_end_at - session_ref.started_at) * 1000
+            state.arm_capture_epoch = session_ref.capture_epoch
             state.last_detection_time = now
             for w in self.wakewords:
                 state.consec[w] = 0
@@ -627,6 +722,7 @@ class HermesDetector:
             for w in self.wakewords:
                 state.interpreters[w].reset()
             state.wake_remainder = np.empty(0, dtype=np.int16)
+            state.wake_remainder_started_at = None
             logger.info(
                 f"🔔 ARMED '{client_id}' word={arm_word} score={scores[arm_word]:.4f}"
                 f"{f' also_fired={also_fired}' if also_fired else ''}"
@@ -651,7 +747,11 @@ class HermesDetector:
         return None
 
     async def _run_capture(
-        self, state: ClientWakeState, session_ref: AudioSessionRef, audio: np.ndarray
+        self,
+        state: ClientWakeState,
+        session_ref: AudioSessionRef,
+        chunk_ref: AudioChunkRef,
+        audio: np.ndarray,
     ) -> Optional[WakeEvent]:
         client_id = session_ref.client_id
         analyzer = state.turn_analyzer
@@ -661,16 +761,24 @@ class HermesDetector:
         state.capture_chunks.append(audio)
 
         # Re-chunk into 512-sample VAD frames, carrying a remainder across calls.
+        remainder_samples = state.vad_remainder.size
         buf = (
-            np.concatenate([state.vad_remainder, audio])
-            if state.vad_remainder.size
-            else audio
+            np.concatenate([state.vad_remainder, audio]) if remainder_samples else audio
+        )
+        buf_started_at = (
+            state.vad_remainder_started_at
+            if remainder_samples and state.vad_remainder_started_at is not None
+            else chunk_ref.captured_at - remainder_samples / SAMPLE_RATE
         )
         n_full = (buf.size // VAD_FRAME_SAMPLES) * VAD_FRAME_SAMPLES
         state.vad_remainder = buf[n_full:].copy()
+        state.vad_remainder_started_at = (
+            buf_started_at + n_full / SAMPLE_RATE if state.vad_remainder.size else None
+        )
 
         for i in range(0, n_full, VAD_FRAME_SAMPLES):
             frame = buf[i : i + VAD_FRAME_SAMPLES]
+            frame_end_at = buf_started_at + (i + VAD_FRAME_SAMPLES) / SAMPLE_RATE
             conf = float(
                 np.asarray(
                     vad(frame.astype(np.float32) / 32768.0, SAMPLE_RATE)
@@ -683,7 +791,9 @@ class HermesDetector:
             # primary signal (see WAKEWORD_STOP_SECS).
             backstop = analyzer.append_audio(frame.tobytes(), is_speech)
             if backstop == EndOfTurnState.COMPLETE:
-                return self._finish_capture(state, session_ref, "stop_secs")
+                return self._finish_capture(
+                    state, session_ref, "stop_secs", end_of_turn_at=frame_end_at
+                )
 
             if is_speech:
                 # Speech (re)started: reset the endpoint tracking; the next query
@@ -700,7 +810,12 @@ class HermesDetector:
                 if state.eot_silence_frames >= state.eot_next_check:
                     model_state, _ = await analyzer.analyze_end_of_turn()
                     if model_state == EndOfTurnState.COMPLETE:
-                        return self._finish_capture(state, session_ref, "smart_turn")
+                        return self._finish_capture(
+                            state,
+                            session_ref,
+                            "smart_turn",
+                            end_of_turn_at=frame_end_at,
+                        )
                     # INCOMPLETE: the model expects more speech — keep listening and
                     # re-query after another stretch of continued silence.
                     state.eot_next_check = (
@@ -709,12 +824,22 @@ class HermesDetector:
 
         # Hard cap on capture duration.
         if (time.monotonic() - state.arm_time) > self.max_arm_secs:
-            return self._finish_capture(state, session_ref, "max_duration")
+            return self._finish_capture(
+                state,
+                session_ref,
+                "max_duration",
+                end_of_turn_at=chunk_ref.captured_at + audio.size / SAMPLE_RATE,
+            )
 
         return None
 
     def _finish_capture(
-        self, state: ClientWakeState, session_ref: AudioSessionRef, reason: str
+        self,
+        state: ClientWakeState,
+        session_ref: AudioSessionRef,
+        reason: str,
+        *,
+        end_of_turn_at: float | None = None,
     ) -> WakeEvent:
         client_id = session_ref.client_id
         eot_time = time.monotonic()
@@ -729,6 +854,21 @@ class HermesDetector:
         # near-silent audio.
         speech_secs = state.capture_speech_frames * VAD_FRAME_SAMPLES / SAMPLE_RATE
         has_speech = state.capture_speech_frames >= self.min_command_speech_frames
+        if (
+            not state.wake_trace_id
+            or state.arm_occurred_at is None
+            or state.arm_offset_ms is None
+            or state.arm_capture_epoch != session_ref.capture_epoch
+        ):
+            raise RuntimeError("armed capture lacks stable interaction clock identity")
+        command_seconds = len(captured) / 2 / SAMPLE_RATE
+        command_end_at = state.arm_occurred_at + max(command_seconds, 1 / SAMPLE_RATE)
+        resolved_eot_at = end_of_turn_at or command_end_at
+        trigger_seconds = len(state.trigger_audio) / 2 / SAMPLE_RATE
+        trigger_start_at = state.arm_occurred_at - max(trigger_seconds, 1 / SAMPLE_RATE)
+        trigger_start_ms = max(
+            0.0, state.arm_offset_ms - max(trigger_seconds, 1 / SAMPLE_RATE) * 1000
+        )
         event = WakeEvent(
             client_id=session_ref.client_id,
             session_id=session_ref.session_id,
@@ -738,6 +878,23 @@ class HermesDetector:
             eot_time=eot_time,
             score=state.arm_score,
             reason=reason,
+            wake_trace_id=state.wake_trace_id,
+            capture_epoch=session_ref.capture_epoch,
+            armed_at=state.arm_occurred_at,
+            end_of_turn_at=resolved_eot_at,
+            trigger_interval=WakeEventInterval(
+                start_ms=trigger_start_ms,
+                end_ms=state.arm_offset_ms,
+                started_at=trigger_start_at,
+                ended_at=state.arm_occurred_at,
+            ),
+            command_interval=WakeEventInterval(
+                start_ms=state.arm_offset_ms,
+                end_ms=state.arm_offset_ms
+                + max(command_seconds, 1 / SAMPLE_RATE) * 1000,
+                started_at=state.arm_occurred_at,
+                ended_at=command_end_at,
+            ),
             kind="command",
             also_fired=list(state.also_fired),
             has_speech=has_speech,
@@ -751,15 +908,27 @@ class HermesDetector:
             f"speech={speech_secs:.2f}s has_speech={has_speech}"
         )
         # Reset state for the next wake word.
+        self.reset_armed_state(state)
+        return event
+
+    def reset_armed_state(self, state: ClientWakeState) -> None:
+        """Clear an accepted arm without emitting a command or external effect."""
         state.armed = False
         state.armed_wakeword = None
         state.also_fired = []
         state.arm_time = 0.0
         state.arm_score = 0.0
+        state.arm_verifier_passed = None
+        state.arm_verifier_score = None
+        state.wake_trace_id = None
+        state.arm_occurred_at = None
+        state.arm_offset_ms = None
+        state.arm_capture_epoch = None
         state.trigger_audio = b""
         state.trigger_features = None
         state.trigger_context = b""
         state.vad_remainder = np.empty(0, dtype=np.int16)
+        state.vad_remainder_started_at = None
         state.wake_remainder = np.empty(0, dtype=np.int16)
         state.capture_chunks = []
         state.capture_speech_frames = 0
@@ -768,7 +937,6 @@ class HermesDetector:
         state.eot_next_check = 0
         if state.turn_analyzer is not None:
             state.turn_analyzer.clear()
-        return event
 
     # ------------------------------------------------------------------ #
     # "Prime + say it" positive capture (false-negative / hard-positive collection)

@@ -6,12 +6,13 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Awaitable, Callable, Literal, TypeVar
 
 import redis.asyncio as redis
+from google.protobuf import duration_pb2
 from redis.exceptions import WatchError
 
+from advanced_omi_backend.audio_contract.v2 import audio_pb2
 from advanced_omi_backend.redis_keys import (
     ClientId,
     UserId,
@@ -19,21 +20,21 @@ from advanced_omi_backend.redis_keys import (
     device_downlink_channel,
     response_generation,
     voice_response,
-    voice_response_media,
+)
+from advanced_omi_backend.services.playback_audio import (
+    DOWNLINK_BITRATE_BPS,
+    DOWNLINK_FRAME_MS,
+    DOWNLINK_SAMPLE_RATE_HZ,
 )
 from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
-from advanced_omi_backend.voice_protocol import (
-    MAX_RESPONSE_BYTES,
-    MAX_RESPONSE_DURATION_MS,
-    ResponseAudio,
-    ResponseCancel,
-)
 
 RESPONSE_RETENTION_SECONDS = 24 * 60 * 60
-MEDIA_RETENTION_SECONDS = 5 * 60
 GENERATION_RETENTION_SECONDS = 24 * 60 * 60
 PLAYBACK_START_ACK_SECONDS = 5.0
 PLAYBACK_COMPLETION_GRACE_SECONDS = 2.0
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_RESPONSE_DURATION_MS = 60_000
+WAKE_INTERACTION_EVENTS_STREAM = "wakeword:interaction-events"
 
 ResponseState = Literal[
     "queued",
@@ -46,7 +47,7 @@ ResponseState = Literal[
     "failed",
 ]
 ResponseKind = Literal["speech", "tone"]
-ResponseTransport = Literal["voice_v1"]
+ResponseTransport = Literal["audio_v2"]
 T = TypeVar("T")
 
 
@@ -87,6 +88,7 @@ class ResponseRecord:
     sample_rate: int | None = None
     playback_monotonic_ms: int | None = None
     terminal_reason: str | None = None
+    wake_trace_id: str | None = None
 
 
 def _decode(value):
@@ -100,6 +102,14 @@ def _decode_hash(raw: dict) -> dict[str, str]:
 def _optional_int(values: dict[str, str], key: str) -> int | None:
     value = values.get(key, "")
     return int(value) if value else None
+
+
+def _capture_binding(record: ResponseRecord) -> audio_pb2.CaptureBinding:
+    return audio_pb2.CaptureBinding(
+        capture_session_id=audio_pb2.CaptureSessionId(value=record.audio_session_id),
+        voice_session_id=audio_pb2.VoiceSessionId(value=record.voice_session_id),
+        capture_epoch=record.capture_epoch,
+    )
 
 
 def _record_from_hash(raw: dict) -> ResponseRecord | None:
@@ -130,6 +140,7 @@ def _record_from_hash(raw: dict) -> ResponseRecord | None:
         sample_rate=_optional_int(values, "sample_rate"),
         playback_monotonic_ms=_optional_int(values, "playback_monotonic_ms"),
         terminal_reason=values.get("terminal_reason") or None,
+        wake_trace_id=values.get("wake_trace_id") or None,
     )
 
 
@@ -158,6 +169,27 @@ def _record_mapping(record: ResponseRecord) -> dict[str, str]:
         "sample_rate": str(record.sample_rate or ""),
         "playback_monotonic_ms": str(record.playback_monotonic_ms or ""),
         "terminal_reason": record.terminal_reason or "",
+        "wake_trace_id": record.wake_trace_id or "",
+    }
+
+
+def _wake_lifecycle_event(
+    record: ResponseRecord, stage: str, occurred_at: float
+) -> dict:
+    return {
+        "wake_trace_id": record.wake_trace_id,
+        "stage": stage,
+        "occurred_at": occurred_at,
+        "user_id": record.user_id,
+        "client_id": record.client_id,
+        "audio_session_id": record.audio_session_id,
+        "capture_epoch": record.capture_epoch,
+        "voice_session_id": record.voice_session_id,
+        "turn_id": record.turn_id,
+        "turn_revision": record.turn_revision,
+        "response_id": record.response_id,
+        "generation": record.generation,
+        "response_state": record.state,
     }
 
 
@@ -261,31 +293,15 @@ class ResponseCoordinator:
                     continue
 
         if cancelled is not None and cancelled.state == "cancelled":
-            event = ResponseCancel(
-                type="response.cancel",
-                event_id=uuid.uuid4(),
-                client_id=cancelled.client_id,
-                audio_session_id=cancelled.audio_session_id,
-                voice_session_id=cancelled.voice_session_id,
-                capture_epoch=cancelled.capture_epoch,
-                sent_at=datetime.now(timezone.utc),
-                response_id=cancelled.response_id,
-                generation=generation,
-                reason=(
-                    reason
-                    if reason
-                    in {
-                        "barge_in",
-                        "new_turn",
-                        "replacement",
-                        "route_change",
-                        "disconnect",
-                        "session_stopped",
-                    }
-                    else "replacement"
-                ),
+            event = audio_pb2.DeviceDownlinkEvent(
+                cancel_playback=audio_pb2.CancelPlayback(
+                    binding=_capture_binding(cancelled),
+                    response_id=audio_pb2.ResponseId(value=cancelled.response_id),
+                    generation=generation,
+                    reason=audio_pb2.STOP_REASON_INTERACTION_COMPLETE,
+                )
             )
-            await self._publish(cancelled.client_id, event.model_dump(mode="json"))
+            await self._publish(cancelled.client_id, event.SerializeToString())
         return generation
 
     async def queue(
@@ -304,6 +320,7 @@ class ResponseCoordinator:
         barge_in_allowed: bool,
         trace_id: str,
         causation_id: str,
+        wake_trace_id: str | None = None,
     ) -> ResponseRecord:
         if kind == "tone" and barge_in_allowed:
             raise ValueError("tones cannot claim barge-in support")
@@ -345,10 +362,11 @@ class ResponseCoordinator:
                         turn_revision=turn_revision,
                         generation=generation,
                         kind=kind,
-                        transport="voice_v1",
+                        transport="audio_v2",
                         barge_in_allowed=barge_in_allowed,
                         trace_id=trace_id,
                         causation_id=causation_id,
+                        wake_trace_id=wake_trace_id,
                         state="queued",
                         created_at=now,
                         updated_at=now,
@@ -362,6 +380,19 @@ class ResponseCoordinator:
                         record.response_id,
                         ex=RESPONSE_RETENTION_SECONDS,
                     )
+                    if record.wake_trace_id:
+                        pipe.xadd(
+                            WAKE_INTERACTION_EVENTS_STREAM,
+                            {
+                                "event": json.dumps(
+                                    _wake_lifecycle_event(
+                                        record, "response_queued", now
+                                    ),
+                                    separators=(",", ":"),
+                                    sort_keys=True,
+                                )
+                            },
+                        )
                     await pipe.execute()
                     break
                 except WatchError:
@@ -417,6 +448,26 @@ class ResponseCoordinator:
                     pipe.expire(record_key, RESPONSE_RETENTION_SECONDS)
                     if state in {"done", "cancelled", "failed"}:
                         pipe.delete(current_key)
+                    stage = {
+                        "ready": "response_ready",
+                        "offered": "response_offered",
+                        "playing": "response_playing",
+                        "done": "response_done",
+                    }.get(state)
+                    if stage and record.wake_trace_id:
+                        lifecycle_record = ResponseRecord(
+                            **{**record.__dict__, "state": state, "updated_at": now}
+                        )
+                        pipe.xadd(
+                            WAKE_INTERACTION_EVENTS_STREAM,
+                            {
+                                "event": json.dumps(
+                                    _wake_lifecycle_event(lifecycle_record, stage, now),
+                                    separators=(",", ":"),
+                                    sort_keys=True,
+                                )
+                            },
+                        )
                     await pipe.execute()
                     updated = await self.get(response_id)
                     if updated is None:
@@ -504,17 +555,21 @@ class ResponseCoordinator:
             },
         )
 
-    async def offer(self, response_id: str, wav: bytes) -> ResponseRecord:
+    async def offer(
+        self, response_id: str, opus_packets: tuple[bytes, ...]
+    ) -> ResponseRecord:
         record = await self.get(response_id)
-        if record is None or record.state != "ready" or record.transport != "voice_v1":
+        if record is None or record.state != "ready" or record.transport != "audio_v2":
             raise InvalidResponseTransition("only a ready response can be offered")
         await self.assert_current(record)
+        encoded_bytes = sum(len(packet) for packet in opus_packets)
         if (
             record.byte_length is None
-            or len(wav) != record.byte_length
-            or len(wav) > MAX_RESPONSE_BYTES
+            or encoded_bytes != record.byte_length
+            or encoded_bytes > MAX_RESPONSE_BYTES
+            or not opus_packets
         ):
-            raise ValueError("WAV body does not match response metadata")
+            raise ValueError("Opus packets do not match response metadata")
         if not await self.voice_sessions.binding_matches(
             user_id=record.user_id,
             client_id=record.client_id,
@@ -525,51 +580,44 @@ class ResponseCoordinator:
         ):
             raise StaleResponse("voice binding became stale before offer")
 
-        await self.redis.set(
-            voice_response_media(response_id), wav, ex=MEDIA_RETENTION_SECONDS
-        )
-        await self.assert_current(record)
-        if not await self.voice_sessions.binding_matches(
-            user_id=record.user_id,
-            client_id=record.client_id,
-            audio_session_id=record.audio_session_id,
-            voice_session_id=record.voice_session_id,
-            capture_epoch=record.capture_epoch,
-            socket_id=record.socket_id,
-        ):
-            raise StaleResponse("voice binding became stale while offering")
         offered = await self._set_state(
             response_id, expected={"ready"}, state="offered"
         )
-        event = ResponseAudio(
-            type="response.audio",
-            event_id=uuid.uuid4(),
-            client_id=offered.client_id,
-            audio_session_id=offered.audio_session_id,
-            voice_session_id=offered.voice_session_id,
-            capture_epoch=offered.capture_epoch,
-            sent_at=datetime.now(timezone.utc),
-            turn_id=offered.turn_id,
-            turn_revision=offered.turn_revision,
-            response_id=offered.response_id,
-            generation=offered.generation,
-            sequence=0,
-            kind=offered.kind,
-            barge_in_allowed=offered.barge_in_allowed,
-            media_type="audio/wav",
-            sample_rate=offered.sample_rate,
-            byte_length=offered.byte_length,
-            duration_ms=offered.duration_ms,
-            payload_length=offered.byte_length,
-            trace_id=offered.trace_id,
-            causation_id=offered.causation_id,
+        duration = duration_pb2.Duration()
+        duration.FromMilliseconds(offered.duration_ms or 0)
+        offer = audio_pb2.DeviceDownlinkEvent(
+            playback_offer=audio_pb2.PlaybackOffer(
+                binding=_capture_binding(offered),
+                turn_id=audio_pb2.TurnId(value=offered.turn_id),
+                response_id=audio_pb2.ResponseId(value=offered.response_id),
+                generation=offered.generation,
+                audio_spec=audio_pb2.AudioSpec(
+                    codec=audio_pb2.AUDIO_CODEC_OPUS,
+                    sample_rate_hz=DOWNLINK_SAMPLE_RATE_HZ,
+                    channel_count=1,
+                    frame_duration=duration_pb2.Duration(
+                        nanos=DOWNLINK_FRAME_MS * 1_000_000
+                    ),
+                    bitrate_bps=DOWNLINK_BITRATE_BPS,
+                ),
+                duration=duration,
+                barge_in_allowed=offered.barge_in_allowed,
+            )
         )
-        await self._publish(offered.client_id, event.model_dump(mode="json"))
+        await self._publish(offered.client_id, offer.SerializeToString())
+        for sequence, payload in enumerate(opus_packets):
+            media = audio_pb2.DeviceDownlinkEvent(
+                playback=audio_pb2.PlaybackMediaPacket(
+                    response_id=audio_pb2.ResponseId(value=offered.response_id),
+                    generation=offered.generation,
+                    sequence=sequence,
+                    final_packet=sequence == len(opus_packets) - 1,
+                    opus_payload=payload,
+                )
+            )
+            await self._publish(offered.client_id, media.SerializeToString())
         await self.assert_current(offered)
         return offered
-
-    async def read_media(self, response_id: str) -> bytes | None:
-        return await self.redis.get(voice_response_media(response_id))
 
     async def playback(
         self,
@@ -640,8 +688,6 @@ class ResponseCoordinator:
             },
         )
 
-    async def _publish(self, client_id: str, payload: dict) -> None:
+    async def _publish(self, client_id: str, payload: bytes) -> None:
         channel = str(device_downlink_channel(ClientId.from_value(client_id)))
-        await self.redis.publish(
-            channel, json.dumps(payload, separators=(",", ":"), sort_keys=True)
-        )
+        await self.redis.publish(channel, payload)

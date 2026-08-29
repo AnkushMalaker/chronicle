@@ -479,6 +479,13 @@ class UnprimeRequest(BaseModel):
     client_id: str
 
 
+class ProbeRequest(BaseModel):
+    client_id: str
+    audio_session_id: str
+    wakeword: str
+    timeout_seconds: float = 15
+
+
 class LabelRequest(BaseModel):
     label: str  # "wake" -> positive, "not_wake" -> negative
 
@@ -612,6 +619,42 @@ async def unprime(req: UnprimeRequest):
             detail=f"No priming stream '{req.client_id}' to stop",
         )
     return {"client_id": req.client_id, "unprimed": True}
+
+
+@app.post("/probes", status_code=201)
+async def start_probe(req: ProbeRequest):
+    """Run production wake detection for one stream with every effect suppressed."""
+    consumer: WakeWordConsumer = app.state.consumer
+    try:
+        return consumer.start_probe(
+            req.client_id,
+            req.audio_session_id,
+            req.wakeword,
+            timeout_seconds=req.timeout_seconds,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        status_code = 409 if "already active" in str(exc) else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@app.get("/probes/{probe_id}")
+async def get_probe(probe_id: str):
+    consumer: WakeWordConsumer = app.state.consumer
+    try:
+        return consumer.get_probe(probe_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/probes/{probe_id}")
+async def cancel_probe(probe_id: str):
+    consumer: WakeWordConsumer = app.state.consumer
+    try:
+        return consumer.cancel_probe(probe_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/samples")

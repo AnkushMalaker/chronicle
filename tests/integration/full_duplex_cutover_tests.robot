@@ -34,13 +34,16 @@ Run Backend Contract Tests
 
 
 *** Test Cases ***
-Protocol V1 Phone Enforces Bound Binary Playback And Reconnect Fences
-    [Documentation]    Simulated protocol-v1 phone covers activation, binary response
-    ...                delivery, playback ACKs, duplicate events, barge-in cancellation,
-    ...                stale sockets, route changes, resume-token rotation, and the
-    ...                explicit old-client upgrade boundary.
+Audio V2 Enforces Bound Capture Playback And Connection Fences
+    [Documentation]    Audio-v2 contract tests cover generated controls, atomic media,
+    ...                exact connection leases, durable packet ACKs, playback, and
+    ...                stale-binding rejection.
     Run Backend Contract Tests
-    ...    /workspace/backends/advanced/tests/test_voice_websocket_entrypoints.py
+    ...    /workspace/backends/advanced/tests/test_audio_protocol_v2.py
+    ...    /workspace/backends/advanced/tests/test_audio_v2_ingress.py
+    ...    /workspace/backends/advanced/tests/test_audio_v2_downlink.py
+    ...    /workspace/backends/advanced/tests/test_client_connection_lease.py
+    ...    /workspace/backends/advanced/tests/test_audio_durability.py
     ...    /workspace/backends/advanced/tests/test_response_coordinator.py
     ...    /workspace/backends/advanced/tests/test_voice_session_coordinator.py
     ...    /workspace/backends/advanced/tests/test_voice_properties.py

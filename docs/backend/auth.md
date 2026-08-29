@@ -140,14 +140,12 @@ curl -X POST "http://localhost:8000/auth/jwt/login" \
 
 #### Token-based (Recommended)
 ```javascript
-const ws = new WebSocket('ws://localhost:8000/ws?codec=pcm&token=JWT_TOKEN&device_name=phone');
+const ws = new WebSocket('ws://localhost:8000/ws/audio', 'chronicle.audio.v2');
+// Send JWT_TOKEN in the generated ClientHello.bearer_token field.
 ```
 
-#### Cookie-based
-```javascript
-// Requires existing cookie from web login
-const ws = new WebSocket('ws://localhost:8000/ws?codec=pcm&device_name=phone');
-```
+The audio-v2 socket authenticates with the bearer token carried by the generated
+`ClientHello`; query-string and cookie authentication are not audio interfaces.
 
 ## Client ID Management
 
@@ -223,9 +221,8 @@ COOKIE_SECURE=false
 - `GET /users/me` - Get current user info
 - `PATCH /users/me` - Update user profile
 
-### WebSocket Endpoints
-- `ws://host/ws?codec=opus` - Opus audio stream with auth
-- `ws://host/ws?codec=pcm` - PCM audio stream with auth (default)
+### WebSocket Endpoint
+- `ws://host/ws/audio` - Chronicle audio v2 with generated controls and raw Opus media
 
 ## Error Handling
 

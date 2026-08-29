@@ -34,8 +34,8 @@ Get Client ID From Device Name
 
 
 Stream Audio File Via WebSocket
-    [Documentation]    Stream a WAV file via WebSocket using Wyoming protocol
-    ...                Uses the shared AudioStreamClient from advanced_omi_backend.clients
+    [Documentation]    Stream a WAV file via Chronicle audio v2
+    ...                Uses the shared AudioV2Client from chronicle-client
     [Arguments]    ${audio_file_path}    ${device_name}=robot-test    ${recording_mode}=streaming
 
     File Should Exist    ${audio_file_path}

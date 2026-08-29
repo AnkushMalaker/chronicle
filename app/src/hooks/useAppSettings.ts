@@ -12,7 +12,7 @@ import {
 import { recoverBackendUrl } from '../services/serviceManager';
 import { httpUrlToWebSocketUrl } from '../utils/urlConversion';
 
-const DEFAULT_WS_URL = 'ws://localhost:8000/ws';
+const DEFAULT_WS_URL = 'ws://localhost:8000/ws/audio';
 
 export interface AppSettings {
   webSocketUrl: string;

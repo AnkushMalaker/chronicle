@@ -3,6 +3,7 @@ import { BACKEND_URL } from '../services/api'
 import { getStorageKey } from '../utils/storage'
 import { useAuth } from './AuthContext'
 import { setActiveWakeClientId } from '../hooks/useWakeFeedback'
+import { WebAudioV2Session } from '../protocol/webAudioV2Session'
 
 const log = import.meta.env.DEV ? console.log.bind(console) : () => {}
 
@@ -78,6 +79,7 @@ export interface RecordingContextType {
 }
 
 const RecordingContext = createContext<RecordingContextType | undefined>(undefined)
+const RESPONSE_DRAIN_TIMEOUT_MS = 15_000
 
 export function RecordingProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth()
@@ -94,7 +96,17 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
   // Microphone selection
   const [availableDevices, setAvailableDevices] = useState<MediaDeviceInfo[]>([])
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null)
+  const [selectedDeviceId, setSelectedDeviceIdState] = useState<string | null>(
+    () => localStorage.getItem(getStorageKey('microphoneDeviceId'))
+  )
+  const setSelectedDeviceId = useCallback((id: string | null) => {
+    setSelectedDeviceIdState(id)
+    if (id) {
+      localStorage.setItem(getStorageKey('microphoneDeviceId'), id)
+    } else {
+      localStorage.removeItem(getStorageKey('microphoneDeviceId'))
+    }
+  }, [])
   // System-audio loopback device for Firefox meeting/tab mode ("Monitor of …").
   // Persisted: auto-detect can't know which sink the user actually listens through
   // (each output has its own monitor), so remember the last working choice.
@@ -124,7 +136,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   })
 
   // Refs for direct access
-  const wsRef = useRef<WebSocket | null>(null)
+  const audioSessionRef = useRef<WebAudioV2Session | null>(null)
   const mediaStreamRef = useRef<MediaStream | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
@@ -133,8 +145,11 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const durationIntervalRef = useRef<ReturnType<typeof setInterval>>()
   const keepAliveIntervalRef = useRef<ReturnType<typeof setInterval>>()
   const systemAudioWatchRef = useRef<ReturnType<typeof setInterval>>()
+  const responseDrainTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
+  const responseDrainActiveRef = useRef(false)
   const chunkCountRef = useRef(0)
   const audioProcessingStartedRef = useRef(false)
+  const captureEpochRef = useRef(0)
 
   // Check if we're on localhost or using HTTPS
   const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
@@ -185,13 +200,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     return `${mins}:${secs.toString().padStart(2, '0')}`
   }, [])
 
-  // Cleanup function
-  const cleanup = useCallback(() => {
-    log('Cleaning up audio recording resources')
-
-    // No longer streaming as any client — stop reacting to wake-word SSE feedback.
-    setActiveWakeClientId(null)
-
+  const cleanupCapture = useCallback(() => {
+    log('Cleaning up audio capture resources')
     // Stop audio processing
     audioProcessingStartedRef.current = false
 
@@ -216,21 +226,9 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     setAnalyserState(null)
     processorRef.current = null
 
-    // Clean up WebSocket
-    if (wsRef.current) {
-      wsRef.current.close()
-      wsRef.current = null
-    }
-
-    // Clear intervals
     if (durationIntervalRef.current) {
       clearInterval(durationIntervalRef.current)
       durationIntervalRef.current = undefined
-    }
-
-    if (keepAliveIntervalRef.current) {
-      clearInterval(keepAliveIntervalRef.current)
-      keepAliveIntervalRef.current = undefined
     }
 
     if (systemAudioWatchRef.current) {
@@ -243,6 +241,30 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     // Reset counters
     chunkCountRef.current = 0
   }, [])
+
+  const cleanupTransport = useCallback(() => {
+    log('Cleaning up audio-v2 transport')
+    setActiveWakeClientId(null)
+    responseDrainActiveRef.current = false
+
+    if (responseDrainTimeoutRef.current) {
+      clearTimeout(responseDrainTimeoutRef.current)
+      responseDrainTimeoutRef.current = undefined
+    }
+
+    void audioSessionRef.current?.stop().catch(() => undefined)
+    audioSessionRef.current = null
+
+    if (keepAliveIntervalRef.current) {
+      clearInterval(keepAliveIntervalRef.current)
+      keepAliveIntervalRef.current = undefined
+    }
+  }, [])
+
+  const cleanup = useCallback(() => {
+    cleanupCapture()
+    cleanupTransport()
+  }, [cleanupCapture, cleanupTransport])
 
   // Step 1: Get microphone access
   const getMicrophoneAccess = useCallback(async (): Promise<MediaStream> => {
@@ -383,166 +405,31 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     return stream
   }, [monitorDeviceId])
 
-  // Step 2: Connect WebSocket
-  const connectWebSocket = useCallback(async (): Promise<WebSocket> => {
-    log('Step 2: Connecting to WebSocket')
-
+  // Step 2: Connect and bind the generated audio V2 session.
+  const connectAudioSession = useCallback(async (): Promise<WebAudioV2Session> => {
     const token = localStorage.getItem(getStorageKey('token'))
-    if (!token) {
-      throw new Error('No authentication token found')
-    }
+    if (!token) throw new Error('No authentication token found')
+    const base = BACKEND_URL && BACKEND_URL.startsWith('http')
+      ? new URL(BACKEND_URL)
+      : new URL(BACKEND_URL || '/', window.location.origin)
+    base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:'
+    base.pathname = `${base.pathname.replace(/\/$/, '')}/ws/audio`
+    base.search = ''
+    const session = new WebAudioV2Session(base.toString(), token, clientId => setActiveWakeClientId(clientId || null))
+    await session.connect()
+    audioSessionRef.current = session
+    setDebugStats(prev => ({ ...prev, connectionAttempts: prev.connectionAttempts + 1, sessionStartTime: new Date() }))
+    return session
+  }, [])
 
-    // Build WebSocket URL using BACKEND_URL from API service (handles base path correctly)
-    const { protocol } = window.location
-    const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:'
-
-    let wsUrl: string
-    if (BACKEND_URL && BACKEND_URL.startsWith('http')) {
-      // BACKEND_URL is a full URL (e.g., http://localhost:8000)
-      const backendHost = BACKEND_URL.replace(/^https?:\/\//, '')
-      wsUrl = `${wsProtocol}//${backendHost}/ws?codec=pcm&token=${token}&device_name=webui-recorder`
-    } else if (BACKEND_URL && BACKEND_URL !== '') {
-      // BACKEND_URL is a path (e.g., /prod)
-      wsUrl = `${wsProtocol}//${window.location.host}${BACKEND_URL}/ws?codec=pcm&token=${token}&device_name=webui-recorder`
-    } else {
-      // BACKEND_URL is empty (same origin)
-      wsUrl = `${wsProtocol}//${window.location.host}/ws?codec=pcm&token=${token}&device_name=webui-recorder`
-    }
-
-    return new Promise<WebSocket>((resolve, reject) => {
-      const ws = new WebSocket(wsUrl)
-      // Don't set binaryType yet - only when needed for audio chunks
-
-      ws.onopen = () => {
-        log('WebSocket connected')
-
-        // Add stabilization delay before resolving
-        setTimeout(() => {
-          wsRef.current = ws
-          setDebugStats(prev => ({
-            ...prev,
-            connectionAttempts: prev.connectionAttempts + 1,
-            sessionStartTime: new Date()
-          }))
-
-          // Start keepalive ping every 30 seconds
-          keepAliveIntervalRef.current = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) {
-              try {
-                const ping = { type: 'ping', payload_length: null }
-                ws.send(JSON.stringify(ping) + '\n')
-              } catch (e) {
-                console.error('Failed to send keepalive ping:', e)
-              }
-            }
-          }, 30000)
-
-          log('WebSocket stabilized and ready')
-          resolve(ws)
-        }, 100) // 100ms stabilization delay
-      }
-
-      ws.onclose = (event) => {
-        log('WebSocket disconnected:', event.code, event.reason)
-        wsRef.current = null
-
-        if (keepAliveIntervalRef.current) {
-          clearInterval(keepAliveIntervalRef.current)
-          keepAliveIntervalRef.current = undefined
-        }
-
-        // If recording was active, set error state
-        if (isRecording) {
-          setError('WebSocket connection lost')
-          setCurrentStep('error')
-          cleanup()
-          setIsRecording(false)
-        }
-      }
-
-      ws.onerror = (error) => {
-        console.error('🔌 WebSocket error:', error)
-        reject(new Error('Failed to connect to backend'))
-      }
-
-      ws.onmessage = (event) => {
-        log('Received message from server:', event.data)
-        setDebugStats(prev => ({ ...prev, messagesReceived: prev.messagesReceived + 1 }))
-
-        // Parse server messages
-        try {
-          const message = JSON.parse(event.data)
-
-          // Handle error messages from backend
-          if (message.type === 'error') {
-            const errorMsg = message.message || 'Unknown error from server'
-            console.error('❌ Server error:', errorMsg)
-
-            setError(errorMsg)
-            setCurrentStep('error')
-            setDebugStats(prev => ({
-              ...prev,
-              lastError: errorMsg,
-              lastErrorTime: new Date()
-            }))
-
-            // Stop recording and cleanup
-            cleanup()
-            setIsRecording(false)
-          }
-
-          // The backend confirms the connection with the resolved client_id. Record it
-          // so wake-word SSE feedback can be scoped to this device (see useSSE).
-          else if (message.type === 'ready') {
-            if (message.client_id) setActiveWakeClientId(message.client_id)
-          }
-
-          // Handle other message types (interim_transcript, etc.)
-          else if (message.type === 'interim_transcript') {
-            log('Received interim transcript:', message.data)
-            // Streaming providers send a cumulative transcript that grows over
-            // time, so replace (not append) with the latest text.
-            const text = message.data?.text
-            if (typeof text === 'string' && text.length > 0) {
-              setLiveTranscript(text)
-            }
-          }
-
-        } catch (e) {
-          // Not JSON, ignore
-          log('Non-JSON message:', event.data)
-        }
-      }
-    })
-  }, [isRecording, cleanup])
-
-  // Step 3: Send audio-start message
-  const sendAudioStartMessage = useCallback(async (ws: WebSocket): Promise<void> => {
-    log('Step 3: Sending audio-start message')
-
-    if (ws.readyState !== WebSocket.OPEN) {
-      throw new Error('WebSocket not connected')
-    }
-
-    const rate = audioContextRef.current?.sampleRate ?? 16000
-
-    const startMessage = {
-      type: 'audio-start',
-      data: {
-        rate,
-        width: 2,
-        channels: 1,
-        mode: mode  // Pass recording mode to backend
-      },
-      payload_length: null
-    }
-
-    ws.send(JSON.stringify(startMessage) + '\n')
-    log(`Audio-start message sent with mode: ${mode}, rate: ${rate}`)
-  }, [mode])
+  // Step 3: Open a source-native capture under the V2 binding.
+  const startAudioSession = useCallback(async (session: WebAudioV2Session): Promise<void> => {
+    captureEpochRef.current += 1
+    await session.start(captureEpochRef.current)
+  }, [])
 
   // Step 4: Start audio streaming
-  const startAudioStreaming = useCallback(async (micStream: MediaStream | null, ws: WebSocket): Promise<void> => {
+  const startAudioStreaming = useCallback(async (micStream: MediaStream | null, session: WebAudioV2Session): Promise<void> => {
     log('Step 4: Starting audio streaming')
 
     // Reuse the AudioContext created in startRecording
@@ -564,8 +451,13 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     // Wait brief moment for backend to process audio-start
     await new Promise(resolve => setTimeout(resolve, 100))
 
-    // Set up audio processing
-    const processor = audioContext.createScriptProcessor(4096, 1, 1)
+    // ScriptProcessor only supports power-of-two buffers. Select one from the
+    // actual context rate that satisfies the protocol's 20-100 ms frame contract.
+    const processor = audioContext.createScriptProcessor(
+      1024,
+      1,
+      1,
+    )
 
     // Connect mic source if available
     if (micStream) {
@@ -626,67 +518,23 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       // Log first few calls to debug
       if (processCallCount <= 3) {
         log(`Audio process callback #${processCallCount}`, {
-          wsState: ws?.readyState,
-          wsOpen: ws?.readyState === WebSocket.OPEN,
+          transport: 'chronicle.audio.v2',
           audioProcessingStarted: audioProcessingStartedRef.current,
           audioLevel: avgLevel.toFixed(6),
           hasAudio: avgLevel > 0.001
         })
       }
 
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        if (processCallCount === 1) {
-          console.warn('⚠️ WebSocket not open in audio callback')
-        }
-        return
-      }
-
-      if (!audioProcessingStartedRef.current) {
-        log('Audio processing not started yet, skipping chunk')
-        return
-      }
-
-      // Convert float32 to int16 PCM
-      const pcmBuffer = new Int16Array(inputData.length)
-      for (let i = 0; i < inputData.length; i++) {
-        const sample = Math.max(-1, Math.min(1, inputData[i]))
-        pcmBuffer[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF
-      }
-
+      if (!audioProcessingStartedRef.current) return
       try {
-        const chunkHeader = {
-          type: 'audio-chunk',
-          data: {
-            rate: audioContext.sampleRate,
-            width: 2,
-            channels: 1
-          },
-          payload_length: pcmBuffer.byteLength
-        }
-
-        // Set binary type for WebSocket before sending binary data
-        if (ws.binaryType !== 'arraybuffer') {
-          ws.binaryType = 'arraybuffer'
-          log('Set WebSocket binaryType to arraybuffer for audio chunks')
-        }
-
-        ws.send(JSON.stringify(chunkHeader) + '\n')
-        ws.send(new Uint8Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength))
-
-        // Update debug stats
+        session.push(inputData)
         chunkCountRef.current++
         setDebugStats(prev => ({ ...prev, chunksSent: chunkCountRef.current }))
-
-        // Log first few chunks
-        if (chunkCountRef.current <= 3) {
-          log(`Sent audio chunk #${chunkCountRef.current}, size: ${pcmBuffer.byteLength} bytes`)
-        }
       } catch (error) {
-        console.error('Failed to send audio chunk:', error)
         setDebugStats(prev => ({
           ...prev,
-          lastError: error instanceof Error ? error.message : 'Chunk send failed',
-          lastErrorTime: new Date()
+          lastError: error instanceof Error ? error.message : 'Opus encode failed',
+          lastErrorTime: new Date(),
         }))
       }
     }
@@ -703,6 +551,9 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     const needsDisplayAudio = audioSource !== 'mic'
 
     try {
+      // A stopped capture may still be draining a response on its old socket.
+      // Starting a fresh capture explicitly retires that transport first.
+      cleanupTransport()
       setError(null)
       setLiveTranscript('')
 
@@ -733,15 +584,15 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
       setCurrentStep('websocket')
       // Step 2: Connect WebSocket (includes stabilization delay)
-      const ws = await connectWebSocket()
+      const session = await connectAudioSession()
 
       setCurrentStep('audio-start')
       // Step 3: Send audio-start message (uses audioContextRef for sample rate)
-      await sendAudioStartMessage(ws)
+      await startAudioSession(session)
 
       setCurrentStep('streaming')
       // Step 4: Start audio streaming (reuses existing AudioContext)
-      await startAudioStreaming(micStream, ws)
+      await startAudioStreaming(micStream, session)
 
       // All steps complete - mark as recording
       setIsRecording(true)
@@ -765,7 +616,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       }))
       cleanup()
     }
-  }, [getMicrophoneAccess, getDisplayAudio, getMonitorAudio, monitorDeviceId, audioSource, connectWebSocket, sendAudioStartMessage, startAudioStreaming, cleanup])
+  }, [getMicrophoneAccess, getDisplayAudio, getMonitorAudio, monitorDeviceId, audioSource, connectAudioSession, startAudioSession, startAudioStreaming, cleanup, cleanupTransport])
 
   // Stop recording function
   const stopRecording = useCallback(() => {
@@ -777,23 +628,16 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     // Stop audio processing
     audioProcessingStartedRef.current = false
 
-    // Send audio-stop message if WebSocket is still open
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      try {
-        const stopMessage = {
-          type: 'audio-stop',
-          data: { timestamp: Date.now() },
-          payload_length: null
-        }
-        wsRef.current.send(JSON.stringify(stopMessage) + '\n')
-        log('Audio-stop message sent')
-      } catch (error) {
-        console.error('Failed to send audio-stop:', error)
-      }
-    }
+    void audioSessionRef.current?.stop().catch(error => setError(error instanceof Error ? error.message : 'Audio V2 stop failed'))
 
-    // Cleanup resources
-    cleanup()
+    // Stop privacy-sensitive capture immediately, but keep the protocol
+    // transport alive long enough for the just-finalized turn to respond.
+    cleanupCapture()
+    responseDrainActiveRef.current = true
+    responseDrainTimeoutRef.current = setTimeout(() => {
+      responseDrainTimeoutRef.current = undefined
+      cleanupTransport()
+    }, RESPONSE_DRAIN_TIMEOUT_MS)
 
     // Reset state
     setIsRecording(false)
@@ -801,15 +645,16 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     setCurrentStep('idle')
 
     log('Recording stopped')
-  }, [isRecording, cleanup])
+  }, [isRecording, cleanupCapture, cleanupTransport])
 
   // Stop recording when user logs out
   useEffect(() => {
     if (!user && isRecording) {
       log('User logged out, stopping recording')
       stopRecording()
+      cleanupTransport()
     }
-  }, [user, isRecording, stopRecording])
+  }, [user, isRecording, stopRecording, cleanupTransport])
 
   // Warn user before closing tab during recording
   useEffect(() => {

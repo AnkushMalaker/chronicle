@@ -3,7 +3,7 @@ Generic streaming transcription consumer for real-time audio processing.
 
 Uses registry-driven transcription provider from config.yml (supports any streaming provider).
 
-Reads from: audio:stream:* streams
+Reads from: audio:v2:realtime:* generated-event streams
 Publishes interim to: Redis Pub/Sub channel transcription:interim:{session_id}
 Writes final to: transcription:results:{session_id} Redis Stream
 Triggers plugins: streaming_transcript level (final results only)
@@ -26,19 +26,19 @@ from advanced_omi_backend.models.user import get_user_by_id
 from advanced_omi_backend.observability.otel_setup import set_span_attrs
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.plugins.router import PluginRouter
-from advanced_omi_backend.redis_keys import (
-    SessionId,
-    parse_audio_stream_name,
-    transcription_results_stream,
-)
+from advanced_omi_backend.redis_keys import SessionId, transcription_results_stream
 from advanced_omi_backend.services.audio_stream.durability import (
-    AUDIO_PERSISTENCE_GROUP,
     delete_stream_if_durable,
     session_append_closed,
 )
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
+)
+from advanced_omi_backend.services.audio_stream.v2_streams import (
+    REALTIME_GROUPS,
+    parse_realtime_stream_name,
+    parse_stream_event,
 )
 from advanced_omi_backend.services.transcription import get_transcription_provider
 from advanced_omi_backend.services.wakeword.followup import maybe_handle_followup
@@ -203,7 +203,7 @@ class StreamingTranscriptionConsumer:
     """
     Generic streaming transcription consumer using registry-driven providers.
 
-    - Discovers audio:stream:* streams dynamically
+    - Discovers audio:v2:realtime:* streams dynamically
     - Uses Redis consumer groups for fan-out (allows batch workers to process same stream)
     - Starts WebSocket connections using configured provider (from config.yml)
     - Sends audio immediately (no buffering)
@@ -250,8 +250,8 @@ class StreamingTranscriptionConsumer:
         )
 
         # Stream configuration
-        self.stream_pattern = "audio:stream:*"
-        self.group_name = "streaming-transcription"
+        self.stream_pattern = "audio:v2:realtime:*"
+        self.group_name = "streaming-transcription-v2"
         self.consumer_name = f"streaming-worker-{os.getpid()}"
 
         self.running = False
@@ -339,7 +339,7 @@ class StreamingTranscriptionConsumer:
             if not entries:
                 return False
             if any(
-                fields.get(b"end_marker") or fields.get("end_marker")
+                parse_stream_event(fields).WhichOneof("event") in {"ended", "failed"}
                 for _, fields in entries
             ):
                 return False
@@ -1030,8 +1030,7 @@ class StreamingTranscriptionConsumer:
         Args:
             stream_name: Redis stream name (e.g., "audio:stream:user01-phone")
         """
-        # Extract session_id from stream name (format: audio:stream:{session_id})
-        session_id = str(parse_audio_stream_name(stream_name))
+        session_id = parse_realtime_stream_name(stream_name)
 
         # Track this stream
         self.active_streams[stream_name] = {
@@ -1093,8 +1092,9 @@ class StreamingTranscriptionConsumer:
                                 else message_id
                             )
 
-                            # Check for end marker
-                            if fields.get(b"end_marker") or fields.get("end_marker"):
+                            event = parse_stream_event(fields)
+                            event_kind = event.WhichOneof("event")
+                            if event_kind in {"ended", "failed"}:
                                 logger.info(f"End marker received for {session_id}")
                                 stream_ended = True
                                 # ACK the end marker
@@ -1103,9 +1103,8 @@ class StreamingTranscriptionConsumer:
                                 )
                                 break
 
-                            # Extract audio data (producer sends as 'audio_data', not 'audio_chunk')
-                            audio_chunk = fields.get(b"audio_data") or fields.get(
-                                "audio_data"
+                            audio_chunk = (
+                                event.frame.pcm_s16le if event_kind == "frame" else b""
                             )
                             if audio_chunk:
                                 logger.debug(
@@ -1153,8 +1152,10 @@ class StreamingTranscriptionConsumer:
                                             break  # Don't ACK — leave chunks pending
                                     # Non-connection error: fall through to ACK
                             else:
-                                logger.warning(
-                                    f"Message {msg_id} has no audio_data field"
+                                logger.debug(
+                                    "Ignoring non-frame audio-v2 event %s on %s",
+                                    event_kind,
+                                    stream_name,
                                 )
 
                             # ACK only on success or non-fatal error
@@ -1211,7 +1212,7 @@ class StreamingTranscriptionConsumer:
         wakeword_detection also block deletion when present. There is deliberately no
         age/TTL fallback: inability to prove durability means retaining the stream.
         """
-        session_id = str(parse_audio_stream_name(stream_name))
+        session_id = parse_realtime_stream_name(stream_name)
         if not await session_append_closed(self.redis_client, session_id):
             logger.debug(
                 f"Retaining stream {stream_name}: session may still append to it"
@@ -1221,7 +1222,7 @@ class StreamingTranscriptionConsumer:
         decision = await delete_stream_if_durable(
             self.redis_client,
             stream_name,
-            required_groups={self.group_name, AUDIO_PERSISTENCE_GROUP},
+            required_groups=set(REALTIME_GROUPS),
         )
         if decision.safe_to_delete:
             logger.info(
@@ -1283,7 +1284,7 @@ class StreamingTranscriptionConsumer:
                     # end_session_stream sets transcription:complete:{session_id} with 5-min TTL.
                     # Without this check, re-discovered streams spawn zombie tasks that each
                     # open a new transcription provider connection, exhausting connection limits.
-                    session_id = str(parse_audio_stream_name(stream_name))
+                    session_id = parse_realtime_stream_name(stream_name)
                     completion_key = f"transcription:complete:{session_id}"
                     if await self.redis_client.exists(completion_key):
                         # The flag can outlive the provider stream it describes: a

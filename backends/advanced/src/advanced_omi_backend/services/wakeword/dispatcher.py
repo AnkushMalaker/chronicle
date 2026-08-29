@@ -15,6 +15,7 @@ import logging
 import os
 import time
 import wave
+from datetime import datetime, timezone
 
 import redis.asyncio as redis
 from redis import exceptions as redis_exceptions
@@ -32,6 +33,10 @@ from advanced_omi_backend.services.audio_stream.aggregator import (
 )
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 from advanced_omi_backend.services.transcription import get_transcription_provider
+from advanced_omi_backend.services.wakeword.activations import (
+    WakeActivation,
+    WakeActivationStore,
+)
 from advanced_omi_backend.services.wakeword.contracts import WakeDetectionEvent
 from advanced_omi_backend.services.wakeword.executor import (
     execute_voice_command,
@@ -39,6 +44,11 @@ from advanced_omi_backend.services.wakeword.executor import (
     play_tone_on_device,
     publish_sse,
     set_device_led,
+)
+from advanced_omi_backend.services.wakeword.interaction_ledger import (
+    WakeAudioInterval,
+    WakeInteractionFact,
+    WakeInteractionLedger,
 )
 from advanced_omi_backend.speaker_recognition_client import SpeakerRecognitionClient
 
@@ -68,6 +78,7 @@ _STREAMING_POLL_SECS = float(os.getenv("WAKEWORD_STREAMING_POLL_SECS", "3.0"))
 _STREAMING_POLL_INTERVAL = 0.3
 # Slack around the capture window when matching streaming results by wall clock.
 _STREAMING_WINDOW_MARGIN_SECS = 2.0
+_PENDING_MIN_IDLE_MS = 30_000
 
 
 def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
@@ -89,7 +100,13 @@ def _pcm_to_wav(pcm: bytes, sample_rate: int) -> bytes:
 class WakeWordDispatcher:
     """Reads wake-word detections from Redis and dispatches plugin events."""
 
-    def __init__(self, redis_client: redis.Redis, plugin_router: PluginRouter):
+    def __init__(
+        self,
+        redis_client: redis.Redis,
+        plugin_router: PluginRouter,
+        interaction_ledger: WakeInteractionLedger | None = None,
+        activation_store: WakeActivationStore | None = None,
+    ):
         """Initialize the dispatcher.
 
         Args:
@@ -98,6 +115,8 @@ class WakeWordDispatcher:
         """
         self.redis_client = redis_client
         self.plugin_router = plugin_router
+        self.interaction_ledger = interaction_ledger
+        self.activations = activation_store or WakeActivationStore(redis_client)
         self.consumer_name = "wakeword-dispatch-worker"
         self.running = False
         # Lazily-built speaker-recognition client, used only by the per-user
@@ -131,6 +150,7 @@ class WakeWordDispatcher:
         await self._setup_group()
         self.running = True
         logger.info(f"🔔 WakeWordDispatcher listening on {DETECTIONS_STREAM}")
+        await self._recover_pending_once()
 
         while self.running:
             # Heartbeat so the workers healthcheck can tell this loop is turning.
@@ -166,14 +186,29 @@ class WakeWordDispatcher:
                     )
                     self._tasks.add(task)
                     task.add_done_callback(self._tasks.discard)
-                    # ACK immediately: dispatch is fire-and-forget (the old serial
-                    # path also ACKed unconditionally, so delivery is unchanged).
-                    await self.redis_client.xack(DETECTIONS_STREAM, GROUP_NAME, msg_id)
+
+    async def _recover_pending_once(self) -> None:
+        """Claim and retry stale unacknowledged detections after worker failure."""
+        claimed = await self.redis_client.xautoclaim(
+            DETECTIONS_STREAM,
+            GROUP_NAME,
+            self.consumer_name,
+            min_idle_time=_PENDING_MIN_IDLE_MS,
+            start_id="0-0",
+            count=100,
+        )
+        rows = claimed[1] if claimed else []
+        for message_id, fields in rows:
+            msg_id = (
+                message_id.decode() if isinstance(message_id, bytes) else message_id
+            )
+            await self._handle_message_safe(fields, msg_id)
 
     async def _handle_message_safe(self, fields: dict, msg_id: str) -> None:
         """Run _handle_message, swallowing errors (nothing awaits this task)."""
         try:
             await self._handle_message(fields)
+            await self.redis_client.xack(DETECTIONS_STREAM, GROUP_NAME, msg_id)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 - never let one bad detection crash
@@ -214,7 +249,9 @@ class WakeWordDispatcher:
         #   batch_then_streaming -> batch ASR, fall back to streaming with a warning
         audio_b64 = event.audio_b64
         sample_rate = event.sample_rate
-        detected_at = event.detected_at
+        await self._append_interaction_fact(event, "armed", 0)
+        await self._append_interaction_fact(event, "end_of_turn", 1)
+        end_of_turn_at = event.end_of_turn_at
         command_source = get_wakeword_command_source()
         # Silence gate: the wakeword service flags captures that contained no real
         # speech (a false arm with nothing said). Skip batch ASR on those — self-
@@ -256,6 +293,30 @@ class WakeWordDispatcher:
             )
             return
 
+        capture_session = await SessionStore(self.redis_client).read(session_id_value)
+        if capture_session is not None and capture_session.voice_session_id:
+            if has_speech:
+                await self.activations.register(
+                    WakeActivation(
+                        wake_trace_id=event.wake_trace_id,
+                        user_id=user_id,
+                        client_id=str(client_id),
+                        audio_session_id=session_id_value,
+                        capture_epoch=event.capture_epoch,
+                        wakeword=event.wakeword,
+                        armed_at=event.armed_at,
+                        end_of_turn_at=event.end_of_turn_at,
+                        command_start_ms=event.command_interval.start_ms,
+                        command_end_ms=event.command_interval.end_ms,
+                    )
+                )
+            logger.info(
+                "Wake activation registered for audio-v2 voice session %s; "
+                "the complete committed turn owns command resolution",
+                capture_session.voice_session_id,
+            )
+            return
+
         command = ""
         # Pre-dispatch stage durations, threaded into the executor's latency line:
         # the captured command-audio length (the wakeword-service arm→end-of-turn
@@ -284,7 +345,7 @@ class WakeWordDispatcher:
         else:
             pcm = base64.b64decode(audio_b64)
             # int16 mono: 2 bytes/sample. Used to align the streaming-transcript
-            # window against the detection's wall-clock `detected_at`.
+            # window against the capture clock's semantic end-of-turn.
             capture_secs = len(pcm) / 2 / max(sample_rate, 1)
             _asr_start = time.perf_counter()
             command, asr_status = await self._resolve_command(
@@ -293,23 +354,28 @@ class WakeWordDispatcher:
                 sample_rate=sample_rate,
                 session_id=session_id_value,
                 user_id=user_id,
-                detected_at=detected_at,
+                end_of_turn_at=end_of_turn_at,
                 capture_secs=capture_secs,
             )
             asr_ms = (time.perf_counter() - _asr_start) * 1000.0
 
-        capture_session = await SessionStore(self.redis_client).read(session_id_value)
-        if capture_session is not None and capture_session.voice_session_id:
-            logger.info(
-                "Wake activation belongs to protocol-v1 committed turn %s; "
-                "skipping fragment-level command dispatch",
-                capture_session.voice_session_id,
-            )
-            return
-
         conversation_id = await get_active_conversation_id(
             self.redis_client, session_id_value
         )
+        await self._append_interaction_fact(
+            event,
+            "command_resolved",
+            2,
+            occurred_at=time.time(),
+            command=command,
+            asr_status=asr_status,
+        )
+
+        async def record_execution_stage(stage: str, details: dict) -> None:
+            ordinal = {"dispatched": 3, "acted": 4, "followup_opened": 10}[stage]
+            await self._append_interaction_fact(
+                event, stage, ordinal, occurred_at=time.time(), **details
+            )
 
         # Funnel through the shared executor so the acoustic wake path and the
         # streaming follow-up path dispatch, reply, emit SSE, and arm the
@@ -331,6 +397,45 @@ class WakeWordDispatcher:
             reason=event.reason,
             capture_secs=capture_secs,
             asr_ms=asr_ms,
+            wake_trace_id=event.wake_trace_id,
+            interaction_stage_callback=record_execution_stage,
+        )
+
+    async def _append_interaction_fact(
+        self,
+        event: WakeDetectionEvent,
+        stage: str,
+        ordinal: int,
+        *,
+        occurred_at: float | None = None,
+        **payload,
+    ) -> None:
+        if self.interaction_ledger is None:
+            return
+        is_arm = stage == "armed"
+        interval = event.trigger_interval if is_arm else event.command_interval
+        fact_time = occurred_at or (event.armed_at if is_arm else event.end_of_turn_at)
+        await self.interaction_ledger.append(
+            WakeInteractionFact(
+                wake_trace_id=event.wake_trace_id,
+                stage=stage,
+                ordinal=ordinal,
+                occurred_at=datetime.fromtimestamp(fact_time, tz=timezone.utc),
+                user_id=str(event.user_id),
+                client_id=str(event.client_id),
+                audio_session_id=str(event.session_id),
+                capture_epoch=event.capture_epoch,
+                wakeword=event.wakeword,
+                audio_interval=WakeAudioInterval(
+                    start_ms=interval.start_ms,
+                    end_ms=interval.end_ms,
+                    started_at=datetime.fromtimestamp(
+                        interval.started_at, tz=timezone.utc
+                    ),
+                    ended_at=datetime.fromtimestamp(interval.ended_at, tz=timezone.utc),
+                ),
+                payload=payload,
+            )
         )
 
     async def _check_speaker_gate(
@@ -425,13 +530,13 @@ class WakeWordDispatcher:
         sample_rate: int,
         session_id: str,
         user_id: str,
-        detected_at: float,
+        end_of_turn_at: float,
         capture_secs: float,
     ) -> tuple[str, str]:
         """Resolve the command text per the configured source. Returns (command, asr_status)."""
         if command_source == "streaming":
             command = await self._streaming_command(
-                session_id, detected_at, capture_secs
+                session_id, end_of_turn_at, capture_secs
             )
             if not command:
                 logger.warning(
@@ -455,7 +560,9 @@ class WakeWordDispatcher:
 
         # Batch ASR was unreachable or heard nothing — fall back to the live
         # streaming transcript the user already saw, and flag it loudly.
-        fallback = await self._streaming_command(session_id, detected_at, capture_secs)
+        fallback = await self._streaming_command(
+            session_id, end_of_turn_at, capture_secs
+        )
         if fallback:
             logger.warning(
                 "⚠️ Wake-word batch ASR %s for '%s'; falling back to the live "
@@ -510,35 +617,29 @@ class WakeWordDispatcher:
         return stripped.strip()
 
     async def _streaming_command(
-        self, session_id: str, detected_at: float, capture_secs: float
+        self, session_id: str, end_of_turn_at: float, capture_secs: float
     ) -> str:
         """Best-effort command from the live streaming transcript for the capture window.
 
         Streaming final results carry a wall-clock timestamp on the same clock as
-        the detection's ``detected_at``, so we keep the finals that land within the
+        the capture's ``end_of_turn_at``, so we keep finals that land within the
         capture window and strip the wake word. Polls briefly because the final
         streaming result can arrive a beat after the wake-word turn-end fires.
         """
         aggregator = TranscriptionResultsAggregator(self.redis_client)
-        have_clock = detected_at > 0
-        low = detected_at - capture_secs - _STREAMING_WINDOW_MARGIN_SECS
-        high = detected_at + _STREAMING_WINDOW_MARGIN_SECS
+        low = end_of_turn_at - capture_secs - _STREAMING_WINDOW_MARGIN_SECS
+        high = end_of_turn_at + _STREAMING_WINDOW_MARGIN_SECS
         attempts = max(1, int(_STREAMING_POLL_SECS / _STREAMING_POLL_INTERVAL))
 
         for attempt in range(attempts):
             results = await aggregator.get_session_results(session_id)
             if results:
-                if have_clock:
-                    windowed = [
-                        r
-                        for r in results
-                        if low <= r.get("timestamp", 0.0) <= high
-                        and (r.get("text") or "").strip()
-                    ]
-                else:
-                    # No detection clock to align against; use the latest final only.
-                    last = results[-1]
-                    windowed = [last] if (last.get("text") or "").strip() else []
+                windowed = [
+                    r
+                    for r in results
+                    if low <= r.get("timestamp", 0.0) <= high
+                    and (r.get("text") or "").strip()
+                ]
                 if windowed:
                     text = " ".join((r.get("text") or "").strip() for r in windowed)
                     return self._strip_wake_words(text.strip())

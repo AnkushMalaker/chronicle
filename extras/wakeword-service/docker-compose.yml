@@ -73,6 +73,7 @@ services:
       - ./app.py:/app/app.py:ro
       - ./consumer.py:/app/consumer.py:ro
       - ./detector.py:/app/detector.py:ro
+      - ./identities.py:/app/identities.py:ro
       - ./samples.py:/app/samples.py:ro
       - ./verifier.py:/app/verifier.py:ro
       - ./hubert_detector.py:/app/hubert_detector.py:ro

@@ -160,6 +160,32 @@ class ClientManager:
         logger.info(f"✅ Removed and cleaned up client {client_id}")
         return True
 
+    async def remove_client_lease(self, client_id: str, connection_id: str) -> bool:
+        """Remove exactly the physical connection that is closing.
+
+        A stable client id may already point at a replacement connection. Cleanup
+        from the old socket must then be a no-op rather than disconnecting the new
+        capture.
+        """
+
+        client_state = self._active_clients.get(client_id)
+        if client_state is None or client_state.socket_id != connection_id:
+            return False
+        await client_state.disconnect()
+        # No await occurs between the identity check and deletion. Keep the object
+        # check nevertheless: it documents and defends the lease invariant if
+        # disconnect later grows an async handoff.
+        if self._active_clients.get(client_id) is not client_state:
+            return False
+        del self._active_clients[client_id]
+        unregister_client_user_mapping(client_id)
+        logger.info(
+            "✅ Removed client lease %s for connection %s",
+            client_id,
+            connection_id,
+        )
+        return True
+
     def get_all_client_ids(self) -> list[str]:
         """
         Get list of all active client IDs.

@@ -20,9 +20,9 @@ What each field measures:
 - ``reply→device`` offset, from the start of dispatch, at which the reply audio
                was published to the device downlink.
 - ``total``    best-effort end-to-end ≈ capture + asr + (dispatch → downlink).
-- ``est_play`` *estimated* playback length (the mute-window heuristic). The
-               device gives no playback-complete signal, so the true "ending"
-               time is not measured — this is an estimate only.
+- ``est_play`` estimated playback length used by legacy log-only callers. Voice
+               protocol v1 emits durable offered/started/done acknowledgements;
+               :mod:`wakeword.latency` is the canonical physical-playback report.
 
 All durations use a monotonic clock; ``capture``/``asr`` are passed in from the
 dispatcher (which runs before this timer is created).
@@ -141,7 +141,7 @@ class WakeTimer:
         parts.append(f"total≈{total_ms / 1000.0:.2f}s")
 
         if self.est_play_secs is not None:
-            # Estimate only — no playback-complete signal from the device.
+            # Estimate only; audio-v2 traces use physical playback ACKs instead.
             parts.append(f"est_play≈{self.est_play_secs:.1f}s")
 
         cmd = (self.command or "")[:60]

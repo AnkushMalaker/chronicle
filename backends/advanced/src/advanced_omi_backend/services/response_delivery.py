@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import io
-import json
 import time
 import uuid
-import wave
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 import redis.asyncio as redis
 
-from advanced_omi_backend.redis_keys import ClientId, SessionId, device_downlink_channel
+from advanced_omi_backend.redis_keys import ClientId, SessionId
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
+from advanced_omi_backend.services.playback_audio import encode_wav_for_playback
 from advanced_omi_backend.services.response_coordinator import (
     ResponseCoordinator,
     ResponseRecord,
@@ -30,19 +28,6 @@ if TYPE_CHECKING:
 WavOperation = Callable[[], Awaitable[bytes]]
 
 
-def _wav_metadata(wav: bytes) -> tuple[int, int]:
-    try:
-        with wave.open(io.BytesIO(wav), "rb") as reader:
-            sample_rate = reader.getframerate()
-            frame_count = reader.getnframes()
-    except (EOFError, wave.Error) as error:
-        raise ValueError("coordinated response must be a valid WAV") from error
-    if sample_rate <= 0 or frame_count <= 0:
-        raise ValueError("coordinated response WAV must contain audio frames")
-    duration_ms = max(1, round(frame_count * 1000 / sample_rate))
-    return sample_rate, duration_ms
-
-
 async def deliver_wav_response(
     redis_client: redis.Redis,
     client_id: ClientId,
@@ -55,6 +40,7 @@ async def deliver_wav_response(
     turn_revision: int = 0,
     barge_in_allowed: bool = True,
     timer: WakeTimer | None = None,
+    wake_trace_id: str | None = None,
 ) -> ResponseRecord:
     """Fence production, routing, and delivery against one authenticated target."""
 
@@ -71,19 +57,8 @@ async def deliver_wav_response(
     ):
         raise StaleResponse("response target is not an authenticated audio session")
     if not view.voice_session_id:
-        await redis_client.publish(
-            str(device_downlink_channel(client_id)),
-            json.dumps(
-                {
-                    "type": "error",
-                    "error": "client_upgrade_required",
-                    "message": "Interactive voice requires voice protocol v1",
-                },
-                separators=(",", ":"),
-            ),
-        )
         raise ClientUpgradeRequired(
-            "interactive responses require voice_duplex_protocol 1"
+            "interactive responses require an audio-v2 voice binding"
         )
 
     voice_sessions = VoiceSessionCoordinator(redis_client)
@@ -99,7 +74,7 @@ async def deliver_wav_response(
 
     voice = await voice_sessions.get(view.voice_session_id)
     if voice is None:
-        raise StaleResponse("protocol-v1 response has no voice session")
+        raise StaleResponse("audio-v2 response has no voice session")
     response = await coordinator.queue(
         user_id=view.user_id,
         client_id=view.client_id,
@@ -113,7 +88,8 @@ async def deliver_wav_response(
         kind=kind,
         barge_in_allowed=barge_in_allowed if kind == "speech" else False,
         trace_id=trace_id,
-        causation_id=response_turn_id,
+        causation_id=wake_trace_id or response_turn_id,
+        wake_trace_id=wake_trace_id,
     )
 
     started = time.perf_counter()
@@ -121,14 +97,15 @@ async def deliver_wav_response(
         wav = await coordinator.synthesize(response.response_id, operation)
         if timer is not None:
             timer.tts_ms = (time.perf_counter() - started) * 1000
-        sample_rate, duration_ms = _wav_metadata(wav)
+        playback = encode_wav_for_playback(wav)
+        duration_ms = playback.duration_ms
         await coordinator.mark_ready(
             response.response_id,
-            byte_length=len(wav),
+            byte_length=sum(len(packet) for packet in playback.packets),
             duration_ms=duration_ms,
-            sample_rate=sample_rate,
+            sample_rate=24_000,
         )
-        delivered = await coordinator.offer(response.response_id, wav)
+        delivered = await coordinator.offer(response.response_id, playback.packets)
         if timer is not None:
             timer.est_play_secs = duration_ms / 1000
             timer.mark_downlink()
@@ -151,6 +128,7 @@ async def deliver_text_response(
     turn_id: str | None = None,
     turn_revision: int = 0,
     timer: WakeTimer | None = None,
+    wake_trace_id: str | None = None,
 ) -> ResponseRecord | None:
     if not text:
         return None
@@ -169,4 +147,5 @@ async def deliver_text_response(
         turn_revision=turn_revision,
         barge_in_allowed=True,
         timer=timer,
+        wake_trace_id=wake_trace_id,
     )

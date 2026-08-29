@@ -428,14 +428,18 @@ source = { editable = "../chronicle-client" }
 dependencies = [
     { name = "httpx" },
     { name = "minidisc-python" },
+    { name = "protobuf" },
     { name = "python-dotenv" },
+    { name = "websockets" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "minidisc-python", specifier = ">=0.1.0" },
+    { name = "protobuf", specifier = ">=5.29.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "websockets", specifier = ">=15.0.1" },
 ]
 
 [[package]]
@@ -640,6 +644,7 @@ dependencies = [
     { name = "chronicle-client" },
     { name = "httpx" },
     { name = "minidisc-python" },
+    { name = "opuslib" },
     { name = "python-dotenv" },
     { name = "rumps", marker = "sys_platform == 'darwin'" },
     { name = "websockets" },
@@ -663,6 +668,7 @@ requires-dist = [
     { name = "chronicle-client", editable = "../chronicle-client" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "minidisc-python", specifier = ">=0.1.0" },
+    { name = "opuslib", specifier = ">=3.0.1" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "rumps", marker = "sys_platform == 'darwin'", specifier = ">=0.4.0" },
     { name = "websockets", specifier = ">=15.0.1" },
@@ -880,6 +886,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/76/17/fcf8a90dcf36fe00b
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9d/e1/76e4694201d67b93a6f1644b2588b4a3d965419fe189416e3496cf415db5/noiseprotocol-0.3.1-py3-none-any.whl", hash = "sha256:2e1a603a38439636cf0ffd8b3e8b12cee27d368a28b41be7dbe568b2abb23111", size = 20546, upload-time = "2020-03-03T18:51:28.095Z" },
 ]
+
+[[package]]
+name = "opuslib"
+version = "3.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/46/55/826befabb29fd3902bad6d6d7308790894c7ad4d73f051728a0c53d37cd7/opuslib-3.0.1.tar.gz", hash = "sha256:2cb045e5b03e7fc50dfefe431e3404dddddbd8f5961c10c51e32dfb69a044c97", size = 8550, upload-time = "2018-01-16T06:04:42.184Z" }
 
 [[package]]
 name = "packaging"

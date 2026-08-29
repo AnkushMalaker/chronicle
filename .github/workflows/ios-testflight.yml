@@ -5,7 +5,7 @@ permissions:
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/audio-v2-cutover]
     paths: ['app/**']
   workflow_dispatch:
     inputs:
@@ -51,9 +51,9 @@ jobs:
         run: |
           npm run test:wearable-activation
           npm run typecheck
-          npm run test:voice-protocol
-          npm run test:phone-duplex
+          npm run test:durable-audio-spool
           npm run check:theme
+          npx --no-install expo-modules-autolinking verify --platform ios --verbose
 
       - name: Write and validate ASC API key
         env:
