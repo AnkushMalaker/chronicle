@@ -43,6 +43,23 @@ const wyomingHeader = (
   payloadLength: number | null = null,
 ): string => `${JSON.stringify({ type, data, version: '1.0.0', payload_length: payloadLength })}\n`;
 
+const backlogTransportUrl = (url: string): string => {
+  const parsed = new URL(url);
+  const deviceName = parsed.searchParams.get('device_name');
+  if (!deviceName || /^b-[0-9a-f]{8}$/.test(deviceName)) return url;
+
+  // Chronicle normalizes device names to ten characters. A stable hash keeps the
+  // backlog connection distinct from the live device without creating a new
+  // registered identity for every upload or changing any other query parameter.
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < deviceName.length; index += 1) {
+    hash ^= deviceName.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  parsed.searchParams.set('device_name', `b-${hash.toString(16).padStart(8, '0')}`);
+  return parsed.toString();
+};
+
 /**
  * Routes durable packets without coupling live capture to historical recovery.
  *
@@ -99,7 +116,7 @@ export class DurableBacklogUploadSession {
     if (!packets.length) return Promise.resolve();
 
     const pending = new Map(packets.map((packet) => [packetKey(packet), packet]));
-    const socket = this.options.createSocket(this.options.url);
+    const socket = this.options.createSocket(backlogTransportUrl(this.options.url));
 
     return new Promise<void>((resolve, reject) => {
       let settled = false;

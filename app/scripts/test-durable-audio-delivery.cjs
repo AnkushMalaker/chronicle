@@ -101,16 +101,25 @@ const packet = (segmentId, sequence, capturedAtMs) => ({
 
   const socket = new FakeSocket();
   const retired = [];
+  let openedBacklogUrl = null;
   const uploader = new DurableBacklogUploadSession({
-    url: 'wss://chronicle.test/ws?codec=opus',
+    url: 'wss://chronicle.test/ws?codec=opus&token=secret&device_name=phone-mic',
     audioFormat: { rate: 16_000, width: 2, channels: 1 },
-    createSocket: () => socket,
+    createSocket: (url) => {
+      openedBacklogUrl = url;
+      return socket;
+    },
     acknowledge: async (acknowledgedPacket) => {
       retired.push(`${acknowledgedPacket.segmentId}:${acknowledgedPacket.sequence}`);
     },
   });
   const oldPackets = [packet('old-a', 0, 1_000), packet('old-b', 4, 1_500)];
   const upload = uploader.upload(oldPackets);
+  assert.equal(
+    openedBacklogUrl,
+    'wss://chronicle.test/ws?codec=opus&token=secret&device_name=b-e094bf51',
+    'backlog transport must have a stable client identity distinct from live capture',
+  );
   await socket.open();
 
   const sentHeaders = socket.sent.filter((value) => typeof value === 'string').map(JSON.parse);
