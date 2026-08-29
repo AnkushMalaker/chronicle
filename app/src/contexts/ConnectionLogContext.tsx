@@ -19,6 +19,7 @@ export type ConnectionEventType =
   | 'connect_success'
   | 'connect_fail'
   | 'disconnect'
+  | 'disconnect_reason'
   | 'battery_read'
   | 'audio_start'
   | 'audio_stop'

@@ -155,11 +155,32 @@ export async function initLogger(): Promise<void> {
 
 export async function readLog(): Promise<string> {
   try {
+    await writeQueue;
     const info = await FileSystem.getInfoAsync(LOG_FILE);
     if (!info.exists) return '';
     return await FileSystem.readAsStringAsync(LOG_FILE);
   } catch (err) {
     return `failed to read log: ${String(err)}`;
+  }
+}
+
+export async function readLogBundle(): Promise<string> {
+  try {
+    await writeQueue;
+    const sections: string[] = [];
+    for (const [label, path] of [
+      ['previous', LOG_FILE_OLD],
+      ['current', LOG_FILE],
+    ] as const) {
+      const info = await FileSystem.getInfoAsync(path);
+      if (info.exists && !info.isDirectory) {
+        const contents = await FileSystem.readAsStringAsync(path);
+        sections.push(`==================== ${label.toUpperCase()} LOG ====================\n${contents}`);
+      }
+    }
+    return sections.join('\n');
+  } catch (err) {
+    return `failed to read log bundle: ${String(err)}`;
   }
 }
 

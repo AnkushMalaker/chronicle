@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { View, Text, FlatList, StyleSheet, SafeAreaView, Share, Platform, Alert } from 'react-native';
 import { useTheme, type Theme } from '@/theme';
 import { Badge, Button, Heading, Mono, type Tone } from '@/components/ui';
 import { useConnectionLog, ConnectionEvent, ConnectionEventType } from '@/contexts/ConnectionLogContext';
-import { getLogPath, readLog, clearLog } from '@/utils/logger';
+import { getLogPath, readLog, readLogBundle, clearLog } from '@/utils/logger';
+import { uploadClientDiagnostic } from '@/services/clientDiagnostics';
 
 const EVENT_BADGE_TONES: Record<ConnectionEventType, Tone> = {
   scan_start: 'info',
@@ -13,6 +14,7 @@ const EVENT_BADGE_TONES: Record<ConnectionEventType, Tone> = {
   connect_success: 'success',
   connect_fail: 'danger',
   disconnect: 'danger',
+  disconnect_reason: 'danger',
   battery_read: 'success',
   audio_start: 'info',
   audio_stop: 'neutral',
@@ -96,12 +98,31 @@ export default function DiagnosticsScreen() {
   const t = useTheme();
   const s = createScreenStyles(t);
   const { events, clearEvents } = useConnectionLog();
+  const [isUploading, setIsUploading] = useState(false);
+  const [lastUploadId, setLastUploadId] = useState<string | null>(null);
+
+  const pushLogToBackend = async () => {
+    setIsUploading(true);
+    try {
+      const contents = await readLogBundle();
+      const receipt = await uploadClientDiagnostic(contents);
+      setLastUploadId(receipt.upload_id);
+      Alert.alert(
+        'Log received',
+        `Chronicle stored ${receipt.size_bytes} bytes as ${receipt.upload_id}.`,
+      );
+    } catch (err) {
+      Alert.alert('Upload failed', String(err));
+    } finally {
+      setIsUploading(false);
+    }
+  };
 
   const shareLogFile = async () => {
     try {
       const contents = await readLog();
       if (!contents) {
-        Alert.alert('No log yet', 'The crash log file is empty.');
+        Alert.alert('No log yet', 'The device log file is empty.');
         return;
       }
       if (Platform.OS === 'ios') {
@@ -115,7 +136,7 @@ export default function DiagnosticsScreen() {
   };
 
   const wipeLogFile = async () => {
-    Alert.alert('Clear crash log?', 'Removes the on-device crash log file.', [
+    Alert.alert('Clear device log?', 'Removes the on-device diagnostic log files.', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Clear', style: 'destructive', onPress: async () => { await clearLog(); } },
     ]);
@@ -124,12 +145,22 @@ export default function DiagnosticsScreen() {
   return (
     <SafeAreaView style={s.safeArea}>
       <View style={s.logBar}>
-        <Text style={s.logBarTitle}>Crash Log</Text>
+        <Text style={s.logBarTitle}>Device Log</Text>
         <Mono style={s.logBarPath} numberOfLines={1}>{getLogPath()}</Mono>
         <View style={s.logBarRow}>
+          <Button
+            variant="primary"
+            size="sm"
+            style={s.logBtn}
+            onPress={pushLogToBackend}
+            disabled={isUploading}
+          >
+            {isUploading ? 'Sending…' : 'Send to Backend'}
+          </Button>
           <Button variant="secondary" size="sm" style={s.logBtn} onPress={shareLogFile}>Share Log File</Button>
-          <Button variant="danger" size="sm" style={s.logBtn} onPress={wipeLogFile}>Clear File</Button>
         </View>
+        {lastUploadId && <Mono style={s.uploadReceipt}>Last upload: {lastUploadId}</Mono>}
+        <Button variant="danger" size="sm" onPress={wipeLogFile}>Clear File</Button>
       </View>
       <View style={s.header}>
         <Heading>Connection Log ({events.length})</Heading>
@@ -204,5 +235,8 @@ const createScreenStyles = (t: Theme) => StyleSheet.create({
   },
   logBtn: {
     flex: 1,
+  },
+  uploadReceipt: {
+    marginVertical: t.space[2],
   },
 });

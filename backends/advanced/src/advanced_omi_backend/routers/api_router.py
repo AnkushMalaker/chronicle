@@ -16,6 +16,7 @@ from .modules import (
     api_key_router,
     audio_router,
     chat_router,
+    client_diagnostic_router,
     client_router,
     conversation_router,
     data_audit_router,
@@ -48,6 +49,7 @@ router.include_router(api_key_router)
 router.include_router(audio_router)
 router.include_router(user_router)
 router.include_router(chat_router)
+router.include_router(client_diagnostic_router)
 router.include_router(client_router)
 router.include_router(conversation_router)
 router.include_router(data_audit_router)

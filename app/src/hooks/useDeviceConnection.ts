@@ -1,6 +1,7 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Alert } from 'react-native';
 import { OmiConnection, BleAudioCodec, OmiDevice } from 'friend-lite-react-native';
+import { BleError, BleManager, Subscription } from 'react-native-ble-plx';
 import { useConnectionLog } from '../contexts/ConnectionLogContext';
 
 interface UseDeviceConnection {
@@ -18,6 +19,7 @@ interface UseDeviceConnection {
 
 export const useDeviceConnection = (
   omiConnection: OmiConnection,
+  diagnosticBleManager: BleManager,
   onDisconnect?: () => void, // Callback for when disconnection happens, e.g., to stop audio listener
   onConnect?: () => void // Callback for when connection happens
 ): UseDeviceConnection => {
@@ -31,6 +33,35 @@ export const useDeviceConnection = (
   // Debounce guards
   const lastConnectAttemptRef = useRef<number>(0);
   const disconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const disconnectMonitorRef = useRef<Subscription | null>(null);
+  const connectStartedAtRef = useRef<number | null>(null);
+  const intentionalDisconnectRef = useRef(false);
+
+  const removeDisconnectMonitor = useCallback(() => {
+    disconnectMonitorRef.current?.remove();
+    disconnectMonitorRef.current = null;
+  }, []);
+
+  useEffect(() => removeDisconnectMonitor, [removeDisconnectMonitor]);
+
+  const describeDisconnect = useCallback((error: BleError | null, deviceId: string): string => {
+    const connectedForMs = connectStartedAtRef.current == null
+      ? null
+      : Math.max(0, Date.now() - connectStartedAtRef.current);
+    const oneLine = (value: unknown) => String(value).replace(/[\r\n]+/g, ' ').slice(0, 300);
+    const fields = [
+      `device=${deviceId}`,
+      `initiated_by_app=${intentionalDisconnectRef.current}`,
+      connectedForMs == null ? null : `connected_for_ms=${connectedForMs}`,
+      error ? `error_code=${error.errorCode}` : null,
+      error?.iosErrorCode != null ? `ios_error_code=${error.iosErrorCode}` : null,
+      error?.androidErrorCode != null ? `android_error_code=${error.androidErrorCode}` : null,
+      error?.attErrorCode != null ? `att_error_code=${error.attErrorCode}` : null,
+      error?.reason ? `reason="${oneLine(error.reason)}"` : null,
+      error?.message ? `message="${oneLine(error.message)}"` : null,
+    ].filter(Boolean);
+    return fields.join(' ');
+  }, []);
 
   const handleConnectionStateChange = useCallback((id: string, state: string) => {
     console.log(`Device ${id} connection state: ${state}`);
@@ -38,6 +69,7 @@ export const useDeviceConnection = (
     setIsConnecting(false);
 
     if (isNowConnected) {
+        connectStartedAtRef.current = Date.now();
         // Cancel any pending disconnect timer (handles BLE flapping)
         if (disconnectTimerRef.current) {
           clearTimeout(disconnectTimerRef.current);
@@ -84,6 +116,19 @@ export const useDeviceConnection = (
     setCurrentCodec(null);
     setBatteryLevel(-1);
     addEvent('connect_start', `Connecting to ${deviceId}`, { deviceId });
+    intentionalDisconnectRef.current = false;
+    connectStartedAtRef.current = Date.now();
+    removeDisconnectMonitor();
+    disconnectMonitorRef.current = diagnosticBleManager.onDeviceDisconnected(
+      deviceId,
+      (error, device) => {
+        addEvent(
+          'disconnect_reason',
+          describeDisconnect(error, device?.id ?? deviceId),
+          { deviceId: device?.id ?? deviceId },
+        );
+      },
+    );
 
     try {
       const success = await omiConnection.connect(deviceId, handleConnectionStateChange);
@@ -91,6 +136,8 @@ export const useDeviceConnection = (
         console.log('Successfully initiated connection to device:', deviceId);
       } else {
         setIsConnecting(false);
+        connectStartedAtRef.current = null;
+        removeDisconnectMonitor();
         addEvent('connect_fail', `Connection failed to ${deviceId}`, { deviceId });
         Alert.alert('Connection Failed', 'Could not connect to the device. Please try again.');
       }
@@ -99,13 +146,16 @@ export const useDeviceConnection = (
       setIsConnecting(false);
       setConnectedDevice(null);
       setConnectedDeviceId(null);
+      connectStartedAtRef.current = null;
+      removeDisconnectMonitor();
       addEvent('connect_fail', `Connection error: ${error}`, { deviceId });
       Alert.alert('Connection Error', String(error));
     }
-  }, [omiConnection, handleConnectionStateChange, connectedDeviceId]); // Added connectedDeviceId
+  }, [omiConnection, diagnosticBleManager, handleConnectionStateChange, connectedDeviceId, addEvent, describeDisconnect, removeDisconnectMonitor]);
 
   const disconnectFromDevice = useCallback(async () => {
     console.log('Attempting to disconnect...');
+    intentionalDisconnectRef.current = true;
     setIsConnecting(false); // No longer attempting to connect if we are disconnecting
     try {
       if (onDisconnect) {

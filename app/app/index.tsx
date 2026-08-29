@@ -116,7 +116,7 @@ export default function App() {
     }
   }, [originalStopAudioListener, audioStreamer.stopStreaming, phoneAudioRecorder.stopRecording, phoneAudioRecorder.isRecording]);
 
-  const deviceConnection = useDeviceConnection(omiConnection, onDeviceDisconnect, onDeviceConnect);
+  const deviceConnection = useDeviceConnection(omiConnection, bleManager, onDeviceDisconnect, onDeviceConnect);
 
   // Battery monitor
   const batteryMonitor = useBatteryMonitor({

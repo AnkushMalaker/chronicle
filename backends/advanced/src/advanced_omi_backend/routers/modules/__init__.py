@@ -24,6 +24,7 @@ from .annotation_routes import router as annotation_router
 from .api_key_routes import router as api_key_router
 from .audio_routes import router as audio_router
 from .chat_routes import router as chat_router
+from .client_diagnostic_routes import router as client_diagnostic_router
 from .client_routes import router as client_router
 from .conversation_routes import router as conversation_router
 from .data_audit_routes import router as data_audit_router
@@ -50,6 +51,7 @@ __all__ = [
     "audio_router",
     "chat_router",
     "client_router",
+    "client_diagnostic_router",
     "conversation_router",
     "data_audit_router",
     "device_input_router",
