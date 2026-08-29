@@ -72,6 +72,31 @@ final class DuplexAudioStateTests: XCTestCase {
     )
   }
 
+  func testStreamingResamplerEmitsEveryTwentyMillisecondBuffer() throws {
+    let inputFormat = try XCTUnwrap(AVAudioFormat(
+      commonFormat: .pcmFormatFloat32,
+      sampleRate: 48_000,
+      channels: 1,
+      interleaved: false
+    ))
+    let converter = try XCTUnwrap(ChronicleDuplexPcmConverter(inputFormat: inputFormat))
+
+    for bufferIndex in 0..<8 {
+      let input = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: 960))
+      input.frameLength = 960
+      let samples = try XCTUnwrap(input.floatChannelData?.pointee)
+      for frame in 0..<960 {
+        samples[frame] = sin(Float(bufferIndex * 960 + frame) * 0.05)
+      }
+
+      let pcm = try XCTUnwrap(
+        converter.convert(input),
+        "tap buffer \(bufferIndex) produced no PCM"
+      )
+      XCTAssertFalse(pcm.isEmpty)
+    }
+  }
+
   func testStopRestoresInactiveEngineState() {
     let state = DuplexAudioState()
     state.start(captureEpoch: 4)

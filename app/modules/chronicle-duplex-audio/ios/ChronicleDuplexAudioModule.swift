@@ -5,7 +5,7 @@ public final class ChronicleDuplexAudioModule: Module {
   private let engine = AVAudioEngine()
   private let player = AVAudioPlayerNode()
   private let controlQueue = DispatchQueue(label: "chronicle.duplex.audio")
-  private var converter: AVAudioConverter?
+  private var pcmConverter: ChronicleDuplexPcmConverter?
   private var captureEpoch = 0
   private var voiceProcessingEnabled = false
   private var captureSuppressed = false
@@ -152,15 +152,10 @@ public final class ChronicleDuplexAudioModule: Module {
     }
 
     let inputFormat = input.outputFormat(forBus: 0)
-    guard let targetFormat = AVAudioFormat(
-      commonFormat: .pcmFormatInt16,
-      sampleRate: 16_000,
-      channels: 1,
-      interleaved: true
-    ), let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+    guard let pcmConverter = ChronicleDuplexPcmConverter(inputFormat: inputFormat) else {
       throw Exception(name: "engine_unavailable", description: "Cannot create the 16 kHz PCM converter")
     }
-    self.converter = converter
+    self.pcmConverter = pcmConverter
     input.installTap(onBus: 0, bufferSize: 960, format: inputFormat) { [weak self] buffer, _ in
       self?.emitPcm(buffer)
     }
@@ -171,30 +166,10 @@ public final class ChronicleDuplexAudioModule: Module {
   }
 
   private func emitPcm(_ input: AVAudioPCMBuffer) {
-    guard !captureSuppressed, engine.isRunning, let converter else { return }
-    let capacity = ChronicleDuplexResampler.outputCapacity(
-      inputFrames: input.frameLength,
-      inputRate: input.format.sampleRate
-    )
-    guard let output = AVAudioPCMBuffer(pcmFormat: converter.outputFormat, frameCapacity: capacity) else {
-      return
-    }
-    var supplied = false
-    var conversionError: NSError?
-    let status = converter.convert(to: output, error: &conversionError) { _, state in
-      if supplied {
-        state.pointee = .noDataNow
-        return nil
-      }
-      supplied = true
-      state.pointee = .haveData
-      return input
-    }
-    guard status != .error,
-          conversionError == nil,
-          output.frameLength > 0,
-          let samples = output.int16ChannelData?.pointee else { return }
-    let data = Data(bytes: samples, count: Int(output.frameLength) * MemoryLayout<Int16>.size)
+    guard !captureSuppressed,
+          engine.isRunning,
+          let data = pcmConverter?.convert(input),
+          !data.isEmpty else { return }
     sendEvent("onPcmFrame", [
       "captureEpoch": captureEpoch,
       "monotonicTimestampMs": ProcessInfo.processInfo.systemUptime * 1_000,
@@ -327,7 +302,7 @@ public final class ChronicleDuplexAudioModule: Module {
     player.stop()
     engine.stop()
     if player.engine != nil { engine.detach(player) }
-    converter = nil
+    pcmConverter = nil
     voiceProcessingEnabled = false
     captureSuppressed = false
     if deactivateSession {
