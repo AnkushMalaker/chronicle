@@ -16,7 +16,8 @@ on:
 
 jobs:
   build-and-submit:
-    runs-on: ubuntu-latest
+    runs-on: macos-26
+    timeout-minutes: 120
     defaults:
       run:
         working-directory: ./app
@@ -33,6 +34,9 @@ jobs:
           cache: 'npm'
           cache-dependency-path: ./app/package-lock.json
 
+      - name: Select Xcode version
+        run: sudo xcode-select -s /Applications/Xcode_26.2.app/Contents/Developer
+
       - name: Setup Expo
         uses: expo/expo-github-action@v8
         with:
@@ -42,6 +46,14 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Verify mobile app
+        run: |
+          npm run test:wearable-activation
+          npm run typecheck
+          npm run test:voice-protocol
+          npm run test:phone-duplex
+          npm run check:theme
 
       - name: Write and validate ASC API key
         env:
@@ -64,18 +76,30 @@ jobs:
               `EXPO_ASC_KEY_ID=${ios.ascApiKeyId}\nEXPO_ASC_ISSUER_ID=${ios.ascApiKeyIssuerId}\n`);
           '
 
-      - name: Build and submit to TestFlight
+      - name: Build App Store IPA locally
         if: inputs.build_id == ''
-        # The ASC key is exported for the *build*, not just the submit step: a new
-        # target (the share extension) needs its own provisioning profile, and
-        # without Apple auth EAS falls back to an interactive login and fails
-        # non-interactive builds with "Failed to set up credentials".
+        # EAS still supplies the managed signing credentials, but compilation runs
+        # on this macOS runner so it does not consume the monthly EAS build quota.
         env:
           EXPO_ASC_API_KEY_PATH: ${{ github.workspace }}/app/asc-api-key.p8
-          # Without this EAS prompts "Apple Team ID:" and dies on unreadable stdin.
-          # It is the OU of the team's distribution certificate, not a secret.
           EXPO_APPLE_TEAM_ID: '39Z45MQX8Z'
-        run: eas build --platform ios --profile testflight --auto-submit --non-interactive
+        run: >-
+          eas build
+          --platform ios
+          --profile testflight
+          --local
+          --non-interactive
+          --output "${{ runner.temp }}/chronicle.ipa"
+
+      - name: Submit local IPA to TestFlight
+        if: inputs.build_id == ''
+        run: >-
+          eas submit
+          --platform ios
+          --profile testflight
+          --path "${{ runner.temp }}/chronicle.ipa"
+          --non-interactive
+          --wait
 
       - name: Submit existing build to TestFlight
         if: inputs.build_id != ''
