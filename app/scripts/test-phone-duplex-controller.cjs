@@ -91,6 +91,24 @@ const bound = (type, eventId) => ({
     'the phone engine must not advertise an unimplemented iOS background-processing mode',
   );
 
+  const iosDuplexSource = fs.readFileSync(
+    path.join(
+      __dirname,
+      '../modules/chronicle-duplex-audio/ios/ChronicleDuplexAudioModule.swift',
+    ),
+    'utf8',
+  );
+  assert.match(
+    iosDuplexSource,
+    /let inputFormat = input\.inputFormat\(forBus: 0\)/,
+    'the iOS input tap must use the current hardware input format',
+  );
+  assert.doesNotMatch(
+    iosDuplexSource,
+    /let inputFormat = input\.outputFormat\(forBus: 0\)/,
+    'using the input node output format can install a silent iOS tap',
+  );
+
   const sent = [];
   const scheduled = [];
   const cancelled = [];

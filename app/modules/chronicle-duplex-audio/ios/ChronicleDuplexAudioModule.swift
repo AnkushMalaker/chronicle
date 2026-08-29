@@ -151,7 +151,10 @@ public final class ChronicleDuplexAudioModule: Module {
       voiceProcessingEnabled = false
     }
 
-    let inputFormat = input.outputFormat(forBus: 0)
+    // iOS input taps must be installed with the hardware input format. The node's
+    // output format can differ after voice processing is enabled and produces a
+    // successfully started engine whose tap never receives buffers.
+    let inputFormat = input.inputFormat(forBus: 0)
     guard let pcmConverter = ChronicleDuplexPcmConverter(inputFormat: inputFormat) else {
       throw Exception(name: "engine_unavailable", description: "Cannot create the 16 kHz PCM converter")
     }
