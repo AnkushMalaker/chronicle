@@ -12,6 +12,7 @@
     "test:voice-protocol": "node scripts/test-voice-protocol.cjs",
     "test:phone-duplex": "node scripts/test-phone-duplex-controller.cjs",
     "test:durable-audio-spool": "node scripts/test-durable-audio-spool.cjs",
+    "test:durable-audio-delivery": "node scripts/test-durable-audio-delivery.cjs",
     "check:theme": "node scripts/check-theme-tokens.mjs"
   },
   "dependencies": {

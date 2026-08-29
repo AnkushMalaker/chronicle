@@ -54,6 +54,7 @@ jobs:
           npm run test:voice-protocol
           npm run test:phone-duplex
           npm run test:durable-audio-spool
+          npm run test:durable-audio-delivery
           npm run check:theme
 
       - name: Write and validate ASC API key

@@ -5,6 +5,10 @@ import notifee, { AndroidImportance } from '@notifee/react-native';
 import NetInfo from '@react-native-community/netinfo';
 import { refreshToken } from '../services/auth';
 import { durableAudioSpool, SpoolPacket } from '../services/durableAudioSpool';
+import {
+  DurableAudioDeliveryCoordinator,
+  DurableBacklogUploadSession,
+} from '../services/durableAudioDelivery';
 import { useConnectionLog, ConnectionEventType, ConnectionEvent } from '../contexts/ConnectionLogContext';
 import {
   addPlaybackStateListener,
@@ -40,6 +44,8 @@ interface UseAudioStreamer {
 }
 
 export interface StreamStartConfig {
+  /** Wall-clock start of the current wearable capture. Older spool packets use a separate lane. */
+  durableCaptureStartedAtMs?: number;
   phoneVoice?: {
     captureEpoch: number;
     capabilities: VoiceCapabilities;
@@ -175,8 +181,10 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   const currentUrlRef = useRef<string>('');
   const outboundChainRef = useRef<Promise<void>>(Promise.resolve());
   const pendingPacketsRef = useRef<Map<string, SpoolPacket>>(new Map());
-  const drainingSpoolRef = useRef<boolean>(false);
-  const deferredLivePacketsRef = useRef<SpoolPacket[]>([]);
+  const sentLivePacketKeysRef = useRef<Set<string>>(new Set());
+  const queuedBacklogPacketKeysRef = useRef<Set<string>>(new Set());
+  const backlogUploadChainRef = useRef<Promise<void>>(Promise.resolve());
+  const deliveryCoordinatorRef = useRef<DurableAudioDeliveryCoordinator | null>(null);
   const activeAudioFormatRef = useRef<Record<string, unknown>>(AMBIENT_AUDIO_FORMAT);
   const streamConfigRef = useRef<StreamStartConfig | undefined>(undefined);
   const duplexControllerRef = useRef<PhoneDuplexController | null>(null);
@@ -308,9 +316,13 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   }, [setStateSafe]);
 
   const sendDurablePacket = useCallback((packet: SpoolPacket) => {
-    pendingPacketsRef.current.set(`${packet.segmentId}:${packet.sequence}`, packet);
+    const key = `${packet.segmentId}:${packet.sequence}`;
+    pendingPacketsRef.current.set(key, packet);
+    if (sentLivePacketKeysRef.current.has(key)) return;
     outboundChainRef.current = outboundChainRef.current.then(async () => {
       if (websocketRef.current?.readyState !== WebSocket.OPEN) return;
+      if (sentLivePacketKeysRef.current.has(key)) return;
+      sentLivePacketKeysRef.current.add(key);
       await sendWyomingEvent(
         {
           type: 'audio-chunk',
@@ -326,17 +338,39 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     });
   }, [sendWyomingEvent]);
 
-  const drainDurableSpool = useCallback(async () => {
-    drainingSpoolRef.current = true;
-    try {
-      const packets = await durableAudioSpool.pendingPackets();
-      packets.forEach(sendDurablePacket);
-    } finally {
-      deferredLivePacketsRef.current.forEach(sendDurablePacket);
-      deferredLivePacketsRef.current = [];
-      drainingSpoolRef.current = false;
-    }
-  }, [sendDurablePacket]);
+  const queueBacklogPackets = useCallback((packets: SpoolPacket[]): Promise<void> => {
+    const batch = packets.filter((packet) => {
+      const key = `${packet.segmentId}:${packet.sequence}`;
+      if (queuedBacklogPacketKeysRef.current.has(key)) return false;
+      queuedBacklogPacketKeysRef.current.add(key);
+      return true;
+    });
+    if (!batch.length) return Promise.resolve();
+
+    const operation = backlogUploadChainRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const upload = new DurableBacklogUploadSession({
+          url: currentUrlRef.current,
+          audioFormat: AMBIENT_AUDIO_FORMAT,
+          createSocket: (url) => new WebSocket(url) as any,
+          acknowledge: async (packet) => {
+            const key = `${packet.segmentId}:${packet.sequence}`;
+            pendingPacketsRef.current.delete(key);
+            sentLivePacketKeysRef.current.delete(key);
+            await durableAudioSpool.acknowledge(packet);
+          },
+        });
+        await upload.upload(batch);
+      })
+      .finally(() => {
+        batch.forEach((packet) => {
+          queuedBacklogPacketKeysRef.current.delete(`${packet.segmentId}:${packet.sequence}`);
+        });
+      });
+    backlogUploadChainRef.current = operation;
+    return operation;
+  }, []);
 
   // Stop (CHANGED): use explicit close code & reason; clear heartbeat; stop FGS
   const stopStreaming = useCallback(async () => {
@@ -368,14 +402,34 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
       websocketRef.current = null;
     }
 
+    sentLivePacketKeysRef.current.clear();
+    const delivery = deliveryCoordinatorRef.current;
+    deliveryCoordinatorRef.current = null;
+    startForegroundServiceNotification(
+      'Chronicle - Uploading',
+      'Finishing saved audio upload',
+    ).catch(() => undefined);
+    durableAudioSpool.pendingPackets()
+      .then((packets) => delivery
+        ? delivery.finishCapture(packets)
+        : queueBacklogPackets(packets))
+      .catch((cause) => {
+        console.error('[AudioStreamer] Saved audio remains queued:', cause);
+        logEvent('ws_error', `Saved audio upload paused: ${(cause as Error)?.message || cause}`);
+      })
+      .finally(() => {
+        if (manuallyStoppedRef.current) {
+          stopForegroundServiceNotification().catch(() => undefined);
+        }
+      });
+
     setStateSafe(setIsStreaming, false);
     setStateSafe(setIsConnecting, false);
     activeAudioFormatRef.current = AMBIENT_AUDIO_FORMAT;
     streamConfigRef.current = undefined;
     duplexUnsupportedRef.current = false;
     setStateSafe(setPhonePlaybackState, null);
-    await stopForegroundServiceNotification();
-  }, [clearDuplexSocketState, sendWyomingEvent, setStateSafe]);
+  }, [clearDuplexSocketState, logEvent, queueBacklogPackets, sendWyomingEvent, setStateSafe]);
 
   // Reconnect (persistent): exponential backoff capped at MAX_RECONNECT_MS, and
   // we NEVER permanently give up — giving up would also disable the NetInfo and
@@ -480,6 +534,15 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           duplexResumeRef.current?.previousVoiceSessionId ?? null
         )
       : AMBIENT_AUDIO_FORMAT;
+    deliveryCoordinatorRef.current = new DurableAudioDeliveryCoordinator({
+      captureStartedAtMs: requestedConfig?.durableCaptureStartedAtMs ?? Date.now(),
+      sendLive: async (packets) => {
+        packets.forEach(sendDurablePacket);
+        await outboundChainRef.current;
+      },
+      sendBacklog: queueBacklogPackets,
+    });
+    manuallyStoppedRef.current = false;
 
     setStateSafe(setIsConnecting, true);
     setStateSafe(setError, null);
@@ -583,7 +646,20 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
             };
             console.log('[AudioStreamer] Sending audio-start event');
             await sendWyomingEvent(audioStartEvent);
-            await drainDurableSpool();
+            sentLivePacketKeysRef.current.clear();
+            const delivery = deliveryCoordinatorRef.current;
+            if (delivery) {
+              // Runtime packets captured while the socket opened go live first.
+              // The filesystem scan and historical upload continue independently.
+              delivery.recover([...pendingPacketsRef.current.values()]).catch((cause) =>
+                console.error('[AudioStreamer] Failed to recover runtime audio:', cause)
+              );
+              durableAudioSpool.pendingPackets()
+                .then((packets) => delivery.recover(packets))
+                .catch((cause) =>
+                  console.error('[AudioStreamer] Failed to recover durable audio:', cause)
+                );
+            }
             console.log('[AudioStreamer] ✅ audio-start sent successfully');
             if (duplexControllerRef.current) {
               protocolHandshakeTimerRef.current = setTimeout(() => {
@@ -629,6 +705,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
               const packet = pendingPacketsRef.current.get(key);
               if (packet) {
                 pendingPacketsRef.current.delete(key);
+                sentLivePacketKeysRef.current.delete(key);
                 durableAudioSpool.acknowledge(packet).catch((e) =>
                   console.error('[AudioStreamer] Failed to retire acknowledged audio:', e)
                 );
@@ -761,15 +838,18 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
         reject(new Error(msg));
       }
     });
-  }, [attemptReconnect, attemptReLogin, clearDuplexSocketState, drainDurableSpool, notifyInfo, sendWyomingEvent, setStateSafe, stopStreaming, logEvent]);
+  }, [attemptReconnect, attemptReLogin, clearDuplexSocketState, notifyInfo, queueBacklogPackets, sendDurablePacket, sendWyomingEvent, setStateSafe, stopStreaming, logEvent]);
 
   const sendAudio = useCallback(async (audioBytes: Uint8Array, durable = true) => {
     if (!audioBytes.length) return;
 
     if (durable) {
       const packet = durableAudioSpool.append(audioBytes);
-      if (drainingSpoolRef.current) {
-        deferredLivePacketsRef.current.push(packet);
+      const delivery = deliveryCoordinatorRef.current;
+      if (delivery) {
+        delivery.captured(packet).catch((cause) =>
+          console.error('[AudioStreamer] Live audio remains queued:', cause)
+        );
       } else {
         sendDurablePacket(packet);
       }

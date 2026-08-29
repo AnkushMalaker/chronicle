@@ -102,6 +102,7 @@ export const useAudioStreamingOrchestrator = ({
 
     try {
       const finalUrl = buildWebSocketUrl(settings.webSocketUrl);
+      const durableCaptureStartedAtMs = Date.now();
       await originalStartAudioListener(async (audioBytes) => {
         if (audioBytes.length > 0) {
           await audioStreamer.sendAudio(audioBytes);
@@ -109,7 +110,7 @@ export const useAudioStreamingOrchestrator = ({
       });
       // BLE capture is independent of network availability. The durable spool above
       // keeps receiving while this connection attempt fails or reconnects.
-      audioStreamer.startStreaming(finalUrl).catch((error) => {
+      audioStreamer.startStreaming(finalUrl, { durableCaptureStartedAtMs }).catch((error) => {
         console.warn('[AudioOrchestrator] Initial WebSocket connection failed; buffering locally:', error);
       });
     } catch (error) {
