@@ -21,7 +21,7 @@ let package = Package(
         "Package.swift",
         "Tests",
       ],
-      sources: ["DuplexAudioState.swift", "DuplexPcmConverter.swift"]
+      sources: ["DuplexAudioState.swift", "DuplexPcmConverter.swift", "DuplexOpusEncoder.swift"]
     ),
     .testTarget(
       name: "ChronicleDuplexAudioTests",

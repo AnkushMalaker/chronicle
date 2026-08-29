@@ -10,3 +10,5 @@ The normative transport and compatibility reference is
   wearable bridges. Ordinary capture does not require it.
 - `voice-session.ready-half-duplex.json` is the canonical capability event for Elato,
   HAVPE, speaker-routed OMI, and other bridges without verified isolation or AEC.
+- `typescript/interactiveAudio.ts` owns phone Opus packet sequencing and captured-clock
+  metadata. Native adapters emit one raw packet and never construct wire headers.

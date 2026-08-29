@@ -24,6 +24,10 @@ import {
   type PhoneResumeProof,
 } from '../protocol/phoneDuplexController';
 import type { VoiceCapabilities } from '../protocol/voiceProtocol';
+import {
+  type CapturedAudioFrame,
+  InteractiveAudioFrameEncoder,
+} from '../../../contracts/voice_protocol/v1/typescript/interactiveAudio';
 
 interface UseAudioStreamerOptions {
   /** Called when a new JWT token is obtained via auto-re-login */
@@ -41,6 +45,7 @@ interface UseAudioStreamer {
   getWebSocketReadyState: () => number | undefined;
   stopStreaming: () => Promise<void>;
   sendAudio: (audioBytes: Uint8Array, durable?: boolean) => void;
+  sendInteractiveAudio: (frame: CapturedAudioFrame) => void;
 }
 
 export interface StreamStartConfig {
@@ -186,6 +191,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   const backlogUploadChainRef = useRef<Promise<void>>(Promise.resolve());
   const deliveryCoordinatorRef = useRef<DurableAudioDeliveryCoordinator | null>(null);
   const activeAudioFormatRef = useRef<Record<string, unknown>>(AMBIENT_AUDIO_FORMAT);
+  const interactiveAudioEncoderRef = useRef<InteractiveAudioFrameEncoder | null>(null);
   const streamConfigRef = useRef<StreamStartConfig | undefined>(undefined);
   const duplexControllerRef = useRef<PhoneDuplexController | null>(null);
   const duplexResumeRef = useRef<PhoneResumeProof | null>(null);
@@ -426,6 +432,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     setStateSafe(setIsStreaming, false);
     setStateSafe(setIsConnecting, false);
     activeAudioFormatRef.current = AMBIENT_AUDIO_FORMAT;
+    interactiveAudioEncoderRef.current = null;
     streamConfigRef.current = undefined;
     duplexUnsupportedRef.current = false;
     setStateSafe(setPhonePlaybackState, null);
@@ -505,6 +512,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           duplexResumeRef.current?.previousVoiceSessionId ?? null
         )
       : AMBIENT_AUDIO_FORMAT;
+    interactiveAudioEncoderRef.current = requestedConfig?.phoneVoice
+      ? new InteractiveAudioFrameEncoder(requestedConfig.phoneVoice.captureEpoch)
+      : null;
     manuallyStoppedRef.current = false;
     authFailedRef.current = false;
 
@@ -534,6 +544,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           duplexResumeRef.current?.previousVoiceSessionId ?? null
         )
       : AMBIENT_AUDIO_FORMAT;
+    interactiveAudioEncoderRef.current = requestedConfig?.phoneVoice
+      ? new InteractiveAudioFrameEncoder(requestedConfig.phoneVoice.captureEpoch)
+      : null;
     deliveryCoordinatorRef.current = new DurableAudioDeliveryCoordinator({
       captureStartedAtMs: requestedConfig?.durableCaptureStartedAtMs ?? Date.now(),
       sendLive: async (packets) => {
@@ -590,6 +603,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
                   stopCapture: phoneVoice.stopCapture,
                 };
                 streamConfigRef.current = { phoneVoice: nextPhoneVoice };
+                interactiveAudioEncoderRef.current = new InteractiveAudioFrameEncoder(
+                  nextPhoneVoice.captureEpoch
+                );
                 activeAudioFormatRef.current = phoneAudioFormat(
                   nextPhoneVoice,
                   voiceSessionId
@@ -736,6 +752,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
                 data: { timestamp: Date.now(), reason: 'resume_rejected' },
               });
               streamConfigRef.current = { phoneVoice: replacement };
+              interactiveAudioEncoderRef.current = new InteractiveAudioFrameEncoder(
+                replacement.captureEpoch
+              );
               activeAudioFormatRef.current = phoneAudioFormat(replacement);
               await sendWyomingEvent({
                 type: 'audio-start',
@@ -877,6 +896,21 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     }
   }, [sendDurablePacket, sendWyomingEvent, setStateSafe]);
 
+  const sendInteractiveAudio = useCallback(async (frame: CapturedAudioFrame) => {
+    const socket = websocketRef.current;
+    const encoder = interactiveAudioEncoderRef.current;
+    if (!encoder || socket?.readyState !== WebSocket.OPEN) return;
+    try {
+      const encoded = encoder.encode(frame);
+      await sendWyomingEvent(encoded.header, encoded.payload);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Invalid interactive audio frame';
+      console.error('[AudioStreamer] Interactive Opus frame rejected:', message);
+      logEvent('ws_error', `Interactive Opus frame rejected: ${message}`);
+      setStateSafe(setError, message);
+    }
+  }, [logEvent, sendWyomingEvent, setStateSafe]);
+
   const getWebSocketReadyState = useCallback(() => websocketRef.current?.readyState, []);
 
   /** Connectivity-triggered reconnect (NEW) */
@@ -943,5 +977,6 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     getWebSocketReadyState,
     stopStreaming,
     sendAudio,
+    sendInteractiveAudio,
   };
 };

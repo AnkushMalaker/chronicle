@@ -3,6 +3,19 @@ import XCTest
 @testable import ChronicleDuplexAudio
 
 final class DuplexAudioStateTests: XCTestCase {
+  func testOpusEncoderProducesOneRawFortyMillisecondPacket() throws {
+    let encoder = try XCTUnwrap(ChronicleDuplexOpusEncoder())
+
+    let packet = try encoder.encode(
+      Data(repeating: 0, count: ChronicleDuplexOpusEncoder.pcmByteCount)
+    )
+
+    XCTAssertEqual(packet.durationMs, 40)
+    XCTAssertFalse(packet.data.isEmpty)
+    XCTAssertLessThanOrEqual(packet.data.count, 1_275)
+    XCTAssertFalse(packet.data.starts(with: Data("OggS".utf8)))
+  }
+
   func testEngineStateRejectsResponseFromPreviousEpoch() throws {
     let state = DuplexAudioState()
     state.start(captureEpoch: 4)

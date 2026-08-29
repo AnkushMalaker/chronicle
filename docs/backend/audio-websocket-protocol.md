@@ -102,7 +102,38 @@ Startup order:
 3. Backend sends `audio-session.started`.
 4. Backend sends `voice-session.start` with a single-use resume token.
 5. Client reports actual capabilities with `voice-session.ready`.
-6. Audio chunks continue over the unchanged base binary path.
+6. Audio chunks continue over the codec selected on the WebSocket.
+
+### Phone interactive audio packets
+
+The Chronicle phone app connects with `codec=opus`. AEC and noise suppression run
+inside the native PCM audio graph, after which the native adapter emits 16 kHz mono
+raw Opus packets. The app sends exactly one packet per binary frame; it must not send
+an Ogg container or `OpusHead` stream header.
+
+Each binary frame is preceded by a strict captured-clock header:
+
+```json
+{
+  "type": "audio-chunk",
+  "data": {
+    "codec": "opus",
+    "rate": 16000,
+    "channels": 1,
+    "frame_duration_ms": 40,
+    "time_basis": "captured",
+    "frame_sequence": 7,
+    "monotonic_offset_ms": 280,
+    "captured_at_ms": 1770000000125
+  },
+  "payload_length": 62
+}
+```
+
+The shared transport module, not platform capture code, assigns `frame_sequence` and
+`monotonic_offset_ms`. The backend validates packet length and format, decodes Opus
+once at the inference boundary, publishes the decoded captured-clock PCM to active
+turn consumers, and then sends that same PCM through the durable capture pipeline.
 
 A v1 client must fail interactive activation closed if this handshake does not
 complete. Chronicle clients surface that as `server_upgrade_required`; they do not

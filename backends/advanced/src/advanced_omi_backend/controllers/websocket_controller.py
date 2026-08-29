@@ -66,6 +66,10 @@ from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
 )
+from advanced_omi_backend.services.interactive_audio import (
+    parse_interactive_opus_chunk_header,
+    validate_raw_opus_payload,
+)
 from advanced_omi_backend.services.observability import record_event_sync
 from advanced_omi_backend.services.plugin_service import get_plugin_router
 from advanced_omi_backend.services.response_coordinator import (
@@ -1592,6 +1596,109 @@ async def _commit_mobile_spool_receipt(
     )
 
 
+async def _handle_opus_wyoming_audio_packet(
+    websocket: WebSocket,
+    client_state,
+    audio_stream_producer,
+    control_header: dict,
+    opus_data: bytes,
+    user_id: str,
+    user_email: str,
+    client_id: str,
+    decoder: OmiOpusDecoder | None = None,
+) -> tuple[Optional[asyncio.Task], bool]:
+    """Decode one strict interactive Opus packet at the inference/WAL seam."""
+
+    header = parse_interactive_opus_chunk_header(control_header)
+    validate_raw_opus_payload(header, opus_data)
+    wire_metadata = header.data.model_dump(mode="python")
+    receipt_key, spool_sequence, duplicate = await _prepare_mobile_spool_receipt(
+        websocket,
+        audio_stream_producer,
+        user_id,
+        client_id,
+        wire_metadata,
+    )
+    if duplicate:
+        return None, False
+
+    active_decoder = decoder or OmiOpusDecoder()
+    loop = asyncio.get_running_loop()
+    pcm = await loop.run_in_executor(
+        _DEC_IO_EXECUTOR,
+        partial(active_decoder.decode_packet, opus_data, strip_header=False),
+    )
+    if not pcm:
+        raise ValueError("interactive Opus packet could not be decoded")
+    expected_bytes = (
+        header.data.rate
+        * header.data.channels
+        * OMI_SAMPLE_WIDTH
+        * header.data.frame_duration_ms
+        // 1_000
+    )
+    if len(pcm) != expected_bytes:
+        raise ValueError(
+            f"interactive Opus decoded {len(pcm)} PCM bytes; expected {expected_bytes}"
+        )
+
+    pcm_metadata = {
+        "rate": header.data.rate,
+        "width": OMI_SAMPLE_WIDTH,
+        "channels": header.data.channels,
+        "time_basis": header.data.time_basis,
+        "frame_sequence": header.data.frame_sequence,
+        "monotonic_offset_ms": header.data.monotonic_offset_ms,
+        "captured_at_ms": header.data.captured_at_ms,
+    }
+    if client_state.voice_session_id and client_state.processing_profile in {
+        "duplex_aec",
+        "duplex_isolated",
+        "half_duplex",
+    }:
+        session_id = client_state.stream_session_id
+        if session_id is None:
+            raise RuntimeError("Interactive frame has no active audio session")
+        await VoiceFramePublisher(audio_stream_producer.redis_client).publish(
+            voice_session_id=client_state.voice_session_id,
+            audio_session_id=session_id,
+            capture_epoch=client_state.capture_epoch,
+            pcm=pcm,
+            metadata=pcm_metadata,
+        )
+
+    task = await _handle_audio_chunk(
+        client_state,
+        audio_stream_producer,
+        pcm,
+        pcm_metadata,
+        user_id,
+        user_email,
+        client_id,
+        websocket=websocket,
+    )
+    if receipt_key is not None and spool_sequence is not None:
+        session_id = client_state.stream_session_id
+        if session_id is None:
+            raise RuntimeError(
+                "Durable Opus audio requires an active streaming capture"
+            )
+        await audio_stream_producer.flush_session_buffer(
+            session_id,
+            sample_rate=header.data.rate,
+            channels=header.data.channels,
+            sample_width=OMI_SAMPLE_WIDTH,
+        )
+        await _commit_mobile_spool_receipt(
+            websocket,
+            audio_stream_producer,
+            receipt_key,
+            str(wire_metadata["spool_segment_id"]),
+            spool_sequence,
+        )
+    return task, True
+
+
 async def _handle_pcm_wyoming_audio_packet(
     websocket: WebSocket,
     client_state,
@@ -2210,6 +2317,7 @@ async def handle_omi_websocket(
 
         packet_count = 0
         total_bytes = 0
+        interactive_opus = False
 
         while True:
             # Parse Wyoming protocol
@@ -2222,20 +2330,31 @@ async def handle_omi_websocket(
                 )
                 application_logger.info(f"🎙️ OMI audio session started for {client_id}")
 
+                audio_format = header.get(
+                    "data",
+                    {
+                        "rate": OMI_SAMPLE_RATE,
+                        "width": OMI_SAMPLE_WIDTH,
+                        "channels": OMI_CHANNELS,
+                    },
+                )
+                interactive_opus = (
+                    audio_format.get("voice_duplex_protocol") == VOICE_DUPLEX_PROTOCOL
+                )
+                if interactive_opus:
+                    await _handle_audio_session_start(
+                        client_state,
+                        audio_format,
+                        client_id,
+                        websocket=ws,
+                    )
                 interim_holder[0] = await _initialize_streaming_session(
                     client_state,
                     audio_stream_producer,
                     user.user_id,
                     user.email,
                     client_id,
-                    header.get(
-                        "data",
-                        {
-                            "rate": OMI_SAMPLE_RATE,
-                            "width": OMI_SAMPLE_WIDTH,
-                            "channels": OMI_CHANNELS,
-                        },
-                    ),
+                    audio_format,
                     websocket=ws,
                 )
 
@@ -2271,16 +2390,29 @@ async def handle_omi_websocket(
                         f"🎵 Received OMI audio chunk #{packet_count}: {len(payload)} bytes"
                     )
 
-                decoded = await _handle_omi_audio_chunk(
-                    client_state,
-                    audio_stream_producer,
-                    payload,
-                    _decode_packet,
-                    user.user_id,
-                    client_id,
-                    packet_count,
-                    _captured_at_seconds(chunk_data),
-                )
+                if interactive_opus:
+                    _, decoded = await _handle_opus_wyoming_audio_packet(
+                        ws,
+                        client_state,
+                        audio_stream_producer,
+                        header,
+                        payload,
+                        user.user_id,
+                        user.email,
+                        client_id,
+                        decoder=decoder,
+                    )
+                else:
+                    decoded = await _handle_omi_audio_chunk(
+                        client_state,
+                        audio_stream_producer,
+                        payload,
+                        _decode_packet,
+                        user.user_id,
+                        client_id,
+                        packet_count,
+                        _captured_at_seconds(chunk_data),
+                    )
 
                 if receipt_key is not None and decoded:
                     # ACK only after the decoded bytes cross the Redis WAL boundary.
@@ -2312,16 +2444,26 @@ async def handle_omi_websocket(
                     f"Total chunks: {packet_count}, Total bytes: {total_bytes}"
                 )
 
-                await _finalize_streaming_session(
-                    client_state,
-                    audio_stream_producer,
-                    user.user_id,
-                    user.email,
-                    client_id,
-                )
+                if interactive_opus:
+                    await _handle_audio_session_stop(
+                        client_state,
+                        audio_stream_producer,
+                        user.user_id,
+                        user.email,
+                        client_id,
+                    )
+                else:
+                    await _finalize_streaming_session(
+                        client_state,
+                        audio_stream_producer,
+                        user.user_id,
+                        user.email,
+                        client_id,
+                    )
 
                 packet_count = 0
                 total_bytes = 0
+                interactive_opus = False
 
             elif header["type"] == "ping":
                 # App-level heartbeat. The mobile client (useAudioStreamer) pings every
@@ -2347,6 +2489,19 @@ async def handle_omi_websocket(
                 direction = dial_data.get("direction", "")
                 await _handle_dial_event(
                     client_state, direction, user.user_id, client_id
+                )
+
+            elif header["type"] in {
+                "voice-session.ready",
+                "voice-session.capabilities-changed",
+                "voice-session.resume",
+                "voice-session.stopped",
+                "response.playback",
+            }:
+                await _handle_phone_voice_event(
+                    payload=header,
+                    client_state=client_state,
+                    audio_stream_producer=audio_stream_producer,
                 )
 
             else:

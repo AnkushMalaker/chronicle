@@ -13,6 +13,8 @@ import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.MediaCodec
+import android.media.MediaFormat
 import android.media.NoiseSuppressor
 import android.os.Build
 import android.os.SystemClock
@@ -27,14 +29,28 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.ArrayDeque
+import kotlin.math.sqrt
 
 @RequiresApi(Build.VERSION_CODES.S)
 class ChronicleDuplexAudioModule : Module() {
+  private data class OpusStamp(
+    val captureEpoch: Int,
+    val capturedAtMs: Double,
+    val monotonicTimestampMs: Double,
+    val audioLevel: Double,
+  )
+
+  private companion object {
+    const val OPUS_FRAME_MS = 20.0
+  }
+
   private val captureExecutor = Executors.newSingleThreadExecutor()
   private val playbackExecutor = Executors.newSingleThreadExecutor()
   private val capturing = AtomicBoolean(false)
   private var captureEpoch = 0
   private var recorder: AudioRecord? = null
+  private var opusEncoder: MediaCodec? = null
   private var player: AudioTrack? = null
   private var echoCanceler: AcousticEchoCanceler? = null
   private var noiseSuppressor: NoiseSuppressor? = null
@@ -50,7 +66,7 @@ class ChronicleDuplexAudioModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("ChronicleDuplexAudio")
-    Events("onPcmFrame", "onPlaybackState", "onRouteChange")
+    Events("onAudioFrame", "onPlaybackState", "onRouteChange", "onCaptureDiagnostic")
 
     OnDestroy {
       tearDownEngine(restoreRouting = true)
@@ -133,7 +149,14 @@ class ChronicleDuplexAudioModule : Module() {
       newRecorder.release()
       throw CodedException("engine_unavailable", "AudioRecord did not initialize", null)
     }
+    val newOpusEncoder = try {
+      createOpusEncoder()
+    } catch (cause: Exception) {
+      newRecorder.release()
+      throw cause
+    }
     recorder = newRecorder
+    opusEncoder = newOpusEncoder
     echoCanceler = if (AcousticEchoCanceler.isAvailable()) {
       AcousticEchoCanceler.create(newRecorder.audioSessionId)?.apply { enabled = true }
     } else null
@@ -174,21 +197,134 @@ class ChronicleDuplexAudioModule : Module() {
 
   private fun captureLoop(activeRecorder: AudioRecord, epoch: Int) {
     val frame = ByteArray(640)
+    var frameOffset = 0
+    val stamps = ArrayDeque<OpusStamp>()
     while (capturing.get() && recorder === activeRecorder && captureEpoch == epoch) {
-      val count = activeRecorder.read(frame, 0, frame.size, AudioRecord.READ_BLOCKING)
-      if (count <= 0 || captureSuppressed) continue
-      sendEvent(
-        "onPcmFrame",
-        bundleOf(
-          "captureEpoch" to epoch,
-          "monotonicTimestampMs" to SystemClock.elapsedRealtime().toDouble(),
-          "sampleRate" to 16_000,
-          "channels" to 1,
-          "sampleWidth" to 2,
-          "pcmBase64" to Base64.encodeToString(frame.copyOf(count), Base64.NO_WRAP),
-        ),
+      val count = activeRecorder.read(
+        frame,
+        frameOffset,
+        frame.size - frameOffset,
+        AudioRecord.READ_BLOCKING,
       )
+      if (count <= 0) continue
+      frameOffset += count
+      if (frameOffset < frame.size) continue
+      frameOffset = 0
+      if (captureSuppressed) continue
+      val capturedAtMs = System.currentTimeMillis().toDouble() - OPUS_FRAME_MS
+      val monotonicMs = SystemClock.elapsedRealtime().toDouble() - OPUS_FRAME_MS
+      try {
+        queueOpusFrame(
+          frame,
+          OpusStamp(epoch, capturedAtMs, monotonicMs, rmsPcm16(frame)),
+          stamps,
+        )
+      } catch (cause: Exception) {
+        sendEvent(
+          "onCaptureDiagnostic",
+          bundleOf(
+            "captureEpoch" to epoch,
+            "stage" to "encoding_failed",
+            "details" to (cause.message ?: "Android Opus encoding failed"),
+          ),
+        )
+        break
+      }
     }
+  }
+
+  private fun createOpusEncoder(): MediaCodec {
+    val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 16_000, 1).apply {
+      setInteger(MediaFormat.KEY_BIT_RATE, 24_000)
+      setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 640)
+      setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+    }
+    return try {
+      MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS).apply {
+        configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+        start()
+      }
+    } catch (cause: Exception) {
+      throw CodedException("encoder_unavailable", "Low-delay Opus encoder unavailable", cause)
+    }
+  }
+
+  private fun queueOpusFrame(
+    pcm: ByteArray,
+    stamp: OpusStamp,
+    stamps: ArrayDeque<OpusStamp>,
+  ) {
+    val encoder = opusEncoder
+      ?: throw CodedException("encoder_unavailable", "Opus encoder unavailable", null)
+    val inputIndex = encoder.dequeueInputBuffer(10_000)
+    if (inputIndex < 0) {
+      throw CodedException("encoding_failed", "Opus encoder input stalled", null)
+    }
+    val input = encoder.getInputBuffer(inputIndex)
+      ?: throw CodedException("encoding_failed", "Opus encoder input unavailable", null)
+    input.clear()
+    input.put(pcm)
+    val presentationTimeUs = (stamp.monotonicTimestampMs * 1_000).toLong()
+    encoder.queueInputBuffer(inputIndex, 0, pcm.size, presentationTimeUs, 0)
+    stamps.addLast(stamp)
+    drainOpusPackets(encoder, stamps)
+  }
+
+  private fun drainOpusPackets(encoder: MediaCodec, stamps: ArrayDeque<OpusStamp>) {
+    val info = MediaCodec.BufferInfo()
+    while (true) {
+      val outputIndex = encoder.dequeueOutputBuffer(info, 0)
+      when {
+        outputIndex >= 0 -> {
+          try {
+            if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0 || info.size == 0) continue
+            val output = encoder.getOutputBuffer(outputIndex)
+              ?: throw CodedException("encoding_failed", "Opus encoder output unavailable", null)
+            output.position(info.offset)
+            output.limit(info.offset + info.size)
+            val packet = ByteArray(info.size)
+            output.get(packet)
+            if (packet.size > 1_275 || packet.take(4).toByteArray().contentEquals("OggS".toByteArray())) {
+              throw CodedException("encoding_failed", "Opus encoder returned a container", null)
+            }
+            val stamp = stamps.pollFirst()
+              ?: throw CodedException("encoding_failed", "Opus encoder lost capture clock", null)
+            sendEvent(
+              "onAudioFrame",
+              bundleOf(
+                "captureEpoch" to stamp.captureEpoch,
+                "capturedAtMs" to stamp.capturedAtMs,
+                "monotonicTimestampMs" to stamp.monotonicTimestampMs,
+                "codec" to "opus",
+                "sampleRate" to 16_000,
+                "channels" to 1,
+                "frameDurationMs" to OPUS_FRAME_MS.toInt(),
+                "audioLevel" to stamp.audioLevel,
+                "payloadBase64" to Base64.encodeToString(packet, Base64.NO_WRAP),
+              ),
+            )
+          } finally {
+            encoder.releaseOutputBuffer(outputIndex, false)
+          }
+        }
+        outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
+        else -> return
+      }
+    }
+  }
+
+  private fun rmsPcm16(bytes: ByteArray): Double {
+    var sum = 0.0
+    var samples = 0
+    var offset = 0
+    while (offset + 1 < bytes.size) {
+      val value = ((bytes[offset].toInt() and 0xff) or (bytes[offset + 1].toInt() shl 8)).toShort()
+      val normalized = value.toDouble() / 32_768.0
+      sum += normalized * normalized
+      samples += 1
+      offset += 2
+    }
+    return if (samples == 0) 0.0 else sqrt(sum / samples)
   }
 
   private fun schedule(response: Map<String, Any>) {
@@ -376,6 +512,9 @@ class ChronicleDuplexAudioModule : Module() {
     recorder?.runCatching { stop() }
     recorder?.release()
     recorder = null
+    opusEncoder?.runCatching { stop() }
+    opusEncoder?.release()
+    opusEncoder = null
     echoCanceler?.release()
     echoCanceler = null
     noiseSuppressor?.release()

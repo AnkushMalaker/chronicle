@@ -4,6 +4,7 @@ import { OmiConnection } from 'friend-lite-react-native';
 import { AppSettings } from './useAppSettings';
 import type { StreamStartConfig } from './useAudioStreamer';
 import type { PhoneCaptureSession } from './usePhoneAudioRecorder';
+import type { CapturedAudioFrame } from '../../../contracts/voice_protocol/v1/typescript/interactiveAudio';
 
 interface OrchestratorParams {
   omiConnection: OmiConnection;
@@ -15,12 +16,13 @@ interface OrchestratorParams {
     startStreaming: (url: string, config?: StreamStartConfig) => Promise<void>;
     stopStreaming: () => Promise<void>;
     sendAudio: (audioBytes: Uint8Array, durable?: boolean) => void;
+    sendInteractiveAudio: (frame: CapturedAudioFrame) => void;
     getWebSocketReadyState: () => number | undefined;
   };
   phoneAudioRecorder: {
     isRecording: boolean;
     startRecording: (
-      onData: (pcmBuffer: Uint8Array) => Promise<void>
+      onData: (frame: CapturedAudioFrame) => Promise<void>
     ) => Promise<PhoneCaptureSession>;
     stopRecording: () => Promise<void>;
   };
@@ -75,7 +77,7 @@ export const useAudioStreamingOrchestrator = ({
     if (!url.includes('/ws')) url = url.replace(/\/$/, '') + '/ws';
     if (!url.includes('codec=')) {
       const sep = url.includes('?') ? '&' : '?';
-      url = url + sep + 'codec=pcm';
+      url = url + sep + 'codec=opus';
     }
 
     const isAdvanced = settings.jwtToken && settings.isAuthenticated;
@@ -132,10 +134,10 @@ export const useAudioStreamingOrchestrator = ({
 
     try {
       const finalUrl = buildPhoneWebSocketUrl(settings.webSocketUrl);
-      const capture = await phoneAudioRecorder.startRecording(async (pcmBuffer) => {
+      const capture = await phoneAudioRecorder.startRecording(async (frame) => {
         const wsReady = audioStreamer.getWebSocketReadyState();
-        if (wsReady === WebSocket.OPEN && pcmBuffer.length > 0) {
-          await audioStreamer.sendAudio(pcmBuffer, false);
+        if (wsReady === WebSocket.OPEN && frame.payload.length > 0) {
+          await audioStreamer.sendInteractiveAudio(frame);
         }
       });
       await audioStreamer.startStreaming(finalUrl, { phoneVoice: capture });

@@ -6,6 +6,10 @@ public final class ChronicleDuplexAudioModule: Module {
   private let player = AVAudioPlayerNode()
   private let controlQueue = DispatchQueue(label: "chronicle.duplex.audio")
   private var pcmConverter: ChronicleDuplexPcmConverter?
+  private var opusEncoder: ChronicleDuplexOpusEncoder?
+  private var opusPcmBuffer = Data()
+  private var opusBufferCapturedAtMs: Double?
+  private var opusBufferMonotonicMs: Double?
   private var captureEpoch = 0
   private var voiceProcessingEnabled = false
   private var captureSuppressed = false
@@ -30,7 +34,7 @@ public final class ChronicleDuplexAudioModule: Module {
 
   public func definition() -> ModuleDefinition {
     Name("ChronicleDuplexAudio")
-    Events("onPcmFrame", "onPlaybackState", "onRouteChange", "onCaptureDiagnostic")
+    Events("onAudioFrame", "onPlaybackState", "onRouteChange", "onCaptureDiagnostic")
 
     OnCreate { [weak self] in
       self?.installObservers()
@@ -175,7 +179,14 @@ public final class ChronicleDuplexAudioModule: Module {
     guard let pcmConverter = ChronicleDuplexPcmConverter(inputFormat: inputFormat) else {
       throw Exception(name: "engine_unavailable", description: "Cannot create the 16 kHz PCM converter")
     }
+    guard let opusEncoder = ChronicleDuplexOpusEncoder() else {
+      throw Exception(name: "encoder_unavailable", description: "Cannot create the low-delay Opus encoder")
+    }
     self.pcmConverter = pcmConverter
+    self.opusEncoder = opusEncoder
+    opusPcmBuffer.removeAll(keepingCapacity: true)
+    opusBufferCapturedAtMs = nil
+    opusBufferMonotonicMs = nil
     resetCaptureMetrics()
     input.installTap(onBus: 0, bufferSize: 960, format: inputFormat) { [weak self] buffer, _ in
       self?.emitPcm(buffer)
@@ -206,23 +217,87 @@ public final class ChronicleDuplexAudioModule: Module {
       }
       return
     }
-    let firstPcm = observePcmFrame()
-    if firstPcm {
-      emitCaptureDiagnostic(stage: "first_pcm", details: "bytes=\(data.count)")
+    let durationMs = Double(data.count) / Double(16_000 * 2) * 1_000
+    let capturedAtMs = Date().timeIntervalSince1970 * 1_000 - durationMs
+    let timestamp = ProcessInfo.processInfo.systemUptime * 1_000 - durationMs
+    emitOpus(pcm: data, capturedAtMs: capturedAtMs, monotonicMs: timestamp)
+  }
+
+  private func emitOpus(pcm: Data, capturedAtMs: Double, monotonicMs: Double) {
+    if opusPcmBuffer.isEmpty {
+      opusBufferCapturedAtMs = capturedAtMs
+      opusBufferMonotonicMs = monotonicMs
     }
+    opusPcmBuffer.append(pcm)
+    while opusPcmBuffer.count >= ChronicleDuplexOpusEncoder.pcmByteCount {
+      let frame = Data(opusPcmBuffer.prefix(ChronicleDuplexOpusEncoder.pcmByteCount))
+      opusPcmBuffer.removeFirst(ChronicleDuplexOpusEncoder.pcmByteCount)
+      guard let frameCapturedAtMs = opusBufferCapturedAtMs,
+        let frameMonotonicMs = opusBufferMonotonicMs,
+        let encoder = opusEncoder
+      else { return }
+      do {
+        let packet = try encoder.encode(frame)
+        let firstOpus = observePcmFrame()
+        if firstOpus {
+          emitCaptureDiagnostic(stage: "first_opus", details: "bytes=\(packet.data.count)")
+        }
+        sendOpusPacket(
+          packet,
+          capturedAtMs: frameCapturedAtMs,
+          monotonicMs: frameMonotonicMs,
+          audioLevel: rmsPcm16(frame)
+        )
+      } catch {
+        if observeConversionFailure() {
+          emitCaptureDiagnostic(stage: "encoding_failed", details: error.localizedDescription)
+        }
+      }
+      opusBufferCapturedAtMs = frameCapturedAtMs + Double(ChronicleDuplexOpusEncoder.frameDurationMs)
+      opusBufferMonotonicMs = frameMonotonicMs + Double(ChronicleDuplexOpusEncoder.frameDurationMs)
+    }
+    if opusPcmBuffer.isEmpty {
+      opusBufferCapturedAtMs = nil
+      opusBufferMonotonicMs = nil
+    }
+  }
+
+  private func sendOpusPacket(
+    _ packet: ChronicleEncodedOpusPacket,
+    capturedAtMs: Double,
+    monotonicMs: Double,
+    audioLevel: Double
+  ) {
     let epoch = captureEpoch
-    let timestamp = ProcessInfo.processInfo.systemUptime * 1_000
-    let encoded = data.base64EncodedString()
+    let encoded = packet.data.base64EncodedString()
     DispatchQueue.main.async { [weak self] in
-      self?.sendEvent("onPcmFrame", [
+      self?.sendEvent("onAudioFrame", [
         "captureEpoch": epoch,
-        "monotonicTimestampMs": timestamp,
+        "capturedAtMs": capturedAtMs,
+        "monotonicTimestampMs": monotonicMs,
+        "codec": "opus",
         "sampleRate": 16_000,
         "channels": 1,
-        "sampleWidth": 2,
-        "pcmBase64": encoded,
+        "frameDurationMs": packet.durationMs,
+        "audioLevel": audioLevel,
+        "payloadBase64": encoded,
       ])
     }
+  }
+
+  private func rmsPcm16(_ data: Data) -> Double {
+    guard data.count >= 2 else { return 0 }
+    var sum = 0.0
+    var samples = 0
+    data.withUnsafeBytes { bytes in
+      let values = bytes.bindMemory(to: Int16.self)
+      for value in values {
+        let normalized = Double(Int16(littleEndian: value)) / 32_768.0
+        sum += normalized * normalized
+        samples += 1
+      }
+    }
+    return samples > 0 ? sqrt(sum / Double(samples)) : 0
   }
 
   private func resetCaptureMetrics() {
@@ -454,6 +529,10 @@ public final class ChronicleDuplexAudioModule: Module {
     engine.stop()
     if player.engine != nil { engine.detach(player) }
     pcmConverter = nil
+    opusEncoder = nil
+    opusPcmBuffer.removeAll(keepingCapacity: false)
+    opusBufferCapturedAtMs = nil
+    opusBufferMonotonicMs = nil
     voiceProcessingEnabled = false
     captureSuppressed = false
     if deactivateSession {

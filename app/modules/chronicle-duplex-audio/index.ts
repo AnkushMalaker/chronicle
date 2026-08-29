@@ -11,13 +11,16 @@ export interface StartVoiceSessionOptions {
   captureEpoch: number;
 }
 
-export interface NativePcmFrame {
+export interface NativeAudioFrame {
   captureEpoch: number;
+  capturedAtMs: number;
   monotonicTimestampMs: number;
+  codec: 'opus';
   sampleRate: 16000;
   channels: 1;
-  sampleWidth: 2;
-  pcmBase64: string;
+  frameDurationMs: 20 | 40 | 60;
+  audioLevel: number;
+  payloadBase64: string;
 }
 
 export interface NativeResponse {
@@ -52,8 +55,9 @@ export interface NativeCaptureDiagnostic {
   stage:
     | 'engine_started'
     | 'first_tap'
-    | 'first_pcm'
+    | 'first_opus'
     | 'conversion_failed'
+    | 'encoding_failed'
     | 'voice_processing_fallback'
     | 'capture_failed';
   details: string;
@@ -65,8 +69,8 @@ type ChronicleDuplexAudioNative = NativeModule & {
   cancelResponse(responseId: string, generation: number): Promise<void>;
   stopVoiceSession(): Promise<NativeStopResult>;
   addListener(
-    eventName: 'onPcmFrame',
-    listener: (event: NativePcmFrame) => void
+    eventName: 'onAudioFrame',
+    listener: (event: NativeAudioFrame) => void
   ): EventSubscription;
   addListener(
     eventName: 'onPlaybackState',
@@ -103,10 +107,10 @@ export function startVoiceSession(
   return requireNative().startVoiceSession(options);
 }
 
-export function addPcmFrameListener(
-  listener: (event: NativePcmFrame) => void
+export function addAudioFrameListener(
+  listener: (event: NativeAudioFrame) => void
 ): EventSubscription {
-  return requireNative().addListener('onPcmFrame', listener);
+  return requireNative().addListener('onAudioFrame', listener);
 }
 
 export function addPlaybackStateListener(
