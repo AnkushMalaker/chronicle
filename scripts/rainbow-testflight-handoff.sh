@@ -45,8 +45,8 @@ fi
 
 pushd "${WORKTREE_PATH}/app" >/dev/null
 
-if [[ "$(node --version)" != v20.* ]]; then
-  echo "Rainbow must use Node 20 to match the TestFlight workflow" >&2
+if [[ "$(node --version)" != v22.* ]]; then
+  echo "Rainbow must use Node 22 to match the TestFlight workflow" >&2
   exit 1
 fi
 
