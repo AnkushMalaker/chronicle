@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Radio, Zap, Archive, Settings, Monitor, Mic } from 'lucide-react'
 import { useRecording, isLoopbackDevice, isMacOS } from '../contexts/RecordingContext'
 import { Button } from '../components/ui'
@@ -9,6 +10,20 @@ import WakeFeedback from '../components/audio/WakeFeedback'
 
 export default function LiveRecord() {
   const recording = useRecording()
+  const [isLoadingMicrophones, setIsLoadingMicrophones] = useState(false)
+  const microphoneDevices = recording.availableDevices.filter(
+    device => recording.audioSource === 'mic' || !isLoopbackDevice(device.label)
+  )
+  const microphoneLabelsKnown = microphoneDevices.some(device => device.label)
+
+  const loadMicrophones = async () => {
+    setIsLoadingMicrophones(true)
+    try {
+      await recording.requestDeviceAccess()
+    } finally {
+      setIsLoadingMicrophones(false)
+    }
+  }
 
   return (
     <div>
@@ -196,34 +211,55 @@ export default function LiveRecord() {
         )
       })()}
 
-      {/* Microphone Selector (hidden in tab-only mode) */}
-      {recording.audioSource !== 'tab' && recording.availableDevices.length > 1 && (
-        <div className="mb-4 flex items-center gap-2">
-          <Settings className="h-4 w-4 text-gray-500 dark:text-gray-400 flex-shrink-0" />
-          <label className="text-sm font-medium text-gray-700 dark:text-gray-300 flex-shrink-0">
-            Microphone:
-          </label>
-          <select
-            value={recording.selectedDeviceId ?? ''}
-            onChange={(e) => recording.setSelectedDeviceId(e.target.value || null)}
-            disabled={recording.isRecording}
-            className={`
-              flex-1 min-w-0 text-sm px-2 py-1.5 rounded-lg border
-              bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100
-              border-gray-300 dark:border-gray-600
-              ${recording.isRecording ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
-            `}
-          >
-            <option value="">System Default</option>
-            {recording.availableDevices
-              // In Firefox meeting mode, monitor devices belong in the System audio selector
-              .filter(d => recording.audioSource === 'mic' || !isLoopbackDevice(d.label))
-              .map((device) => (
-              <option key={device.deviceId} value={device.deviceId}>
-                {device.label || `Microphone (${device.deviceId.slice(0, 8)}...)`}
-              </option>
-            ))}
-          </select>
+      {/* Microphone setup stays visible before recording. Browsers hide device labels
+          until permission is granted, so the first action probes and immediately
+          releases the default input; it does not start a Chronicle recording. */}
+      {recording.audioSource !== 'tab' && (
+        <div className="mb-4 space-y-1.5">
+          <div className="flex items-center gap-2">
+            <Settings className="h-4 w-4 text-gray-500 dark:text-gray-400 flex-shrink-0" />
+            <label
+              htmlFor="recording-microphone"
+              className="text-sm font-medium text-gray-700 dark:text-gray-300 flex-shrink-0"
+            >
+              Microphone:
+            </label>
+            {microphoneLabelsKnown ? (
+              <select
+                id="recording-microphone"
+                value={recording.selectedDeviceId ?? ''}
+                onChange={(e) => recording.setSelectedDeviceId(e.target.value || null)}
+                disabled={recording.isRecording}
+                className={`
+                  flex-1 min-w-0 text-sm px-2 py-1.5 rounded-lg border
+                  bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100
+                  border-gray-300 dark:border-gray-600
+                  ${recording.isRecording ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                `}
+              >
+                <option value="">System Default</option>
+                {microphoneDevices.map((device) => (
+                  <option key={device.deviceId} value={device.deviceId}>
+                    {device.label}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={loadMicrophones}
+                disabled={recording.isRecording || isLoadingMicrophones}
+              >
+                {isLoadingMicrophones ? 'Loading microphones…' : 'Choose microphone…'}
+              </Button>
+            )}
+          </div>
+          {!microphoneLabelsKnown && (
+            <p className="pl-6 text-xs text-gray-500 dark:text-gray-400">
+              Your browser will ask for microphone access so Chronicle can list devices. Recording will not start.
+            </p>
+          )}
         </div>
       )}
 
@@ -321,8 +357,8 @@ export default function LiveRecord() {
               : 'Complete audio sent after you stop'
             }
           </li>
-          <li>• <strong>Wyoming protocol:</strong> Structured communication ensures reliable data transmission</li>
-          <li>• <strong>High quality audio:</strong> 16kHz mono with noise suppression and echo cancellation</li>
+          <li>• <strong>Audio v2:</strong> Every Opus packet carries its session binding, clock, and sequence</li>
+          <li>• <strong>Efficient audio:</strong> 16kHz mono Opus with noise suppression and echo cancellation</li>
           <li>• <strong>View results:</strong> Check Conversations page for transcribed content and memories</li>
         </ul>
       </div>

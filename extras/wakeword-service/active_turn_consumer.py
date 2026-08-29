@@ -1,4 +1,4 @@
-"""Separate consumer for protocol-v1 active voice-session turn frames."""
+"""Active-turn consumer for generated Chronicle audio-v2 realtime frames."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 import numpy as np
 import redis.asyncio as redis
+from audio_contract.v2 import audio_pb2
 from pipecat.audio.turn.smart_turn.base_smart_turn import (
     EndOfTurnState,
     SmartTurnParams,
@@ -24,8 +25,8 @@ from turn_segmenter import TurnEvent, TurnFrame, TurnPolicy, TurnSegmenter
 
 logger = logging.getLogger(__name__)
 
-FRAME_STREAM_PATTERN = "voice:frames:*"
-GROUP_NAME = "active_turns"
+FRAME_STREAM_PATTERN = "audio:v2:realtime:*"
+GROUP_NAME = "interactive-turn-v2"
 COMMITTED_TURNS_STREAM = "voice:turns:committed"
 TURN_EVENTS_STREAM = "voice:turns:events"
 DISCOVERY_SECONDS = 0.5
@@ -33,11 +34,6 @@ PENDING_CLAIM_MIN_IDLE_MS = 30_000
 PENDING_RECOVERY_INTERVAL_SECONDS = 5.0
 VAD_FRAME_SAMPLES = 512
 SAMPLE_RATE = 16_000
-
-
-def _value(fields: dict, key: str):
-    value = fields.get(key) or fields.get(key.encode())
-    return value.decode() if isinstance(value, bytes) and key != "pcm" else value
 
 
 class SileroSmartTurnModels:
@@ -125,6 +121,7 @@ class ActiveTurnConsumer:
         self._tasks: dict[str, asyncio.Task] = {}
         self._segmenters: dict[str, TurnSegmenter] = {}
         self._models: dict[str, object] = {}
+        self._data_purposes: dict[str, str] = {}
         self._last_frame_offsets_ms: dict[str, float] = {}
         self._last_frame_received_ms: dict[str, float] = {}
         self.frames_consumed = 0
@@ -260,7 +257,23 @@ class ActiveTurnConsumer:
 
     async def _handle_entry(self, stream: str, message_id, fields: dict) -> bool:
         try:
-            await self.handle_frame(fields)
+            if set(fields) != {b"event"}:
+                raise ValueError("audio-v2 turn entry has untyped fields")
+            event = audio_pb2.CaptureStreamEvent()
+            event.ParseFromString(fields[b"event"])
+            event_kind = event.WhichOneof("event")
+            if event_kind == "frame":
+                data_purpose = {
+                    audio_pb2.DATA_PURPOSE_NORMAL_CAPTURE: "normal_capture",
+                    audio_pb2.DATA_PURPOSE_ANNOTATION: "annotation",
+                }.get(event.frame.data_purpose)
+                if data_purpose is None:
+                    raise ValueError("audio-v2 frame has no data purpose")
+                if event.frame.binding.voice_session_id.value:
+                    await self.handle_frame(
+                        event.frame,
+                        data_purpose=data_purpose,
+                    )
         except Exception:
             logger.exception("Active-turn frame failed on %s", stream)
             return False
@@ -270,41 +283,37 @@ class ActiveTurnConsumer:
         )
         return True
 
-    async def handle_frame(self, fields: dict) -> None:
+    async def handle_frame(
+        self,
+        frame_event: audio_pb2.CanonicalPcmFrame,
+        *,
+        data_purpose: str,
+    ) -> None:
         try:
-            required = {
-                key: _value(fields, key)
-                for key in (
-                    "voice_session_id",
-                    "audio_session_id",
-                    "capture_epoch",
-                    "frame_sequence",
-                    "monotonic_offset_ms",
-                    "sample_rate",
-                    "sample_count",
-                    "pcm",
-                )
-            }
-            missing = [key for key, value in required.items() if value is None]
-            if missing:
-                raise ValueError(
-                    "active-turn frame missing fields: " + ", ".join(missing)
-                )
-            voice_session_id = str(required["voice_session_id"])
-            audio_session_id = str(required["audio_session_id"])
-            capture_epoch = int(required["capture_epoch"])
-            sequence = int(required["frame_sequence"])
-            offset_ms = float(required["monotonic_offset_ms"])
-            sample_rate = int(required["sample_rate"])
-            sample_count = int(required["sample_count"])
-            pcm = required["pcm"]
+            voice_session_id = frame_event.binding.voice_session_id.value
+            audio_session_id = frame_event.binding.capture_session_id.value
+            capture_epoch = frame_event.binding.capture_epoch
+            sequence = frame_event.sequence
+            offset_ms = frame_event.monotonic_offset_us / 1000.0
+            sample_rate = SAMPLE_RATE
+            pcm = frame_event.pcm_s16le
+            sample_count = len(pcm) // 2
             if not voice_session_id or not audio_session_id or not pcm:
                 raise ValueError("active-turn frame has empty identity or PCM")
+            if data_purpose not in {"normal_capture", "annotation"}:
+                raise ValueError("active-turn frame has invalid data_purpose")
+            previous_purpose = self._data_purposes.get(voice_session_id)
+            if previous_purpose is not None and previous_purpose != data_purpose:
+                raise ValueError("active-turn session changed data_purpose")
+            self._data_purposes[voice_session_id] = data_purpose
             duration_ms = sample_count * 1000 / sample_rate
             segmenter = self._segmenters.setdefault(
                 voice_session_id, TurnSegmenter(TurnPolicy.conversational())
             )
-            models = self._models.setdefault(voice_session_id, self.model_factory())
+            models = self._models.get(voice_session_id)
+            if models is None:
+                models = self.model_factory()
+                self._models[voice_session_id] = models
             speech, semantic_complete = await models.evaluate(pcm)
             frame = TurnFrame(
                 voice_session_id=voice_session_id,
@@ -317,7 +326,7 @@ class ActiveTurnConsumer:
                 speech=speech,
             )
             events = await segmenter.push(frame, semantic_complete=semantic_complete)
-            await self._publish_events(events)
+            await self._publish_events(events, data_purpose=data_purpose)
             self._last_frame_offsets_ms[voice_session_id] = frame.end_ms
             self._last_frame_received_ms[voice_session_id] = self.monotonic_ms()
             self.frames_consumed += 1
@@ -334,9 +343,19 @@ class ActiveTurnConsumer:
             if last_offset_ms is None or last_received_ms is None:
                 continue
             session_offset_ms = last_offset_ms + max(0, now_ms - last_received_ms)
-            await self._publish_events(await segmenter.advance(session_offset_ms))
+            await self._publish_events(
+                await segmenter.advance(session_offset_ms),
+                data_purpose=self._data_purposes[voice_session_id],
+            )
 
-    async def _publish_events(self, events: list[TurnEvent]) -> None:
+    async def _publish_events(
+        self,
+        events: list[TurnEvent],
+        *,
+        data_purpose: str,
+    ) -> None:
+        if data_purpose == "annotation":
+            return
         for event in events:
             metadata = {
                 "kind": event.kind,

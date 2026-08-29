@@ -7,7 +7,7 @@ the same four facts — where the backend is, its WebSocket URL, which API key t
 present, and what this device is called — and each used to derive them itself.
 This package is the single source.
 
-It also owns the Python voice protocol-v1 state machine shared by the tray pendant
+It also owns the Python audio-v2 state machine shared by the tray pendant
 client and HAVPE relay. A target supplies verified isolated or half-duplex
 capabilities. The state machine binds responses to the
 server-issued audio/voice session and epoch, enforces generation ordering, and emits

@@ -6,15 +6,15 @@ TCP-to-WebSocket relay that bridges ESP32 Voice-PE devices to the Chronicle back
 
 ```
 ESP32 Voice-PE ──TCP:8989──► HAVPE Relay ──WebSocket──► Chronicle Backend
-  (32-bit stereo)            (16-bit mono)               (/ws?codec=pcm)
+  (32-bit stereo)            (16-bit mono Opus)          (/ws/audio)
 ```
 
 The relay:
 - Listens for raw TCP audio from an ESP32 running ESPHome
 - Converts 32-bit stereo I2S data to 16-bit mono PCM
 - Authenticates with the Chronicle backend (JWT)
-- Streams audio over WebSocket using the Wyoming protocol
-- Terminates Chronicle voice protocol v1 and reports native half-duplex capabilities
+- Adapts the device-local JSONL/PCM stream to Chronicle audio v2
+- Terminates Chronicle audio v2 and reports native half-duplex capabilities
 - Delivers bound response WAVs through ESPHome and ACKs physical playback state
 
 Interactive output requires both the updated relay and the included firmware from
@@ -166,7 +166,7 @@ havpe-relay/
 ├── Dockerfile                     # Container build
 ├── firmware/
 │   ├── voice-chronicle.yaml       # ESPHome config for ESP32-S3
-│   ├── chronicle-sdk/chronicle.h  # Wyoming protocol TCP client
+│   ├── chronicle-sdk/chronicle.h  # Device-local JSONL/PCM TCP client
 │   ├── secrets.template.yaml      # Secrets template
 │   └── secrets.yaml               # Your secrets (gitignored)
 └── pyproject.toml                 # Python dependencies

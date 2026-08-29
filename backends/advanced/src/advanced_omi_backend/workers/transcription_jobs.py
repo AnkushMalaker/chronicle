@@ -23,6 +23,8 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Dependency, Job
 
 from advanced_omi_backend.config import (
+    get_batch_chunk_seconds,
+    get_diarization_settings,
     get_live_segmentation,
     get_streaming_fallback_timeout,
     require_speech_for_transcription,
@@ -217,7 +219,8 @@ async def apply_speaker_recognition(
         return segments
 
 
-BATCH_CHUNK_SECONDS = 3600  # Never send more than 1h to ASR at once
+BATCH_CHUNK_SECONDS = 3600  # Hard cap even when configuration is more permissive
+BATCH_CHUNK_OVERLAP_SECONDS = 5.0
 
 # No-activity watchdog: only treat "zero transcription results" as a provider failure
 # when audio is actually flowing in. A connected-but-quiet device (common right after a
@@ -232,6 +235,127 @@ def _needs_forced_alignment(words: list[dict]) -> bool:
     return not words or any(
         len(str(word.get("word", "")).split()) > 1 for word in words
     )
+
+
+def _owned_window_items(
+    items: list[dict],
+    *,
+    window_start: float,
+    ownership_start: float,
+    ownership_end: float,
+    final_window: bool,
+    clip_to_ownership: bool,
+) -> list[dict]:
+    """Offset timed provider items and assign overlap to exactly one window."""
+    owned: list[dict] = []
+    for source in items:
+        item = dict(source)
+        start = float(item.get("start", 0.0)) + window_start
+        end = float(item.get("end", item.get("start", 0.0))) + window_start
+        midpoint = (start + end) / 2.0
+        if midpoint < ownership_start:
+            continue
+        if midpoint > ownership_end or (midpoint == ownership_end and not final_window):
+            continue
+        if clip_to_ownership:
+            start = max(start, ownership_start)
+            end = min(end, ownership_end)
+            if end <= start:
+                continue
+        item["start"] = start
+        item["end"] = end
+        owned.append(item)
+    return owned
+
+
+def _word_text(word: dict) -> str:
+    return str(
+        word.get("punctuated_word") or word.get("word") or word.get("text") or ""
+    ).strip()
+
+
+def _segments_for_owned_window(
+    segments: list[dict],
+    owned_words: list[dict],
+    *,
+    window_start: float,
+    ownership_start: float,
+    ownership_end: float,
+    final_window: bool,
+) -> list[dict]:
+    """Build seam-safe segments whose text and bounds contain their owned words."""
+    if not owned_words:
+        return _owned_window_items(
+            segments,
+            window_start=window_start,
+            ownership_start=ownership_start,
+            ownership_end=ownership_end,
+            final_window=final_window,
+            clip_to_ownership=True,
+        )
+
+    offset_segments = []
+    for source in segments:
+        segment = dict(source)
+        segment["start"] = float(segment.get("start", 0.0)) + window_start
+        segment["end"] = (
+            float(segment.get("end", segment.get("start", 0.0))) + window_start
+        )
+        offset_segments.append(segment)
+
+    coherent: list[dict] = []
+    assigned_word_ids: set[int] = set()
+    for segment in offset_segments:
+        words = [
+            word
+            for word in owned_words
+            if id(word) not in assigned_word_ids
+            and float(segment["start"])
+            <= (float(word.get("start", 0.0)) + float(word.get("end", 0.0))) / 2.0
+            <= float(segment["end"])
+        ]
+        if words:
+            item = dict(segment)
+            item["start"] = min(float(word.get("start", 0.0)) for word in words)
+            item["end"] = max(float(word.get("end", 0.0)) for word in words)
+            item["text"] = " ".join(filter(None, (_word_text(word) for word in words)))
+            coherent.append(item)
+            assigned_word_ids.update(id(word) for word in words)
+            continue
+
+        if classify_segment_text(str(segment.get("text", ""))) == "event":
+            midpoint = (float(segment["start"]) + float(segment["end"])) / 2.0
+            if ownership_start <= midpoint and (
+                midpoint < ownership_end or (final_window and midpoint <= ownership_end)
+            ):
+                item = dict(segment)
+                item["start"] = max(float(item["start"]), ownership_start)
+                item["end"] = min(float(item["end"]), ownership_end)
+                if item["end"] > item["start"]:
+                    coherent.append(item)
+
+    # Providers occasionally emit a timed word just outside every utterance. Keep
+    # that evidence renderable instead of silently losing it at the stitch seam.
+    for word in owned_words:
+        if id(word) in assigned_word_ids:
+            continue
+        speaker = "Speaker 0"
+        midpoint = (float(word.get("start", 0.0)) + float(word.get("end", 0.0))) / 2.0
+        for segment in offset_segments:
+            if float(segment["start"]) <= midpoint <= float(segment["end"]):
+                speaker = segment.get("speaker", speaker)
+                break
+        coherent.append(
+            {
+                "start": float(word.get("start", 0.0)),
+                "end": float(word.get("end", 0.0)),
+                "text": _word_text(word),
+                "speaker": speaker,
+            }
+        )
+
+    coherent.sort(key=lambda segment: (segment["start"], segment["end"]))
+    return coherent
 
 
 async def _align_result_words(result: dict, wav_data: bytes) -> dict:
@@ -287,7 +411,8 @@ async def transcribe_audio_range(
     Reconstruct audio for a time range and transcribe it.
 
     Pure reconstruction + transcription — no DB writes, no plugins, no speech validation.
-    If the audio exceeds BATCH_CHUNK_SECONDS (1h), it is split internally and merged.
+    Audio above the configured provider ceiling is split into overlapping windows
+    and merged back onto the conversation presentation clock.
 
     Args:
         conversation_id: Conversation ID, or None when transcribing raw capture claims
@@ -361,6 +486,11 @@ async def transcribe_audio_range(
     provider_capabilities = {}
     if hasattr(provider, "get_capabilities_dict"):
         provider_capabilities = provider.get_capabilities_dict()
+    if not diarize:
+        # Describe what this response contains, rather than every feature the
+        # configured model could have produced in a different request.
+        provider_capabilities = dict(provider_capabilities)
+        provider_capabilities.pop("diarization", None)
 
     # Batch providers bill by audio duration, silence included — cut long
     # silences with the local VAD before sending, and map timestamps back to
@@ -407,7 +537,12 @@ async def transcribe_audio_range(
             else 0
         )
 
-    if duration <= BATCH_CHUNK_SECONDS:
+    chunk_seconds = min(
+        float(BATCH_CHUNK_SECONDS),
+        get_batch_chunk_seconds(provider.name),
+    )
+
+    if duration <= chunk_seconds:
         # Single chunk — transcribe directly
         transcribe_kwargs: dict = {
             "audio_data": wav_data,
@@ -441,30 +576,71 @@ async def transcribe_audio_range(
             "sample_rate": actual_sample_rate,
         }
 
-    # Multi-chunk: split PCM, create WAV per chunk, transcribe, merge
-    chunk_size_bytes = int(
-        BATCH_CHUNK_SECONDS * actual_sample_rate * sample_width * channels
+    # A previously successful whole-file request may predate a newly lowered
+    # provider ceiling. Preserve that paid result before changing the audio hashes
+    # by partitioning it into windows. This lookup must never call the provider.
+    cached_lookup = getattr(provider, "get_cached_transcription", None)
+    if cached_lookup is not None:
+        cached_result = await cached_lookup(
+            wav_data,
+            actual_sample_rate,
+            diarize=diarize,
+        )
+        if cached_result is not None:
+            cached_result = await _align_result_words(cached_result, wav_data)
+            if condense_map:
+                cached_result = remap_condensed_result(cached_result, condense_map)
+            return {
+                "text": cached_result.get("text", ""),
+                "segments": cached_result.get("segments", []),
+                "words": cached_result.get("words", []),
+                "provider_name": provider.name,
+                "provider_capabilities": provider_capabilities,
+                "wav_size": len(wav_data),
+                "sample_rate": actual_sample_rate,
+            }
+
+    # Multi-chunk: use bounded overlapping windows. Midpoint ownership assigns
+    # every provider word/segment to exactly one side of each seam, while the
+    # overlap gives the recognizer enough acoustic context for boundary words.
+    frame_bytes = sample_width * channels
+    chunk_size_bytes = int(chunk_seconds * actual_sample_rate) * frame_bytes
+    overlap_seconds = min(
+        BATCH_CHUNK_OVERLAP_SECONDS,
+        chunk_seconds / 4.0,
     )
-    all_text = []
+    overlap_bytes = int(overlap_seconds * actual_sample_rate) * frame_bytes
+    step_bytes = chunk_size_bytes - overlap_bytes
+    if step_bytes <= 0:
+        raise ValueError("Batch transcription chunk overlap must be below its ceiling")
+
     all_segments = []
     all_words = []
     total_wav_size = 0
-    chunk_num = 0
+    windows: list[tuple[int, int]] = []
+    window_start_byte = 0
+    while window_start_byte < len(pcm_data):
+        window_end_byte = min(window_start_byte + chunk_size_bytes, len(pcm_data))
+        windows.append((window_start_byte, window_end_byte))
+        if window_end_byte >= len(pcm_data):
+            break
+        window_start_byte += step_bytes
 
     logger.info(
-        f"📦 Audio duration {duration:.0f}s exceeds {BATCH_CHUNK_SECONDS}s, "
-        f"splitting into {BATCH_CHUNK_SECONDS}s chunks"
+        f"📦 Audio duration {duration:.0f}s exceeds the {provider.name} "
+        f"request ceiling ({chunk_seconds:.0f}s); splitting into {len(windows)} "
+        f"windows with {overlap_seconds:.1f}s overlap"
     )
 
-    for i in range(0, len(pcm_data), chunk_size_bytes):
-        chunk_pcm = pcm_data[i : i + chunk_size_bytes]
+    for index, (window_start_byte, window_end_byte) in enumerate(windows):
+        chunk_pcm = pcm_data[window_start_byte:window_end_byte]
         chunk_wav = _build_wav(chunk_pcm, actual_sample_rate, channels, sample_width)
-        chunk_start = i / (actual_sample_rate * sample_width * channels)
-        chunk_num += 1
+        chunk_start = window_start_byte / (actual_sample_rate * frame_bytes)
+        chunk_end = window_end_byte / (actual_sample_rate * frame_bytes)
 
         logger.info(
-            f"📦 Transcribing chunk {chunk_num}: "
-            f"[{chunk_start:.0f}s - {chunk_start + len(chunk_pcm) / (actual_sample_rate * sample_width * channels):.0f}s]"
+            f"📦 Transcribing chunk {index + 1}/{len(windows)}: "
+            f"[{chunk_start:.0f}s - {chunk_end:.0f}s]"
         )
 
         transcribe_kwargs = {
@@ -487,21 +663,52 @@ async def transcribe_audio_range(
             raise RuntimeError(f"Transcription failed ({type(e).__name__}): {e}")
 
         result = await _align_result_words(result, chunk_wav)
-        # Offset timestamps by chunk start time
-        for seg in result.get("segments", []):
-            seg["start"] = seg.get("start", 0.0) + chunk_start
-            seg["end"] = seg.get("end", 0.0) + chunk_start
-        for w in result.get("words", []):
-            w["start"] = w.get("start", 0.0) + chunk_start
-            w["end"] = w.get("end", 0.0) + chunk_start
-
-        all_text.append(result.get("text", ""))
-        all_segments.extend(result.get("segments", []))
-        all_words.extend(result.get("words", []))
+        ownership_start = (
+            chunk_start
+            if index == 0
+            else (
+                chunk_start + windows[index - 1][1] / (actual_sample_rate * frame_bytes)
+            )
+            / 2.0
+        )
+        ownership_end = (
+            chunk_end
+            if index == len(windows) - 1
+            else (
+                chunk_end + windows[index + 1][0] / (actual_sample_rate * frame_bytes)
+            )
+            / 2.0
+        )
+        owned_words = _owned_window_items(
+            result.get("words", []),
+            window_start=chunk_start,
+            ownership_start=ownership_start,
+            ownership_end=ownership_end,
+            final_window=index == len(windows) - 1,
+            clip_to_ownership=False,
+        )
+        all_words.extend(owned_words)
+        all_segments.extend(
+            _segments_for_owned_window(
+                result.get("segments", []),
+                owned_words,
+                window_start=chunk_start,
+                ownership_start=ownership_start,
+                ownership_end=ownership_end,
+                final_window=index == len(windows) - 1,
+            )
+        )
         total_wav_size += len(chunk_wav)
 
+    merged_text = " ".join(filter(None, (_word_text(word) for word in all_words)))
+    if not merged_text:
+        merged_text = " ".join(
+            str(segment.get("text", "")).strip()
+            for segment in all_segments
+            if str(segment.get("text", "")).strip()
+        )
     merged = {
-        "text": " ".join(all_text),
+        "text": merged_text,
         "segments": all_segments,
         "words": all_words,
         "provider_name": provider.name,
@@ -1053,11 +1260,19 @@ async def transcribe_full_audio_job(
                     },
                 )
 
+    # Provider diarization is discarded when Pyannote is authoritative, so do
+    # not pay its compute cost in that mode. Pyannote receives the complete audio
+    # later and projects its neural turns onto these conversation-clock words.
+    diarization_settings = get_diarization_settings()
+    request_provider_diarization = (
+        diarization_settings.get("diarization_source") == "provider"
+    )
+
     # Transcribe full audio
     try:
         result = await transcribe_audio_range(
             conversation_id=conversation_id,
-            diarize=True,
+            diarize=request_provider_diarization,
             context_info=context_info,
             progress_callback=_on_batch_progress,
             provider_model_name=provider_model_name,
@@ -1236,9 +1451,10 @@ async def transcription_fallback_check_job(
 
     start_time_wall = time.time()
 
+    diarization_settings = get_diarization_settings()
     result = await transcribe_audio_range(
         None,
-        diarize=True,
+        diarize=diarization_settings.get("diarization_source") == "provider",
         context_info=context_info,
         audio_ranges=fallback_ranges,
     )

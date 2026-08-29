@@ -51,6 +51,7 @@ CaptureProcessingProfile = Literal[
     "duplex_isolated",
     "half_duplex",
 ]
+CaptureDataPurpose = Literal["normal_capture", "annotation"]
 EffectReporting = Literal["reported", "unreported", "not_applicable"]
 
 # Packet clocks can jitter slightly around their nominal audio duration. A larger
@@ -111,6 +112,21 @@ class CaptureEffects(BaseModel):
             self.aec.reporting == "reported"
             and self.noise_suppression.reporting == "reported"
         )
+
+
+class CaptureStartProvenance(BaseModel):
+    """Application-level capture claims supplied when a stream is opened.
+
+    Transport adapters construct this type explicitly. The capture lifecycle never
+    infers provenance from a codec/options dictionary.
+    """
+
+    protocol: int | None = None
+    capture_epoch: int = Field(ge=0)
+    processing_profile: CaptureProcessingProfile
+    effects: CaptureEffects
+    voice_session_id: str | None = None
+    data_purpose: CaptureDataPurpose = "normal_capture"
 
 
 class AudioRangeRef(BaseModel):

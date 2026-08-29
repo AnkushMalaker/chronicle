@@ -3,17 +3,20 @@
   "version": "1.0.0",
   "main": "expo-router/entry",
   "scripts": {
+    "prepare:audio-contracts": "npm --prefix ../contracts/audio/v2/typescript ci --ignore-scripts --no-audit --no-fund",
+    "pretypecheck": "npm run prepare:audio-contracts",
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "test:wearable-activation": "node scripts/test-wearable-activation.cjs",
-    "test:voice-protocol": "node scripts/test-voice-protocol.cjs",
-    "test:phone-duplex": "node scripts/test-phone-duplex-controller.cjs",
+    "test:durable-audio-spool": "node scripts/test-durable-audio-spool.cjs",
     "check:theme": "node scripts/check-theme-tokens.mjs"
   },
   "dependencies": {
+    "@chronicle/audio-contracts": "file:../contracts/audio/v2/typescript",
+    "@bufbuild/protobuf": "2.14.0",
     "@expo/metro-runtime": "~55.0.12",
     "@notifee/react-native": "^9.1.8",
     "@react-native-async-storage/async-storage": "^2.1.2",

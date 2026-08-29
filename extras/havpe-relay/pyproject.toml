@@ -12,6 +12,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "aioesphomeapi>=30.2.0",
     "minidisc-python>=0.1.0",
+    "opuslib>=3.0.1",
 ]
 
 [tool.uv.sources]

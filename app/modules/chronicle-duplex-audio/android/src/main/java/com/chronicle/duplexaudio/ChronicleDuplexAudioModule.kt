@@ -12,6 +12,8 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
+import android.media.MediaCodec
+import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.media.NoiseSuppressor
 import android.os.Build
@@ -23,8 +25,6 @@ import androidx.core.os.bundleOf
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -35,6 +35,7 @@ class ChronicleDuplexAudioModule : Module() {
   private val capturing = AtomicBoolean(false)
   private var captureEpoch = 0
   private var recorder: AudioRecord? = null
+  private var opusEncoder: MediaCodec? = null
   private var player: AudioTrack? = null
   private var echoCanceler: AcousticEchoCanceler? = null
   private var noiseSuppressor: NoiseSuppressor? = null
@@ -50,7 +51,7 @@ class ChronicleDuplexAudioModule : Module() {
 
   override fun definition() = ModuleDefinition {
     Name("ChronicleDuplexAudio")
-    Events("onPcmFrame", "onPlaybackState", "onRouteChange")
+    Events("onOpusFrame", "onPlaybackState", "onRouteChange")
 
     OnDestroy {
       tearDownEngine(restoreRouting = true)
@@ -134,6 +135,18 @@ class ChronicleDuplexAudioModule : Module() {
       throw CodedException("engine_unavailable", "AudioRecord did not initialize", null)
     }
     recorder = newRecorder
+    opusEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS).apply {
+      configure(
+        MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 16_000, 1).apply {
+          setInteger(MediaFormat.KEY_BIT_RATE, 24_000)
+          setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 640)
+        },
+        null,
+        null,
+        MediaCodec.CONFIGURE_FLAG_ENCODE,
+      )
+      start()
+    }
     echoCanceler = if (AcousticEchoCanceler.isAvailable()) {
       AcousticEchoCanceler.create(newRecorder.audioSessionId)?.apply { enabled = true }
     } else null
@@ -142,7 +155,7 @@ class ChronicleDuplexAudioModule : Module() {
     } else null
 
     val outputBuffer = maxOf(
-      AudioTrack.getMinBufferSize(16_000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT),
+      AudioTrack.getMinBufferSize(24_000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT),
       3_200,
     )
     player = AudioTrack.Builder()
@@ -155,7 +168,7 @@ class ChronicleDuplexAudioModule : Module() {
       .setAudioFormat(
         AudioFormat.Builder()
           .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-          .setSampleRate(16_000)
+          .setSampleRate(24_000)
           .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
           .build()
       )
@@ -174,20 +187,44 @@ class ChronicleDuplexAudioModule : Module() {
 
   private fun captureLoop(activeRecorder: AudioRecord, epoch: Int) {
     val frame = ByteArray(640)
+    val encoder = opusEncoder ?: return
+    val outputInfo = MediaCodec.BufferInfo()
     while (capturing.get() && recorder === activeRecorder && captureEpoch == epoch) {
       val count = activeRecorder.read(frame, 0, frame.size, AudioRecord.READ_BLOCKING)
       if (count <= 0 || captureSuppressed) continue
-      sendEvent(
-        "onPcmFrame",
-        bundleOf(
-          "captureEpoch" to epoch,
-          "monotonicTimestampMs" to SystemClock.elapsedRealtime().toDouble(),
-          "sampleRate" to 16_000,
-          "channels" to 1,
-          "sampleWidth" to 2,
-          "pcmBase64" to Base64.encodeToString(frame.copyOf(count), Base64.NO_WRAP),
-        ),
-      )
+      val durationMs = count.toDouble() / (16_000 * 2) * 1_000
+      val inputIndex = encoder.dequeueInputBuffer(10_000)
+      if (inputIndex >= 0) {
+        encoder.getInputBuffer(inputIndex)?.apply { clear(); put(frame, 0, count) }
+        encoder.queueInputBuffer(
+          inputIndex, 0, count, SystemClock.elapsedRealtimeNanos() / 1_000, 0
+        )
+      }
+      while (true) {
+        val outputIndex = encoder.dequeueOutputBuffer(outputInfo, 0)
+        if (outputIndex < 0) break
+        if (outputInfo.size > 0 && outputInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
+          val packet = ByteArray(outputInfo.size)
+          encoder.getOutputBuffer(outputIndex)?.apply {
+            position(outputInfo.offset)
+            limit(outputInfo.offset + outputInfo.size)
+            get(packet)
+          }
+          sendEvent(
+            "onOpusFrame",
+            bundleOf(
+              "captureEpoch" to epoch,
+              "capturedAtMs" to System.currentTimeMillis().toDouble() - durationMs,
+              "monotonicTimestampMs" to SystemClock.elapsedRealtime().toDouble() - durationMs,
+              "sampleRate" to 16_000,
+              "channels" to 1,
+              "frameDurationMs" to durationMs,
+              "opusBase64" to Base64.encodeToString(packet, Base64.NO_WRAP),
+            ),
+          )
+        }
+        encoder.releaseOutputBuffer(outputIndex, false)
+      }
     }
   }
 
@@ -200,9 +237,16 @@ class ChronicleDuplexAudioModule : Module() {
     if (epoch != captureEpoch) {
       throw CodedException("decode_failed", "stale capture epoch", null)
     }
-    val encoded = response["wavBase64"] as? String
-      ?: throw CodedException("decode_failed", "wavBase64 is required", null)
-    val pcm = parsePcm16Wav(Base64.decode(encoded, Base64.DEFAULT))
+    val encoded = response["opusPacketsBase64"] as? List<*>
+      ?: throw CodedException("decode_failed", "opusPacketsBase64 is required", null)
+    val packets = encoded.map {
+      val value = it as? String
+        ?: throw CodedException("decode_failed", "Opus packet must be base64", null)
+      Base64.decode(value, Base64.DEFAULT)
+    }
+    if (packets.isEmpty() || packets.any { it.isEmpty() }) {
+      throw CodedException("decode_failed", "Opus response is empty", null)
+    }
     val activePlayer = player
       ?: throw CodedException("playback_unavailable", "AudioTrack unavailable", null)
     cancelCurrent(null)
@@ -212,22 +256,71 @@ class ChronicleDuplexAudioModule : Module() {
     activePlayer.play()
     emitPlayback(responseId, generation, "started", null)
     playbackExecutor.execute {
-      var offset = 0
-      while (offset < pcm.size && currentResponse == binding) {
-        val written = activePlayer.write(pcm, offset, pcm.size - offset, AudioTrack.WRITE_BLOCKING)
-        if (written <= 0) {
-          emitPlayback(responseId, generation, "failed", "playback_unavailable")
-          currentResponse = null
-          captureSuppressed = false
-          return@execute
+      playOpusPackets(packets, activePlayer, binding)
+    }
+  }
+
+  private fun playOpusPackets(packets: List<ByteArray>, activePlayer: AudioTrack, binding: EpochResponse) {
+    val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)
+    try {
+      decoder.configure(
+        MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 24_000, 1),
+        null,
+        null,
+        0,
+      )
+      decoder.start()
+      val info = MediaCodec.BufferInfo()
+      var inputSequence = 0
+      var outputEnded = false
+      while (!outputEnded && currentResponse == binding) {
+        if (inputSequence <= packets.size) {
+          val inputIndex = decoder.dequeueInputBuffer(10_000)
+          if (inputIndex >= 0) {
+            val end = inputSequence == packets.size
+            val packet = if (end) ByteArray(0) else packets[inputSequence]
+            decoder.getInputBuffer(inputIndex)?.apply { clear(); put(packet) }
+            decoder.queueInputBuffer(
+              inputIndex,
+              0,
+              packet.size,
+              inputSequence * 20_000L,
+              if (end) MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0,
+            )
+            inputSequence += 1
+          }
         }
-        offset += written
+        val outputIndex = decoder.dequeueOutputBuffer(info, 10_000)
+        if (outputIndex >= 0) {
+          if (info.size > 0) {
+            val pcm = ByteArray(info.size)
+            decoder.getOutputBuffer(outputIndex)?.apply {
+              position(info.offset)
+              limit(info.offset + info.size)
+              get(pcm)
+            }
+            if (activePlayer.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING) <= 0) {
+              throw IllegalStateException("AudioTrack write failed")
+            }
+          }
+          outputEnded = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+          decoder.releaseOutputBuffer(outputIndex, false)
+        }
       }
       if (currentResponse == binding) {
         currentResponse = null
         captureSuppressed = false
-        emitPlayback(responseId, generation, "done", null)
+        emitPlayback(binding.id, binding.generation, "done", null)
       }
+    } catch (_: Exception) {
+      if (currentResponse == binding) {
+        currentResponse = null
+        captureSuppressed = false
+        emitPlayback(binding.id, binding.generation, "failed", "decode_failed")
+      }
+    } finally {
+      runCatching { decoder.stop() }
+      decoder.release()
     }
   }
 
@@ -376,6 +469,11 @@ class ChronicleDuplexAudioModule : Module() {
     recorder?.runCatching { stop() }
     recorder?.release()
     recorder = null
+    opusEncoder?.let { encoder ->
+      runCatching { encoder.stop() }
+      encoder.release()
+    }
+    opusEncoder = null
     echoCanceler?.release()
     echoCanceler = null
     noiseSuppressor?.release()
@@ -411,32 +509,4 @@ class ChronicleDuplexAudioModule : Module() {
     return restored
   }
 
-  internal fun parsePcm16Wav(wav: ByteArray): ByteArray {
-    if (wav.size < 44 || String(wav, 0, 4) != "RIFF" || String(wav, 8, 4) != "WAVE") {
-      throw CodedException("decode_failed", "Response is not a RIFF/WAVE file", null)
-    }
-    val view = ByteBuffer.wrap(wav).order(ByteOrder.LITTLE_ENDIAN)
-    var offset = 12
-    var validFormat = false
-    while (offset + 8 <= wav.size) {
-      val id = String(wav, offset, 4)
-      val size = view.getInt(offset + 4)
-      val dataOffset = offset + 8
-      if (size < 0 || dataOffset + size > wav.size) break
-      if (id == "fmt " && size >= 16) {
-        validFormat = view.getShort(dataOffset).toInt() == 1 &&
-          view.getShort(dataOffset + 2).toInt() == 1 &&
-          view.getInt(dataOffset + 4) == 16_000 &&
-          view.getShort(dataOffset + 14).toInt() == 16
-      }
-      if (id == "data") {
-        if (!validFormat) {
-          throw CodedException("decode_failed", "WAV must be mono 16 kHz PCM16", null)
-        }
-        return wav.copyOfRange(dataOffset, dataOffset + size)
-      }
-      offset = dataOffset + size + (size and 1)
-    }
-    throw CodedException("decode_failed", "WAV data chunk is missing", null)
-  }
 }

@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock
 import pytest
 from fakeredis import aioredis as fake_aioredis
 
+from advanced_omi_backend.audio_contract.v2 import audio_pb2
+from advanced_omi_backend.models.audio_capabilities import VoiceCapabilities
 from advanced_omi_backend.plugins.services import PluginServices
 from advanced_omi_backend.redis_keys import ClientId, SessionId, device_downlink_channel
 from advanced_omi_backend.services import response_delivery
@@ -20,7 +22,6 @@ from advanced_omi_backend.services.voice_sessions import (
     ClientUpgradeRequired,
     VoiceSessionCoordinator,
 )
-from advanced_omi_backend.voice_protocol import VoiceCapabilities
 
 pytestmark = pytest.mark.unit
 
@@ -47,7 +48,7 @@ async def _ready_voice(voice_coordinator: VoiceSessionCoordinator):
         audio_session_id="audio-1",
         capture_epoch=3,
         socket_id="socket-1",
-        advertised_protocol=1,
+        advertised_protocol=2,
     )
     capabilities = VoiceCapabilities(
         mode="duplex_full",
@@ -90,6 +91,74 @@ async def _queued_response(coordinator, voice):
         trace_id="trace-1",
         causation_id="turn-1",
     )
+
+
+async def _interaction_events(redis_client):
+    rows = await redis_client.xrange("wakeword:interaction-events")
+    return [json.loads(fields[b"event"]) for _, fields in rows]
+
+
+async def test_wake_response_lifecycle_is_durably_emitted_in_the_state_transaction(
+    coordinator, voice_coordinator, redis_client
+):
+    voice = await _ready_voice(voice_coordinator)
+    generation = await coordinator.begin_turn("user-1", "client-1")
+    trace_id = "7ce4d46b-232f-47f9-8148-d595ed344cf2"
+    response = await coordinator.queue(
+        user_id="user-1",
+        client_id="client-1",
+        audio_session_id="audio-1",
+        voice_session_id=voice.voice_session_id,
+        capture_epoch=3,
+        socket_id="socket-1",
+        turn_id="turn-1",
+        turn_revision=0,
+        generation=generation,
+        kind="speech",
+        barge_in_allowed=True,
+        trace_id="response-trace",
+        causation_id=trace_id,
+        wake_trace_id=trace_id,
+    )
+    await coordinator.mark_ready(
+        response.response_id, byte_length=12, duration_ms=250, sample_rate=24000
+    )
+    await coordinator.offer(response.response_id, (b"opus-packet!",))
+    await coordinator.playback(
+        response_id=response.response_id,
+        generation=response.generation,
+        state="started",
+        user_id="user-1",
+        client_id="client-1",
+        audio_session_id="audio-1",
+        voice_session_id=voice.voice_session_id,
+        capture_epoch=3,
+        socket_id="socket-1",
+        monotonic_timestamp_ms=10,
+    )
+    await coordinator.playback(
+        response_id=response.response_id,
+        generation=response.generation,
+        state="done",
+        user_id="user-1",
+        client_id="client-1",
+        audio_session_id="audio-1",
+        voice_session_id=voice.voice_session_id,
+        capture_epoch=3,
+        socket_id="socket-1",
+        monotonic_timestamp_ms=260,
+    )
+
+    events = await _interaction_events(redis_client)
+    assert [event["stage"] for event in events] == [
+        "response_queued",
+        "response_ready",
+        "response_offered",
+        "response_playing",
+        "response_done",
+    ]
+    assert {event["wake_trace_id"] for event in events} == {trace_id}
+    assert {event["response_id"] for event in events} == {response.response_id}
 
 
 async def test_generations_are_client_wide_and_strictly_monotonic(coordinator):
@@ -135,7 +204,7 @@ async def test_synthesis_result_is_dropped_when_generation_changes_during_await(
     assert (await coordinator.get(response.response_id)).state == "cancelled"
 
 
-async def test_offer_publishes_binary_wav_reference_only_for_ready_bound_session(
+async def test_offer_publishes_typed_offer_then_raw_opus_packets(
     coordinator, voice_coordinator, redis_client
 ):
     voice = await _ready_voice(voice_coordinator)
@@ -151,14 +220,18 @@ async def test_offer_publishes_binary_wav_reference_only_for_ready_bound_session
     await pubsub.subscribe(channel)
     await pubsub.get_message(timeout=1)
 
-    offered = await coordinator.offer(response.response_id, b"RIFF12345678")
-    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
+    offered = await coordinator.offer(response.response_id, (b"opus-packet!",))
+    offer_message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
+    media_message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
+    offer = audio_pb2.DeviceDownlinkEvent.FromString(offer_message["data"])
+    media = audio_pb2.DeviceDownlinkEvent.FromString(media_message["data"])
 
     assert offered.state == "offered"
-    assert message is not None
-    assert b'"type":"response.audio"' in message["data"]
-    assert b"RIFF12345678" not in message["data"]
-    assert await coordinator.read_media(response.response_id) == b"RIFF12345678"
+    assert offer.WhichOneof("event") == "playback_offer"
+    assert offer.playback_offer.audio_spec.sample_rate_hz == 24_000
+    assert media.WhichOneof("event") == "playback"
+    assert media.playback.opus_payload == b"opus-packet!"
+    assert media.playback.final_packet
 
 
 async def test_stale_socket_cannot_offer_or_ack_playback(
@@ -177,7 +250,7 @@ async def test_stale_socket_cannot_offer_or_ack_playback(
     )
 
     with pytest.raises(StaleResponse):
-        await coordinator.offer(response.response_id, b"RIFF12345678")
+        await coordinator.offer(response.response_id, (b"opus-packet!",))
     with pytest.raises(StaleResponse):
         await coordinator.playback(
             response_id=response.response_id,
@@ -199,7 +272,7 @@ async def test_only_one_response_can_reach_playing(coordinator, voice_coordinato
     await coordinator.mark_ready(
         first.response_id, byte_length=12, duration_ms=250, sample_rate=24000
     )
-    await coordinator.offer(first.response_id, b"RIFF12345678")
+    await coordinator.offer(first.response_id, (b"opus-packet!",))
     playing = await coordinator.playback(
         response_id=first.response_id,
         generation=first.generation,
@@ -255,7 +328,7 @@ async def test_physical_cancellation_ack_is_idempotent_after_generation_fence(
     await coordinator.mark_ready(
         response.response_id, byte_length=12, duration_ms=250, sample_rate=24000
     )
-    await coordinator.offer(response.response_id, b"RIFF12345678")
+    await coordinator.offer(response.response_id, (b"opus-packet!",))
     await coordinator.playback(
         response_id=response.response_id,
         generation=response.generation,
@@ -288,7 +361,7 @@ async def test_physical_cancellation_ack_is_idempotent_after_generation_fence(
     assert acknowledged.playback_monotonic_ms == 20
 
 
-async def test_plugin_stop_playback_uses_generation_fenced_v1_cancellation(
+async def test_plugin_stop_playback_uses_generation_fenced_v2_cancellation(
     coordinator, voice_coordinator, redis_client
 ):
     voice = await _ready_voice(voice_coordinator)
@@ -296,7 +369,7 @@ async def test_plugin_stop_playback_uses_generation_fenced_v1_cancellation(
     await coordinator.mark_ready(
         response.response_id, byte_length=12, duration_ms=250, sample_rate=24_000
     )
-    await coordinator.offer(response.response_id, b"RIFF12345678")
+    await coordinator.offer(response.response_id, (b"opus-packet!",))
     services = PluginServices.__new__(PluginServices)
     services._async_redis = redis_client
 
@@ -337,11 +410,6 @@ async def test_capture_only_client_must_upgrade_before_interactive_delivery(
     )
     synthesize = AsyncMock(return_value=_wav())
     monkeypatch.setattr(response_delivery, "synthesize_speech", synthesize)
-    channel = str(device_downlink_channel(ClientId.from_value("wearable-1")))
-    pubsub = redis_client.pubsub()
-    await pubsub.subscribe(channel)
-    await pubsub.get_message(timeout=1)
-
     with pytest.raises(ClientUpgradeRequired):
         await deliver_text_response(
             redis_client,
@@ -349,12 +417,10 @@ async def test_capture_only_client_must_upgrade_before_interactive_delivery(
             SessionId.from_value("audio-wearable"),
             "hello",
         )
-    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
-    assert json.loads(message["data"])["error"] == "client_upgrade_required"
     synthesize.assert_not_awaited()
 
 
-async def test_text_delivery_uses_response_audio_for_protocol_v1_phone(
+async def test_text_delivery_publishes_audio_v2_playback_for_phone(
     coordinator, voice_coordinator, redis_client, monkeypatch
 ):
     voice = await _ready_voice(voice_coordinator)
@@ -394,11 +460,11 @@ async def test_text_delivery_uses_response_audio_for_protocol_v1_phone(
         turn_id="turn-1",
     )
     message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
+    downlink = audio_pb2.DeviceDownlinkEvent.FromString(message["data"])
 
     assert offered.state == "offered"
-    assert offered.transport == "voice_v1"
-    assert b'"type":"response.audio"' in message["data"]
-    assert b'"audio_b64"' not in message["data"]
+    assert offered.transport == "audio_v2"
+    assert downlink.WhichOneof("event") == "playback_offer"
 
 
 async def test_missing_native_playback_ack_fails_current_response_and_health_reports_it(
@@ -412,7 +478,7 @@ async def test_missing_native_playback_ack_fails_current_response_and_health_rep
         duration_ms=250,
         sample_rate=24_000,
     )
-    offered = await coordinator.offer(response.response_id, b"RIFF12345678")
+    offered = await coordinator.offer(response.response_id, (b"opus-packet!",))
 
     failed = await coordinator.expire_stalled(
         response.response_id,

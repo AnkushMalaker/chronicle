@@ -1,11 +1,14 @@
 """Durability invariants from Redis acceptance through Mongo persistence."""
 
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from google.protobuf import timestamp_pb2
 
+from advanced_omi_backend.audio_contract.v2 import audio_pb2
 from advanced_omi_backend.services.audio_stream.durability import (
     PersistenceOutcome,
     PersistenceRuntimeState,
@@ -57,14 +60,18 @@ class _DurabilityRedis:
         self.read_cursors = []
         self.acked = []
         self.delivered_count = 0
+        self.group = "audio_persistence"
+        self.stream = b"audio:stream:session-1"
 
-    async def xgroup_create(self, *args, **kwargs):
+    async def xgroup_create(self, stream, group, *args, **kwargs):
+        self.group = group
+        self.stream = stream.encode() if isinstance(stream, str) else stream
         return True
 
     async def xreadgroup(self, group, consumer, streams, **kwargs):
         cursor = next(iter(streams.values()))
         self.read_cursors.append(cursor)
-        stream = b"audio:stream:session-1"
+        stream = self.stream
 
         if cursor != ">" and self.pending_message and not self.pending_delivered:
             self.pending_delivered = True
@@ -97,7 +104,7 @@ class _DurabilityRedis:
         return [
             [
                 b"name",
-                b"audio_persistence",
+                self.group.encode(),
                 b"pending",
                 pending,
                 b"lag",
@@ -144,6 +151,23 @@ def _audio_message(message_id=b"1-0"):
             b"time_basis": b"received",
         },
     )
+
+
+def _v2_message(message_id=b"1-0"):
+    captured_at = timestamp_pb2.Timestamp()
+    captured_at.FromDatetime(datetime.fromtimestamp(1_770_000_000.0, tz=timezone.utc))
+    event = audio_pb2.CaptureStreamEvent(
+        frame=audio_pb2.CanonicalPcmFrame(
+            binding=audio_pb2.CaptureBinding(
+                capture_session_id=audio_pb2.CaptureSessionId(value="session-1")
+            ),
+            sequence=1,
+            captured_at=captured_at,
+            delivery_class=audio_pb2.DELIVERY_CLASS_RECOVERED,
+            pcm_s16le=b"\x00\x01" * 160000,
+        )
+    )
+    return message_id, {b"event": event.SerializeToString()}
 
 
 def _patch_persistence_dependencies(monkeypatch, audio_chunk_model):
@@ -229,6 +253,45 @@ async def test_restarted_worker_replays_pending_audio_before_new_entries(monkeyp
     assert redis.read_cursors[0] != ">", "pending entries must be replayed first"
     inserted.assert_awaited_once()
     assert redis.acked == [b"pending-1"]
+
+
+@pytest.mark.asyncio
+async def test_v2_recovered_frame_commits_from_typed_durable_stream(monkeypatch):
+    inserted = []
+
+    class SuccessfulAudioChunk:
+        source_stream = _QueryField()
+        source_first_message_id = _QueryField()
+        capture_session_id = _QueryField()
+        find_one = AsyncMock(return_value=None)
+        find = staticmethod(lambda *_args, **_kwargs: _EmptyFind())
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        async def insert(self):
+            inserted.append(self)
+
+    capture = _patch_persistence_dependencies(monkeypatch, SuccessfulAudioChunk)
+    redis = _DurabilityRedis(
+        statuses=[SessionStatus.ACTIVE, SessionStatus.FINISHED],
+        new_message=_v2_message(),
+    )
+
+    await audio_jobs.audio_streaming_persistence_job.__wrapped__(
+        "session-1",
+        "user-1",
+        "client-1",
+        contract_version=2,
+        redis_client=redis,
+    )
+
+    assert len(inserted) == 1
+    assert inserted[0].source_stream == "audio:v2:durable:session-1"
+    assert inserted[0].captured_at.timestamp() == 1_770_000_000.0
+    assert inserted[0].original_size == 320000
+    assert redis.acked == [b"1-0"]
+    assert capture.time_basis == "captured"
 
 
 @pytest.mark.asyncio
@@ -735,13 +798,14 @@ class _LaggingStreamRedis:
         return [
             [
                 b"name",
-                b"streaming-transcription",
+                b"streaming-transcription-v2",
                 b"pending",
                 0,
                 b"lag",
                 0,
             ],
-            [b"name", b"audio_persistence", b"pending", 0, b"lag", 4],
+            [b"name", b"wakeword-v2", b"pending", 0, b"lag", 4],
+            [b"name", b"interactive-turn-v2", b"pending", 0, b"lag", 0],
         ]
 
     async def delete(self, stream_name):
@@ -749,13 +813,13 @@ class _LaggingStreamRedis:
 
 
 @pytest.mark.asyncio
-async def test_stream_with_unconsumed_persistence_lag_is_not_deleted():
+async def test_realtime_stream_with_unconsumed_wake_lag_is_not_deleted():
     redis = _LaggingStreamRedis()
     consumer = object.__new__(StreamingTranscriptionConsumer)
     consumer.redis_client = redis
-    consumer.group_name = "streaming-transcription"
+    consumer.group_name = "streaming-transcription-v2"
 
-    await consumer._try_delete_finished_stream("audio:stream:client-1")
+    await consumer._try_delete_finished_stream("audio:v2:realtime:client-1")
 
     assert redis.deleted == []
 

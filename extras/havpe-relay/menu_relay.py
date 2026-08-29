@@ -3,7 +3,7 @@
 Runs the TCP-to-WebSocket relay in a background asyncio thread and shows
 connection status in the macOS menu bar. No terminal needed.
 
-Uses the shared relay_core module for Wyoming protocol forwarding.
+Uses the shared relay_core module for Chronicle audio-v2 forwarding.
 """
 
 import asyncio

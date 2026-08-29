@@ -4,6 +4,7 @@ import { OmiConnection } from 'friend-lite-react-native';
 import { AppSettings } from './useAppSettings';
 import type { StreamStartConfig } from './useAudioStreamer';
 import type { PhoneCaptureSession } from './usePhoneAudioRecorder';
+import type { CapturedOpusFrame } from '../protocol/capturedOpusFrame';
 
 interface OrchestratorParams {
   omiConnection: OmiConnection;
@@ -14,13 +15,14 @@ interface OrchestratorParams {
     isStreaming: boolean;
     startStreaming: (url: string, config?: StreamStartConfig) => Promise<void>;
     stopStreaming: () => Promise<void>;
-    sendAudio: (audioBytes: Uint8Array, durable?: boolean) => void;
+    sendDurableAudio: (audioBytes: Uint8Array) => void;
+    sendInteractiveFrame: (frame: CapturedOpusFrame) => void;
     getWebSocketReadyState: () => number | undefined;
   };
   phoneAudioRecorder: {
     isRecording: boolean;
     startRecording: (
-      onData: (pcmBuffer: Uint8Array) => Promise<void>
+      onData: (frame: CapturedOpusFrame) => Promise<void>
     ) => Promise<PhoneCaptureSession>;
     stopRecording: () => Promise<void>;
   };
@@ -51,11 +53,10 @@ export const useAudioStreamingOrchestrator = ({
   const buildWebSocketUrl = useCallback((baseUrl: string): string => {
     let url = baseUrl.trim();
     url = url.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
-    if (!url.includes('/ws')) url = url.replace(/\/$/, '') + '/ws';
-    if (!url.includes('codec=')) {
-      const sep = url.includes('?') ? '&' : '?';
-      url = url + sep + 'codec=opus';
-    }
+    const parsed = new URL(url);
+    parsed.pathname = '/ws/audio';
+    parsed.search = '';
+    url = parsed.toString();
 
     const isAdvanced = settings.jwtToken && settings.isAuthenticated;
     if (isAdvanced) {
@@ -72,11 +73,10 @@ export const useAudioStreamingOrchestrator = ({
   const buildPhoneWebSocketUrl = useCallback((baseUrl: string): string => {
     let url = baseUrl.trim();
     url = url.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:');
-    if (!url.includes('/ws')) url = url.replace(/\/$/, '') + '/ws';
-    if (!url.includes('codec=')) {
-      const sep = url.includes('?') ? '&' : '?';
-      url = url + sep + 'codec=pcm';
-    }
+    const parsed = new URL(url);
+    parsed.pathname = '/ws/audio';
+    parsed.search = '';
+    url = parsed.toString();
 
     const isAdvanced = settings.jwtToken && settings.isAuthenticated;
     if (isAdvanced) {
@@ -104,7 +104,7 @@ export const useAudioStreamingOrchestrator = ({
       const finalUrl = buildWebSocketUrl(settings.webSocketUrl);
       await originalStartAudioListener(async (audioBytes) => {
         if (audioBytes.length > 0) {
-          await audioStreamer.sendAudio(audioBytes);
+          audioStreamer.sendDurableAudio(audioBytes);
         }
       });
       // BLE capture is independent of network availability. The durable spool above
@@ -131,10 +131,10 @@ export const useAudioStreamingOrchestrator = ({
 
     try {
       const finalUrl = buildPhoneWebSocketUrl(settings.webSocketUrl);
-      const capture = await phoneAudioRecorder.startRecording(async (pcmBuffer) => {
+      const capture = await phoneAudioRecorder.startRecording(async (frame) => {
         const wsReady = audioStreamer.getWebSocketReadyState();
-        if (wsReady === WebSocket.OPEN && pcmBuffer.length > 0) {
-          await audioStreamer.sendAudio(pcmBuffer, false);
+        if (wsReady === WebSocket.OPEN && frame.opus.length > 0) {
+          audioStreamer.sendInteractiveFrame(frame);
         }
       });
       await audioStreamer.startStreaming(finalUrl, { phoneVoice: capture });

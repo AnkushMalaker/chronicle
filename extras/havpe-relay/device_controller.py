@@ -32,7 +32,7 @@ class DeviceController:
     def connected(self) -> bool:
         return self._connected
 
-    def supports_voice_protocol_v1(self) -> bool:
+    def supports_audio_v2_playback(self) -> bool:
         """True only when firmware exposes media output and physical state."""
         return (
             self._connected

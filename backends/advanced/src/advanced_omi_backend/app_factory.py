@@ -27,9 +27,9 @@ from advanced_omi_backend.client_manager import (
     get_client_manager,
     initialize_redis_for_client_manager,
 )
+from advanced_omi_backend.controllers.capture_lifecycle import cleanup_client_state
 from advanced_omi_backend.controllers.data_audit_controller import run_auto_clean_cron
 from advanced_omi_backend.controllers.queue_controller import redis_conn
-from advanced_omi_backend.controllers.websocket_controller import cleanup_client_state
 from advanced_omi_backend.cron_scheduler import get_scheduler, register_cron_job
 from advanced_omi_backend.llm_client import get_llm_client
 from advanced_omi_backend.middleware.app_middleware import setup_middleware
@@ -56,6 +56,7 @@ from advanced_omi_backend.models.timeline import (
     AudioEvidenceSpan,
     DirtyEvidenceRange,
     EpisodeDispatchLatch,
+    MemoryReviewProposal,
     TimelineAnalysisRun,
     TimelineDay,
     TimelineEpisode,
@@ -110,11 +111,14 @@ from advanced_omi_backend.services.reaper import run_reaper
 from advanced_omi_backend.services.status_reconciler import (
     reconcile_conversation_statuses,
 )
+from advanced_omi_backend.services.timeline.consolidation import (
+    prefetch_consolidation_horizon,
+)
 from advanced_omi_backend.services.timeline.dirty_ranges import reconcile_dirty_ranges
 from advanced_omi_backend.services.timeline.discovery import (
     process_current_timeline_days,
 )
-from advanced_omi_backend.services.timeline.memory import process_episode_memory
+from advanced_omi_backend.services.timeline.review import process_memory_review_queue
 from advanced_omi_backend.services.timeline.thumbnails import process_episode_thumbnails
 from advanced_omi_backend.task_manager import get_task_manager, init_task_manager
 from advanced_omi_backend.users import (
@@ -177,6 +181,7 @@ async def lifespan(app: FastAPI):
                 TimelineDay,
                 DirtyEvidenceRange,
                 EpisodeDispatchLatch,
+                MemoryReviewProposal,
             ],
         )
         application_logger.info("Beanie initialized for all document models")
@@ -350,6 +355,9 @@ async def lifespan(app: FastAPI):
             register_cron_job("device_audio_ingest", process_device_audio)
             register_cron_job("screen_context_retention", purge_screen_context)
             register_cron_job("timeline_analysis", process_current_timeline_days)
+            register_cron_job(
+                "timeline_consolidation_prefetch", prefetch_consolidation_horizon
+            )
             register_cron_job("rolling_reconciliation_scan", reconcile_dirty_ranges)
             register_cron_job("episode_thumbnails", process_episode_thumbnails)
             register_cron_job(
@@ -358,7 +366,7 @@ async def lifespan(app: FastAPI):
             register_cron_job(
                 "manual_memory_visual_index", process_manual_memory_visual_index
             )
-            register_cron_job("episode_memory", process_episode_memory)
+            register_cron_job("episode_memory_review", process_memory_review_queue)
             register_cron_job("audio_stream_reclaim", reclaim_settled_audio_streams)
             register_cron_job(
                 "pi_operating_memory_threshold",

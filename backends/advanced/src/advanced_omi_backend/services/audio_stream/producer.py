@@ -114,6 +114,7 @@ class AudioStreamProducer:
         processing_profile: CaptureProcessingProfile,
         effects: CaptureEffects,
         voice_session_id: str | None,
+        data_purpose: str = "normal_capture",
     ):
         """
         Initialize session tracking metadata in Redis.
@@ -200,6 +201,7 @@ class AudioStreamProducer:
             effects=effects,
             voice_session_id=voice_session_id,
             source_stream=stream_name,
+            data_purpose=data_purpose,
         )
         await capture.insert()
 

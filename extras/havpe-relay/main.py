@@ -7,7 +7,7 @@ Two connections to the device:
   ESPHome API (:6053) — button/dial events (device → backend),
                         LED control + audio playback (backend → device)
 
-All events are forwarded to/from the backend WebSocket using Wyoming protocol.
+The firmware's device-local JSONL/PCM stream is adapted to Chronicle audio v2.
 """
 
 import argparse
@@ -119,7 +119,7 @@ def _make_wav_callbacks(dump_dir: str):
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="HAVPE Relay - Bidirectional Wyoming bridge"
+        description="HAVPE Relay - Bidirectional Chronicle audio-v2 bridge"
     )
     parser.add_argument("--port", type=int, default=8989)
     parser.add_argument("--host", type=str, default="0.0.0.0")

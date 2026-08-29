@@ -4,7 +4,7 @@ The phone spools every BLE packet to a file before offering it to the WebSocket,
 that file has an id. It used to travel as ``durable_session_id`` and come back as
 ``session_id`` — so a spool-file identity wore the name of the backend ``SessionId``,
 which is a different thing with a different lifetime (one WebSocket connection, minted
-in ``websocket_controller`` as ``{client_id}-{uuid4}``).
+for each authenticated audio-v2 connection as ``{client_id}-{uuid4}``).
 
 Nothing was mis-routed by it, because the receipt key is namespaced by user and client
 and the value is only ever echoed back. That is exactly why it is worth pinning: the
@@ -13,15 +13,16 @@ names are the only thing keeping the two apart, and the wire is where they meet.
 These assert the shape both ends agree on, without a live socket.
 """
 
-import re
 from pathlib import Path
 
 import pytest
+from google.protobuf.descriptor import FieldDescriptor
+
+from advanced_omi_backend.audio_contract.v2 import audio_pb2
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "advanced_omi_backend"
 APP = Path(__file__).resolve().parents[3] / "app" / "src"
 
-WEBSOCKET_CONTROLLER = SRC / "controllers" / "websocket_controller.py"
 AUDIO_STREAMER = APP / "hooks" / "useAudioStreamer.ts"
 SPOOL = APP / "services" / "durableAudioSpool.ts"
 
@@ -38,25 +39,14 @@ def _code(path: Path) -> str:
     return "\n".join(lines)
 
 
-def test_backend_reads_and_acknowledges_the_spool_segment_id():
-    code = _code(WEBSOCKET_CONTROLLER)
+def test_v2_ack_is_bound_to_the_backend_capture_and_exact_packet_sequence():
+    """The V2 receipt cannot confuse a local spool file with a capture session."""
 
-    assert 'chunk_data.get("spool_segment_id")' in code
-    assert 'chunk_data.get("spool_sequence")' in code
-    # The acknowledgment names what it is acknowledging.
-    assert '"spool_segment_id": spool_segment_id' in code
-
-
-def test_the_backend_never_calls_a_spool_id_a_session_id():
-    """``session_id`` in an audio-ack meant the backend audio session, which it isn't."""
-
-    code = _code(WEBSOCKET_CONTROLLER)
-
-    assert "durable_session_id" not in code
-    assert "durable_sequence" not in code
-    # Find every audio-ack payload and confirm none of them carries a session_id key.
-    for block in re.findall(r'"type": "audio-ack",(.{0,240}?)\}', code, re.S):
-        assert '"session_id"' not in block, block
+    fields = audio_pb2.CapturePacketAccepted.DESCRIPTOR.fields_by_name
+    assert fields["binding"].message_type.full_name.endswith("CaptureBinding")
+    assert fields["sequence"].type == FieldDescriptor.TYPE_UINT64
+    assert "spool_segment_id" not in fields
+    assert "session_id" not in fields
 
 
 @pytest.mark.parametrize("path", [AUDIO_STREAMER, SPOOL])
@@ -73,12 +63,9 @@ def test_the_app_sends_and_matches_the_same_wire_fields_the_backend_reads():
     if not AUDIO_STREAMER.exists():  # pragma: no cover
         pytest.skip("app tree not present")
     app_code = _code(AUDIO_STREAMER)
-    backend_code = _code(WEBSOCKET_CONTROLLER)
-
-    # Sent by the app, read by the backend.
-    for field in ("spool_segment_id", "spool_sequence"):
-        assert field in app_code, field
-        assert field in backend_code, field
-
-    # The app retires a pending packet on the key the backend actually sends back.
-    assert "msg.spool_segment_id" in app_code
+    # Spool identity stays local. The client maps a generated packet sequence back
+    # to its pending file and retires it only on CapturePacketAccepted.
+    assert "acceptedRef" in app_code
+    assert "onPacketAccepted" in app_code
+    assert "durableAudioSpool.acknowledge(packet)" in app_code
+    assert "spool_segment_id" not in app_code

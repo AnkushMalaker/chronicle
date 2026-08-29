@@ -3,12 +3,12 @@ import hashlib
 import pytest
 from fakeredis import aioredis as fake_aioredis
 
+from advanced_omi_backend.models.audio_capabilities import VoiceCapabilities
 from advanced_omi_backend.services.voice_sessions import (
     ClientUpgradeRequired,
     StaleVoiceBinding,
     VoiceSessionCoordinator,
 )
-from advanced_omi_backend.voice_protocol import VoiceCapabilities
 
 pytestmark = pytest.mark.unit
 
@@ -60,11 +60,11 @@ async def _start(coordinator: VoiceSessionCoordinator):
         audio_session_id="audio-1",
         capture_epoch=4,
         socket_id="socket-1",
-        advertised_protocol=1,
+        advertised_protocol=2,
     )
 
 
-async def test_interactive_activation_requires_protocol_v1(coordinator):
+async def test_interactive_activation_requires_audio_contract_v2(coordinator):
     with pytest.raises(ClientUpgradeRequired):
         await coordinator.start(
             user_id="user-1",
@@ -210,7 +210,7 @@ async def test_fresh_activation_ends_reconnecting_session_instead_of_resuming_it
         audio_session_id="unrelated-audio",
         capture_epoch=0,
         socket_id="socket-2",
-        advertised_protocol=1,
+        advertised_protocol=2,
     )
 
     assert fresh.session.voice_session_id != first.session.voice_session_id

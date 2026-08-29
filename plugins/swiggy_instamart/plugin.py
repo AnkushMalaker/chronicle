@@ -834,7 +834,6 @@ class SwiggyInstamartPlugin(BasePlugin):
                 ],
                 tools=_SHOPPING_TOOLS,
                 operation=self.llm_operation,
-                default_model_type="fast_llm",
                 timeout_seconds=self.llm_timeout_seconds,
             )
             message = response.choices[0].message

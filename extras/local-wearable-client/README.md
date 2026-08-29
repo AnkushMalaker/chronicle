@@ -2,8 +2,7 @@
 
 macOS client that scans for BLE wearable devices (OMI, Neo1, Friend), connects, and streams audio to the Chronicle backend. Runs as a **menu bar app** with device selection, or headless for background use.
 
-Ordinary pendant capture still uses Chronicle's base Wyoming transport. Interactive
-output uses voice protocol v1. Speakerless OMI/Neo devices play through the tray host:
+Pendant capture uses Chronicle audio v2. Speakerless OMI/Neo devices play through the tray host:
 verified headphones keep capture live, while speakers gate capture during TTS. Elato
 playback requires firmware implementing the bound BLE status contract; old Elato
 firmware remains capture-only. See the

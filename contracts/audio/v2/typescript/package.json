@@ -1,0 +1,14 @@
+{
+  "name": "@chronicle/audio-contracts",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./codec": "./codec.ts",
+    "./messages": "./advanced_omi_backend/audio_contract/v2/audio_pb.ts"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.14.0"
+  }
+}

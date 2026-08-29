@@ -34,6 +34,12 @@ from advanced_omi_backend.services.plugin_service import (
     run_plugin_recovery,
 )
 from advanced_omi_backend.services.wakeword import WakeWordDispatcher
+from advanced_omi_backend.services.wakeword.interaction_event_consumer import (
+    WakeInteractionEventConsumer,
+)
+from advanced_omi_backend.services.wakeword.interaction_ledger import (
+    WakeInteractionLedger,
+)
 
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongo:27017")
 
@@ -74,6 +80,10 @@ async def main():
         await init_beanie(
             database=mongo_client[MONGODB_DATABASE], document_models=[User]
         )
+        interaction_facts = mongo_client[MONGODB_DATABASE]["wake_interaction_facts"]
+        await interaction_facts.create_index(
+            [("wake_trace_id", 1), ("stage", 1), ("ordinal", 1)], unique=True
+        )
         logger.info("✅ Database (Beanie) initialized for speaker gate")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}", exc_info=True)
@@ -103,13 +113,22 @@ async def main():
     # at boot (e.g. Home Assistant on a server that's still off).
     recovery_task = asyncio.create_task(run_plugin_recovery(plugin_router))
 
+    interaction_ledger = WakeInteractionLedger(interaction_facts)
     dispatcher = WakeWordDispatcher(
-        redis_client=redis_client, plugin_router=plugin_router
+        redis_client=redis_client,
+        plugin_router=plugin_router,
+        interaction_ledger=interaction_ledger,
     )
+    interaction_consumer = WakeInteractionEventConsumer(
+        redis_client, interaction_ledger
+    )
+
+    async def stop_consumers() -> None:
+        await asyncio.gather(dispatcher.stop(), interaction_consumer.stop())
 
     def signal_handler(signum, frame):
         logger.info(f"Received signal {signum}, shutting down...")
-        asyncio.create_task(dispatcher.stop())
+        asyncio.create_task(stop_consumers())
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -117,13 +136,14 @@ async def main():
     try:
         logger.info("🔔 Listening for wake-word detections on wakeword:detections")
         start_loop_monitor("wakeword-dispatch")
-        await dispatcher.run()
+        await asyncio.gather(dispatcher.run(), interaction_consumer.run())
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received, shutting down...")
     except Exception as e:
         logger.error(f"Worker error: {e}", exc_info=True)
         sys.exit(1)
     finally:
+        await interaction_consumer.stop()
         recovery_task.cancel()
         await redis_client.aclose()
         logger.info("👋 Wake-word dispatch worker stopped")

@@ -50,6 +50,25 @@ Do not assume a remote deployment's checkout is clean or matches `origin` — ch
 inspect the live application. Remote deployment, restarts, or other mutations still
 require the user's request to change or deploy the running system.
 
+### Verifying live historical data
+
+Before claiming that captured data was not sent, stored, processed, or added to a
+timeline:
+
+- Anchor the investigation on the exact user-provided URL or ID. Confirm the live
+  database and inspect a real document's field names and BSON types; do not guess that
+  a domain ID is MongoDB `_id` or that a date is stored as a string. Treat an empty
+  query as inconclusive until the same query shape returns a known positive control.
+- Verify each layer separately: ingress/backfill records, canonical `audio_chunks`,
+  `conversations`, timeline days/episodes, and the UI. Promotion between collections
+  can leave an ingress collection empty even though canonical data exists.
+- For timelines, use the stored `local_date` type and user timezone, follow explicit
+  conversation/audio references, check time overlap, and distinguish active/open
+  episodes from provisional or superseded runs.
+- State exactly which claim the evidence supports: sent, stored, processed, linked, or
+  merely visible in one UI route. Report UTC and user-local timestamps when time is
+  relevant.
+
 ### Investigating a slow or unresponsive backend
 
 When *everything* is slow at once — the dashboard hangs, health checks time out, a
@@ -280,7 +299,7 @@ voice evidence and human review assign a real person.
 
 ### Key Components
 - **Audio Pipeline**: Real-time Opus/PCM → Application-level processing → Deepgram transcription → memory extraction
-- **Wyoming Protocol**: WebSocket communication uses Wyoming protocol (JSONL + binary) for structured audio sessions
+- **Audio Protocol V2**: `/ws/audio` uses generated control messages and atomic raw-Opus media envelopes
 - **Unified Pipeline**: Job-based tracking system for all audio processing (WebSocket and file uploads)
 - **Job Tracker**: Tracks pipeline jobs with stage events (audio → transcription → memory) and completion status
 - **Task Management**: BackgroundTaskManager tracks all async tasks to prevent orphaned processes
@@ -310,8 +329,12 @@ Optional:
 
 ## Data Flow Architecture
 
-1. **Audio Ingestion**: OMI devices stream audio via WebSocket using Wyoming protocol with JWT auth
-2. **Wyoming Protocol Session Management**: Clients send audio-start/audio-stop events for session boundaries
+For any capture, streaming, playback, wake-word, transcription, or audio-import
+change, read `docs/backend/audio-interface-map.md`. It is the boundary inventory and
+migration ledger for the generated Chronicle audio contract.
+
+1. **Audio Ingestion**: Devices stream raw Opus through generated audio-v2 envelopes with bearer authentication
+2. **Typed Session Management**: Bound start/stop controls define capture sessions and reject stale sockets
 3. **Application-Level Processing**: Global queues and processors handle all audio/transcription/memory tasks
 4. **Speech-Driven Conversation Creation**: Continuous capture creates no user-facing row until speech is detected; deliberate recordings/uploads are visible immediately
 5. **Audio Evidence and Conversations**: Opus audio documents are persisted in `audio_chunks`; `captured_at` remains stable when chunks are split, merged, or trimmed. A conversation is the current semantic/operational claim over those documents, not their temporal identity.
@@ -460,7 +483,7 @@ SPEAKER_SERVICE_URL=http://speaker-recognition:8085
 ### Common Endpoints
 - **GET /health**: Basic application health check
 - **GET /readiness**: Service dependency validation
-- **WS /ws**: Audio streaming endpoint with codec parameter (Wyoming protocol, supports pcm and opus codecs)
+- **WS /ws/audio**: Audio-v2 WebSocket (generated control JSON plus atomic raw-Opus media)
 - **GET /api/conversations**: User's conversations with transcripts
 - **GET /api/memories/search**: Agentic vault search (retrieval agent over the Markdown vault)
 - **POST /auth/jwt/login**: Email-based login (returns JWT token)

@@ -5,7 +5,7 @@
 #   - Speaker output via ESPHome API media_player (for TTS playback)
 #   - LED ring status indicators
 #   - HTTP audio source for playing audio from URLs
-#   - Chronicle voice protocol v1 native half-duplex playback reporting
+#   - Chronicle audio-v2 native half-duplex playback reporting
 #
 # Flash with:
 #   cd extras/havpe-relay/firmware

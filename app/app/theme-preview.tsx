@@ -177,7 +177,7 @@ function ThemeShowcase({ name }: { name: ThemeName }) {
 
       <SectionLabel>Form fields</SectionLabel>
       <Card>
-        <TextField label="Backend URL" value="wss://kraken.parrot-census.ts.net/ws" hint="From the QR on the dashboard." />
+        <TextField label="Backend URL" value="wss://kraken.parrot-census.ts.net/ws/audio" hint="From the QR on the dashboard." />
         <TextField label="Email" placeholder="user@example.com" />
         <TextField label="Password" value="hunter2" secureTextEntry error="Incorrect password." />
         <TextField label="Device name" value="pendant" editable={false} hint="Disabled while streaming." />

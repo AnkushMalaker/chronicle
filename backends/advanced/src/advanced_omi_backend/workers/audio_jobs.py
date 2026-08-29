@@ -6,6 +6,7 @@ This module contains jobs related to audio file processing and cropping.
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
 
@@ -13,6 +14,7 @@ from bson import Binary
 from pymongo.errors import DuplicateKeyError
 from rq import get_current_job
 
+from advanced_omi_backend.audio_contract.v2 import audio_pb2
 from advanced_omi_backend.models.audio_capture import (
     CAPTURE_CONTINUITY_TOLERANCE_SECONDS,
     AudioCaptureSession,
@@ -29,6 +31,11 @@ from advanced_omi_backend.services.audio_stream.durability import (
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStatus,
     SessionStore,
+)
+from advanced_omi_backend.services.audio_stream.v2_streams import (
+    DURABLE_GROUP,
+    durable_stream,
+    parse_stream_event,
 )
 from advanced_omi_backend.utils.audio_chunk_utils import encode_pcm_to_opus
 from advanced_omi_backend.utils.job_utils import check_job_alive
@@ -85,12 +92,57 @@ def _time_basis_from_fields(fields: dict) -> str:
     return value
 
 
+@dataclass(frozen=True)
+class PersistenceWalEntry:
+    capture_session_id: str
+    pcm: bytes
+    captured_at: datetime | None
+    time_basis: str
+    terminal: bool
+
+
+def _decode_v2_wal_entry(fields: dict[bytes, bytes]) -> PersistenceWalEntry:
+    event = parse_stream_event(fields)
+    event_kind = event.WhichOneof("event")
+    if event_kind == "opened":
+        capture_session_id = event.opened.binding.capture_session_id.value
+        return PersistenceWalEntry(
+            capture_session_id=capture_session_id,
+            pcm=b"",
+            captured_at=None,
+            time_basis="captured",
+            terminal=False,
+        )
+    if event_kind == "frame":
+        frame = event.frame
+        captured_at = frame.captured_at.ToDatetime(tzinfo=timezone.utc)
+        return PersistenceWalEntry(
+            capture_session_id=frame.binding.capture_session_id.value,
+            pcm=frame.pcm_s16le,
+            captured_at=captured_at,
+            time_basis="captured",
+            terminal=False,
+        )
+    if event_kind == "ended":
+        return PersistenceWalEntry(
+            capture_session_id=event.ended.binding.capture_session_id.value,
+            pcm=b"",
+            captured_at=None,
+            time_basis="captured",
+            terminal=True,
+        )
+    raise AudioPersistenceInvariantError(
+        f"unsupported durable audio-v2 event {event_kind!r}"
+    )
+
+
 @async_job(redis=True, beanie=True)
 async def audio_streaming_persistence_job(
     session_id: str,
     user_id: str,
     client_id: str,
     *,
+    contract_version: int = 1,
     redis_client=None,
 ) -> Dict[str, Any]:
     """Commit a Redis raw-audio WAL to MongoDB with at-least-once delivery.
@@ -101,8 +153,14 @@ async def audio_streaming_persistence_job(
     another store. RQ retries re-enter through pending recovery using the same
     deterministic consumer name.
     """
-    audio_stream_name = f"audio:stream:{session_id}"
-    audio_group_name = AUDIO_PERSISTENCE_GROUP
+    if contract_version == 2:
+        audio_stream_name = durable_stream(session_id)
+        audio_group_name = DURABLE_GROUP
+    elif contract_version == 1:
+        audio_stream_name = f"audio:stream:{session_id}"
+        audio_group_name = AUDIO_PERSISTENCE_GROUP
+    else:
+        raise ValueError(f"unsupported audio contract version {contract_version}")
     audio_consumer_name = f"persistence-{session_id[-16:]}"
     logger.info(f"🎵 Starting durable Mongo audio persistence for session {session_id}")
 
@@ -266,30 +324,44 @@ async def audio_streaming_persistence_job(
         for _stream_name, stream_messages in messages:
             for message_id, fields in stream_messages:
                 last_message_id = message_id
-                audio_data = (
-                    fields.get(b"audio_data") or fields.get("audio_data") or b""
-                )
-                raw_chunk_id = fields.get(b"chunk_id") or fields.get("chunk_id") or b""
-                chunk_id = (
-                    raw_chunk_id.decode()
-                    if isinstance(raw_chunk_id, bytes)
-                    else str(raw_chunk_id)
-                )
-                is_terminal = chunk_id == "END" or bool(
-                    fields.get(b"end_marker") or fields.get("end_marker")
-                )
-                raw_capture_id = fields.get(b"capture_session_id") or fields.get(
-                    "capture_session_id"
-                )
-                if not raw_capture_id:
-                    raise AudioPersistenceInvariantError(
-                        f"Redis WAL entry {_message_id_text(message_id)} has no capture id"
+                if contract_version == 2:
+                    decoded = _decode_v2_wal_entry(fields)
+                    audio_data = decoded.pcm
+                    is_terminal = decoded.terminal
+                    capture_id = decoded.capture_session_id
+                    message_captured_at = decoded.captured_at
+                    message_time_basis = decoded.time_basis
+                else:
+                    audio_data = (
+                        fields.get(b"audio_data") or fields.get("audio_data") or b""
                     )
-                capture_id = (
-                    raw_capture_id.decode()
-                    if isinstance(raw_capture_id, bytes)
-                    else str(raw_capture_id)
-                )
+                    raw_chunk_id = (
+                        fields.get(b"chunk_id") or fields.get("chunk_id") or b""
+                    )
+                    chunk_id = (
+                        raw_chunk_id.decode()
+                        if isinstance(raw_chunk_id, bytes)
+                        else str(raw_chunk_id)
+                    )
+                    is_terminal = chunk_id == "END" or bool(
+                        fields.get(b"end_marker") or fields.get("end_marker")
+                    )
+                    raw_capture_id = fields.get(b"capture_session_id") or fields.get(
+                        "capture_session_id"
+                    )
+                    if not raw_capture_id:
+                        raise AudioPersistenceInvariantError(
+                            f"Redis WAL entry {_message_id_text(message_id)} has no capture id"
+                        )
+                    capture_id = (
+                        raw_capture_id.decode()
+                        if isinstance(raw_capture_id, bytes)
+                        else str(raw_capture_id)
+                    )
+                    message_captured_at = _captured_at_from_fields(
+                        fields, _message_id_text(message_id)
+                    )
+                    message_time_basis = _time_basis_from_fields(fields)
                 if capture_id != session_id:
                     raise AudioPersistenceInvariantError(
                         f"Redis WAL entry {_message_id_text(message_id)} belongs to "
@@ -297,14 +369,10 @@ async def audio_streaming_persistence_job(
                     )
 
                 if audio_data:
-                    message_captured_at = _captured_at_from_fields(
-                        fields, _message_id_text(message_id)
-                    )
                     if message_captured_at is None:
                         raise AudioPersistenceInvariantError(
                             f"WAL chunk {_message_id_text(message_id)} has no absolute capture time"
                         )
-                    message_time_basis = _time_basis_from_fields(fields)
                     if observed_time_basis is None:
                         observed_time_basis = message_time_basis
                         if capture.time_basis != message_time_basis:
@@ -440,20 +508,12 @@ async def audio_streaming_persistence_job(
         total_compressed_bytes / total_pcm_bytes if total_pcm_bytes else 0.0
     )
 
-    capture.status = "complete"
-    if capture.ended_at is None:
-        final_chunk = (
-            await AudioChunkDocument.find(
-                AudioChunkDocument.capture_session_id == session_id
-            )
-            .sort("-sequence")
-            .first_or_none()
-        )
-        if final_chunk is not None:
-            capture.ended_at = final_chunk.captured_at + timedelta(
-                seconds=final_chunk.duration
-            )
-    await capture.save()
+    # The producer owns the technical session end time. It can finalize while this
+    # long-running worker still holds the document loaded above, so saving that
+    # stale object here would replace the producer's wall-clock ``ended_at`` with
+    # an absent or recorded-audio timestamp. Update only the field this worker
+    # owns; audio evidence keeps its independent captured clock on each chunk.
+    await capture.set({"status": "complete"})
 
     await redis_client.delete(f"audio_persistence:session:{session_id}")
     logger.info(

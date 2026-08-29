@@ -8,6 +8,7 @@ from fakeredis import aioredis as fake_aioredis
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from advanced_omi_backend.models.audio_capabilities import VoiceCapabilities
 from advanced_omi_backend.plugins import (
     BasePlugin,
     InteractionModeDefinition,
@@ -33,7 +34,6 @@ from advanced_omi_backend.services.response_coordinator import (
     StaleResponse,
 )
 from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
-from advanced_omi_backend.voice_protocol import VoiceCapabilities
 
 pytestmark = pytest.mark.unit
 property_settings = settings(max_examples=25, deadline=None)
@@ -95,7 +95,7 @@ async def _ready_runtime():
         audio_session_id="audio-1",
         capture_epoch=4,
         socket_id="socket-1",
-        advertised_protocol=1,
+        advertised_protocol=2,
     )
     voice = await voices.ready(
         voice_session_id=started.session.voice_session_id,
@@ -149,11 +149,11 @@ def test_property_generations_one_player_and_no_stale_playback(turn_count):
             )
             await responses.mark_ready(
                 response.response_id,
-                byte_length=12,
+                byte_length=len(b"opus-packet"),
                 duration_ms=20,
-                sample_rate=16_000,
+                sample_rate=24_000,
             )
-            await responses.offer(response.response_id, b"RIFF12345678")
+            await responses.offer(response.response_id, (b"opus-packet",))
             records.append(
                 await responses.playback(
                     response_id=response.response_id,

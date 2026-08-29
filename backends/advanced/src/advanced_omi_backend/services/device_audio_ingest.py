@@ -667,10 +667,16 @@ async def _ingest_segment(
             # underlying full window remains capture_evidence on AudioCaptureSession;
             # only the speech-derived range is a visible Conversation.
             data_purpose="conversation",
-            memory_excluded=True,
-            memory_exclusion_reason="timeline_day_memory_owns_continuous_capture",
+            # This source record is eligible for durable memory, but the write is
+            # deferred below until rolling Timeline classifies a conversational Episode.
+            # ``memory_excluded`` is a permanent safety fence, not a scheduling flag:
+            # leaving it set would make the later Timeline-triggered job no-op.
+            memory_excluded=False,
+            memory_exclusion_reason=None,
             skip_memory_extraction=True,
-            skip_title_summary=True,
+            # These are user-visible Recordings and need meaningful UI enrichment
+            # while Timeline is still deciding their final episode classification.
+            skip_title_summary=False,
         )
     except Exception:
         logger.exception(

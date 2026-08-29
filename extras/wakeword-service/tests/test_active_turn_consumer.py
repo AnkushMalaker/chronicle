@@ -7,7 +7,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from active_turn_consumer import COMMITTED_TURNS_STREAM, ActiveTurnConsumer
+from active_turn_consumer import (
+    COMMITTED_TURNS_STREAM,
+    TURN_EVENTS_STREAM,
+    ActiveTurnConsumer,
+)
+from audio_contract.v2 import audio_pb2
 
 
 class FakeRedis:
@@ -33,17 +38,20 @@ class FakeClock:
         return self.now_ms
 
 
-def _fields(sequence: int, pcm: bytes) -> dict:
-    return {
-        b"voice_session_id": b"voice-1",
-        b"audio_session_id": b"audio-1",
-        b"capture_epoch": b"2",
-        b"frame_sequence": str(sequence).encode(),
-        b"monotonic_offset_ms": str(sequence * 40).encode(),
-        b"sample_rate": b"16000",
-        b"sample_count": b"640",
-        b"pcm": pcm,
-    }
+def _frame(sequence: int, pcm: bytes) -> audio_pb2.CanonicalPcmFrame:
+    pcm = pcm + (b"\x00" * max(0, 1280 - len(pcm)))
+    return audio_pb2.CanonicalPcmFrame(
+        binding=audio_pb2.CaptureBinding(
+            capture_session_id=audio_pb2.CaptureSessionId(value="audio-1"),
+            voice_session_id=audio_pb2.VoiceSessionId(value="voice-1"),
+            capture_epoch=2,
+        ),
+        sequence=sequence,
+        monotonic_offset_us=sequence * 40_000,
+        delivery_class=audio_pb2.DELIVERY_CLASS_LIVE,
+        pcm_s16le=pcm,
+        data_purpose=audio_pb2.DATA_PURPOSE_NORMAL_CAPTURE,
+    )
 
 
 @pytest.mark.asyncio
@@ -58,7 +66,9 @@ async def test_active_consumer_publishes_only_committed_turns():
     for sequence, pcm in enumerate(
         [b"speech-1", b"speech-2", b"silence", b"silence", b"silence"]
     ):
-        await consumer.handle_frame(_fields(sequence, pcm))
+        await consumer.handle_frame(
+            _frame(sequence, pcm), data_purpose="normal_capture"
+        )
 
     assert all(stream != COMMITTED_TURNS_STREAM for stream, _, _ in redis.added)
     clock.now_ms += 2_000
@@ -79,9 +89,11 @@ async def test_consumer_health_records_fresh_success_and_errors():
     redis = FakeRedis()
     consumer = ActiveTurnConsumer(redis_client=redis, model_factory=FakeModels)
 
-    await consumer.handle_frame(_fields(0, b"speech"))
+    await consumer.handle_frame(_frame(0, b"speech"), data_purpose="normal_capture")
     with pytest.raises(ValueError):
-        await consumer.handle_frame({b"voice_session_id": b"voice-1"})
+        await consumer.handle_frame(
+            audio_pb2.CanonicalPcmFrame(), data_purpose="normal_capture"
+        )
 
     health = consumer.health()
     assert health["frames_consumed"] == 1
@@ -90,11 +102,53 @@ async def test_consumer_health_records_fresh_success_and_errors():
 
 
 @pytest.mark.asyncio
+async def test_active_consumer_reuses_one_model_bundle_per_voice_session():
+    redis = FakeRedis()
+    created = []
+
+    def model_factory():
+        model = FakeModels()
+        created.append(model)
+        return model
+
+    consumer = ActiveTurnConsumer(redis_client=redis, model_factory=model_factory)
+
+    await consumer.handle_frame(_frame(0, b"speech-1"), data_purpose="normal_capture")
+    await consumer.handle_frame(_frame(1, b"speech-2"), data_purpose="normal_capture")
+
+    assert len(created) == 1
+
+
+@pytest.mark.asyncio
+async def test_annotation_probe_exercises_models_without_publishing_turn_events():
+    redis = FakeRedis()
+    created = []
+
+    def model_factory():
+        model = FakeModels()
+        created.append(model)
+        return model
+
+    consumer = ActiveTurnConsumer(redis_client=redis, model_factory=model_factory)
+
+    await consumer.handle_frame(_frame(0, b"speech-1"), data_purpose="annotation")
+    await consumer.handle_frame(_frame(1, b"speech-2"), data_purpose="annotation")
+
+    assert len(created) == 1
+    assert all(
+        stream not in {TURN_EVENTS_STREAM, COMMITTED_TURNS_STREAM}
+        for stream, _, _ in redis.added
+    )
+
+
+@pytest.mark.asyncio
 async def test_consumer_recovers_own_and_stranded_peer_frames_before_acknowledging():
-    own = (b"10-0", _fields(10, b"speech-own"))
-    peer = (b"11-0", _fields(11, b"speech-peer"))
+    own_event = audio_pb2.CaptureStreamEvent(frame=_frame(10, b"speech-own"))
+    peer_event = audio_pb2.CaptureStreamEvent(frame=_frame(11, b"speech-peer"))
+    own = (b"10-0", {b"event": own_event.SerializeToString()})
+    peer = (b"11-0", {b"event": peer_event.SerializeToString()})
     redis = SimpleNamespace(
-        xreadgroup=AsyncMock(side_effect=[[(b"voice:frames:voice-1", [own])], []]),
+        xreadgroup=AsyncMock(side_effect=[[(b"audio:v2:realtime:audio-1", [own])], []]),
         xautoclaim=AsyncMock(return_value=(b"0-0", [peer], [])),
         xack=AsyncMock(),
     )
@@ -102,7 +156,7 @@ async def test_consumer_recovers_own_and_stranded_peer_frames_before_acknowledgi
     consumer.handle_frame = AsyncMock()
 
     recovered = await consumer.recover_pending(
-        "voice:frames:voice-1",
+        "audio:v2:realtime:audio-1",
         claim_min_idle_ms=0,
     )
 
@@ -110,8 +164,8 @@ async def test_consumer_recovers_own_and_stranded_peer_frames_before_acknowledgi
     assert consumer.handle_frame.await_count == 2
     assert redis.xack.await_count == 2
     redis.xautoclaim.assert_awaited_once_with(
-        "voice:frames:voice-1",
-        "active_turns",
+        "audio:v2:realtime:audio-1",
+        "interactive-turn-v2",
         consumer.consumer_name,
         0,
         start_id="0-0",
@@ -121,16 +175,17 @@ async def test_consumer_recovers_own_and_stranded_peer_frames_before_acknowledgi
 
 @pytest.mark.asyncio
 async def test_failed_active_frame_remains_pending_for_retry():
-    entry = (b"12-0", _fields(12, b"speech"))
+    event = audio_pb2.CaptureStreamEvent(frame=_frame(12, b"speech"))
+    entry = (b"12-0", {b"event": event.SerializeToString()})
     redis = SimpleNamespace(
-        xreadgroup=AsyncMock(return_value=[(b"voice:frames:voice-1", [entry])]),
+        xreadgroup=AsyncMock(return_value=[(b"audio:v2:realtime:audio-1", [entry])]),
         xautoclaim=AsyncMock(),
         xack=AsyncMock(),
     )
     consumer = ActiveTurnConsumer(redis_client=redis, model_factory=FakeModels)
     consumer.handle_frame = AsyncMock(side_effect=RuntimeError("model reset"))
 
-    recovered = await consumer.recover_pending("voice:frames:voice-1")
+    recovered = await consumer.recover_pending("audio:v2:realtime:audio-1")
 
     assert recovered == 0
     redis.xack.assert_not_awaited()
