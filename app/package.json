@@ -8,6 +8,7 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
+    "test:wearable-activation": "node scripts/test-wearable-activation.cjs",
     "test:voice-protocol": "node scripts/test-voice-protocol.cjs",
     "test:phone-duplex": "node scripts/test-phone-duplex-controller.cjs",
     "check:theme": "node scripts/check-theme-tokens.mjs"

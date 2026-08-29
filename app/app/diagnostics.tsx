@@ -11,6 +11,7 @@ const EVENT_BADGE_TONES: Record<ConnectionEventType, Tone> = {
   scan_stop: 'neutral',
   scan_result: 'suggest',
   connect_start: 'warning',
+  device_active: 'success',
   connect_success: 'success',
   connect_fail: 'danger',
   disconnect: 'danger',

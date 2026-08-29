@@ -16,6 +16,7 @@ export type ConnectionEventType =
   | 'scan_stop'
   | 'scan_result'
   | 'connect_start'
+  | 'device_active'
   | 'connect_success'
   | 'connect_fail'
   | 'disconnect'

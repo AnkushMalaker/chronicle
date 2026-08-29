@@ -3,6 +3,7 @@ import { Alert } from 'react-native';
 import { OmiConnection, BleAudioCodec, OmiDevice } from 'friend-lite-react-native';
 import { BleError, BleManager, Subscription } from 'react-native-ble-plx';
 import { useConnectionLog } from '../contexts/ConnectionLogContext';
+import { activateWearableAfterConnect } from '../services/wearableActivation';
 
 interface UseDeviceConnection {
   connectedDevice: OmiDevice | null;
@@ -91,7 +92,7 @@ export const useDeviceConnection = (
           if (onDisconnect) onDisconnect();
         }, 500);
     }
-  }, [onDisconnect, onConnect]);
+  }, [addEvent, onDisconnect, onConnect]);
 
   const connectToDevice = useCallback(async (deviceId: string) => {
     // Connect debounce: ignore rapid double-taps within 100ms
@@ -130,9 +131,33 @@ export const useDeviceConnection = (
       },
     );
 
+    let connectionReady = false;
+    let connectionDroppedBeforeReady = false;
+    let connectedStateDeviceId: string | null = null;
+    let reportedConnected = false;
+    const reportConnectionStateWhenReady = (id: string, state: string) => {
+      if (state === 'connected') {
+        connectedStateDeviceId = id;
+        if (!connectionReady || reportedConnected) return;
+        reportedConnected = true;
+      } else if (!connectionReady) {
+        connectionDroppedBeforeReady = true;
+      }
+      handleConnectionStateChange(id, state);
+    };
+
     try {
-      const success = await omiConnection.connect(deviceId, handleConnectionStateChange);
+      const success = await omiConnection.connect(deviceId, reportConnectionStateWhenReady);
       if (success) {
+        const activation = await activateWearableAfterConnect(diagnosticBleManager, deviceId);
+        if (activation === 'neo_activated') {
+          addEvent('device_active', 'Neo Active mode enabled', { deviceId });
+        }
+        connectionReady = true;
+        if (connectionDroppedBeforeReady) {
+          throw new Error('Device disconnected before the Active handshake completed');
+        }
+        reportConnectionStateWhenReady(connectedStateDeviceId ?? deviceId, 'connected');
         console.log('Successfully initiated connection to device:', deviceId);
       } else {
         setIsConnecting(false);
@@ -143,6 +168,12 @@ export const useDeviceConnection = (
       }
     } catch (error) {
       console.error('Connection error:', error);
+      intentionalDisconnectRef.current = true;
+      try {
+        await omiConnection.disconnect();
+      } catch (disconnectError) {
+        console.warn('Cleanup after connection error failed:', disconnectError);
+      }
       setIsConnecting(false);
       setConnectedDevice(null);
       setConnectedDeviceId(null);
