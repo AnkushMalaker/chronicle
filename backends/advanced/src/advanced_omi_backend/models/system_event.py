@@ -37,6 +37,7 @@ CATEGORIES = (
     "client",  # a device/WebSocket connection event
     "pipeline",  # audio/transcription pipeline failure
     "job",  # an RQ job failure (hard or soft)
+    "memory",  # memory-agent degradation or deterministic fallback
     "plugin",  # plugin init/dispatch failure
     "config",  # configuration diagnostics issue
     "api",  # request-handling error
@@ -106,6 +107,14 @@ class SystemEvent(Document):
             ),
             IndexModel(
                 [("category", 1), ("created_at", -1)], name="system_events_category"
+            ),
+            IndexModel(
+                [
+                    ("category", 1),
+                    ("metadata.fallback_type", 1),
+                    ("occurrence_times", -1),
+                ],
+                name="system_events_memory_fallbacks",
             ),
             # TTL index for 30-day retention. A single-field index is direction-agnostic
             # for sorting, so this {created_at: 1} index also serves the plain

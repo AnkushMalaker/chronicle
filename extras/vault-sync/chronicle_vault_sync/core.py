@@ -28,18 +28,28 @@ APP_SUPPORT = (
 VAULT_DIR_FILE = APP_SUPPORT / "vault_dir.txt"
 
 
-def _persisted_vault_dir() -> Optional[str]:
+def _vault_dir_file(memory_space_id: Optional[str] = None) -> Path:
+    if memory_space_id is None:
+        return VAULT_DIR_FILE
+    safe_id = Path(memory_space_id).name
+    if safe_id != memory_space_id or safe_id in {"", ".", ".."}:
+        raise ValueError("Invalid memory space id")
+    return APP_SUPPORT / f"vault_dir.{safe_id}.txt"
+
+
+def persisted_vault_dir(memory_space_id: Optional[str] = None) -> Optional[str]:
     try:
-        if VAULT_DIR_FILE.exists():
-            return VAULT_DIR_FILE.read_text().strip() or None
+        path = _vault_dir_file(memory_space_id)
+        if path.exists():
+            return path.read_text().strip() or None
     except OSError:
         pass
     return None
 
 
-def save_vault_dir(path: str) -> None:
+def save_vault_dir(path: str, memory_space_id: Optional[str] = None) -> None:
     APP_SUPPORT.mkdir(parents=True, exist_ok=True)
-    VAULT_DIR_FILE.write_text(path)
+    _vault_dir_file(memory_space_id).write_text(path)
 
 
 @dataclass
@@ -53,7 +63,7 @@ class VaultSyncConfig:
     def from_env(cls) -> "VaultSyncConfig":
         client = ClientConfig.from_env()
         vault_dir = (
-            _persisted_vault_dir() or os.getenv("LOCAL_VAULT_DIR") or "~/ChronicleVault"
+            persisted_vault_dir() or os.getenv("LOCAL_VAULT_DIR") or "~/ChronicleVault"
         )
         return cls(
             backend_url=client.backend_url,
@@ -63,7 +73,13 @@ class VaultSyncConfig:
         )
 
 
-def broker_pair(backend_url: str, token: str, device_id: str, device_name: str) -> dict:
+def broker_pair(
+    backend_url: str,
+    token: str,
+    device_id: str,
+    device_name: str,
+    memory_space_id: Optional[str] = None,
+) -> dict:
     """Ask the backend to register this device and share the user's vault folder.
 
     Returns the broker payload: server_device_id, sync_address, folder_id, folder_label.
@@ -73,7 +89,48 @@ def broker_pair(backend_url: str, token: str, device_id: str, device_name: str) 
         resp = client.post(
             f"{backend_url}/api/vault-sync/pair",
             headers=auth_headers(token),
-            json={"device_id": device_id, "device_name": device_name},
+            json={
+                "device_id": device_id,
+                "device_name": device_name,
+                "memory_space_id": memory_space_id,
+            },
         )
     resp.raise_for_status()
     return resp.json()
+
+
+def broker_folders(backend_url: str, token: str) -> list[dict]:
+    """Return every Main/space folder the authenticated user may pair."""
+    with httpx.Client(timeout=15.0) as client:
+        response = client.get(
+            f"{backend_url}/api/vault-sync/folders",
+            headers=auth_headers(token),
+        )
+    response.raise_for_status()
+    return list(response.json().get("folders") or [])
+
+
+def broker_space_action(
+    backend_url: str,
+    token: str,
+    memory_space_id: str,
+    action: str,
+) -> dict:
+    """Apply an authenticated lifecycle action to one owned scoped vault."""
+
+    endpoints = {
+        "freeze": f"/api/spaces/{memory_space_id}/sync/freeze",
+        "resume": f"/api/spaces/{memory_space_id}/sync/resume",
+        "reopen": f"/api/spaces/{memory_space_id}/reopen",
+    }
+    try:
+        endpoint = endpoints[action]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported memory-space action: {action}") from exc
+    with httpx.Client(timeout=15.0) as client:
+        response = client.post(
+            f"{backend_url}{endpoint}",
+            headers=auth_headers(token),
+        )
+    response.raise_for_status()
+    return response.json()

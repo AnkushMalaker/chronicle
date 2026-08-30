@@ -2,26 +2,30 @@
 
 Under rolling reconciliation a recording closing is a scheduling signal, not proof
 that a conversation happened. The close path still runs every evidence producer and
-still writes the provisional Conversation source record, but ``conversation.complete``
-and the per-conversation consolidated memory write now fire from the **first settled
-conversational Episode revision**, latched per ``(episode_key, event_type)`` so
-resettlement or supersession never re-fires them.
+still writes the provisional Conversation source record. The per-conversation memory
+write fires from the **first non-open conversational Episode revision**; the
+user-facing ``conversation.complete`` plugin event waits for ``settled``. Completion
+is latched per Episode; memory is latched per source Conversation because a Timeline
+split can make two Episodes reference the same source. ``provisional`` means the
+boundary may still revise; Timeline has already made the semantic
+conversation-versus-media classification needed to gate memory.
 
 See docs/backend/rolling-reconciliation.md, "Classification-gated event dispatch".
 
-Failure semantics: the latch is claimed *before* the side effects, so two concurrent
-publishes cannot both dispatch. If dispatch then raises, the latch is deleted again so
-a later settlement re-fires it. That makes delivery at-least-once rather than
-at-most-once, which is the right trade here: the downstream work (plugin events, the
-memory write keyed on the conversation) is idempotent or re-runnable, while a silently
-dropped dispatch means an episode the user never hears about and no record of why.
+Failure semantics: each latch is claimed *before* its side effect, so two concurrent
+publishes cannot both dispatch it. If that effect raises, only its latch is deleted so
+a later classification/recovery pass re-fires it. That makes delivery at-least-once
+rather than at-most-once, which is the right trade here: the downstream work (plugin
+events, the memory write keyed on the conversation) is idempotent or re-runnable,
+while a silently dropped dispatch means an episode the user never hears about and no
+record of why.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from bson import ObjectId
 from pymongo.errors import DuplicateKeyError
@@ -34,12 +38,17 @@ from advanced_omi_backend.models.timeline import (
     utcnow,
 )
 from advanced_omi_backend.plugins.events import PluginEvent
+from advanced_omi_backend.services.memory.visibility import conversation_scope_filter
 from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
+
+from .recording_refs import episode_conversation_ids, resolve_live_recordings
 
 logger = logging.getLogger(__name__)
 
 CONVERSATION_COMPLETE = PluginEvent.CONVERSATION_COMPLETE.value
+MEMORY_EXTRACTION = "memory.extraction"
+DISPATCHABLE_STATUSES = ("provisional", "settled")
 
 
 _users_col = None
@@ -85,24 +94,50 @@ def active_pipeline_sync(user_id: str) -> str:
 
 
 async def _related_conversations(episode: TimelineEpisode) -> list[Conversation]:
-    ids = [item for item in episode.related_conversation_ids if item]
-    if not ids:
+    source_ids = episode_conversation_ids(episode)
+    if not source_ids:
         return []
-    return await Conversation.find({"conversation_id": {"$in": ids}}).to_list()
+    live_ids = await resolve_live_recordings(source_ids)
+    if not live_ids:
+        return []
+    conversations = await Conversation.find(
+        {
+            "$and": [conversation_scope_filter()],
+            "conversation_id": {"$in": sorted(live_ids)},
+            "deleted": {"$ne": True},
+            "memory_excluded": {"$ne": True},
+        }
+    ).to_list()
+    by_id = {item.conversation_id: item for item in conversations}
+    ordered_ids = [item for item in source_ids if item in live_ids]
+    ordered_ids.extend(sorted(live_ids.difference(ordered_ids)))
+    return [by_id[item] for item in ordered_ids if item in by_id]
 
 
-async def _fire(episode: TimelineEpisode, conversations: list[Conversation]) -> None:
-    """Run exactly the work the close path used to run, with reconciled bounds."""
+async def _fire_memory(
+    _episode: TimelineEpisode, conversations: list[Conversation]
+) -> None:
+    """Enqueue per-conversation memory writes after Timeline classification."""
 
     # Imported here to break the import cycle: workers.memory_jobs imports the queue
     # controller, which imports the timeline dirty-range trigger from this package.
     from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
+
+    for conversation in conversations:
+        enqueue_memory_processing(conversation.conversation_id)
+
+
+async def _fire_plugins(
+    episode: TimelineEpisode, conversations: list[Conversation]
+) -> None:
+    """Publish the user-facing completion event only after Episode settlement."""
 
     transcript = "\n".join(
         conversation.transcript
         for conversation in conversations
         if conversation.transcript
     )
+    conversation_ids = [item.conversation_id for item in conversations]
     await dispatch_plugin_event(
         event=PluginEvent.CONVERSATION_COMPLETE,
         user_id=episode.user_id,
@@ -114,9 +149,7 @@ async def _fire(episode: TimelineEpisode, conversations: list[Conversation]) -> 
             "transcript": transcript,
             "duration": (episode.ended_at - episode.started_at).total_seconds(),
             "conversation_id": (
-                episode.related_conversation_ids[0]
-                if episode.related_conversation_ids
-                else episode.episode_id
+                conversation_ids[0] if conversation_ids else episode.episode_id
             ),
             "episode_key": episode.episode_key,
             "episode_id": episode.episode_id,
@@ -124,7 +157,7 @@ async def _fire(episode: TimelineEpisode, conversations: list[Conversation]) -> 
             "ended_at": episode.ended_at,
             "title": episode.title,
             "summary": episode.summary,
-            "related_conversation_ids": list(episode.related_conversation_ids),
+            "related_conversation_ids": conversation_ids,
         },
         metadata={
             "source": "timeline_episode",
@@ -138,10 +171,48 @@ async def _fire(episode: TimelineEpisode, conversations: list[Conversation]) -> 
         require_router=True,
     )
 
-    for conversation in conversations:
-        # The memory write is per conversation, but it is now caused by the episode
-        # settling rather than by the recording closing.
-        enqueue_memory_processing(conversation.conversation_id)
+
+async def _claim_and_fire(
+    episode: TimelineEpisode,
+    event_type: str,
+    fire: Callable[[TimelineEpisode, list[Conversation]], Awaitable[None]],
+    conversations: list[Conversation],
+    *,
+    latch_key: str | None = None,
+) -> bool:
+    subject_key = latch_key or episode.episode_key
+    latch = EpisodeDispatchLatch(
+        user_id=episode.user_id,
+        episode_key=subject_key,
+        event_type=event_type,
+        episode_id=episode.episode_id,
+        revision=int(episode.revision),
+    )
+    try:
+        await latch.insert()
+    except DuplicateKeyError:
+        logger.debug(
+            "🩹 %s already dispatched for episode %s",
+            event_type,
+            subject_key,
+        )
+        return False
+
+    try:
+        await fire(episode, conversations)
+    except Exception:
+        await EpisodeDispatchLatch.find(
+            EpisodeDispatchLatch.episode_key == subject_key,
+            EpisodeDispatchLatch.event_type == event_type,
+        ).delete()
+        logger.error(
+            "❌ Dispatch of %s failed for episode %s; latch released for retry",
+            event_type,
+            subject_key,
+            exc_info=True,
+        )
+        return False
+    return True
 
 
 async def _retype_media_source_record(episode: TimelineEpisode) -> None:
@@ -163,70 +234,243 @@ async def _retype_media_source_record(episode: TimelineEpisode) -> None:
     )
 
 
-async def dispatch_settled_episodes(user_id: str, episode_ids: list[str]) -> list[str]:
-    """Fire user-facing events for newly settled conversational episodes.
+async def dispatch_classified_episodes(
+    user_id: str, episode_ids: list[str]
+) -> dict[str, list[str]]:
+    """Dispatch memory at classification and plugins only at settlement.
 
-    Returns the ``episode_key``s dispatched by this call (empty when every candidate
-    was already latched, unsettled, or non-conversational).
+    The two effects have separate latches. A provisional classification can therefore
+    make memory available without sending a premature summary email, and later
+    settlement can publish ``conversation.complete`` exactly once.
     """
 
     if not episode_ids:
-        return []
+        return {"memory": [], "events": []}
 
     episodes = await TimelineEpisode.find(
         {"episode_id": {"$in": list(episode_ids)}, "user_id": user_id}
     ).to_list()
 
-    dispatched: list[str] = []
+    memory_dispatched: list[str] = []
+    events_dispatched: list[str] = []
     for episode in episodes:
-        if episode.status != "settled":
+        if episode.status not in DISPATCHABLE_STATUSES:
             continue
         if not episode.conversational:
-            await _retype_media_source_record(episode)
+            if episode.status == "settled":
+                await _retype_media_source_record(episode)
             continue
 
-        latch = EpisodeDispatchLatch(
-            user_id=user_id,
-            episode_key=episode.episode_key,
-            event_type=CONVERSATION_COMPLETE,
-            episode_id=episode.episode_id,
-            revision=int(episode.revision),
-        )
-        try:
-            await latch.insert()
-        except DuplicateKeyError:
-            logger.debug(
-                "🩹 %s already dispatched for episode %s",
+        conversations = await _related_conversations(episode)
+        memory_fired = False
+        for conversation in conversations:
+            if await _claim_and_fire(
+                episode,
+                MEMORY_EXTRACTION,
+                _fire_memory,
+                [conversation],
+                latch_key=f"conversation:{conversation.conversation_id}",
+            ):
+                memory_fired = True
+        if memory_fired:
+            memory_dispatched.append(episode.episode_key)
+            logger.info(
+                "📌 Dispatched %s for classified episode %s (revision %s, status=%s)",
+                MEMORY_EXTRACTION,
+                episode.episode_key,
+                episode.revision,
+                episode.status,
+            )
+        if episode.status == "settled" and await _claim_and_fire(
+            episode, CONVERSATION_COMPLETE, _fire_plugins, conversations
+        ):
+            events_dispatched.append(episode.episode_key)
+            logger.info(
+                "📌 Dispatched %s for settled episode %s (revision %s)",
                 CONVERSATION_COMPLETE,
                 episode.episode_key,
+                episode.revision,
             )
-            continue
 
-        try:
-            await _fire(episode, await _related_conversations(episode))
-        except Exception:
-            # Release the claim so a later settlement re-fires. See module docstring.
-            await EpisodeDispatchLatch.find(
-                EpisodeDispatchLatch.episode_key == episode.episode_key,
-                EpisodeDispatchLatch.event_type == CONVERSATION_COMPLETE,
-            ).delete()
-            logger.error(
-                "❌ Dispatch of %s failed for episode %s; latch released for retry",
-                CONVERSATION_COMPLETE,
-                episode.episode_key,
-                exc_info=True,
-            )
-            continue
+    return {"memory": memory_dispatched, "events": events_dispatched}
 
-        dispatched.append(episode.episode_key)
+
+async def dispatch_ready_episodes(limit: int = 200) -> dict[str, int]:
+    """Recover classified conversational Episodes missing a required dispatch latch.
+
+    Publishing normally dispatches immediately. This bounded scan covers a crash
+    between publish and dispatch, rows created before this policy existed, and a
+    temporarily unavailable queue or plugin router. Provisional episodes require the
+    conversation-scoped memory latch for every related source; settled episodes also
+    require their episode-scoped completion latch. The aggregation excludes fully
+    dispatched rows before applying ``limit``, so old successful rows cannot starve
+    new work.
+    """
+
+    collection = TimelineEpisode.get_pymongo_collection()
+    rows = await collection.aggregate(
+        [
+            {
+                "$match": {
+                    "pipeline": "rolling",
+                    "status": {"$in": list(DISPATCHABLE_STATUSES)},
+                    "conversational": True,
+                }
+            },
+            {
+                "$set": {
+                    "source_conversation_ids": {
+                        "$setUnion": [
+                            {"$ifNull": ["$related_conversation_ids", []]},
+                            {
+                                "$reduce": {
+                                    "input": {"$ifNull": ["$audio_ranges", []]},
+                                    "initialValue": [],
+                                    "in": {
+                                        "$setUnion": [
+                                            "$$value",
+                                            {
+                                                "$ifNull": [
+                                                    "$$this.conversation_ids",
+                                                    [],
+                                                ]
+                                            },
+                                        ]
+                                    },
+                                }
+                            },
+                        ]
+                    }
+                }
+            },
+            {
+                "$lookup": {
+                    "from": "conversations",
+                    "localField": "source_conversation_ids",
+                    "foreignField": "conversation_id",
+                    "as": "related_conversations",
+                }
+            },
+            {
+                "$set": {
+                    "memory_latch_keys": {
+                        "$map": {
+                            "input": {
+                                "$filter": {
+                                    "input": "$related_conversations",
+                                    "as": "conversation",
+                                    "cond": {
+                                        "$and": [
+                                            {
+                                                "$ne": [
+                                                    "$$conversation.deleted",
+                                                    True,
+                                                ]
+                                            },
+                                            {
+                                                "$ne": [
+                                                    "$$conversation.memory_excluded",
+                                                    True,
+                                                ]
+                                            },
+                                        ]
+                                    },
+                                }
+                            },
+                            "as": "conversation",
+                            "in": {
+                                "$concat": [
+                                    "conversation:",
+                                    "$$conversation.conversation_id",
+                                ]
+                            },
+                        }
+                    }
+                }
+            },
+            {
+                "$lookup": {
+                    "from": "episode_dispatch_latches",
+                    "localField": "memory_latch_keys",
+                    "foreignField": "episode_key",
+                    "as": "memory_latches",
+                }
+            },
+            {
+                "$lookup": {
+                    "from": "episode_dispatch_latches",
+                    "let": {"key": "$episode_key"},
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {
+                                    "$and": [
+                                        {"$eq": ["$episode_key", "$$key"]},
+                                        {
+                                            "$eq": [
+                                                "$event_type",
+                                                CONVERSATION_COMPLETE,
+                                            ]
+                                        },
+                                    ]
+                                }
+                            }
+                        },
+                        {"$limit": 1},
+                    ],
+                    "as": "completion_latches",
+                }
+            },
+            {
+                "$match": {
+                    "$expr": {
+                        "$or": [
+                            {
+                                "$gt": [
+                                    {
+                                        "$size": {
+                                            "$setDifference": [
+                                                "$memory_latch_keys",
+                                                "$memory_latches.episode_key",
+                                            ]
+                                        }
+                                    },
+                                    0,
+                                ]
+                            },
+                            {
+                                "$and": [
+                                    {"$eq": ["$status", "settled"]},
+                                    {"$eq": [{"$size": "$completion_latches"}, 0]},
+                                ]
+                            },
+                        ]
+                    }
+                }
+            },
+            {"$sort": {"ended_at": 1, "episode_id": 1}},
+            {"$limit": limit},
+            {"$project": {"_id": 0, "episode_id": 1, "user_id": 1}},
+        ]
+    ).to_list(length=limit)
+
+    by_user: dict[str, list[str]] = {}
+    for row in rows:
+        by_user.setdefault(row["user_id"], []).append(row["episode_id"])
+
+    dispatched_keys: set[str] = set()
+    for user_id, episode_ids in by_user.items():
+        outcome = await dispatch_classified_episodes(user_id, episode_ids)
+        dispatched_keys.update(outcome["memory"])
+        dispatched_keys.update(outcome["events"])
+
+    if rows or dispatched_keys:
         logger.info(
-            "📌 Dispatched %s for settled episode %s (revision %s)",
-            CONVERSATION_COMPLETE,
-            episode.episode_key,
-            episode.revision,
+            "📌 Classified-episode recovery: %d unlatched, %d dispatched",
+            len(rows),
+            len(dispatched_keys),
         )
-
-    return dispatched
+    return {"unlatched": len(rows), "dispatched": len(dispatched_keys)}
 
 
 @async_job(redis=True, beanie=True)

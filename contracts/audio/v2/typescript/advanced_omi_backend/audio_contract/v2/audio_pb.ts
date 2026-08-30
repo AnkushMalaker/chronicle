@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file advanced_omi_backend/audio_contract/v2/audio.proto.
  */
 export const file_advanced_omi_backend_audio_contract_v2_audio: GenFile = /*@__PURE__*/
-  fileDesc("CjJhZHZhbmNlZF9vbWlfYmFja2VuZC9hdWRpb19jb250cmFjdC92Mi9hdWRpby5wcm90bxISY2hyb25pY2xlLmF1ZGlvLnYyIhgKB0V2ZW50SWQSDQoFdmFsdWUYASABKAkiGQoIQ2xpZW50SWQSDQoFdmFsdWUYASABKAkiHQoMQ29ubmVjdGlvbklkEg0KBXZhbHVlGAEgASgJIiAKD0NhcHR1cmVTb3VyY2VJZBINCgV2YWx1ZRgBIAEoCSIhChBDYXB0dXJlU2Vzc2lvbklkEg0KBXZhbHVlGAEgASgJIh8KDlZvaWNlU2Vzc2lvbklkEg0KBXZhbHVlGAEgASgJIhcKBlR1cm5JZBINCgV2YWx1ZRgBIAEoCSIbCgpSZXNwb25zZUlkEg0KBXZhbHVlGAEgASgJIrEBCglBdWRpb1NwZWMSLQoFY29kZWMYASABKA4yHi5jaHJvbmljbGUuYXVkaW8udjIuQXVkaW9Db2RlYxIWCg5zYW1wbGVfcmF0ZV9oehgCIAEoDRIVCg1jaGFubmVsX2NvdW50GAMgASgNEjEKDmZyYW1lX2R1cmF0aW9uGAQgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uEhMKC2JpdHJhdGVfYnBzGAUgASgNIqcBCg5DYXB0dXJlQmluZGluZxJAChJjYXB0dXJlX3Nlc3Npb25faWQYASABKAsyJC5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZVNlc3Npb25JZBI8ChB2b2ljZV9zZXNzaW9uX2lkGAIgASgLMiIuY2hyb25pY2xlLmF1ZGlvLnYyLlZvaWNlU2Vzc2lvbklkEhUKDWNhcHR1cmVfZXBvY2gYAyABKAQiRQoMRWZmZWN0U3RhdHVzEhEKCXJlcXVlc3RlZBgBIAEoCBIRCglhdmFpbGFibGUYAiABKAgSDwoHZW5hYmxlZBgDIAEoCCLYAgoTQ2FwdHVyZUNhcGFiaWxpdGllcxIzCgtkdXBsZXhfbW9kZRgBIAEoDjIeLmNocm9uaWNsZS5hdWRpby52Mi5EdXBsZXhNb2RlEjMKC2lucHV0X3JvdXRlGAIgASgOMh4uY2hyb25pY2xlLmF1ZGlvLnYyLklucHV0Um91dGUSNQoMb3V0cHV0X3JvdXRlGAMgASgOMh8uY2hyb25pY2xlLmF1ZGlvLnYyLk91dHB1dFJvdXRlEh0KFW5hdGl2ZV9zYW1wbGVfcmF0ZV9oehgEIAEoDRJEChphY291c3RpY19lY2hvX2NhbmNlbGxhdGlvbhgFIAEoCzIgLmNocm9uaWNsZS5hdWRpby52Mi5FZmZlY3RTdGF0dXMSOwoRbm9pc2Vfc3VwcHJlc3Npb24YBiABKAsyIC5jaHJvbmljbGUuYXVkaW8udjIuRWZmZWN0U3RhdHVzIpoCCgtDbGllbnRIZWxsbxIUCgxiZWFyZXJfdG9rZW4YASABKAkSNgoJc291cmNlX2lkGAIgASgLMiMuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVTb3VyY2VJZBIzCgtkZXZpY2Vfa2luZBgDIAEoDjIeLmNocm9uaWNsZS5hdWRpby52Mi5EZXZpY2VLaW5kEhQKDGRpc3BsYXlfbmFtZRgEIAEoCRI3ChBzdXBwb3J0ZWRfdXBsaW5rGAUgAygLMh0uY2hyb25pY2xlLmF1ZGlvLnYyLkF1ZGlvU3BlYxI5ChJzdXBwb3J0ZWRfZG93bmxpbmsYBiADKAsyHS5jaHJvbmljbGUuYXVkaW8udjIuQXVkaW9TcGVjIucCCgxTdGFydENhcHR1cmUSFQoNY2FwdHVyZV9lcG9jaBgBIAEoBBJBChJwcm9jZXNzaW5nX3Byb2ZpbGUYAiABKA4yJS5jaHJvbmljbGUuYXVkaW8udjIuUHJvY2Vzc2luZ1Byb2ZpbGUSNQoMZGF0YV9wdXJwb3NlGAMgASgOMh8uY2hyb25pY2xlLmF1ZGlvLnYyLkRhdGFQdXJwb3NlEjkKDmRlbGl2ZXJ5X2NsYXNzGAQgASgOMiEuY2hyb25pY2xlLmF1ZGlvLnYyLkRlbGl2ZXJ5Q2xhc3MSMQoKYXVkaW9fc3BlYxgFIAEoCzIdLmNocm9uaWNsZS5hdWRpby52Mi5BdWRpb1NwZWMSPQoMY2FwYWJpbGl0aWVzGAYgASgLMicuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVDYXBhYmlsaXRpZXMSGQoRcmVjb3ZlcnlfYmF0Y2hfaWQYByABKAkicgoLU3RvcENhcHR1cmUSMwoHYmluZGluZxgBIAEoCzIiLmNocm9uaWNsZS5hdWRpby52Mi5DYXB0dXJlQmluZGluZxIuCgZyZWFzb24YAiABKA4yHi5jaHJvbmljbGUuYXVkaW8udjIuU3RvcFJlYXNvbiKAAQoKVm9pY2VSZWFkeRIzCgdiaW5kaW5nGAEgASgLMiIuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVCaW5kaW5nEj0KDGNhcGFiaWxpdGllcxgCIAEoCzInLmNocm9uaWNsZS5hdWRpby52Mi5DYXB0dXJlQ2FwYWJpbGl0aWVzIqQCChdQbGF5YmFja0Fja25vd2xlZGdlbWVudBIzCgdiaW5kaW5nGAEgASgLMiIuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVCaW5kaW5nEjMKC3Jlc3BvbnNlX2lkGAIgASgLMh4uY2hyb25pY2xlLmF1ZGlvLnYyLlJlc3BvbnNlSWQSEgoKZ2VuZXJhdGlvbhgDIAEoBBIwCgVzdGF0ZRgEIAEoDjIhLmNocm9uaWNsZS5hdWRpby52Mi5QbGF5YmFja1N0YXRlEh4KFm1vbm90b25pY190aW1lc3RhbXBfdXMYBSABKAQSOQoKZXJyb3JfY29kZRgGIAEoDjIlLmNocm9uaWNsZS5hdWRpby52Mi5Qcm90b2NvbEVycm9yQ29kZSIrCglIZWFydGJlYXQSHgoWbW9ub3RvbmljX3RpbWVzdGFtcF91cxgBIAEoBCI9CgtCdXR0b25FdmVudBIuCgVzdGF0ZRgBIAEoDjIfLmNocm9uaWNsZS5hdWRpby52Mi5CdXR0b25TdGF0ZSKPBAoNQ2xpZW50Q29udHJvbBItCghldmVudF9pZBgBIAEoCzIbLmNocm9uaWNsZS5hdWRpby52Mi5FdmVudElkEisKB3NlbnRfYXQYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjAKBWhlbGxvGAogASgLMh8uY2hyb25pY2xlLmF1ZGlvLnYyLkNsaWVudEhlbGxvSAASOQoNc3RhcnRfY2FwdHVyZRgLIAEoCzIgLmNocm9uaWNsZS5hdWRpby52Mi5TdGFydENhcHR1cmVIABI3CgxzdG9wX2NhcHR1cmUYDCABKAsyHy5jaHJvbmljbGUuYXVkaW8udjIuU3RvcENhcHR1cmVIABI1Cgt2b2ljZV9yZWFkeRgNIAEoCzIeLmNocm9uaWNsZS5hdWRpby52Mi5Wb2ljZVJlYWR5SAASTwoYcGxheWJhY2tfYWNrbm93bGVkZ2VtZW50GA4gASgLMisuY2hyb25pY2xlLmF1ZGlvLnYyLlBsYXliYWNrQWNrbm93bGVkZ2VtZW50SAASMgoJaGVhcnRiZWF0GA8gASgLMh0uY2hyb25pY2xlLmF1ZGlvLnYyLkhlYXJ0YmVhdEgAEjcKDGJ1dHRvbl9ldmVudBgQIAEoCzIfLmNocm9uaWNsZS5hdWRpby52Mi5CdXR0b25FdmVudEgAQgcKBWV2ZW50IncKC1NlcnZlckhlbGxvEi8KCWNsaWVudF9pZBgBIAEoCzIcLmNocm9uaWNsZS5hdWRpby52Mi5DbGllbnRJZBI3Cg1jb25uZWN0aW9uX2lkGAIgASgLMiAuY2hyb25pY2xlLmF1ZGlvLnYyLkNvbm5lY3Rpb25JZCJ4Cg5DYXB0dXJlU3RhcnRlZBIzCgdiaW5kaW5nGAEgASgLMiIuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVCaW5kaW5nEjEKCmF1ZGlvX3NwZWMYAiABKAsyHS5jaHJvbmljbGUuYXVkaW8udjIuQXVkaW9TcGVjIkUKDkNhcHR1cmVTdG9wcGVkEjMKB2JpbmRpbmcYASABKAsyIi5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZUJpbmRpbmciXgoVQ2FwdHVyZVBhY2tldEFjY2VwdGVkEjMKB2JpbmRpbmcYASABKAsyIi5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZUJpbmRpbmcSEAoIc2VxdWVuY2UYAiABKAQitAIKDVBsYXliYWNrT2ZmZXISMwoHYmluZGluZxgBIAEoCzIiLmNocm9uaWNsZS5hdWRpby52Mi5DYXB0dXJlQmluZGluZxIrCgd0dXJuX2lkGAIgASgLMhouY2hyb25pY2xlLmF1ZGlvLnYyLlR1cm5JZBIzCgtyZXNwb25zZV9pZBgDIAEoCzIeLmNocm9uaWNsZS5hdWRpby52Mi5SZXNwb25zZUlkEhIKCmdlbmVyYXRpb24YBCABKAQSMQoKYXVkaW9fc3BlYxgFIAEoCzIdLmNocm9uaWNsZS5hdWRpby52Mi5BdWRpb1NwZWMSKwoIZHVyYXRpb24YBiABKAsyGS5nb29nbGUucHJvdG9idWYuRHVyYXRpb24SGAoQYmFyZ2VfaW5fYWxsb3dlZBgHIAEoCCK+AQoOQ2FuY2VsUGxheWJhY2sSMwoHYmluZGluZxgBIAEoCzIiLmNocm9uaWNsZS5hdWRpby52Mi5DYXB0dXJlQmluZGluZxIzCgtyZXNwb25zZV9pZBgCIAEoCzIeLmNocm9uaWNsZS5hdWRpby52Mi5SZXNwb25zZUlkEhIKCmdlbmVyYXRpb24YAyABKAQSLgoGcmVhc29uGAQgASgOMh4uY2hyb25pY2xlLmF1ZGlvLnYyLlN0b3BSZWFzb24ijAEKDVByb3RvY29sRXJyb3ISMwoEY29kZRgBIAEoDjIlLmNocm9uaWNsZS5hdWRpby52Mi5Qcm90b2NvbEVycm9yQ29kZRIOCgZkZXRhaWwYAiABKAkSNgoRcmVqZWN0ZWRfZXZlbnRfaWQYAyABKAsyGy5jaHJvbmljbGUuYXVkaW8udjIuRXZlbnRJZCLWBAoNU2VydmVyQ29udHJvbBItCghldmVudF9pZBgBIAEoCzIbLmNocm9uaWNsZS5hdWRpby52Mi5FdmVudElkEisKB3NlbnRfYXQYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjAKBWhlbGxvGAogASgLMh8uY2hyb25pY2xlLmF1ZGlvLnYyLlNlcnZlckhlbGxvSAASPQoPY2FwdHVyZV9zdGFydGVkGAsgASgLMiIuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVTdGFydGVkSAASPQoPY2FwdHVyZV9zdG9wcGVkGAwgASgLMiIuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVTdG9wcGVkSAASOwoOcGxheWJhY2tfb2ZmZXIYDSABKAsyIS5jaHJvbmljbGUuYXVkaW8udjIuUGxheWJhY2tPZmZlckgAEj0KD2NhbmNlbF9wbGF5YmFjaxgOIAEoCzIiLmNocm9uaWNsZS5hdWRpby52Mi5DYW5jZWxQbGF5YmFja0gAEjIKCWhlYXJ0YmVhdBgPIAEoCzIdLmNocm9uaWNsZS5hdWRpby52Mi5IZWFydGJlYXRIABIyCgVlcnJvchgQIAEoCzIhLmNocm9uaWNsZS5hdWRpby52Mi5Qcm90b2NvbEVycm9ySAASTAoXY2FwdHVyZV9wYWNrZXRfYWNjZXB0ZWQYESABKAsyKS5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZVBhY2tldEFjY2VwdGVkSABCBwoFZXZlbnQi+gEKEkNhcHR1cmVNZWRpYVBhY2tldBIzCgdiaW5kaW5nGAEgASgLMiIuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVCaW5kaW5nEhAKCHNlcXVlbmNlGAIgASgEEi8KC2NhcHR1cmVkX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIbChNtb25vdG9uaWNfb2Zmc2V0X3VzGAQgASgEEjkKDmRlbGl2ZXJ5X2NsYXNzGAUgASgOMiEuY2hyb25pY2xlLmF1ZGlvLnYyLkRlbGl2ZXJ5Q2xhc3MSFAoMb3B1c19wYXlsb2FkGAYgASgMIpwBChNQbGF5YmFja01lZGlhUGFja2V0EjMKC3Jlc3BvbnNlX2lkGAEgASgLMh4uY2hyb25pY2xlLmF1ZGlvLnYyLlJlc3BvbnNlSWQSEgoKZ2VuZXJhdGlvbhgCIAEoBBIQCghzZXF1ZW5jZRgDIAEoBBIUCgxmaW5hbF9wYWNrZXQYBCABKAgSFAoMb3B1c19wYXlsb2FkGAUgASgMIpABCg1NZWRpYUVudmVsb3BlEjkKB2NhcHR1cmUYASABKAsyJi5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZU1lZGlhUGFja2V0SAASOwoIcGxheWJhY2sYAiABKAsyJy5jaHJvbmljbGUuYXVkaW8udjIuUGxheWJhY2tNZWRpYVBhY2tldEgAQgcKBW1lZGlhItcBChNEZXZpY2VEb3dubGlua0V2ZW50EjsKDnBsYXliYWNrX29mZmVyGAEgASgLMiEuY2hyb25pY2xlLmF1ZGlvLnYyLlBsYXliYWNrT2ZmZXJIABI7CghwbGF5YmFjaxgCIAEoCzInLmNocm9uaWNsZS5hdWRpby52Mi5QbGF5YmFja01lZGlhUGFja2V0SAASPQoPY2FuY2VsX3BsYXliYWNrGAMgASgLMiIuY2hyb25pY2xlLmF1ZGlvLnYyLkNhbmNlbFBsYXliYWNrSABCBwoFZXZlbnQi4QIKE0NhcHR1cmVTdHJlYW1PcGVuZWQSMwoHYmluZGluZxgBIAEoCzIiLmNocm9uaWNsZS5hdWRpby52Mi5DYXB0dXJlQmluZGluZxIvCgljbGllbnRfaWQYAiABKAsyHC5jaHJvbmljbGUuYXVkaW8udjIuQ2xpZW50SWQSNgoJc291cmNlX2lkGAMgASgLMiMuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVTb3VyY2VJZBIyCgtzb3VyY2Vfc3BlYxgEIAEoCzIdLmNocm9uaWNsZS5hdWRpby52Mi5BdWRpb1NwZWMSQQoScHJvY2Vzc2luZ19wcm9maWxlGAUgASgOMiUuY2hyb25pY2xlLmF1ZGlvLnYyLlByb2Nlc3NpbmdQcm9maWxlEjUKDGRhdGFfcHVycG9zZRgGIAEoDjIfLmNocm9uaWNsZS5hdWRpby52Mi5EYXRhUHVycG9zZSKtAgoRQ2Fub25pY2FsUGNtRnJhbWUSMwoHYmluZGluZxgBIAEoCzIiLmNocm9uaWNsZS5hdWRpby52Mi5DYXB0dXJlQmluZGluZxIQCghzZXF1ZW5jZRgCIAEoBBIvCgtjYXB0dXJlZF9hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASGwoTbW9ub3RvbmljX29mZnNldF91cxgEIAEoBBI5Cg5kZWxpdmVyeV9jbGFzcxgFIAEoDjIhLmNocm9uaWNsZS5hdWRpby52Mi5EZWxpdmVyeUNsYXNzEhEKCXBjbV9zMTZsZRgGIAEoDBI1CgxkYXRhX3B1cnBvc2UYByABKA4yHy5jaHJvbmljbGUuYXVkaW8udjIuRGF0YVB1cnBvc2UieQoSQ2FwdHVyZVN0cmVhbUVuZGVkEjMKB2JpbmRpbmcYASABKAsyIi5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZUJpbmRpbmcSLgoGcmVhc29uGAIgASgOMh4uY2hyb25pY2xlLmF1ZGlvLnYyLlN0b3BSZWFzb24i/gEKEkNhcHR1cmVTdHJlYW1FdmVudBI5CgZvcGVuZWQYASABKAsyJy5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZVN0cmVhbU9wZW5lZEgAEjYKBWZyYW1lGAIgASgLMiUuY2hyb25pY2xlLmF1ZGlvLnYyLkNhbm9uaWNhbFBjbUZyYW1lSAASNwoFZW5kZWQYAyABKAsyJi5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZVN0cmVhbUVuZGVkSAASMwoGZmFpbGVkGAQgASgLMiEuY2hyb25pY2xlLmF1ZGlvLnYyLlByb3RvY29sRXJyb3JIAEIHCgVldmVudCpaCgpBdWRpb0NvZGVjEhsKF0FVRElPX0NPREVDX1VOU1BFQ0lGSUVEEAASFAoQQVVESU9fQ09ERUNfT1BVUxABEhkKFUFVRElPX0NPREVDX1BDTV9TMTZMRRACKmYKDURlbGl2ZXJ5Q2xhc3MSHgoaREVMSVZFUllfQ0xBU1NfVU5TUEVDSUZJRUQQABIXChNERUxJVkVSWV9DTEFTU19MSVZFEAESHAoYREVMSVZFUllfQ0xBU1NfUkVDT1ZFUkVEEAIq9AEKCkRldmljZUtpbmQSGwoXREVWSUNFX0tJTkRfVU5TUEVDSUZJRUQQABIZChVERVZJQ0VfS0lORF9JT1NfUEhPTkUQARIdChlERVZJQ0VfS0lORF9BTkRST0lEX1BIT05FEAISGwoXREVWSUNFX0tJTkRfV0VCX0JST1dTRVIQAxITCg9ERVZJQ0VfS0lORF9PTUkQBBITCg9ERVZJQ0VfS0lORF9ORU8QBRIVChFERVZJQ0VfS0lORF9IQVZQRRAGEhoKFkRFVklDRV9LSU5EX1NDUkVFTlBJUEUQBxIVChFERVZJQ0VfS0lORF9QUk9CRRAIKo0CChFQcm9jZXNzaW5nUHJvZmlsZRIiCh5QUk9DRVNTSU5HX1BST0ZJTEVfVU5TUEVDSUZJRUQQABIeChpQUk9DRVNTSU5HX1BST0ZJTEVfQU1CSUVOVBABEiQKIFBST0NFU1NJTkdfUFJPRklMRV9TT1VSQ0VfTkFUSVZFEAISIQodUFJPQ0VTU0lOR19QUk9GSUxFX0RVUExFWF9BRUMQAxImCiJQUk9DRVNTSU5HX1BST0ZJTEVfRFVQTEVYX0lTT0xBVEVEEAQSIgoeUFJPQ0VTU0lOR19QUk9GSUxFX0hBTEZfRFVQTEVYEAUSHwobUFJPQ0VTU0lOR19QUk9GSUxFX0lNUE9SVEVEEAYqaQoLRGF0YVB1cnBvc2USHAoYREFUQV9QVVJQT1NFX1VOU1BFQ0lGSUVEEAASHwobREFUQV9QVVJQT1NFX05PUk1BTF9DQVBUVVJFEAESGwoXREFUQV9QVVJQT1NFX0FOTk9UQVRJT04QAipvCgpEdXBsZXhNb2RlEhsKF0RVUExFWF9NT0RFX1VOU1BFQ0lGSUVEEAASFAoQRFVQTEVYX01PREVfRlVMTBABEhgKFERVUExFWF9NT0RFX0lTT0xBVEVEEAISFAoQRFVQTEVYX01PREVfSEFMRhADKq4BCgpJbnB1dFJvdXRlEhsKF0lOUFVUX1JPVVRFX1VOU1BFQ0lGSUVEEAASHAoYSU5QVVRfUk9VVEVfQlVJTFRfSU5fTUlDEAESHQoZSU5QVVRfUk9VVEVfQkxVRVRPT1RIX0hGUBACEhkKFUlOUFVUX1JPVVRFX1dJUkVEX01JQxADEhMKD0lOUFVUX1JPVVRFX1VTQhAEEhYKEklOUFVUX1JPVVRFX1JFTU9URRAFKtEBCgtPdXRwdXRSb3V0ZRIcChhPVVRQVVRfUk9VVEVfVU5TUEVDSUZJRUQQABIdChlPVVRQVVRfUk9VVEVfU1BFQUtFUlBIT05FEAESGQoVT1VUUFVUX1JPVVRFX0VBUlBJRUNFEAISGwoXT1VUUFVUX1JPVVRFX0hFQURQSE9ORVMQAxIeChpPVVRQVVRfUk9VVEVfQkxVRVRPT1RIX0hGUBAEEhQKEE9VVFBVVF9ST1VURV9VU0IQBRIXChNPVVRQVVRfUk9VVEVfUkVNT1RFEAYqugEKClN0b3BSZWFzb24SGwoXU1RPUF9SRUFTT05fVU5TUEVDSUZJRUQQABIeChpTVE9QX1JFQVNPTl9VU0VSX1JFUVVFU1RFRBABEiAKHFNUT1BfUkVBU09OX0FVRElPX0RJU0NPTk5FQ1QQAhIkCiBTVE9QX1JFQVNPTl9JTlRFUkFDVElPTl9DT01QTEVURRADEicKI1NUT1BfUkVBU09OX1RFTVBPUkFSSUxZX1VOQVZBSUxBQkxFEAQqnQEKDVBsYXliYWNrU3RhdGUSHgoaUExBWUJBQ0tfU1RBVEVfVU5TUEVDSUZJRUQQABIaChZQTEFZQkFDS19TVEFURV9TVEFSVEVEEAESFwoTUExBWUJBQ0tfU1RBVEVfRE9ORRACEhwKGFBMQVlCQUNLX1NUQVRFX0NBTkNFTExFRBADEhkKFVBMQVlCQUNLX1NUQVRFX0ZBSUxFRBAEKoYBCgtCdXR0b25TdGF0ZRIcChhCVVRUT05fU1RBVEVfVU5TUEVDSUZJRUQQABIdChlCVVRUT05fU1RBVEVfU0lOR0xFX1BSRVNTEAESHQoZQlVUVE9OX1NUQVRFX0RPVUJMRV9QUkVTUxACEhsKF0JVVFRPTl9TVEFURV9MT05HX1BSRVNTEAMq4AIKEVByb3RvY29sRXJyb3JDb2RlEiMKH1BST1RPQ09MX0VSUk9SX0NPREVfVU5TUEVDSUZJRUQQABItCilQUk9UT0NPTF9FUlJPUl9DT0RFX0FVVEhFTlRJQ0FUSU9OX0ZBSUxFRBABEioKJlBST1RPQ09MX0VSUk9SX0NPREVfSU5WQUxJRF9UUkFOU0lUSU9OEAISJQohUFJPVE9DT0xfRVJST1JfQ09ERV9JTlZBTElEX01FRElBEAMSJQohUFJPVE9DT0xfRVJST1JfQ09ERV9TVEFMRV9CSU5ESU5HEAQSMAosUFJPVE9DT0xfRVJST1JfQ09ERV9VTlNVUFBPUlRFRF9BVURJT19GT1JNQVQQBRIpCiVQUk9UT0NPTF9FUlJPUl9DT0RFX01FU1NBR0VfVE9PX0xBUkdFEAYSIAocUFJPVE9DT0xfRVJST1JfQ09ERV9JTlRFUk5BTBAHYgZwcm90bzM", [file_google_protobuf_duration, file_google_protobuf_timestamp]);
+  fileDesc("CjJhZHZhbmNlZF9vbWlfYmFja2VuZC9hdWRpb19jb250cmFjdC92Mi9hdWRpby5wcm90bxISY2hyb25pY2xlLmF1ZGlvLnYyIhgKB0V2ZW50SWQSDQoFdmFsdWUYASABKAkiGQoIQ2xpZW50SWQSDQoFdmFsdWUYASABKAkiHQoMQ29ubmVjdGlvbklkEg0KBXZhbHVlGAEgASgJIiAKD0NhcHR1cmVTb3VyY2VJZBINCgV2YWx1ZRgBIAEoCSIhChBDYXB0dXJlU2Vzc2lvbklkEg0KBXZhbHVlGAEgASgJIh4KDU1lbW9yeVNwYWNlSWQSDQoFdmFsdWUYASABKAkiHwoOVm9pY2VTZXNzaW9uSWQSDQoFdmFsdWUYASABKAkiFwoGVHVybklkEg0KBXZhbHVlGAEgASgJIhsKClJlc3BvbnNlSWQSDQoFdmFsdWUYASABKAkisQEKCUF1ZGlvU3BlYxItCgVjb2RlYxgBIAEoDjIeLmNocm9uaWNsZS5hdWRpby52Mi5BdWRpb0NvZGVjEhYKDnNhbXBsZV9yYXRlX2h6GAIgASgNEhUKDWNoYW5uZWxfY291bnQYAyABKA0SMQoOZnJhbWVfZHVyYXRpb24YBCABKAsyGS5nb29nbGUucHJvdG9idWYuRHVyYXRpb24SEwoLYml0cmF0ZV9icHMYBSABKA0ipwEKDkNhcHR1cmVCaW5kaW5nEkAKEmNhcHR1cmVfc2Vzc2lvbl9pZBgBIAEoCzIkLmNocm9uaWNsZS5hdWRpby52Mi5DYXB0dXJlU2Vzc2lvbklkEjwKEHZvaWNlX3Nlc3Npb25faWQYAiABKAsyIi5jaHJvbmljbGUuYXVkaW8udjIuVm9pY2VTZXNzaW9uSWQSFQoNY2FwdHVyZV9lcG9jaBgDIAEoBCJFCgxFZmZlY3RTdGF0dXMSEQoJcmVxdWVzdGVkGAEgASgIEhEKCWF2YWlsYWJsZRgCIAEoCBIPCgdlbmFibGVkGAMgASgIItgCChNDYXB0dXJlQ2FwYWJpbGl0aWVzEjMKC2R1cGxleF9tb2RlGAEgASgOMh4uY2hyb25pY2xlLmF1ZGlvLnYyLkR1cGxleE1vZGUSMwoLaW5wdXRfcm91dGUYAiABKA4yHi5jaHJvbmljbGUuYXVkaW8udjIuSW5wdXRSb3V0ZRI1CgxvdXRwdXRfcm91dGUYAyABKA4yHy5jaHJvbmljbGUuYXVkaW8udjIuT3V0cHV0Um91dGUSHQoVbmF0aXZlX3NhbXBsZV9yYXRlX2h6GAQgASgNEkQKGmFjb3VzdGljX2VjaG9fY2FuY2VsbGF0aW9uGAUgASgLMiAuY2hyb25pY2xlLmF1ZGlvLnYyLkVmZmVjdFN0YXR1cxI7ChFub2lzZV9zdXBwcmVzc2lvbhgGIAEoCzIgLmNocm9uaWNsZS5hdWRpby52Mi5FZmZlY3RTdGF0dXMimgIKC0NsaWVudEhlbGxvEhQKDGJlYXJlcl90b2tlbhgBIAEoCRI2Cglzb3VyY2VfaWQYAiABKAsyIy5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZVNvdXJjZUlkEjMKC2RldmljZV9raW5kGAMgASgOMh4uY2hyb25pY2xlLmF1ZGlvLnYyLkRldmljZUtpbmQSFAoMZGlzcGxheV9uYW1lGAQgASgJEjcKEHN1cHBvcnRlZF91cGxpbmsYBSADKAsyHS5jaHJvbmljbGUuYXVkaW8udjIuQXVkaW9TcGVjEjkKEnN1cHBvcnRlZF9kb3dubGluaxgGIAMoCzIdLmNocm9uaWNsZS5hdWRpby52Mi5BdWRpb1NwZWMiowMKDFN0YXJ0Q2FwdHVyZRIVCg1jYXB0dXJlX2Vwb2NoGAEgASgEEkEKEnByb2Nlc3NpbmdfcHJvZmlsZRgCIAEoDjIlLmNocm9uaWNsZS5hdWRpby52Mi5Qcm9jZXNzaW5nUHJvZmlsZRI1CgxkYXRhX3B1cnBvc2UYAyABKA4yHy5jaHJvbmljbGUuYXVkaW8udjIuRGF0YVB1cnBvc2USOQoOZGVsaXZlcnlfY2xhc3MYBCABKA4yIS5jaHJvbmljbGUuYXVkaW8udjIuRGVsaXZlcnlDbGFzcxIxCgphdWRpb19zcGVjGAUgASgLMh0uY2hyb25pY2xlLmF1ZGlvLnYyLkF1ZGlvU3BlYxI9CgxjYXBhYmlsaXRpZXMYBiABKAsyJy5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZUNhcGFiaWxpdGllcxIZChFyZWNvdmVyeV9iYXRjaF9pZBgHIAEoCRI6Cg9tZW1vcnlfc3BhY2VfaWQYCCABKAsyIS5jaHJvbmljbGUuYXVkaW8udjIuTWVtb3J5U3BhY2VJZCJyCgtTdG9wQ2FwdHVyZRIzCgdiaW5kaW5nGAEgASgLMiIuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVCaW5kaW5nEi4KBnJlYXNvbhgCIAEoDjIeLmNocm9uaWNsZS5hdWRpby52Mi5TdG9wUmVhc29uIoABCgpWb2ljZVJlYWR5EjMKB2JpbmRpbmcYASABKAsyIi5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZUJpbmRpbmcSPQoMY2FwYWJpbGl0aWVzGAIgASgLMicuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVDYXBhYmlsaXRpZXMipAIKF1BsYXliYWNrQWNrbm93bGVkZ2VtZW50EjMKB2JpbmRpbmcYASABKAsyIi5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZUJpbmRpbmcSMwoLcmVzcG9uc2VfaWQYAiABKAsyHi5jaHJvbmljbGUuYXVkaW8udjIuUmVzcG9uc2VJZBISCgpnZW5lcmF0aW9uGAMgASgEEjAKBXN0YXRlGAQgASgOMiEuY2hyb25pY2xlLmF1ZGlvLnYyLlBsYXliYWNrU3RhdGUSHgoWbW9ub3RvbmljX3RpbWVzdGFtcF91cxgFIAEoBBI5CgplcnJvcl9jb2RlGAYgASgOMiUuY2hyb25pY2xlLmF1ZGlvLnYyLlByb3RvY29sRXJyb3JDb2RlIisKCUhlYXJ0YmVhdBIeChZtb25vdG9uaWNfdGltZXN0YW1wX3VzGAEgASgEIj0KC0J1dHRvbkV2ZW50Ei4KBXN0YXRlGAEgASgOMh8uY2hyb25pY2xlLmF1ZGlvLnYyLkJ1dHRvblN0YXRlIo8ECg1DbGllbnRDb250cm9sEi0KCGV2ZW50X2lkGAEgASgLMhsuY2hyb25pY2xlLmF1ZGlvLnYyLkV2ZW50SWQSKwoHc2VudF9hdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASMAoFaGVsbG8YCiABKAsyHy5jaHJvbmljbGUuYXVkaW8udjIuQ2xpZW50SGVsbG9IABI5Cg1zdGFydF9jYXB0dXJlGAsgASgLMiAuY2hyb25pY2xlLmF1ZGlvLnYyLlN0YXJ0Q2FwdHVyZUgAEjcKDHN0b3BfY2FwdHVyZRgMIAEoCzIfLmNocm9uaWNsZS5hdWRpby52Mi5TdG9wQ2FwdHVyZUgAEjUKC3ZvaWNlX3JlYWR5GA0gASgLMh4uY2hyb25pY2xlLmF1ZGlvLnYyLlZvaWNlUmVhZHlIABJPChhwbGF5YmFja19hY2tub3dsZWRnZW1lbnQYDiABKAsyKy5jaHJvbmljbGUuYXVkaW8udjIuUGxheWJhY2tBY2tub3dsZWRnZW1lbnRIABIyCgloZWFydGJlYXQYDyABKAsyHS5jaHJvbmljbGUuYXVkaW8udjIuSGVhcnRiZWF0SAASNwoMYnV0dG9uX2V2ZW50GBAgASgLMh8uY2hyb25pY2xlLmF1ZGlvLnYyLkJ1dHRvbkV2ZW50SABCBwoFZXZlbnQidwoLU2VydmVySGVsbG8SLwoJY2xpZW50X2lkGAEgASgLMhwuY2hyb25pY2xlLmF1ZGlvLnYyLkNsaWVudElkEjcKDWNvbm5lY3Rpb25faWQYAiABKAsyIC5jaHJvbmljbGUuYXVkaW8udjIuQ29ubmVjdGlvbklkIngKDkNhcHR1cmVTdGFydGVkEjMKB2JpbmRpbmcYASABKAsyIi5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZUJpbmRpbmcSMQoKYXVkaW9fc3BlYxgCIAEoCzIdLmNocm9uaWNsZS5hdWRpby52Mi5BdWRpb1NwZWMiRQoOQ2FwdHVyZVN0b3BwZWQSMwoHYmluZGluZxgBIAEoCzIiLmNocm9uaWNsZS5hdWRpby52Mi5DYXB0dXJlQmluZGluZyJeChVDYXB0dXJlUGFja2V0QWNjZXB0ZWQSMwoHYmluZGluZxgBIAEoCzIiLmNocm9uaWNsZS5hdWRpby52Mi5DYXB0dXJlQmluZGluZxIQCghzZXF1ZW5jZRgCIAEoBCKRAQoQVHJhbnNjcmlwdFVwZGF0ZRIzCgdiaW5kaW5nGAEgASgLMiIuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVCaW5kaW5nEgwKBHRleHQYAiABKAkSEAoIaXNfZmluYWwYAyABKAgSEgoKY29uZmlkZW5jZRgEIAEoAhIUCgxzcGVha2VyX25hbWUYBSABKAkitAIKDVBsYXliYWNrT2ZmZXISMwoHYmluZGluZxgBIAEoCzIiLmNocm9uaWNsZS5hdWRpby52Mi5DYXB0dXJlQmluZGluZxIrCgd0dXJuX2lkGAIgASgLMhouY2hyb25pY2xlLmF1ZGlvLnYyLlR1cm5JZBIzCgtyZXNwb25zZV9pZBgDIAEoCzIeLmNocm9uaWNsZS5hdWRpby52Mi5SZXNwb25zZUlkEhIKCmdlbmVyYXRpb24YBCABKAQSMQoKYXVkaW9fc3BlYxgFIAEoCzIdLmNocm9uaWNsZS5hdWRpby52Mi5BdWRpb1NwZWMSKwoIZHVyYXRpb24YBiABKAsyGS5nb29nbGUucHJvdG9idWYuRHVyYXRpb24SGAoQYmFyZ2VfaW5fYWxsb3dlZBgHIAEoCCK+AQoOQ2FuY2VsUGxheWJhY2sSMwoHYmluZGluZxgBIAEoCzIiLmNocm9uaWNsZS5hdWRpby52Mi5DYXB0dXJlQmluZGluZxIzCgtyZXNwb25zZV9pZBgCIAEoCzIeLmNocm9uaWNsZS5hdWRpby52Mi5SZXNwb25zZUlkEhIKCmdlbmVyYXRpb24YAyABKAQSLgoGcmVhc29uGAQgASgOMh4uY2hyb25pY2xlLmF1ZGlvLnYyLlN0b3BSZWFzb24ijAEKDVByb3RvY29sRXJyb3ISMwoEY29kZRgBIAEoDjIlLmNocm9uaWNsZS5hdWRpby52Mi5Qcm90b2NvbEVycm9yQ29kZRIOCgZkZXRhaWwYAiABKAkSNgoRcmVqZWN0ZWRfZXZlbnRfaWQYAyABKAsyGy5jaHJvbmljbGUuYXVkaW8udjIuRXZlbnRJZCKZBQoNU2VydmVyQ29udHJvbBItCghldmVudF9pZBgBIAEoCzIbLmNocm9uaWNsZS5hdWRpby52Mi5FdmVudElkEisKB3NlbnRfYXQYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjAKBWhlbGxvGAogASgLMh8uY2hyb25pY2xlLmF1ZGlvLnYyLlNlcnZlckhlbGxvSAASPQoPY2FwdHVyZV9zdGFydGVkGAsgASgLMiIuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVTdGFydGVkSAASPQoPY2FwdHVyZV9zdG9wcGVkGAwgASgLMiIuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVTdG9wcGVkSAASOwoOcGxheWJhY2tfb2ZmZXIYDSABKAsyIS5jaHJvbmljbGUuYXVkaW8udjIuUGxheWJhY2tPZmZlckgAEj0KD2NhbmNlbF9wbGF5YmFjaxgOIAEoCzIiLmNocm9uaWNsZS5hdWRpby52Mi5DYW5jZWxQbGF5YmFja0gAEjIKCWhlYXJ0YmVhdBgPIAEoCzIdLmNocm9uaWNsZS5hdWRpby52Mi5IZWFydGJlYXRIABIyCgVlcnJvchgQIAEoCzIhLmNocm9uaWNsZS5hdWRpby52Mi5Qcm90b2NvbEVycm9ySAASTAoXY2FwdHVyZV9wYWNrZXRfYWNjZXB0ZWQYESABKAsyKS5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZVBhY2tldEFjY2VwdGVkSAASQQoRdHJhbnNjcmlwdF91cGRhdGUYEiABKAsyJC5jaHJvbmljbGUuYXVkaW8udjIuVHJhbnNjcmlwdFVwZGF0ZUgAQgcKBWV2ZW50IvoBChJDYXB0dXJlTWVkaWFQYWNrZXQSMwoHYmluZGluZxgBIAEoCzIiLmNocm9uaWNsZS5hdWRpby52Mi5DYXB0dXJlQmluZGluZxIQCghzZXF1ZW5jZRgCIAEoBBIvCgtjYXB0dXJlZF9hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASGwoTbW9ub3RvbmljX29mZnNldF91cxgEIAEoBBI5Cg5kZWxpdmVyeV9jbGFzcxgFIAEoDjIhLmNocm9uaWNsZS5hdWRpby52Mi5EZWxpdmVyeUNsYXNzEhQKDG9wdXNfcGF5bG9hZBgGIAEoDCKcAQoTUGxheWJhY2tNZWRpYVBhY2tldBIzCgtyZXNwb25zZV9pZBgBIAEoCzIeLmNocm9uaWNsZS5hdWRpby52Mi5SZXNwb25zZUlkEhIKCmdlbmVyYXRpb24YAiABKAQSEAoIc2VxdWVuY2UYAyABKAQSFAoMZmluYWxfcGFja2V0GAQgASgIEhQKDG9wdXNfcGF5bG9hZBgFIAEoDCKQAQoNTWVkaWFFbnZlbG9wZRI5CgdjYXB0dXJlGAEgASgLMiYuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVNZWRpYVBhY2tldEgAEjsKCHBsYXliYWNrGAIgASgLMicuY2hyb25pY2xlLmF1ZGlvLnYyLlBsYXliYWNrTWVkaWFQYWNrZXRIAEIHCgVtZWRpYSLXAQoTRGV2aWNlRG93bmxpbmtFdmVudBI7Cg5wbGF5YmFja19vZmZlchgBIAEoCzIhLmNocm9uaWNsZS5hdWRpby52Mi5QbGF5YmFja09mZmVySAASOwoIcGxheWJhY2sYAiABKAsyJy5jaHJvbmljbGUuYXVkaW8udjIuUGxheWJhY2tNZWRpYVBhY2tldEgAEj0KD2NhbmNlbF9wbGF5YmFjaxgDIAEoCzIiLmNocm9uaWNsZS5hdWRpby52Mi5DYW5jZWxQbGF5YmFja0gAQgcKBWV2ZW50Ip0DChNDYXB0dXJlU3RyZWFtT3BlbmVkEjMKB2JpbmRpbmcYASABKAsyIi5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZUJpbmRpbmcSLwoJY2xpZW50X2lkGAIgASgLMhwuY2hyb25pY2xlLmF1ZGlvLnYyLkNsaWVudElkEjYKCXNvdXJjZV9pZBgDIAEoCzIjLmNocm9uaWNsZS5hdWRpby52Mi5DYXB0dXJlU291cmNlSWQSMgoLc291cmNlX3NwZWMYBCABKAsyHS5jaHJvbmljbGUuYXVkaW8udjIuQXVkaW9TcGVjEkEKEnByb2Nlc3NpbmdfcHJvZmlsZRgFIAEoDjIlLmNocm9uaWNsZS5hdWRpby52Mi5Qcm9jZXNzaW5nUHJvZmlsZRI1CgxkYXRhX3B1cnBvc2UYBiABKA4yHy5jaHJvbmljbGUuYXVkaW8udjIuRGF0YVB1cnBvc2USOgoPbWVtb3J5X3NwYWNlX2lkGAcgASgLMiEuY2hyb25pY2xlLmF1ZGlvLnYyLk1lbW9yeVNwYWNlSWQirQIKEUNhbm9uaWNhbFBjbUZyYW1lEjMKB2JpbmRpbmcYASABKAsyIi5jaHJvbmljbGUuYXVkaW8udjIuQ2FwdHVyZUJpbmRpbmcSEAoIc2VxdWVuY2UYAiABKAQSLwoLY2FwdHVyZWRfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhsKE21vbm90b25pY19vZmZzZXRfdXMYBCABKAQSOQoOZGVsaXZlcnlfY2xhc3MYBSABKA4yIS5jaHJvbmljbGUuYXVkaW8udjIuRGVsaXZlcnlDbGFzcxIRCglwY21fczE2bGUYBiABKAwSNQoMZGF0YV9wdXJwb3NlGAcgASgOMh8uY2hyb25pY2xlLmF1ZGlvLnYyLkRhdGFQdXJwb3NlInkKEkNhcHR1cmVTdHJlYW1FbmRlZBIzCgdiaW5kaW5nGAEgASgLMiIuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVCaW5kaW5nEi4KBnJlYXNvbhgCIAEoDjIeLmNocm9uaWNsZS5hdWRpby52Mi5TdG9wUmVhc29uIv4BChJDYXB0dXJlU3RyZWFtRXZlbnQSOQoGb3BlbmVkGAEgASgLMicuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVTdHJlYW1PcGVuZWRIABI2CgVmcmFtZRgCIAEoCzIlLmNocm9uaWNsZS5hdWRpby52Mi5DYW5vbmljYWxQY21GcmFtZUgAEjcKBWVuZGVkGAMgASgLMiYuY2hyb25pY2xlLmF1ZGlvLnYyLkNhcHR1cmVTdHJlYW1FbmRlZEgAEjMKBmZhaWxlZBgEIAEoCzIhLmNocm9uaWNsZS5hdWRpby52Mi5Qcm90b2NvbEVycm9ySABCBwoFZXZlbnQqWgoKQXVkaW9Db2RlYxIbChdBVURJT19DT0RFQ19VTlNQRUNJRklFRBAAEhQKEEFVRElPX0NPREVDX09QVVMQARIZChVBVURJT19DT0RFQ19QQ01fUzE2TEUQAipmCg1EZWxpdmVyeUNsYXNzEh4KGkRFTElWRVJZX0NMQVNTX1VOU1BFQ0lGSUVEEAASFwoTREVMSVZFUllfQ0xBU1NfTElWRRABEhwKGERFTElWRVJZX0NMQVNTX1JFQ09WRVJFRBACKvQBCgpEZXZpY2VLaW5kEhsKF0RFVklDRV9LSU5EX1VOU1BFQ0lGSUVEEAASGQoVREVWSUNFX0tJTkRfSU9TX1BIT05FEAESHQoZREVWSUNFX0tJTkRfQU5EUk9JRF9QSE9ORRACEhsKF0RFVklDRV9LSU5EX1dFQl9CUk9XU0VSEAMSEwoPREVWSUNFX0tJTkRfT01JEAQSEwoPREVWSUNFX0tJTkRfTkVPEAUSFQoRREVWSUNFX0tJTkRfSEFWUEUQBhIaChZERVZJQ0VfS0lORF9TQ1JFRU5QSVBFEAcSFQoRREVWSUNFX0tJTkRfUFJPQkUQCCqNAgoRUHJvY2Vzc2luZ1Byb2ZpbGUSIgoeUFJPQ0VTU0lOR19QUk9GSUxFX1VOU1BFQ0lGSUVEEAASHgoaUFJPQ0VTU0lOR19QUk9GSUxFX0FNQklFTlQQARIkCiBQUk9DRVNTSU5HX1BST0ZJTEVfU09VUkNFX05BVElWRRACEiEKHVBST0NFU1NJTkdfUFJPRklMRV9EVVBMRVhfQUVDEAMSJgoiUFJPQ0VTU0lOR19QUk9GSUxFX0RVUExFWF9JU09MQVRFRBAEEiIKHlBST0NFU1NJTkdfUFJPRklMRV9IQUxGX0RVUExFWBAFEh8KG1BST0NFU1NJTkdfUFJPRklMRV9JTVBPUlRFRBAGKmkKC0RhdGFQdXJwb3NlEhwKGERBVEFfUFVSUE9TRV9VTlNQRUNJRklFRBAAEh8KG0RBVEFfUFVSUE9TRV9OT1JNQUxfQ0FQVFVSRRABEhsKF0RBVEFfUFVSUE9TRV9BTk5PVEFUSU9OEAIqbwoKRHVwbGV4TW9kZRIbChdEVVBMRVhfTU9ERV9VTlNQRUNJRklFRBAAEhQKEERVUExFWF9NT0RFX0ZVTEwQARIYChREVVBMRVhfTU9ERV9JU09MQVRFRBACEhQKEERVUExFWF9NT0RFX0hBTEYQAyquAQoKSW5wdXRSb3V0ZRIbChdJTlBVVF9ST1VURV9VTlNQRUNJRklFRBAAEhwKGElOUFVUX1JPVVRFX0JVSUxUX0lOX01JQxABEh0KGUlOUFVUX1JPVVRFX0JMVUVUT09USF9IRlAQAhIZChVJTlBVVF9ST1VURV9XSVJFRF9NSUMQAxITCg9JTlBVVF9ST1VURV9VU0IQBBIWChJJTlBVVF9ST1VURV9SRU1PVEUQBSrRAQoLT3V0cHV0Um91dGUSHAoYT1VUUFVUX1JPVVRFX1VOU1BFQ0lGSUVEEAASHQoZT1VUUFVUX1JPVVRFX1NQRUFLRVJQSE9ORRABEhkKFU9VVFBVVF9ST1VURV9FQVJQSUVDRRACEhsKF09VVFBVVF9ST1VURV9IRUFEUEhPTkVTEAMSHgoaT1VUUFVUX1JPVVRFX0JMVUVUT09USF9IRlAQBBIUChBPVVRQVVRfUk9VVEVfVVNCEAUSFwoTT1VUUFVUX1JPVVRFX1JFTU9URRAGKroBCgpTdG9wUmVhc29uEhsKF1NUT1BfUkVBU09OX1VOU1BFQ0lGSUVEEAASHgoaU1RPUF9SRUFTT05fVVNFUl9SRVFVRVNURUQQARIgChxTVE9QX1JFQVNPTl9BVURJT19ESVNDT05ORUNUEAISJAogU1RPUF9SRUFTT05fSU5URVJBQ1RJT05fQ09NUExFVEUQAxInCiNTVE9QX1JFQVNPTl9URU1QT1JBUklMWV9VTkFWQUlMQUJMRRAEKp0BCg1QbGF5YmFja1N0YXRlEh4KGlBMQVlCQUNLX1NUQVRFX1VOU1BFQ0lGSUVEEAASGgoWUExBWUJBQ0tfU1RBVEVfU1RBUlRFRBABEhcKE1BMQVlCQUNLX1NUQVRFX0RPTkUQAhIcChhQTEFZQkFDS19TVEFURV9DQU5DRUxMRUQQAxIZChVQTEFZQkFDS19TVEFURV9GQUlMRUQQBCqGAQoLQnV0dG9uU3RhdGUSHAoYQlVUVE9OX1NUQVRFX1VOU1BFQ0lGSUVEEAASHQoZQlVUVE9OX1NUQVRFX1NJTkdMRV9QUkVTUxABEh0KGUJVVFRPTl9TVEFURV9ET1VCTEVfUFJFU1MQAhIbChdCVVRUT05fU1RBVEVfTE9OR19QUkVTUxADKuACChFQcm90b2NvbEVycm9yQ29kZRIjCh9QUk9UT0NPTF9FUlJPUl9DT0RFX1VOU1BFQ0lGSUVEEAASLQopUFJPVE9DT0xfRVJST1JfQ09ERV9BVVRIRU5USUNBVElPTl9GQUlMRUQQARIqCiZQUk9UT0NPTF9FUlJPUl9DT0RFX0lOVkFMSURfVFJBTlNJVElPThACEiUKIVBST1RPQ09MX0VSUk9SX0NPREVfSU5WQUxJRF9NRURJQRADEiUKIVBST1RPQ09MX0VSUk9SX0NPREVfU1RBTEVfQklORElORxAEEjAKLFBST1RPQ09MX0VSUk9SX0NPREVfVU5TVVBQT1JURURfQVVESU9fRk9STUFUEAUSKQolUFJPVE9DT0xfRVJST1JfQ09ERV9NRVNTQUdFX1RPT19MQVJHRRAGEiAKHFBST1RPQ09MX0VSUk9SX0NPREVfSU5URVJOQUwQB2IGcHJvdG8z", [file_google_protobuf_duration, file_google_protobuf_timestamp]);
 
 /**
  * @generated from message chronicle.audio.v2.EventId
@@ -100,6 +100,23 @@ export const CaptureSessionIdSchema: GenMessage<CaptureSessionId> = /*@__PURE__*
   messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 4);
 
 /**
+ * @generated from message chronicle.audio.v2.MemorySpaceId
+ */
+export type MemorySpaceId = Message<"chronicle.audio.v2.MemorySpaceId"> & {
+  /**
+   * @generated from field: string value = 1;
+   */
+  value: string;
+};
+
+/**
+ * Describes the message chronicle.audio.v2.MemorySpaceId.
+ * Use `create(MemorySpaceIdSchema)` to create a new message.
+ */
+export const MemorySpaceIdSchema: GenMessage<MemorySpaceId> = /*@__PURE__*/
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 5);
+
+/**
  * @generated from message chronicle.audio.v2.VoiceSessionId
  */
 export type VoiceSessionId = Message<"chronicle.audio.v2.VoiceSessionId"> & {
@@ -114,7 +131,7 @@ export type VoiceSessionId = Message<"chronicle.audio.v2.VoiceSessionId"> & {
  * Use `create(VoiceSessionIdSchema)` to create a new message.
  */
 export const VoiceSessionIdSchema: GenMessage<VoiceSessionId> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 5);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 6);
 
 /**
  * @generated from message chronicle.audio.v2.TurnId
@@ -131,7 +148,7 @@ export type TurnId = Message<"chronicle.audio.v2.TurnId"> & {
  * Use `create(TurnIdSchema)` to create a new message.
  */
 export const TurnIdSchema: GenMessage<TurnId> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 6);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 7);
 
 /**
  * @generated from message chronicle.audio.v2.ResponseId
@@ -148,7 +165,7 @@ export type ResponseId = Message<"chronicle.audio.v2.ResponseId"> & {
  * Use `create(ResponseIdSchema)` to create a new message.
  */
 export const ResponseIdSchema: GenMessage<ResponseId> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 7);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 8);
 
 /**
  * @generated from message chronicle.audio.v2.AudioSpec
@@ -185,7 +202,7 @@ export type AudioSpec = Message<"chronicle.audio.v2.AudioSpec"> & {
  * Use `create(AudioSpecSchema)` to create a new message.
  */
 export const AudioSpecSchema: GenMessage<AudioSpec> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 8);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 9);
 
 /**
  * @generated from message chronicle.audio.v2.CaptureBinding
@@ -212,7 +229,7 @@ export type CaptureBinding = Message<"chronicle.audio.v2.CaptureBinding"> & {
  * Use `create(CaptureBindingSchema)` to create a new message.
  */
 export const CaptureBindingSchema: GenMessage<CaptureBinding> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 9);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 10);
 
 /**
  * @generated from message chronicle.audio.v2.EffectStatus
@@ -239,7 +256,7 @@ export type EffectStatus = Message<"chronicle.audio.v2.EffectStatus"> & {
  * Use `create(EffectStatusSchema)` to create a new message.
  */
 export const EffectStatusSchema: GenMessage<EffectStatus> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 10);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 11);
 
 /**
  * @generated from message chronicle.audio.v2.CaptureCapabilities
@@ -281,7 +298,7 @@ export type CaptureCapabilities = Message<"chronicle.audio.v2.CaptureCapabilitie
  * Use `create(CaptureCapabilitiesSchema)` to create a new message.
  */
 export const CaptureCapabilitiesSchema: GenMessage<CaptureCapabilities> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 11);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 12);
 
 /**
  * @generated from message chronicle.audio.v2.ClientHello
@@ -323,7 +340,7 @@ export type ClientHello = Message<"chronicle.audio.v2.ClientHello"> & {
  * Use `create(ClientHelloSchema)` to create a new message.
  */
 export const ClientHelloSchema: GenMessage<ClientHello> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 12);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 13);
 
 /**
  * @generated from message chronicle.audio.v2.StartCapture
@@ -363,6 +380,11 @@ export type StartCapture = Message<"chronicle.audio.v2.StartCapture"> & {
    * @generated from field: string recovery_batch_id = 7;
    */
   recoveryBatchId: string;
+
+  /**
+   * @generated from field: chronicle.audio.v2.MemorySpaceId memory_space_id = 8;
+   */
+  memorySpaceId?: MemorySpaceId | undefined;
 };
 
 /**
@@ -370,7 +392,7 @@ export type StartCapture = Message<"chronicle.audio.v2.StartCapture"> & {
  * Use `create(StartCaptureSchema)` to create a new message.
  */
 export const StartCaptureSchema: GenMessage<StartCapture> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 13);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 14);
 
 /**
  * @generated from message chronicle.audio.v2.StopCapture
@@ -392,7 +414,7 @@ export type StopCapture = Message<"chronicle.audio.v2.StopCapture"> & {
  * Use `create(StopCaptureSchema)` to create a new message.
  */
 export const StopCaptureSchema: GenMessage<StopCapture> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 14);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 15);
 
 /**
  * @generated from message chronicle.audio.v2.VoiceReady
@@ -414,7 +436,7 @@ export type VoiceReady = Message<"chronicle.audio.v2.VoiceReady"> & {
  * Use `create(VoiceReadySchema)` to create a new message.
  */
 export const VoiceReadySchema: GenMessage<VoiceReady> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 15);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 16);
 
 /**
  * @generated from message chronicle.audio.v2.PlaybackAcknowledgement
@@ -456,7 +478,7 @@ export type PlaybackAcknowledgement = Message<"chronicle.audio.v2.PlaybackAcknow
  * Use `create(PlaybackAcknowledgementSchema)` to create a new message.
  */
 export const PlaybackAcknowledgementSchema: GenMessage<PlaybackAcknowledgement> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 16);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 17);
 
 /**
  * @generated from message chronicle.audio.v2.Heartbeat
@@ -473,7 +495,7 @@ export type Heartbeat = Message<"chronicle.audio.v2.Heartbeat"> & {
  * Use `create(HeartbeatSchema)` to create a new message.
  */
 export const HeartbeatSchema: GenMessage<Heartbeat> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 17);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 18);
 
 /**
  * @generated from message chronicle.audio.v2.ButtonEvent
@@ -490,7 +512,7 @@ export type ButtonEvent = Message<"chronicle.audio.v2.ButtonEvent"> & {
  * Use `create(ButtonEventSchema)` to create a new message.
  */
 export const ButtonEventSchema: GenMessage<ButtonEvent> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 18);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 19);
 
 /**
  * @generated from message chronicle.audio.v2.ClientControl
@@ -559,7 +581,7 @@ export type ClientControl = Message<"chronicle.audio.v2.ClientControl"> & {
  * Use `create(ClientControlSchema)` to create a new message.
  */
 export const ClientControlSchema: GenMessage<ClientControl> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 19);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 20);
 
 /**
  * @generated from message chronicle.audio.v2.ServerHello
@@ -581,7 +603,7 @@ export type ServerHello = Message<"chronicle.audio.v2.ServerHello"> & {
  * Use `create(ServerHelloSchema)` to create a new message.
  */
 export const ServerHelloSchema: GenMessage<ServerHello> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 20);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 21);
 
 /**
  * @generated from message chronicle.audio.v2.CaptureStarted
@@ -603,7 +625,7 @@ export type CaptureStarted = Message<"chronicle.audio.v2.CaptureStarted"> & {
  * Use `create(CaptureStartedSchema)` to create a new message.
  */
 export const CaptureStartedSchema: GenMessage<CaptureStarted> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 21);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 22);
 
 /**
  * @generated from message chronicle.audio.v2.CaptureStopped
@@ -620,7 +642,7 @@ export type CaptureStopped = Message<"chronicle.audio.v2.CaptureStopped"> & {
  * Use `create(CaptureStoppedSchema)` to create a new message.
  */
 export const CaptureStoppedSchema: GenMessage<CaptureStopped> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 22);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 23);
 
 /**
  * @generated from message chronicle.audio.v2.CapturePacketAccepted
@@ -642,7 +664,44 @@ export type CapturePacketAccepted = Message<"chronicle.audio.v2.CapturePacketAcc
  * Use `create(CapturePacketAcceptedSchema)` to create a new message.
  */
 export const CapturePacketAcceptedSchema: GenMessage<CapturePacketAccepted> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 23);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 24);
+
+/**
+ * @generated from message chronicle.audio.v2.TranscriptUpdate
+ */
+export type TranscriptUpdate = Message<"chronicle.audio.v2.TranscriptUpdate"> & {
+  /**
+   * @generated from field: chronicle.audio.v2.CaptureBinding binding = 1;
+   */
+  binding?: CaptureBinding | undefined;
+
+  /**
+   * @generated from field: string text = 2;
+   */
+  text: string;
+
+  /**
+   * @generated from field: bool is_final = 3;
+   */
+  isFinal: boolean;
+
+  /**
+   * @generated from field: float confidence = 4;
+   */
+  confidence: number;
+
+  /**
+   * @generated from field: string speaker_name = 5;
+   */
+  speakerName: string;
+};
+
+/**
+ * Describes the message chronicle.audio.v2.TranscriptUpdate.
+ * Use `create(TranscriptUpdateSchema)` to create a new message.
+ */
+export const TranscriptUpdateSchema: GenMessage<TranscriptUpdate> = /*@__PURE__*/
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 25);
 
 /**
  * @generated from message chronicle.audio.v2.PlaybackOffer
@@ -689,7 +748,7 @@ export type PlaybackOffer = Message<"chronicle.audio.v2.PlaybackOffer"> & {
  * Use `create(PlaybackOfferSchema)` to create a new message.
  */
 export const PlaybackOfferSchema: GenMessage<PlaybackOffer> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 24);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 26);
 
 /**
  * @generated from message chronicle.audio.v2.CancelPlayback
@@ -721,7 +780,7 @@ export type CancelPlayback = Message<"chronicle.audio.v2.CancelPlayback"> & {
  * Use `create(CancelPlaybackSchema)` to create a new message.
  */
 export const CancelPlaybackSchema: GenMessage<CancelPlayback> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 25);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 27);
 
 /**
  * @generated from message chronicle.audio.v2.ProtocolError
@@ -748,7 +807,7 @@ export type ProtocolError = Message<"chronicle.audio.v2.ProtocolError"> & {
  * Use `create(ProtocolErrorSchema)` to create a new message.
  */
 export const ProtocolErrorSchema: GenMessage<ProtocolError> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 26);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 28);
 
 /**
  * @generated from message chronicle.audio.v2.ServerControl
@@ -815,6 +874,12 @@ export type ServerControl = Message<"chronicle.audio.v2.ServerControl"> & {
      */
     value: CapturePacketAccepted;
     case: "capturePacketAccepted";
+  } | {
+    /**
+     * @generated from field: chronicle.audio.v2.TranscriptUpdate transcript_update = 18;
+     */
+    value: TranscriptUpdate;
+    case: "transcriptUpdate";
   } | { case: undefined; value?: undefined };
 };
 
@@ -823,7 +888,7 @@ export type ServerControl = Message<"chronicle.audio.v2.ServerControl"> & {
  * Use `create(ServerControlSchema)` to create a new message.
  */
 export const ServerControlSchema: GenMessage<ServerControl> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 27);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 29);
 
 /**
  * @generated from message chronicle.audio.v2.CaptureMediaPacket
@@ -865,7 +930,7 @@ export type CaptureMediaPacket = Message<"chronicle.audio.v2.CaptureMediaPacket"
  * Use `create(CaptureMediaPacketSchema)` to create a new message.
  */
 export const CaptureMediaPacketSchema: GenMessage<CaptureMediaPacket> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 28);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 30);
 
 /**
  * @generated from message chronicle.audio.v2.PlaybackMediaPacket
@@ -902,7 +967,7 @@ export type PlaybackMediaPacket = Message<"chronicle.audio.v2.PlaybackMediaPacke
  * Use `create(PlaybackMediaPacketSchema)` to create a new message.
  */
 export const PlaybackMediaPacketSchema: GenMessage<PlaybackMediaPacket> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 29);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 31);
 
 /**
  * @generated from message chronicle.audio.v2.MediaEnvelope
@@ -931,7 +996,7 @@ export type MediaEnvelope = Message<"chronicle.audio.v2.MediaEnvelope"> & {
  * Use `create(MediaEnvelopeSchema)` to create a new message.
  */
 export const MediaEnvelopeSchema: GenMessage<MediaEnvelope> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 30);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 32);
 
 /**
  * The single cross-process backend-to-device boundary. Redis carries this
@@ -970,7 +1035,7 @@ export type DeviceDownlinkEvent = Message<"chronicle.audio.v2.DeviceDownlinkEven
  * Use `create(DeviceDownlinkEventSchema)` to create a new message.
  */
 export const DeviceDownlinkEventSchema: GenMessage<DeviceDownlinkEvent> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 31);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 33);
 
 /**
  * @generated from message chronicle.audio.v2.CaptureStreamOpened
@@ -1005,6 +1070,11 @@ export type CaptureStreamOpened = Message<"chronicle.audio.v2.CaptureStreamOpene
    * @generated from field: chronicle.audio.v2.DataPurpose data_purpose = 6;
    */
   dataPurpose: DataPurpose;
+
+  /**
+   * @generated from field: chronicle.audio.v2.MemorySpaceId memory_space_id = 7;
+   */
+  memorySpaceId?: MemorySpaceId | undefined;
 };
 
 /**
@@ -1012,7 +1082,7 @@ export type CaptureStreamOpened = Message<"chronicle.audio.v2.CaptureStreamOpene
  * Use `create(CaptureStreamOpenedSchema)` to create a new message.
  */
 export const CaptureStreamOpenedSchema: GenMessage<CaptureStreamOpened> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 32);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 34);
 
 /**
  * @generated from message chronicle.audio.v2.CanonicalPcmFrame
@@ -1059,7 +1129,7 @@ export type CanonicalPcmFrame = Message<"chronicle.audio.v2.CanonicalPcmFrame"> 
  * Use `create(CanonicalPcmFrameSchema)` to create a new message.
  */
 export const CanonicalPcmFrameSchema: GenMessage<CanonicalPcmFrame> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 33);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 35);
 
 /**
  * @generated from message chronicle.audio.v2.CaptureStreamEnded
@@ -1081,7 +1151,7 @@ export type CaptureStreamEnded = Message<"chronicle.audio.v2.CaptureStreamEnded"
  * Use `create(CaptureStreamEndedSchema)` to create a new message.
  */
 export const CaptureStreamEndedSchema: GenMessage<CaptureStreamEnded> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 34);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 36);
 
 /**
  * @generated from message chronicle.audio.v2.CaptureStreamEvent
@@ -1122,7 +1192,7 @@ export type CaptureStreamEvent = Message<"chronicle.audio.v2.CaptureStreamEvent"
  * Use `create(CaptureStreamEventSchema)` to create a new message.
  */
 export const CaptureStreamEventSchema: GenMessage<CaptureStreamEvent> = /*@__PURE__*/
-  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 35);
+  messageDesc(file_advanced_omi_backend_audio_contract_v2_audio, 37);
 
 /**
  * @generated from enum chronicle.audio.v2.AudioCodec

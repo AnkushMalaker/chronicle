@@ -346,16 +346,18 @@ async def due_ranges(
 
 
 async def reconcile_dirty_ranges() -> dict[str, int]:
-    """Cron entry point: reap expired leases, then enqueue every due range.
+    """Cron entry point: enqueue dirty ranges and recover classified dispatches.
 
     Deliberately cheap — it runs on the API event loop, so it does Mongo queries and
-    RQ enqueues only. All reconciliation work happens in ``reconcile_range_job``.
+    RQ enqueues plus one bounded unlatched-Episode scan. All agent/model work
+    happens in ``reconcile_range_job``.
     """
 
     # Imported here to avoid a circular import with the controllers package.
     from advanced_omi_backend.controllers.queue_controller import (
         enqueue_dirty_range_reconciliation,
     )
+    from advanced_omi_backend.services.timeline.dispatch import dispatch_ready_episodes
 
     now = utcnow()
     reclaimed = await reap_expired_leases(now)
@@ -370,6 +372,8 @@ async def reconcile_dirty_ranges() -> dict[str, int]:
         if job_id:
             enqueued += 1
 
+    recovery = await dispatch_ready_episodes()
+
     if ranges or reclaimed:
         logger.info(
             "🩹 Rolling reconciliation scan: %d due, %d enqueued, %d lease(s) reclaimed",
@@ -377,7 +381,12 @@ async def reconcile_dirty_ranges() -> dict[str, int]:
             enqueued,
             reclaimed,
         )
-    return {"due": len(ranges), "enqueued": enqueued, "reclaimed": reclaimed}
+    return {
+        "due": len(ranges),
+        "enqueued": enqueued,
+        "reclaimed": reclaimed,
+        "dispatched": recovery["dispatched"],
+    }
 
 
 # ── Producer-side trigger helpers ────────────────────────────────────────────
@@ -434,6 +443,8 @@ async def note_conversation_dirty(
             Conversation.conversation_id == conversation_id
         )
         if conversation is None:
+            return None
+        if conversation.memory_space_id and conversation.published_to_main_at is None:
             return None
         ranges = conversation.audio_ranges or []
         if ranges:

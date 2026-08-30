@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   ScrollText, RefreshCw, ChevronRight, ChevronDown, ExternalLink,
   Sparkles, Bot, PenLine, Trash2, FileText, type LucideIcon,
@@ -7,7 +7,8 @@ import {
 import { useAuth } from '../contexts/AuthContext'
 import { useMemoryLedger, useMemoryAuditDiff } from '../hooks/useMemoryLedger'
 import type { MemoryAuditEntry } from '../services/api'
-import { Button, MetadataChip, StateBadge } from '../components/ui'
+import MemoryReviewWorkspace from '../components/timeline/MemoryReviewWorkspace'
+import { Button, MetadataChip, StateBadge, Tabs } from '../components/ui'
 
 // ---- Provenance classification -------------------------------------------
 // The ledger answers "who changed this memory and why". The backend owns the
@@ -98,6 +99,9 @@ function LedgerRow({ entry }: { entry: MemoryAuditEntry }) {
   const src = classifySource(entry)
   const expandable = entry.has_diff
   const SrcIcon = src.Icon
+  const sourceEpisodeKeys = Array.isArray(entry.extra?.relevant_episode_keys)
+    ? entry.extra.relevant_episode_keys.filter((key): key is string => typeof key === 'string' && !!key)
+    : []
 
   return (
     <div className="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
@@ -145,6 +149,17 @@ function LedgerRow({ entry }: { entry: MemoryAuditEntry }) {
           </Link>
         )}
 
+        {sourceEpisodeKeys.length > 0 && (
+          <Link
+            to={`/timeline/key/${encodeURIComponent(sourceEpisodeKeys[0])}`}
+            onClick={e => e.stopPropagation()}
+            className="flex-shrink-0 hidden md:inline-flex items-center gap-0.5 text-xs text-blue-600 hover:underline dark:text-blue-400"
+            title={sourceEpisodeKeys.length === 1 ? 'Open source episode' : `Open first of ${sourceEpisodeKeys.length} source episodes`}
+          >
+            {sourceEpisodeKeys.length === 1 ? 'episode' : `${sourceEpisodeKeys.length} episodes`} <ExternalLink className="h-3 w-3" />
+          </Link>
+        )}
+
         <span className="flex-shrink-0 w-40 text-right text-xs text-gray-500 dark:text-gray-400">{formatTime(entry.created_at)}</span>
       </button>
 
@@ -183,9 +198,47 @@ function SummaryStrip({ entries }: { entries: MemoryAuditEntry[] }) {
   )
 }
 
-// ---- Page ------------------------------------------------------------------
+// ---- Workspace -------------------------------------------------------------
 
 export default function MemoryLedger() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const view = searchParams.get('view') === 'history' ? 'history' : 'review'
+  const setView = (nextView: 'review' | 'history') => {
+    const next = new URLSearchParams(searchParams)
+    next.set('view', nextView)
+    setSearchParams(next)
+  }
+
+  return (
+    <div className="space-y-5">
+      <header>
+        <div className="flex items-center gap-2">
+          <ScrollText className="h-6 w-6 text-[var(--tape-media)]" />
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Memory Ledger</h1>
+        </div>
+        <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+          {view === 'review'
+            ? 'Review each day in order before selected memory changes reach the vault.'
+            : 'Inspect the durable history of changes to the memory vault.'}
+        </p>
+      </header>
+      <Tabs
+        variant="underline"
+        value={view}
+        onChange={setView}
+        tabs={[
+          { value: 'review', label: 'Review queue' },
+          { value: 'history', label: 'Change history' },
+        ]}
+      />
+      {view === 'review' ? <MemoryReviewWorkspace /> : <ChangeHistory />}
+    </div>
+  )
+}
+
+// ---- Change history --------------------------------------------------------
+
+function ChangeHistory() {
   const { isAdmin } = useAuth()
 
   const [limit, setLimit] = useState(200)
@@ -227,11 +280,7 @@ export default function MemoryLedger() {
 
   return (
     <div>
-      <div className="mb-6 flex items-center justify-between">
-        <div className="flex items-center space-x-2">
-          <ScrollText className="h-6 w-6 text-blue-600" />
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Memory Ledger</h1>
-        </div>
+      <div className="mb-4 flex justify-end">
         <Button
           variant="secondary"
           size="sm"
@@ -242,11 +291,6 @@ export default function MemoryLedger() {
           Refresh
         </Button>
       </div>
-
-      <p className="mb-5 text-sm text-gray-500 dark:text-gray-400">
-        Every change to your memory vault — what the AI extracted, what the memory agent wrote,
-        and what you edited yourself in Obsidian. Expand a row to see the exact before→after diff.
-      </p>
 
       {error && (
         <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300">

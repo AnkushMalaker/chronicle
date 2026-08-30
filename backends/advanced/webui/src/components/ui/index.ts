@@ -22,6 +22,8 @@ export { Alert } from './Alert'
 export type { AlertProps, AlertTone } from './Alert'
 export { Modal } from './Modal'
 export type { ModalProps } from './Modal'
+export { computeWordDiff, WordDiff } from './WordDiff'
+export type { DiffToken, WordDiffResult } from './WordDiff'
 // Badges / chips. `StateBadge` is also exported as `Badge` for design-system parity.
 export { MetadataChip, StateBadge, StateBadge as Badge } from './Chip'
 export type { StateTone } from './Chip'

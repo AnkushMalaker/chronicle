@@ -26,7 +26,12 @@ from advanced_omi_backend.models.manual_memory import (
 )
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services.manual_memories.image import write_memory_note
-from advanced_omi_backend.services.memory.vault_manager import ConvDocVaultManager
+from advanced_omi_backend.services.memory.audit import record_vault_change
+from advanced_omi_backend.services.memory.scope import (
+    MemoryScope,
+    MemoryScopeError,
+    MemoryScopeResolver,
+)
 from advanced_omi_backend.services.memory.vault_media import (
     promote_image_bytes,
     sniff_image_type,
@@ -38,6 +43,7 @@ router = APIRouter(prefix="/manual-memories", tags=["manual-memories"])
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 MAX_ATTACHMENTS = 8
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+_scopes = MemoryScopeResolver()
 
 
 def _user_id(user: User) -> str:
@@ -59,6 +65,7 @@ def _serialize(memory: ManualMemory) -> dict:
         "source": memory.source,
         "shared_at": memory.shared_at,
         "memory_at": memory.memory_at,
+        "memory_space_id": memory.memory_space_id,
         "vault_path": memory.vault_path,
         "attachments": [
             attachment.model_dump(mode="json") for attachment in memory.attachments
@@ -66,9 +73,13 @@ def _serialize(memory: ManualMemory) -> dict:
     }
 
 
-async def _owned_memory(memory_id: str, user: User) -> ManualMemory:
+async def _owned_memory(
+    memory_id: str, user: User, memory_space_id: Optional[str] = None
+) -> ManualMemory:
     memory = await ManualMemory.find_one(
-        ManualMemory.user_id == _user_id(user), ManualMemory.memory_id == memory_id
+        ManualMemory.user_id == _user_id(user),
+        ManualMemory.memory_id == memory_id,
+        ManualMemory.memory_space_id == memory_space_id,
     )
     if memory is None:
         raise HTTPException(status_code=404, detail="Manual memory not found")
@@ -94,13 +105,16 @@ async def create_manual_memory(
     note: Optional[str] = Form(default=None),
     source_application: Optional[str] = Form(default=None),
     memory_at: Optional[datetime] = Form(default=None),
+    memory_space_id: Optional[str] = Form(default=None),
     user: User = Depends(current_active_user),
 ):
     """Durably create a manual memory before scheduling optional enrichment."""
 
     user_id = _user_id(user)
     existing = await ManualMemory.find_one(
-        ManualMemory.user_id == user_id, ManualMemory.request_id == request_id
+        ManualMemory.user_id == user_id,
+        ManualMemory.request_id == request_id,
+        ManualMemory.memory_space_id == memory_space_id,
     )
     if existing is not None:
         return {"status": "existing", **_serialize(existing)}
@@ -112,7 +126,13 @@ async def create_manual_memory(
     if cleaned_note and len(cleaned_note) > 2000:
         raise HTTPException(status_code=422, detail="Note exceeds 2000 characters")
 
-    root = ConvDocVaultManager().user_root(user_id)
+    scope = MemoryScope(user_id, memory_space_id)
+    if memory_space_id:
+        try:
+            await _scopes.require_space(scope, writable=True)
+        except MemoryScopeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    root = _scopes.vault_root(scope)
     stored: list[ManualMemoryAttachment] = []
     for upload in attachments:
         declared = (upload.content_type or "").split(";", 1)[0].lower()
@@ -141,8 +161,14 @@ async def create_manual_memory(
         )
 
     memory = ManualMemory(
-        memory_id=str(uuid5(NAMESPACE_URL, f"chronicle:{user_id}:{request_id}")),
+        memory_id=str(
+            uuid5(
+                NAMESPACE_URL,
+                f"chronicle:{user_id}:{memory_space_id or 'main'}:{request_id}",
+            )
+        ),
         user_id=user_id,
+        memory_space_id=memory_space_id,
         request_id=request_id,
         note=cleaned_note,
         source={
@@ -159,22 +185,36 @@ async def create_manual_memory(
         await memory.insert()
     except DuplicateKeyError:
         existing = await ManualMemory.find_one(
-            ManualMemory.user_id == user_id, ManualMemory.request_id == request_id
+            ManualMemory.user_id == user_id,
+            ManualMemory.request_id == request_id,
+            ManualMemory.memory_space_id == memory_space_id,
         )
         if existing is None:
             raise
         return {"status": "existing", **_serialize(existing)}
+    await record_vault_change(
+        user_id=user_id,
+        memory_space_id=memory_space_id,
+        operation="create",
+        note_path=memory.vault_path,
+        before=None,
+        after=(root / memory.vault_path).read_text(encoding="utf-8"),
+        summary="manual memory shared",
+        source_type="manual",
+        source_id=memory.memory_id,
+    )
     # A deliberately saved memory is evidence about the moment it was shared, so
     # reconcile a minute around it. It is a point event, and the range model requires
     # positive duration.
-    await note_evidence_dirty(
-        user_id,
-        memory.shared_at - timedelta(seconds=30),
-        memory.shared_at + timedelta(seconds=30),
-        memory.memory_id,
-        "manual_memory",
-        source_kind="manual_memory",
-    )
+    if memory_space_id is None:
+        await note_evidence_dirty(
+            user_id,
+            memory.shared_at - timedelta(seconds=30),
+            memory.shared_at + timedelta(seconds=30),
+            memory.memory_id,
+            "manual_memory",
+            source_kind="manual_memory",
+        )
     for attachment in memory.attachments:
         enqueue_manual_memory_image(memory.memory_id, attachment.attachment_id)
     return {"status": "created", **_serialize(memory)}
@@ -184,9 +224,18 @@ async def create_manual_memory(
 async def list_manual_memories(
     limit: int = Query(default=50, ge=1, le=100),
     before: Optional[datetime] = None,
+    memory_space_id: Optional[str] = None,
     user: User = Depends(current_active_user),
 ):
-    query: dict = {"user_id": _user_id(user)}
+    if memory_space_id:
+        try:
+            await _scopes.require_space(MemoryScope(_user_id(user), memory_space_id))
+        except MemoryScopeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    query: dict = {
+        "user_id": _user_id(user),
+        "memory_space_id": memory_space_id,
+    }
     if before:
         query["shared_at"] = {"$lt": _utc(before)}
     rows = await ManualMemory.find(query).sort("-shared_at").limit(limit + 1).to_list()
@@ -198,13 +247,19 @@ async def list_manual_memories(
 
 
 @router.get("/{memory_id}")
-async def get_manual_memory(memory_id: str, user: User = Depends(current_active_user)):
-    return _serialize(await _owned_memory(memory_id, user))
+async def get_manual_memory(
+    memory_id: str,
+    memory_space_id: Optional[str] = None,
+    user: User = Depends(current_active_user),
+):
+    return _serialize(await _owned_memory(memory_id, user, memory_space_id))
 
 
 async def _attachment_response(memory: ManualMemory, attachment_id: str) -> Response:
     attachment = _owned_attachment(memory, attachment_id)
-    root = ConvDocVaultManager().user_root(memory.user_id).resolve()
+    root = _scopes.vault_root(
+        MemoryScope(memory.user_id, memory.memory_space_id)
+    ).resolve()
     path = (root / attachment.storage_path).resolve()
     if root not in path.parents or not path.is_file():
         raise HTTPException(status_code=404, detail="Attachment content not found")
@@ -217,17 +272,23 @@ async def _attachment_response(memory: ManualMemory, attachment_id: str) -> Resp
 
 @router.get("/{memory_id}/attachments/{attachment_id}/content")
 async def attachment_content(
-    memory_id: str, attachment_id: str, user: User = Depends(current_active_user)
+    memory_id: str,
+    attachment_id: str,
+    memory_space_id: Optional[str] = None,
+    user: User = Depends(current_active_user),
 ):
     return await _attachment_response(
-        await _owned_memory(memory_id, user), attachment_id
+        await _owned_memory(memory_id, user, memory_space_id), attachment_id
     )
 
 
 @router.get("/{memory_id}/attachments/{attachment_id}/thumbnail")
 async def attachment_thumbnail(
-    memory_id: str, attachment_id: str, user: User = Depends(current_active_user)
+    memory_id: str,
+    attachment_id: str,
+    memory_space_id: Optional[str] = None,
+    user: User = Depends(current_active_user),
 ):
     return await _attachment_response(
-        await _owned_memory(memory_id, user), attachment_id
+        await _owned_memory(memory_id, user, memory_space_id), attachment_id
     )

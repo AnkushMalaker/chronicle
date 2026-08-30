@@ -1,5 +1,7 @@
 """Entry-point regressions for the three summary-bundle workers."""
 
+import httpx
+import openai
 import pytest
 
 from advanced_omi_backend.constants import TITLE_NOT_GENERATED
@@ -16,12 +18,14 @@ class _Redis:
 class _Conversation:
     conversation_id = "conversation-1"
     memory_excluded = False
+    data_purpose = "conversation"
     user_id = "user-1"
     transcript = "A useful conversation about rebuilding the memory vault."
     segments = []
     title = "Recording..."
     summary = ""
     detailed_summary = ""
+    memory_space_id = None
 
     async def save(self):
         return self
@@ -85,6 +89,24 @@ def test_registered_title_job_rejects_the_missing_title_placeholder(monkeypatch)
     assert conversation.title == "Recording..."
 
 
+def test_memory_excluded_user_visible_conversation_still_gets_a_title(monkeypatch):
+    conversation = _Conversation()
+    conversation.memory_excluded = True
+    conversation.data_purpose = "conversation"
+    _patch_job_runtime(monkeypatch, conversation)
+
+    async def title(*args, **kwargs):
+        return "Ranked strategy game commentary"
+
+    monkeypatch.setattr(conversation_jobs, "generate_conversation_title", title)
+
+    result = conversation_jobs.generate_title_job(conversation.conversation_id)
+
+    assert result["success"] is True
+    assert result["title"] == "Ranked strategy game commentary"
+    assert conversation.title == "Ranked strategy game commentary"
+
+
 def test_registered_detailed_summary_job_can_skip_vault_retrieval(monkeypatch):
     conversation = _Conversation()
     detailed_contexts = []
@@ -109,6 +131,83 @@ def test_registered_detailed_summary_job_can_skip_vault_retrieval(monkeypatch):
     assert result["success"] is True
     assert result["detailed_summary"] == "A detailed summary."
     assert detailed_contexts == [None]
+
+
+def test_registered_detailed_summary_job_searches_only_its_memory_space(monkeypatch):
+    conversation = _Conversation()
+    conversation.memory_space_id = "5a265801-b8ca-4667-ae7d-07b2c170ecad"
+    searched_scopes = []
+    detailed_contexts = []
+    _patch_job_runtime(monkeypatch, conversation)
+
+    class _MemoryService:
+        async def search_memories(
+            self,
+            _query,
+            _user_id,
+            limit=10,
+            *,
+            memory_space_id=None,
+        ):
+            searched_scopes.append(memory_space_id)
+            return []
+
+    async def detailed(*args, memory_context=None, **kwargs):
+        detailed_contexts.append(memory_context)
+        return "A scoped detailed summary."
+
+    monkeypatch.setattr(conversation_jobs, "get_memory_service", _MemoryService)
+    monkeypatch.setattr(conversation_jobs, "generate_detailed_summary", detailed)
+
+    result = conversation_jobs.generate_detailed_summary_job(
+        conversation.conversation_id
+    )
+
+    assert result["success"] is True
+    assert searched_scopes == [conversation.memory_space_id]
+    assert detailed_contexts == [None]
+
+
+@pytest.mark.parametrize(
+    ("job_name", "generator_name", "job_kwargs"),
+    [
+        ("generate_title_job", "generate_conversation_title", {}),
+        ("generate_short_summary_job", "generate_short_summary", {}),
+        (
+            "generate_detailed_summary_job",
+            "generate_detailed_summary",
+            {"include_memory_context": False},
+        ),
+    ],
+)
+def test_registered_summary_jobs_finish_without_retry_on_provider_quota(
+    monkeypatch, job_name, generator_name, job_kwargs
+):
+    conversation = _Conversation()
+    _patch_job_runtime(monkeypatch, conversation)
+
+    async def quota_exhausted(*args, **kwargs):
+        request = httpx.Request("POST", "https://provider.invalid/chat/completions")
+        response = httpx.Response(403, request=request)
+        raise openai.PermissionDeniedError(
+            "Key limit exceeded (monthly limit)",
+            response=response,
+            body={"error": {"code": 403}},
+        )
+
+    monkeypatch.setattr(conversation_jobs, generator_name, quota_exhausted)
+
+    result = getattr(conversation_jobs, job_name)(
+        conversation.conversation_id, **job_kwargs
+    )
+
+    assert result == {
+        "success": False,
+        "conversation_id": conversation.conversation_id,
+        "stage": job_name.removeprefix("generate_").removesuffix("_job"),
+        "reason": "provider_permission_denied",
+        "retryable": False,
+    }
 
 
 @pytest.mark.asyncio

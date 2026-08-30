@@ -940,6 +940,12 @@ class StreamingTranscriptionConsumer:
                 return
             user_id, client_id = identity
             capture = await self.store.read(session_id)
+            if capture is not None and capture.memory_space_id:
+                logger.debug(
+                    "Suppressing fragment plugin routing for isolated memory space %s",
+                    capture.memory_space_id,
+                )
+                return
             if capture is not None and capture.voice_session_id:
                 logger.debug(
                     "Skipping fragment-level plugin routing for active voice session %s",

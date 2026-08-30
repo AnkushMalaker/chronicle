@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import { Network as NetworkIcon, RefreshCw, CheckCircle, XCircle, Wifi, WifiOff, Radio, Search, Server, Smartphone, Pencil, Trash2, Check, X } from 'lucide-react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Network as NetworkIcon, RefreshCw, CheckCircle, XCircle, Wifi, WifiOff, Radio, Search, Server, Smartphone, Pencil, Trash2, Check, X, Monitor, Link2, Copy } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '../contexts/AuthContext'
-import { systemApi, clientsApi } from '../services/api'
-import { Button } from '../components/ui'
+import { systemApi, clientsApi, deviceInputApi } from '../services/api'
+import { timeAgo } from '../utils/timeAgo'
+import { Button, IconButton } from '../components/ui'
 
 interface DiscoveredService {
   name: string
@@ -45,6 +46,10 @@ function formatAgo(secs?: number): string {
   if (secs < 3600) return `${Math.round(secs / 60)}m ago`
   if (secs < 86400) return `${Math.round(secs / 3600)}h ago`
   return `${Math.round(secs / 86400)}d ago`
+}
+
+function sourceStatusLabel(status: string) {
+  return status.charAt(0).toUpperCase() + status.slice(1)
 }
 
 const SERVICE_DISPLAY: Record<string, { label: string; description: string }> = {
@@ -107,6 +112,15 @@ export default function Network() {
     },
     enabled: isAdmin,
     staleTime: 60_000,
+  })
+  const sources = useQuery({
+    queryKey: ['device-input-sources'],
+    queryFn: async () => (await deviceInputApi.getSources()).data.sources,
+    enabled: isAdmin,
+    refetchInterval: 30_000,
+  })
+  const pairing = useMutation({
+    mutationFn: async () => (await deviceInputApi.createPairingCode()).data,
   })
 
   const startEdit = (d: ConnectedDevice) => {
@@ -184,6 +198,68 @@ export default function Network() {
           </Button>
         </div>
       </div>
+
+      {/* Capture inputs */}
+      <section className="mb-6 rounded-lg border border-gray-200 bg-white p-6 dark:border-gray-700 dark:bg-gray-800">
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="flex items-center text-lg font-semibold text-gray-900 dark:text-gray-100">
+              <Monitor className="mr-2 h-5 w-5 text-blue-600" />
+              Capture sources
+            </h2>
+            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              Screens and libraries that contribute evidence to Chronicle.
+            </p>
+          </div>
+          <Button
+            variant="secondary"
+            size="md"
+            onClick={() => pairing.mutate()}
+            disabled={pairing.isPending}
+            icon={pairing.isPending ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+          >
+            Pair ScreenPipe
+          </Button>
+        </div>
+
+        {pairing.data && (
+          <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-gray-700 dark:border-blue-800 dark:bg-blue-950/30 dark:text-gray-200">
+            <span>
+              Pairing code <code className="mx-1 font-mono font-bold">{pairing.data.code}</code>
+              expires {new Date(pairing.data.expires_at).toLocaleTimeString()}.
+            </span>
+            <IconButton label="Copy pairing code" onClick={() => navigator.clipboard.writeText(pairing.data!.code)}>
+              <Copy className="h-4 w-4" />
+            </IconButton>
+          </div>
+        )}
+
+        {pairing.isError && (
+          <p className="mb-4 text-sm text-red-600 dark:text-red-400">Could not create a pairing code. Try again.</p>
+        )}
+
+        <div className="divide-y divide-gray-100 rounded-md border border-gray-200 dark:divide-gray-700 dark:border-gray-700">
+          {(sources.data || []).map(source => (
+            <div key={source.source_id} className="flex items-center gap-3 px-4 py-3">
+              <Monitor className="h-5 w-5 shrink-0 text-gray-400" />
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium text-gray-900 dark:text-gray-100">{source.name}</div>
+                <div className="text-xs text-gray-500 dark:text-gray-400">{source.provider} · {source.platform}</div>
+              </div>
+              <div className={`shrink-0 text-right text-xs ${source.status === 'online' ? 'text-green-600 dark:text-green-400' : source.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'}`}>
+                <div className="font-medium">{sourceStatusLabel(source.status)}</div>
+                {source.last_seen_at && <div>{timeAgo(source.last_seen_at)}</div>}
+              </div>
+            </div>
+          ))}
+          {sources.isLoading && (
+            <div className="px-4 py-5 text-sm text-gray-500 dark:text-gray-400">Loading capture sources…</div>
+          )}
+          {!sources.isLoading && !sources.data?.length && (
+            <div className="px-4 py-5 text-sm text-gray-500 dark:text-gray-400">No capture sources paired.</div>
+          )}
+        </div>
+      </section>
 
       {/* Tailscale Status */}
       <div className={`rounded-lg p-4 border mb-6 ${

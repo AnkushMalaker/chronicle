@@ -25,6 +25,7 @@ from typing import Any, Iterable
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.timeline import TimelineAudioRange, TimelineEvidenceRef
 from advanced_omi_backend.services.audio_claims import load_chunks_by_id
+from advanced_omi_backend.services.memory.visibility import conversation_scope_filter
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,30 @@ logger = logging.getLogger(__name__)
 # corpus when something has gone wrong upstream.
 MAX_LINEAGE_DEPTH = 8
 MAX_FANOUT = 12
+
+
+def episode_conversation_ids(episode: Any) -> list[str]:
+    """Conversation references carried by an episode, authoritative claims first.
+
+    ``audio_ranges`` is the durable episode-to-audio claim. Its conversation ids are
+    the source containers from which that claim was frozen; ``related_conversation_ids``
+    is weaker agent/lineage context. Consumers that need source Conversations must use
+    both, in that order, and resolve the ids to their current live descendants.
+    """
+
+    ordered: list[str] = []
+    for audio_range in getattr(episode, "audio_ranges", ()) or ():
+        ordered.extend(
+            str(item)
+            for item in (getattr(audio_range, "conversation_ids", ()) or ())
+            if item
+        )
+    ordered.extend(
+        str(item)
+        for item in (getattr(episode, "related_conversation_ids", ()) or ())
+        if item
+    )
+    return list(dict.fromkeys(ordered))
 
 
 def _utc(value: datetime) -> datetime:
@@ -66,7 +91,11 @@ async def build_audio_ranges(
         return []
     start, end = _utc(started_at), _utc(ended_at)
     conversations = await Conversation.find(
-        {"conversation_id": {"$in": sorted(owners)}, "deleted": {"$ne": True}}
+        {
+            "$and": [conversation_scope_filter()],
+            "conversation_id": {"$in": sorted(owners)},
+            "deleted": {"$ne": True},
+        }
     ).to_list()
     ranges: list[TimelineAudioRange] = []
     seen: set[tuple] = set()

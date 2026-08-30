@@ -40,7 +40,10 @@ from advanced_omi_backend.services.memory.audit import (
     memory_provenance,
 )
 from advanced_omi_backend.services.memory.telemetry import text_payload
-from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
+from advanced_omi_backend.services.plugin_service import (
+    dispatch_or_defer_space_event,
+    dispatch_plugin_event,
+)
 from advanced_omi_backend.services.sse_publisher import publish_sse_event
 from advanced_omi_backend.users import get_user_by_id
 
@@ -254,6 +257,7 @@ async def process_memory_job(
     # Get client_id, user_id, and user_email from conversation/user
     client_id = conversation_model.client_id
     user_id = conversation_model.user_id
+    memory_space_id = getattr(conversation_model, "memory_space_id", None)
 
     user = await get_user_by_id(user_id)
     if user:
@@ -271,6 +275,39 @@ async def process_memory_job(
         conversation_model.segments,
         conversation_model.transcript,
     )
+    source_images: list[tuple[str, bytes]] = []
+    if memory_space_id and conversation_model.memory_review_state == "extracting":
+        # Lazy import keeps the optional vision path out of ordinary Main jobs.
+        from advanced_omi_backend.services.memory_space_context import (
+            describe_selected_frames,
+            selected_frames,
+        )
+
+        chosen_frames = selected_frames(conversation_model)
+        source_images = [
+            (f"frame-{frame.frame_id}.jpg", frame.data) for frame in chosen_frames
+        ]
+        if chosen_frames:
+            try:
+                visual_context = await describe_selected_frames(conversation_model)
+            except Exception as exc:
+                # The same pixels still go directly to multimodal write backends. A
+                # failed description pass must not silently degrade to text-only.
+                logger.warning(
+                    "Selected screen-context description failed for %s: %s; "
+                    "continuing with direct image attachments",
+                    conversation_id,
+                    exc,
+                )
+                visual_context = ""
+            if visual_context:
+                conversation_model.memory_context_description = visual_context
+                await conversation_model.save()
+                full_conversation = (
+                    f"{full_conversation}\n\n"
+                    "[User-selected screen evidence supporting this recording]\n"
+                    f"{visual_context}"
+                )
 
     # Fallback: if segments have no text content but transcript exists, use transcript
     # This handles cases where speaker recognition fails/is disabled
@@ -288,6 +325,10 @@ async def process_memory_job(
         logger.warning(
             f"Conversation too short for memory processing: {conversation_id}"
         )
+        if memory_space_id and conversation_model.memory_review_state == "extracting":
+            conversation_model.memory_review_state = "failed"
+            conversation_model.memory_review_error = "Conversation too short"
+            await conversation_model.save()
         return {"success": False, "error": "Conversation too short"}
 
     set_trace_io(input={"transcript": text_payload(full_conversation)})
@@ -304,6 +345,15 @@ async def process_memory_job(
             logger.info(
                 f"Skipping memory - no primary speakers found in conversation {conversation_id}"
             )
+            if (
+                memory_space_id
+                and conversation_model.memory_review_state == "extracting"
+            ):
+                # The review has been consumed successfully even though the user's
+                # existing speaker policy admitted no note content.
+                conversation_model.memory_review_state = "extracted"
+                conversation_model.memory_review_error = None
+                await conversation_model.save()
             return {"success": True, "skipped": True, "reason": "No primary speakers"}
 
     # Read provenance from RQ job metadata. `cause` is descriptive (recorded on
@@ -355,6 +405,10 @@ async def process_memory_job(
                         else None
                     ),
                     source_title=conversation_model.title,
+                    source_people=sorted(transcript_speakers),
+                    source_images=source_images,
+                    memory_space_id=memory_space_id,
+                    admitted_space_write=True,
                 )
     except Exception as e:
         logger.error(
@@ -362,6 +416,10 @@ async def process_memory_job(
             f"(continuing chain so title/summary still runs): {e}",
             exc_info=True,
         )
+        if memory_space_id and conversation_model.memory_review_state == "extracting":
+            conversation_model.memory_review_state = "failed"
+            conversation_model.memory_review_error = str(e)[:500]
+            await conversation_model.save()
         return {"success": False, "error": f"Memory extraction error: {e}"}
 
     if memory_result:
@@ -402,7 +460,9 @@ async def process_memory_job(
                             :5
                         ]:  # Limit to first 5 for display
                             memory_entry = await memory_service.get_memory(
-                                memory_id, user_id
+                                memory_id,
+                                user_id,
+                                memory_space_id=memory_space_id,
                             )
                             if memory_entry:
                                 memory_details.append(
@@ -436,26 +496,43 @@ async def process_memory_job(
             # Trigger memory-level plugins (ALWAYS dispatch when success, even with 0 new memories)
             memory_count = len(created_memory_ids) if created_memory_ids else 0
             try:
-                await dispatch_plugin_event(
-                    event=PluginEvent.MEMORY_PROCESSED,
-                    user_id=user_id,
-                    data={
-                        "memories": created_memory_ids or [],
-                        "conversation": {
-                            "conversation_id": conversation_id,
-                            "client_id": client_id,
-                            "user_id": user_id,
-                            "user_email": user_email,
-                        },
-                        "memory_count": memory_count,
+                event_data = {
+                    "memories": created_memory_ids or [],
+                    "conversation": {
                         "conversation_id": conversation_id,
+                        "client_id": client_id,
+                        "user_id": user_id,
+                        "user_email": user_email,
                     },
-                    metadata={
-                        "processing_time": processing_time,
-                        "memory_provider": memory_provider,
-                    },
-                    description=f"conversation={conversation_id[:12]}, memories={memory_count}",
+                    "memory_count": memory_count,
+                    "conversation_id": conversation_id,
+                }
+                event_metadata = {
+                    "processing_time": processing_time,
+                    "memory_provider": memory_provider,
+                }
+                description = (
+                    f"conversation={conversation_id[:12]}, memories={memory_count}"
                 )
+                if memory_space_id:
+                    await dispatch_or_defer_space_event(
+                        event=PluginEvent.MEMORY_PROCESSED,
+                        user_id=user_id,
+                        memory_space_id=memory_space_id,
+                        source_kind="conversation",
+                        source_id=conversation_id,
+                        data=event_data,
+                        metadata=event_metadata,
+                        description=description,
+                    )
+                else:
+                    await dispatch_plugin_event(
+                        event=PluginEvent.MEMORY_PROCESSED,
+                        user_id=user_id,
+                        data=event_data,
+                        metadata=event_metadata,
+                        description=description,
+                    )
             except Exception as e:
                 logger.warning(f"⚠️ Error triggering memory-level plugins: {e}")
 
@@ -466,12 +543,32 @@ async def process_memory_job(
                 ),
                 "processing_time": processing_time,
             }
+            if (
+                memory_space_id
+                and conversation_model.memory_review_state == "extracting"
+            ):
+                conversation_model.memory_review_state = "extracted"
+                conversation_model.memory_review_error = None
+                await conversation_model.save()
             set_trace_io(output=result)
             return result
         else:
             # Memory extraction failed
+            if (
+                memory_space_id
+                and conversation_model.memory_review_state == "extracting"
+            ):
+                conversation_model.memory_review_state = "failed"
+                conversation_model.memory_review_error = (
+                    "Memory extraction returned failure"
+                )
+                await conversation_model.save()
             return {"success": False, "error": "Memory extraction returned failure"}
     else:
+        if memory_space_id and conversation_model.memory_review_state == "extracting":
+            conversation_model.memory_review_state = "failed"
+            conversation_model.memory_review_error = "Memory service returned no result"
+            await conversation_model.save()
         return {"success": False, "error": "Memory service returned False"}
 
 
@@ -506,6 +603,7 @@ async def _process_speaker_diff_update(
         Tuple of (success, memory_ids) matching ``add_memory`` return type
     """
     active_version = conversation_model.active_transcript
+    memory_space_id = getattr(conversation_model, "memory_space_id", None)
 
     if not active_version:
         logger.warning(
@@ -519,6 +617,8 @@ async def _process_speaker_diff_update(
             user_id,
             user_email,
             allow_update=True,
+            memory_space_id=memory_space_id,
+            admitted_space_write=True,
         )
 
     # Find the source (previous) transcript version from metadata
@@ -536,6 +636,8 @@ async def _process_speaker_diff_update(
             user_id,
             user_email,
             allow_update=True,
+            memory_space_id=memory_space_id,
+            admitted_space_write=True,
         )
 
     # Find the source version's segments
@@ -557,6 +659,8 @@ async def _process_speaker_diff_update(
             user_id,
             user_email,
             allow_update=True,
+            memory_space_id=memory_space_id,
+            admitted_space_write=True,
         )
 
     # Compute the speaker diff
@@ -577,6 +681,8 @@ async def _process_speaker_diff_update(
             user_id,
             user_email,
             allow_update=True,
+            memory_space_id=memory_space_id,
+            admitted_space_write=True,
         )
 
     # Build the previous transcript for context
@@ -601,6 +707,8 @@ async def _process_speaker_diff_update(
         user_email=user_email,
         transcript_diff=transcript_diff,
         previous_transcript=previous_transcript,
+        memory_space_id=memory_space_id,
+        admitted_space_write=True,
     )
 
 

@@ -39,11 +39,8 @@ STALE_CLIENT_AGE_SECS = max(WS_IDLE_TIMEOUT_SECS * 3, 300)
 
 async def _reap_stale_clients() -> int:
     """Force-clean clients that have been silent past STALE_CLIENT_AGE_SECS."""
-    # Lazy import to avoid a circular import at module load (websocket_controller
-    # imports heavily from the rest of the backend).
-    from advanced_omi_backend.controllers.websocket_controller import (
-        cleanup_client_state,
-    )
+    # Lazy import avoids the capture lifecycle -> client manager import cycle.
+    from advanced_omi_backend.controllers.capture_lifecycle import cleanup_client_state
 
     manager = get_client_manager()
     now = time.time()

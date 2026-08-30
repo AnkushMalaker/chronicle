@@ -17,6 +17,7 @@ from advanced_omi_backend.services.memory.agent import (
 from advanced_omi_backend.services.memory.agent import pi_agent
 from advanced_omi_backend.services.memory.agent.memory_agent import (
     MAX_TOOL_ROUNDS,
+    MemoryAgent,
     MemoryAgentResult,
     search_vault,
 )
@@ -69,6 +70,42 @@ class _Operation:
 
 
 @pytest.mark.asyncio
+async def test_direct_memory_writer_receives_selected_images_as_pixels(
+    tmp_path, monkeypatch
+):
+    captured = {}
+
+    async def prompt(*_args, **_kwargs):
+        return "record carefully"
+
+    async def chat(messages, **_kwargs):
+        captured["messages"] = messages
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(tool_calls=None, content="done"),
+                    finish_reason="stop",
+                )
+            ],
+            usage=None,
+        )
+
+    monkeypatch.setattr(memory_agent_module, "_get_prompt", prompt)
+    monkeypatch.setattr(memory_agent_module, "async_chat_with_tools", chat)
+
+    await MemoryAgent(tmp_path).run(
+        "I am showing the notebook now.",
+        "conversation-1",
+        images=[("rainbow.png", b"real-pixel-bytes")],
+    )
+
+    content = captured["messages"][1]["content"]
+    assert content[0]["type"] == "text"
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+@pytest.mark.asyncio
 async def test_tool_chat_uses_configured_fallback_on_context_overflow(monkeypatch):
     request = httpx.Request("POST", "http://local.test/v1/chat/completions")
     response = httpx.Response(400, request=request)
@@ -113,27 +150,26 @@ async def test_tool_chat_falls_back_when_latency_sensitive_primary_never_returns
     fallback_calls = _Completions(result=expected)
     primary = _Operation(primary_calls, "local")
     fallback = _Operation(fallback_calls, "fallback")
-    resolved_default_types = []
+    resolved_operations = []
 
-    def get_operation(_name, *, default_model_type="llm"):
-        resolved_default_types.append(default_model_type)
+    def get_operation(name):
+        resolved_operations.append(name)
         return primary
 
     registry = SimpleNamespace(
         get_llm_operation=get_operation,
-        get_fallback_llm_operation=lambda _name, primary, default_model_type: fallback,
+        get_fallback_llm_operation=lambda _name, primary: fallback,
     )
     monkeypatch.setattr(llm_client, "get_models_registry", lambda: registry)
 
     result = await llm_client.async_chat_with_tools(
         [{"role": "user", "content": "find paneer"}],
         operation="plugin_assistant",
-        default_model_type="fast_llm",
         timeout_seconds=0.01,
     )
 
     assert result is expected
-    assert resolved_default_types == ["fast_llm"]
+    assert resolved_operations == ["plugin_assistant"]
     assert primary_calls.calls == 1
     assert fallback_calls.calls == 1
 

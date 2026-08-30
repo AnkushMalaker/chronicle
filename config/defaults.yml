@@ -114,6 +114,22 @@ models:
       max_tokens: 2000
     model_output: json
 
+  - name: openrouter-qwen3.8-27b
+    description: Qwen3.8 27B multimodal model via OpenRouter
+    model_type: llm
+    model_provider: openrouter
+    api_family: openai
+    thinking: false
+    capabilities: [vision]
+    model_name: qwen/qwen3.8-27b
+    model_url: https://openrouter.ai/api/v1
+    api_key: ${oc.env:OPENROUTER_API_KEY,''}
+    context_window: 1000000
+    model_params:
+      temperature: 0.0
+      max_tokens: 8192
+    model_output: json
+
   - name: gemma4-llm
     description: Gemma 4 E2B-it (unified model, reuses ASR service)
     model_type: llm
@@ -549,7 +565,7 @@ models:
     model_type: stt_stream
     model_provider: smallest
     api_family: websocket
-    model_url: wss://api.smallest.ai/waves/v1/pulse/get_text
+    model_url: wss://api.smallest.ai/waves/v1/stt/live
     api_key: ${oc.env:SMALLEST_API_KEY,''}
     capabilities:
       - word_timestamps
@@ -557,6 +573,7 @@ models:
     operations:
       auth_prefix: Bearer
       query:
+        model: pulse
         # hi natively covers Hindi-English code-switching (see stt-smallest note)
         language: hi
         encoding: linear16
@@ -566,7 +583,7 @@ models:
         sentence_timestamps: 'true'
       end:
         message:
-          type: finalize
+          type: close_stream
       expect:
         interim_type: ''
         final_type: ''
@@ -618,15 +635,16 @@ memory:
       # above draws on a non-default bucket. Empty uses the account's default view.
       limit_id: ""
     pi:
-      # Chronicle model-registry entry. The adapter resolves its provider, upstream
-      # model id, base URL, and API key, then writes an isolated Pi models.json.
-      model: qwen3.8-llm
+      # Model selection comes from llm_operations and defaults. The adapter resolves
+      # that route into a provider, upstream model id, URL, and isolated models.json.
       timeout_seconds: 900
       context_window: 98304
       # Keep most of the window for Pi's system prompt, tool schemas, transcript,
       # and multi-round tool results. The local Qwen setup serves the 98K profile.
       max_tokens: 4096
-      thinking: high
+      # For local Qwen, every non-off level keeps enable_thinking=true; effort labels
+      # are not enforced by llama.cpp. Tool-directed memory writes need thinking off.
+      thinking: off
   # Private agent-owned state learned from Pi's inference traces. This is stored
   # outside the semantic vault: active AGENTS.md guidance is injected once per run;
   # generated skill/scripts remain inert candidates; AGENTS.md candidates require
@@ -726,6 +744,7 @@ llm_operations:
   # by default: the validated Qwen profile ran with thinking disabled, while `none`
   # normalizes safely to the lowest supported effort for OpenAI reasoning models.
   memory_write:
+    model: openrouter-qwen3.8-27b
     # Vault writes are durable state transitions, not creative generation. Exact-input
     # replays showed temperature 1.0 split one concept into duplicate Topics in 2/3
     # runs; temperature 0 reduced that spread. Deterministic gates remain authoritative.
@@ -752,10 +771,23 @@ llm_operations:
     temperature: 0.3
     reasoning_effort: none
     max_tokens: 2048
+  timeline_merge:
+    temperature: 0.0
+    reasoning_effort: low
+    max_tokens: 4096
+    response_format: json
+  # Whole-day visual second pass. It proposes semantic merges for human review and
+  # never mutates episode rows itself.
+  timeline_consolidation:
+    model: openrouter-qwen3.8-27b
+    temperature: 0.0
+    reasoning_effort: none
+    max_tokens: 8192
   detailed_summary:
     temperature: 0.3
+    reasoning_effort: none
     # Reasoning models spend completion tokens on reasoning before any output;
-    # long transcripts overflow small model-level caps and return empty content.
+    # this extraction task needs visible prose, not hidden thinking.
     max_tokens: 8000
   entity_extraction:
     temperature: 0.1
@@ -800,6 +832,12 @@ backend:
     provider: deepgram  # or parakeet
     api_key: ${oc.env:DEEPGRAM_API_KEY,''}
     base_url: https://api.deepgram.com
+    # Maximum audio duration sent in one synchronous batch request. Providers may
+    # set a lower ceiling without changing their model definition/cache fingerprint.
+    batch_chunk_seconds: 3600
+    batch_chunk_seconds_by_provider:
+      # Pulse sessions are capped at ten minutes; leave one minute of headroom.
+      smallest: 540
     # Transcription job timeout in seconds (how long to wait for batch transcription)
     job_timeout_seconds: 900
     # When enabled, automatically re-transcribe every streaming conversation with the batch provider
@@ -811,7 +849,7 @@ backend:
   # provider when available (falls back to pyannote otherwise);
   # "pyannote" always re-diarizes via the speaker service
   diarization:
-    diarization_source: provider
+    diarization_source: pyannote
     similarity_threshold: 0.5
     # Preserve short interjections and their transcript words. Cluster identity uses
     # pooled long excerpts; display fragmentation is reduced after projection.
@@ -991,11 +1029,11 @@ cron_jobs:
     description: "Assemble uploaded device audio into speech-driven conversations"
     enabled: true
     schedule: "*/2 * * * *"
-  episode_memory:
-    description: "Record a settled day's timeline episodes into the memory vault"
+  episode_memory_review:
+    description: "Generate potential memory from reviewed timeline episodes"
     enabled: true
-    # Cheap to run and a no-op until a past day has settled, so an hourly tick just
-    # means a completed day is recorded soon after it stops changing.
+    # Cheap to run and a no-op until a person finalizes a day's episode account.
+    # Only the oldest reviewed day may generate against the accepted vault.
     schedule: "20 * * * *"
   episode_thumbnails:
     description: "Give timeline episodes a representative frame from their own interval"
@@ -1036,8 +1074,19 @@ cron_jobs:
     # so a tight cadence re-does the same work and reshuffles episode ids each time.
     # Analysis is also available on demand from the Timeline page.
     schedule: "0 */4 * * *"
+  timeline_consolidation_prefetch:
+    description: "Keep grouping suggestions ready ahead of the Timeline review cursor"
+    enabled: true
+    schedule: "*/5 * * * *"
 
 timeline:
+  consolidation:
+    # Pre-generate visual grouping proposals after episode publication. The selected
+    # model remains configurable under Settings > AI Model Settings.
+    pregenerate: true
+    # Keep this many oldest reviewable days supplied with grouping suggestions.
+    prefetch_days: 5
+    timeout_seconds: 300
   # Window size is a capacity knob, not a semantic one — the prompt treats windows as
   # coverage units that must never become episode boundaries. It sets how many files
   # one agent pass must read: 20min/3overlap put a full day at 85 windows, which never

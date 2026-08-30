@@ -8,12 +8,15 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Sequence
 
+import openai
 from omegaconf import OmegaConf
 from rq import get_current_job
 from rq.exceptions import NoSuchJobError
@@ -41,7 +44,9 @@ from advanced_omi_backend.observability.otel_setup import (
 )
 from advanced_omi_backend.plugins.events import PluginEvent
 from advanced_omi_backend.services.audio_claims import (
+    AudioClaimError,
     apply_audio_ranges,
+    capture_clock_offset_for_ranges,
     claim_capture_window,
     clip_audio_ranges,
     merge_audio_ranges,
@@ -60,6 +65,7 @@ from advanced_omi_backend.services.device_context import (
 )
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.plugin_service import (
+    dispatch_or_defer_space_event,
     dispatch_plugin_event,
     get_plugin_router,
 )
@@ -475,6 +481,7 @@ class ConversationState:
     session_id: str = ""
     user_id: str = ""
     client_id: str = ""
+    memory_space_id: str = ""
     start_time: float = 0.0
     last_result_count: int = 0
     timeout_triggered: bool = False
@@ -484,6 +491,8 @@ class ConversationState:
     end_reason: str = "unknown"
     live_version_created: bool = False
     last_live_write_time: float = 0.0
+    capture_clock_offset_seconds: Optional[float] = None
+    last_live_clock_warning_time: float = 0.0
 
 
 @dataclass
@@ -685,9 +694,23 @@ async def _initialize_conversation(
     conversation_id = conversation.conversation_id
     if not await store.set_active_conversation(session_id, conversation_id):
         active_id = await store.get_active_conversation_id(session_id)
-        raise RuntimeError(
-            f"Session {session_id} cannot activate conversation {conversation_id}; "
-            f"status is not active or {active_id!r} is already open"
+        session_view = await store.read(session_id)
+        terminal_after_final_result = bool(
+            session_view is not None
+            and session_view.status
+            in (SessionStatus.FINALIZING, SessionStatus.FINISHED)
+            and active_id in (None, conversation_id)
+        )
+        if not terminal_after_final_result:
+            raise RuntimeError(
+                f"Session {session_id} cannot activate conversation {conversation_id}; "
+                f"status is not active or {active_id!r} is already open"
+            )
+        logger.info(
+            "Session %s became %s before final speech materialization; "
+            "continuing without an active Conversation pointer",
+            session_id,
+            session_view.status.value,
         )
 
     if materialized.created:
@@ -958,93 +981,155 @@ async def _monitor_conversation_loop(
                         )
                         state.last_result_count = current_count
 
-                        # Update live transcript in MongoDB (throttled to every 5s)
+                        # Live consumers use the Conversation audio clock too.  Do
+                        # not publish raw capture-session timestamps while waiting
+                        # for persistence to prove the exact sample-clock origin.
+                        now_live = time.time()
+                        live_segments = None
+                        live_clock_metadata = None
                         try:
-                            now_live = time.time()
-                            if not state.live_version_created:
-                                provider = combined.get("provider", "deepgram")
-                                await _create_live_transcript_version(
-                                    conversation_id=state.conversation_id,
-                                    combined=combined,
-                                    validated_segments=validated_segments,
-                                    provider=provider,
-                                )
-                                state.live_version_created = True
-                                state.last_live_write_time = now_live
-                                publish_sse_event(
-                                    state.user_id,
-                                    "transcript.live",
-                                    {
-                                        "conversation_id": state.conversation_id,
-                                        "segments": validated_segments,
-                                        "transcript": combined.get("text", ""),
-                                        "word_count": combined.get("word_count", 0),
-                                    },
-                                )
-                            elif now_live - state.last_live_write_time >= 5.0:
-                                await _update_live_transcript(
-                                    conversation_id=state.conversation_id,
-                                    combined=combined,
-                                    validated_segments=validated_segments,
-                                )
-                                state.last_live_write_time = now_live
-                                publish_sse_event(
-                                    state.user_id,
-                                    "transcript.live",
-                                    {
-                                        "conversation_id": state.conversation_id,
-                                        "segments": validated_segments,
-                                        "transcript": combined.get("text", ""),
-                                        "word_count": combined.get("word_count", 0),
-                                    },
-                                )
-                        except Exception as e:
-                            logger.warning(f"⚠️ Error updating live transcript: {e}")
-
-                        # Dispatch transcript.streaming plugin events
-                        try:
-                            plugin_router = get_plugin_router()
-                            if plugin_router:
-                                transcript_text = combined.get("text", "")
-                                if transcript_text:
-                                    plugin_data = {
-                                        "transcript": transcript_text,
-                                        "segment_id": f"{state.session_id}_{current_count}",
-                                        "conversation_id": state.conversation_id,
-                                        "segments": validated_segments,
-                                        "word_count": speech_analysis.get(
-                                            "word_count", 0
-                                        ),
-                                    }
-                                    logger.info(
-                                        f"🔌 DISPATCH: transcript.streaming event "
-                                        f"(conversation={state.conversation_id[:12]}, "
-                                        f"segment_id={state.session_id}_{current_count})"
-                                    )
-                                    plugin_results = await plugin_router.dispatch_event(
-                                        event=PluginEvent.TRANSCRIPT_STREAMING,
-                                        user_id=state.user_id,
-                                        data=plugin_data,
-                                        metadata={"client_id": state.client_id},
-                                    )
-                                    logger.info(
-                                        f"🔌 RESULT: transcript.streaming dispatched to "
-                                        f"{len(plugin_results) if plugin_results else 0} plugins"
-                                    )
-                                    if plugin_results:
-                                        for result in plugin_results:
-                                            if result.message:
-                                                logger.info(
-                                                    f"  Plugin: {result.message}"
-                                                )
-                                            if not result.should_continue:
-                                                logger.info(
-                                                    f"  Plugin stopped normal processing"
-                                                )
-                        except Exception as e:
-                            logger.warning(
-                                f"⚠️ Error triggering transcript-level plugins: {e}"
+                            capture_clock_offset_seconds = (
+                                await _resolve_live_capture_clock_offset(state)
                             )
+                            live_segments = deepcopy(validated_segments)
+                            _rebase_timestamps_to_conversation_start(
+                                [],
+                                live_segments,
+                                capture_clock_offset_seconds=(
+                                    capture_clock_offset_seconds
+                                ),
+                            )
+                            live_clock_metadata = _streaming_clock_metadata(
+                                state.session_id,
+                                timestamp_clock="conversation",
+                                timestamp_rebase_seconds=(capture_clock_offset_seconds),
+                            )
+                        # Timed live output must fail closed when the persisted
+                        # capture prefix cannot prove the clock transform.
+                        except Exception as e:  # noqa: BLE001
+                            if now_live - state.last_live_clock_warning_time >= 30.0:
+                                logger.warning(
+                                    "Live transcript clock unresolved for %s; "
+                                    "withholding timed Mongo/SSE/plugin projection: %s",
+                                    state.conversation_id[:12],
+                                    e,
+                                )
+                                state.last_live_clock_warning_time = now_live
+
+                        # Update live transcript in MongoDB (throttled to every 5s).
+                        if (
+                            live_segments is not None
+                            and live_clock_metadata is not None
+                            and not state.memory_space_id
+                        ):
+                            try:
+                                capture_clock_offset_seconds = float(
+                                    live_clock_metadata["timestamp_rebase_seconds"]
+                                )
+                                provider = combined.get("provider") or "unknown"
+                                if not state.live_version_created:
+                                    await _create_live_transcript_version(
+                                        conversation_id=state.conversation_id,
+                                        combined=combined,
+                                        validated_segments=live_segments,
+                                        provider=provider,
+                                        capture_session_id=state.session_id,
+                                        capture_clock_offset_seconds=(
+                                            capture_clock_offset_seconds
+                                        ),
+                                    )
+                                    state.live_version_created = True
+                                    state.last_live_write_time = now_live
+                                    publish_sse_event(
+                                        state.user_id,
+                                        "transcript.live",
+                                        {
+                                            "conversation_id": state.conversation_id,
+                                            "segments": live_segments,
+                                            "transcript": combined.get("text", ""),
+                                            "word_count": combined.get("word_count", 0),
+                                            **live_clock_metadata,
+                                        },
+                                    )
+                                elif now_live - state.last_live_write_time >= 5.0:
+                                    await _update_live_transcript(
+                                        conversation_id=state.conversation_id,
+                                        combined=combined,
+                                        validated_segments=live_segments,
+                                        capture_session_id=state.session_id,
+                                        capture_clock_offset_seconds=(
+                                            capture_clock_offset_seconds
+                                        ),
+                                    )
+                                    state.last_live_write_time = now_live
+                                    publish_sse_event(
+                                        state.user_id,
+                                        "transcript.live",
+                                        {
+                                            "conversation_id": state.conversation_id,
+                                            "segments": live_segments,
+                                            "transcript": combined.get("text", ""),
+                                            "word_count": combined.get("word_count", 0),
+                                            **live_clock_metadata,
+                                        },
+                                    )
+                            except Exception as e:
+                                logger.warning(
+                                    f"⚠️ Error updating live transcript: {e}"
+                                )
+
+                        # Dispatch transcript.streaming plugin events only after the
+                        # same conversation-clock projection succeeds.
+                        if (
+                            live_segments is not None
+                            and live_clock_metadata is not None
+                        ):
+                            try:
+                                plugin_router = get_plugin_router()
+                                if plugin_router:
+                                    transcript_text = combined.get("text", "")
+                                    if transcript_text:
+                                        plugin_data = {
+                                            "transcript": transcript_text,
+                                            "segment_id": f"{state.session_id}_{current_count}",
+                                            "conversation_id": state.conversation_id,
+                                            "segments": live_segments,
+                                            "word_count": speech_analysis.get(
+                                                "word_count", 0
+                                            ),
+                                            **live_clock_metadata,
+                                        }
+                                        logger.info(
+                                            f"🔌 DISPATCH: transcript.streaming event "
+                                            f"(conversation={state.conversation_id[:12]}, "
+                                            f"segment_id={state.session_id}_{current_count})"
+                                        )
+                                        plugin_results = (
+                                            await plugin_router.dispatch_event(
+                                                event=PluginEvent.TRANSCRIPT_STREAMING,
+                                                user_id=state.user_id,
+                                                data=plugin_data,
+                                                metadata={"client_id": state.client_id},
+                                            )
+                                        )
+                                        logger.info(
+                                            f"🔌 RESULT: transcript.streaming dispatched to "
+                                            f"{len(plugin_results) if plugin_results else 0} plugins"
+                                        )
+                                        if plugin_results:
+                                            for result in plugin_results:
+                                                if result.message:
+                                                    logger.info(
+                                                        f"  Plugin: {result.message}"
+                                                    )
+                                                if not result.should_continue:
+                                                    logger.info(
+                                                        f"  Plugin stopped normal processing"
+                                                    )
+                            except Exception as e:
+                                logger.warning(
+                                    f"⚠️ Error triggering transcript-level plugins: {e}"
+                                )
 
             # --- Housekeeping (runs on timeout or after processing) ---
             current_time = time.time()
@@ -1153,6 +1238,9 @@ async def _create_live_transcript_version(
     combined: dict,
     validated_segments: list,
     provider: str,
+    *,
+    capture_session_id: str,
+    capture_clock_offset_seconds: float,
 ) -> None:
     """Create the initial live-v0 transcript version via Beanie update.
 
@@ -1187,6 +1275,11 @@ async def _create_live_transcript_version(
         "metadata": {
             "source": "live_streaming",
             "word_count": combined.get("word_count", 0),
+            **_streaming_clock_metadata(
+                capture_session_id,
+                timestamp_clock="conversation",
+                timestamp_rebase_seconds=capture_clock_offset_seconds,
+            ),
         },
     }
 
@@ -1209,6 +1302,9 @@ async def _update_live_transcript(
     conversation_id: str,
     combined: dict,
     validated_segments: list,
+    *,
+    capture_session_id: str,
+    capture_clock_offset_seconds: float,
 ) -> None:
     """Update the live-v0 transcript version in-place via positional $ operator.
 
@@ -1245,45 +1341,41 @@ async def _update_live_transcript(
                 "transcript_versions.$.metadata.word_count": combined.get(
                     "word_count", 0
                 ),
+                "transcript_versions.$.metadata.source_timestamp_clock": (
+                    "capture_session"
+                ),
+                "transcript_versions.$.metadata.timestamp_clock": "conversation",
+                "transcript_versions.$.metadata.timestamp_rebase_seconds": (
+                    capture_clock_offset_seconds
+                ),
+                "transcript_versions.$.metadata.capture_session_id": (
+                    capture_session_id
+                ),
             }
         },
     )
 
 
 def _rebase_timestamps_to_conversation_start(
-    words_data: list, segments_data: list
+    words_data: list,
+    segments_data: list,
+    *,
+    capture_clock_offset_seconds: float,
 ) -> None:
-    """Re-base streaming word/segment timestamps to the conversation's own start.
+    """Shift capture-clock timestamps onto the conversation's audio clock.
 
-    Streaming-provider timestamps are relative to the long-lived provider WebSocket
-    session, which spans EVERY conversation in this WS connection (the audio stream
-    and provider stream are per-connection, not per-conversation, and never reset at
-    conversation boundaries). So a conversation opened late in a session gets word
-    and segment timestamps far past its own audio length — e.g. 785s into a 338s
-    conversation — which breaks alignment with the per-conversation WAV (which is
-    always 0-based) and makes playback/speech-region overlays nonsensical.
+    The provider WebSocket spans every conversation in one capture session, so its
+    timestamps use the session's cumulative PCM-duration clock.  The caller resolves
+    the exact number of audio seconds before this Conversation's first claimed
+    sample.  Never infer that origin from the earliest word: doing so erases real
+    leading silence/pre-roll and puts ASR words on a different clock from Pyannote.
 
-    Each conversation's transcript should be 0-based, like its WAV. We shift every
-    word/segment so the earliest one starts at 0. Mutates the lists in place. A
-    normal single-conversation session already starts near 0, so the shift there is
-    at most the brief pre-speech lead-in (negligible); the drift case is what this
-    corrects.
+    Mutates both lists in place.
     """
-    starts = []
-    for w in words_data:
-        if isinstance(w.get("start"), (int, float)):
-            starts.append(w["start"])
-    for s in segments_data:
-        if isinstance(s.get("start"), (int, float)):
-            starts.append(s["start"])
-        for sw in s.get("words", []) or []:
-            if isinstance(sw.get("start"), (int, float)):
-                starts.append(sw["start"])
-
-    if not starts:
-        return
-    base = min(starts)
-    if base <= 0:
+    base = float(capture_clock_offset_seconds)
+    if not math.isfinite(base) or base < 0:
+        raise ValueError("capture_clock_offset_seconds must be finite and non-negative")
+    if base == 0:
         return
 
     def _shift(item: dict) -> None:
@@ -1297,6 +1389,55 @@ def _rebase_timestamps_to_conversation_start(
         _shift(s)
         for sw in s.get("words", []) or []:
             _shift(sw)
+
+
+def _streaming_clock_metadata(
+    capture_session_id: str,
+    *,
+    timestamp_clock: str,
+    timestamp_rebase_seconds: float,
+) -> dict[str, Any]:
+    """Describe the source and projected clocks on a streaming transcript."""
+    return {
+        "source_timestamp_clock": "capture_session",
+        "timestamp_clock": timestamp_clock,
+        "timestamp_rebase_seconds": float(timestamp_rebase_seconds),
+        "capture_session_id": capture_session_id,
+    }
+
+
+async def _resolve_live_capture_clock_offset(state: ConversationState) -> float:
+    """Resolve and cache the live Conversation's exact capture-clock origin.
+
+    A detected Conversation has no durable range claim until finalization.  Build a
+    temporary claim over the audio persisted so far, using the same claim builder as
+    finalization, and do not expose timed live data until the persisted prefix proves
+    the provider-to-Conversation transform.
+    """
+    if state.capture_clock_offset_seconds is not None:
+        return state.capture_clock_offset_seconds
+
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == state.conversation_id
+    )
+    if conversation is None:
+        raise AudioClaimError(
+            f"Conversation {state.conversation_id} disappeared before live projection"
+        )
+
+    ranges = list(conversation.audio_ranges or [])
+    if not ranges:
+        started_at = conversation.started_at
+        if started_at is None:
+            raise AudioClaimError(
+                f"Conversation {state.conversation_id} has no semantic start"
+            )
+        ended_at = datetime.now(timezone.utc)
+        ranges = await claim_capture_window(state.session_id, started_at, ended_at)
+
+    offset = await capture_clock_offset_for_ranges(state.session_id, ranges)
+    state.capture_clock_offset_seconds = offset
+    return offset
 
 
 async def _save_streaming_transcript(
@@ -1344,12 +1485,35 @@ async def _save_streaming_transcript(
     transcript_text = final_transcript.get("text", "")
     words_data = final_transcript.get("words", [])  # All words from aggregator
 
-    # Re-base provider timestamps to this conversation's own start so they align with
-    # the per-conversation WAV (0-based). Without this, conversations opened late in a
-    # long-lived WS session carry session-relative timestamps past their own length.
-    # Mutates words_data and the segments list (same object reused below) in place.
+    # Provider timestamps use the capture session's cumulative audio-duration clock.
+    # Resolve the Conversation's origin on that same clock from its immutable chunk
+    # claim.  Wall time is not interchangeable here because capture ranges can contain
+    # real gaps or overlaps.  An audio-less salvage has no WAV/claim to align against,
+    # so its capture-session timestamps are preserved rather than inventing an origin.
+    capture_clock_offset_seconds = 0.0
+    timestamp_clock = "capture_session"
+    if conversation.audio_ranges:
+        capture_clock_offset_seconds = await capture_clock_offset_for_ranges(
+            session_id, conversation.audio_ranges
+        )
+        timestamp_clock = "conversation"
+    else:
+        logger.warning(
+            "Conversation %s has no audio claim; preserving capture-session "
+            "transcript timestamps",
+            conversation_id[:12],
+        )
+    timestamp_metadata = _streaming_clock_metadata(
+        session_id,
+        timestamp_clock=timestamp_clock,
+        timestamp_rebase_seconds=capture_clock_offset_seconds,
+    )
+
+    # Mutates words_data and the segments list (the same objects are reused below).
     _rebase_timestamps_to_conversation_start(
-        words_data, final_transcript.get("segments", [])
+        words_data,
+        final_transcript.get("segments", []),
+        capture_clock_offset_seconds=capture_clock_offset_seconds,
     )
 
     # Convert words to Word objects (including per-word speaker labels if present)
@@ -1435,33 +1599,39 @@ async def _save_streaming_transcript(
             "mode": mode,
             "chunk_count": final_transcript.get("chunk_count", 0),
             "word_count": len(words),
+            **timestamp_metadata,
             "provider_capabilities": {"diarization": provider_diarized},
         },
         set_as_active=True,
     )
     version.diarization_source = diarization_source
 
-    transcript_artifact = await persist_transcript_artifact(
-        user_id=str(conversation.user_id),
-        audio_ranges=conversation.audio_ranges,
-        retry_key=f"streaming-transcription:{conversation_id}:{version_id}",
-        provider=provider,
-        model=model,
-        transcript=transcript_text,
-        words=words_data,
-        segments=segments_data,
-        raw_response={
-            "source": "streaming",
-            "mode": mode,
-            "chunk_count": final_transcript.get("chunk_count", 0),
-        },
-    )
-    version.metadata["transcript_artifact_id"] = transcript_artifact.artifact_id
+    transcript_artifact_ids: list[str] = []
+    if conversation.audio_ranges:
+        transcript_artifact = await persist_transcript_artifact(
+            user_id=str(conversation.user_id),
+            audio_ranges=conversation.audio_ranges,
+            retry_key=f"streaming-transcription:{conversation_id}:{version_id}",
+            provider=provider,
+            model=model,
+            transcript=transcript_text,
+            words=words_data,
+            segments=segments_data,
+            raw_response={
+                "source": "streaming",
+                "mode": mode,
+                "chunk_count": final_transcript.get("chunk_count", 0),
+                **timestamp_metadata,
+            },
+        )
+        transcript_artifact_ids = [transcript_artifact.artifact_id]
+        version.metadata["transcript_artifact_id"] = transcript_artifact.artifact_id
+        version.metadata["transcript_artifact_ids"] = transcript_artifact_ids
     await persist_conversation_revision(
         conversation,
         version,
         retry_key=f"streaming-projection:{conversation_id}:{version_id}",
-        transcript_artifact_ids=[transcript_artifact.artifact_id],
+        transcript_artifact_ids=transcript_artifact_ids,
     )
 
     # Save conversation with streaming transcript
@@ -1487,6 +1657,7 @@ async def _enqueue_post_processing(
     client_id: str,
     version_id: str,
     end_reason: str,
+    memory_space_id: str | None = None,
 ) -> None:
     """Enqueue post-conversation processing jobs (speaker, memory, title, events).
 
@@ -1535,6 +1706,7 @@ async def _enqueue_post_processing(
             client_id=client_id,
             end_reason=end_reason,
             trigger=Conversation.ProcessingTrigger.LIVE_SESSION.value,
+            memory_space_id=memory_space_id,
         )
 
         logger.info(
@@ -1555,6 +1727,7 @@ async def _enqueue_post_processing(
             client_id=client_id,  # Pass client_id for UI tracking
             end_reason=end_reason,  # Pass the determined end_reason (websocket_disconnect, inactivity_timeout, etc.)
             trigger=Conversation.ProcessingTrigger.LIVE_SESSION.value,
+            memory_space_id=memory_space_id,
         )
 
         logger.info(
@@ -1622,11 +1795,15 @@ async def open_conversation_job(
 
     # Phase 2: Monitor conversation (polling loop)
     aggregator = TranscriptionResultsAggregator(redis_client)
+    session_store = SessionStore(redis_client)
+    read_session = getattr(session_store, "read", None)
+    session_view = await read_session(session_id) if read_session is not None else None
     state = ConversationState(
         conversation_id=conversation_id,
         session_id=session_id,
         user_id=user_id,
         client_id=client_id,
+        memory_space_id=(session_view.memory_space_id if session_view else ""),
         start_time=time.time(),
     )
 
@@ -1804,6 +1981,7 @@ async def open_conversation_job(
             client_id=client_id,
             version_id=version_id,
             end_reason=state.end_reason,
+            memory_space_id=state.memory_space_id or None,
         )
 
         # Cleanup and session restart
@@ -1851,7 +2029,10 @@ async def _get_summary_job_input(
     if not conversation:
         logger.error(f"Conversation {conversation_id} not found")
         return None, "", [], {"success": False, "error": "Conversation not found"}
-    if conversation.memory_excluded:
+    # Memory eligibility and recording metadata are separate concerns. Detected
+    # continuous-capture conversations deliberately opt out of per-conversation
+    # memory while remaining user-visible recordings that need titles/summaries.
+    if conversation.memory_excluded and conversation.data_purpose != "conversation":
         logger.info(
             f"Skipping {stage} generation for memory-excluded conversation "
             f"{conversation_id[:8]}"
@@ -1904,6 +2085,26 @@ def _publish_summary_update(conversation: Conversation) -> None:
     )
 
 
+def _provider_permission_result(conversation_id: str, stage: str) -> Dict[str, Any]:
+    """Finish a deterministic provider/config failure without spending RQ retries."""
+    result = {
+        "success": False,
+        "conversation_id": conversation_id,
+        "stage": stage,
+        "reason": "provider_permission_denied",
+        "retryable": False,
+    }
+    update_job_meta(**result)
+    set_trace_io(output=result)
+    logger.warning(
+        "Skipping %s for %s: provider denied the request; retry requires a "
+        "configuration or allowance change",
+        stage,
+        conversation_id,
+    )
+    return result
+
+
 @async_job(redis=True, beanie=True)
 @traced_job("title", pipeline_stage="title", gen_ai_operation="chat")
 async def generate_title_job(
@@ -1918,11 +2119,14 @@ async def generate_title_job(
         return early_result
     assert conversation is not None
 
-    title = await generate_conversation_title(
-        transcript_text,
-        segments=segments,
-        user_id=conversation.user_id,
-    )
+    try:
+        title = await generate_conversation_title(
+            transcript_text,
+            segments=segments,
+            user_id=conversation.user_id,
+        )
+    except openai.PermissionDeniedError:
+        return _provider_permission_result(conversation_id, "title")
     if title == TITLE_NOT_GENERATED or not title.strip():
         raise RuntimeError(
             f"Title generation returned the missing-title placeholder for {conversation_id}"
@@ -1962,11 +2166,14 @@ async def generate_short_summary_job(
         return early_result
     assert conversation is not None
 
-    summary = await generate_short_summary(
-        transcript_text,
-        segments=segments,
-        user_id=conversation.user_id,
-    )
+    try:
+        summary = await generate_short_summary(
+            transcript_text,
+            segments=segments,
+            user_id=conversation.user_id,
+        )
+    except openai.PermissionDeniedError:
+        return _provider_permission_result(conversation_id, "short_summary")
     conversation.summary = summary
     await conversation.save()
     _publish_summary_update(conversation)
@@ -2014,7 +2221,10 @@ async def generate_detailed_summary_job(
         try:
             memory_service = get_memory_service()
             memories = await memory_service.search_memories(
-                transcript_text, conversation.user_id, limit=10
+                transcript_text,
+                conversation.user_id,
+                limit=10,
+                memory_space_id=conversation.memory_space_id,
             )
             if memories:
                 memory_context = "\n".join(m.content for m in memories if m.content)
@@ -2026,11 +2236,14 @@ async def generate_detailed_summary_job(
     else:
         logger.info("Skipping vault retrieval for bulk timeline promotion")
 
-    detailed_summary = await generate_detailed_summary(
-        transcript_text,
-        segments=segments,
-        memory_context=memory_context,
-    )
+    try:
+        detailed_summary = await generate_detailed_summary(
+            transcript_text,
+            segments=segments,
+            memory_context=memory_context,
+        )
+    except openai.PermissionDeniedError:
+        return _provider_permission_result(conversation_id, "detailed_summary")
     conversation.detailed_summary = detailed_summary
     await conversation.save()
     _publish_summary_update(conversation)
@@ -2186,9 +2399,12 @@ async def dispatch_conversation_complete_event_job(
 
     # Prepare plugin event data (same format as open_conversation_job)
     try:
-        plugin_results = await dispatch_plugin_event(
+        plugin_results = await dispatch_or_defer_space_event(
             event=PluginEvent.CONVERSATION_COMPLETE,
             user_id=user_id,
+            memory_space_id=(conversation.memory_space_id if conversation else None),
+            source_kind="conversation",
+            source_id=conversation_id,
             data={
                 "conversation": {
                     "client_id": client_id,

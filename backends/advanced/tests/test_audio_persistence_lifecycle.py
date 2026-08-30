@@ -1,5 +1,6 @@
 """Lifecycle invariants for the session-scoped audio persistence worker."""
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -90,6 +91,10 @@ class _PersistedCapture:
     async def save(self):
         return None
 
+    async def set(self, updates):
+        for field, value in updates.items():
+            setattr(self, field, value)
+
 
 class _QueryField:
     def __eq__(self, value):
@@ -147,3 +152,62 @@ async def test_pointer_clear_immediately_before_finalization_does_not_create_pha
 
     assert result["total_mongo_chunks"] == 1
     assert redis.set_calls == []
+
+
+@pytest.mark.asyncio
+async def test_persistence_completion_preserves_concurrent_capture_finalization(
+    monkeypatch,
+):
+    """A stale worker document must not replace the producer's technical end time."""
+
+    redis = _RaceRedis()
+    producer_ended_at = datetime(2026, 8, 29, 3, 37, tzinfo=timezone.utc)
+    persisted = {
+        "status": "finalizing",
+        "ended_at": producer_ended_at,
+    }
+
+    class StaleCapture(_PersistedCapture):
+        async def save(self):
+            persisted.update(status=self.status, ended_at=self.ended_at)
+
+        async def set(self, updates):
+            persisted.update(updates)
+
+    class FakeCapture:
+        capture_session_id = _QueryField()
+        find_one = AsyncMock(return_value=StaleCapture())
+
+    class FakeAudioChunk:
+        source_stream = _QueryField()
+        source_first_message_id = _QueryField()
+        capture_session_id = _QueryField()
+        find_one = AsyncMock(return_value=None)
+        find = staticmethod(lambda *_args, **_kwargs: _EmptyFind())
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        async def insert(self):
+            return None
+
+    monkeypatch.setattr(audio_jobs, "SessionStore", _RaceSessionStore)
+    monkeypatch.setattr(audio_jobs, "AudioCaptureSession", FakeCapture)
+    monkeypatch.setattr(audio_jobs, "AudioChunkDocument", FakeAudioChunk)
+    monkeypatch.setattr(audio_jobs, "get_current_job", lambda: object())
+    monkeypatch.setattr(audio_jobs, "check_job_alive", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        audio_jobs, "encode_pcm_to_opus", AsyncMock(return_value=b"opus")
+    )
+
+    await audio_jobs.audio_streaming_persistence_job.__wrapped__(
+        "session-1",
+        "user-1",
+        "client-1",
+        redis_client=redis,
+    )
+
+    assert persisted == {
+        "status": "complete",
+        "ended_at": producer_ended_at,
+    }

@@ -1867,6 +1867,7 @@ async def split_conversation(
                     client_id=conversation.client_id,
                     end_reason="split",
                     skip_speaker_recognition=True,
+                    memory_space_id=child.memory_space_id,
                 )
             results.append(
                 {
@@ -2170,6 +2171,7 @@ async def merge_conversations(user: User, conversation_ids: List[str]):
                 client_id=merged.client_id,
                 end_reason="merge",
                 skip_speaker_recognition=True,
+                memory_space_id=merged.memory_space_id,
             )
 
         logger.info(

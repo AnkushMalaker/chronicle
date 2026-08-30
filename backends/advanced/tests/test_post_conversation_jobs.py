@@ -57,6 +57,49 @@ def test_post_conversation_jobs_can_skip_optional_screenpipe_work(monkeypatch):
     assert events[0][2]["jobs"] == ["event_dispatch"]
 
 
+def test_memory_spaces_wait_for_review_while_main_still_extracts(monkeypatch):
+    default_queue = RecordingQueue()
+    memory_queue = RecordingQueue()
+
+    monkeypatch.setattr(queue_controller, "default_queue", default_queue)
+    monkeypatch.setattr(queue_controller, "memory_queue", memory_queue)
+    monkeypatch.setattr(
+        queue_controller, "_clear_post_conversation_chain", lambda _id: []
+    )
+    monkeypatch.setattr(
+        queue_controller,
+        "get_service_config",
+        lambda service: {
+            "enabled": service == "memory.extraction",
+        },
+    )
+    monkeypatch.setattr(
+        queue_controller,
+        "post_conv_enqueue_kwargs",
+        lambda stage, meta, depends_on=None: {
+            "meta": {**meta, "failure_stage": stage},
+            "depends_on": depends_on,
+        },
+    )
+    monkeypatch.setattr(queue_controller, "publish_sse_event", lambda *args: None)
+
+    space_jobs = queue_controller.start_post_conversation_jobs(
+        conversation_id="space-conversation",
+        user_id="user-1",
+        memory_space_id="space-1",
+        skip_title_summary=True,
+    )
+    main_jobs = queue_controller.start_post_conversation_jobs(
+        conversation_id="main-conversation",
+        user_id="user-1",
+        skip_title_summary=True,
+    )
+
+    assert space_jobs["memory"] is None
+    assert main_jobs["memory"] == "memory_main-convers"
+    assert [job.id for job in memory_queue.jobs] == ["memory_main-convers"]
+
+
 def test_post_conversation_summary_bundle_has_independent_execution_timeouts(
     monkeypatch,
 ):

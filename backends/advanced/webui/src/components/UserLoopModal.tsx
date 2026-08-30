@@ -3,48 +3,7 @@ import { motion, AnimatePresence, PanInfo } from 'framer-motion'
 import { X, Check, Heart, HeartCrack, Pencil, Play, Pause } from 'lucide-react'
 import { api, BACKEND_URL } from '../services/api'
 import { getStorageKey } from '../utils/storage'
-
-type DiffToken = { text: string; type: 'equal' | 'added' | 'removed' }
-
-/** Simple word-level diff using LCS to highlight changes. */
-function computeWordDiff(original: string, corrected: string): { originalTokens: DiffToken[]; correctedTokens: DiffToken[] } {
-  const a = original.split(/(\s+)/)
-  const b = corrected.split(/(\s+)/)
-
-  // Build LCS table
-  const m = a.length, n = b.length
-  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0))
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1])
-    }
-  }
-
-  // Backtrack to get diff
-  const originalTokens: DiffToken[] = []
-  const correctedTokens: DiffToken[] = []
-  let i = m, j = n
-  const origReverse: DiffToken[] = []
-  const corrReverse: DiffToken[] = []
-
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) {
-      origReverse.push({ text: a[i - 1], type: 'equal' })
-      corrReverse.push({ text: b[j - 1], type: 'equal' })
-      i--; j--
-    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      corrReverse.push({ text: b[j - 1], type: 'added' })
-      j--
-    } else {
-      origReverse.push({ text: a[i - 1], type: 'removed' })
-      i--
-    }
-  }
-
-  originalTokens.push(...origReverse.reverse())
-  correctedTokens.push(...corrReverse.reverse())
-  return { originalTokens, correctedTokens }
-}
+import { computeWordDiff, WordDiff } from './ui'
 
 const AUTO_SHOW_KEY = 'userloop-auto-show'
 
@@ -387,13 +346,7 @@ export default function UserLoopModal() {
                   <div>
                     <div className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Original</div>
                     <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3 text-sm text-gray-800 dark:text-gray-200">
-                      {diff?.originalTokens.map((t, i) =>
-                        t.type === 'removed' ? (
-                          <span key={i} className="bg-red-200 dark:bg-red-700/50 text-red-800 dark:text-red-200 line-through rounded px-0.5">{t.text}</span>
-                        ) : (
-                          <span key={i}>{t.text}</span>
-                        )
-                      )}
+                      {diff && <WordDiff tokens={diff.beforeTokens} />}
                     </div>
                   </div>
                   <div>
@@ -431,13 +384,7 @@ export default function UserLoopModal() {
                       </div>
                     ) : (
                       <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-3 text-sm text-gray-800 dark:text-gray-200">
-                        {diff?.correctedTokens.map((t, i) =>
-                          t.type === 'added' ? (
-                            <span key={i} className="bg-green-200 dark:bg-green-700/50 text-green-800 dark:text-green-200 font-medium rounded px-0.5">{t.text}</span>
-                          ) : (
-                            <span key={i}>{t.text}</span>
-                          )
-                        )}
+                        {diff && <WordDiff tokens={diff.afterTokens} />}
                       </div>
                     )}
                   </div>

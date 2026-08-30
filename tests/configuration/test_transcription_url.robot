@@ -57,16 +57,16 @@ Url Parsing Removes Double Slashes
     Should Be Equal  ${parsed_invalid["netloc"]}  http:
     Should Not Be Equal  ${parsed_invalid["netloc"]}  host.docker.internal:8767
 
-Diarization Source Defaults To Provider
-    [Documentation]  Test that diarization_source defaults to provider (trust provider diarization, fall back to pyannote).
+Diarization Source Defaults To Pyannote
+    [Documentation]  Test that diarization_source defaults to pyannote (segment and identify on the neural timeline).
     ${diarization}=  Create Dictionary
     ${backend}=  Create Dictionary  diarization=${diarization}
     ${config_template}=  Create Dictionary  backend=${backend}
     ${env_vars}=  Create Dictionary
 
     ${resolved}=  Resolve Omega Config  ${config_template}  ${env_vars}
-    ${val}=  Evaluate  $resolved.get('backend', {}).get('diarization', {}).get('diarization_source', 'provider')
-    Should Be Equal  ${val}  provider
+    ${val}=  Evaluate  $resolved.get('backend', {}).get('diarization', {}).get('diarization_source', 'pyannote')
+    Should Be Equal  ${val}  pyannote
 
 Diarization Source Explicit Pyannote
     [Documentation]  Test that diarization_source can be set to pyannote (always re-diarize).

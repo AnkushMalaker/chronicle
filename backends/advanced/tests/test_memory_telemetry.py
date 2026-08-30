@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from advanced_omi_backend.observability import otel_setup
 from advanced_omi_backend.services.memory import telemetry
 from advanced_omi_backend.services.memory.agent import vault_tools
+from advanced_omi_backend.services.memory.agent.memory_agent import MemoryAgentResult
+from advanced_omi_backend.services.memory.base import DayWriteOutcome
+from advanced_omi_backend.services.memory.providers import chronicle
 
 
 class _Span:
@@ -179,6 +184,102 @@ def test_no_usage_emits_no_llm_span(monkeypatch):
         start_time_ns=1,
         end_time_ns=2,
     )
+
+
+@pytest.mark.asyncio
+async def test_day_trace_uses_namespaced_session_and_typed_source_ids(monkeypatch):
+    captured = {}
+
+    @contextmanager
+    def capture_span(name, *, attributes=None, parent_context=None):
+        captured["name"] = name
+        captured["attributes"] = dict(attributes or {})
+        yield _Span()
+
+    service = chronicle.MemoryService(
+        SimpleNamespace(write_agent_backend="direct", write_recovery_backend=None)
+    )
+    monkeypatch.setattr(chronicle, "memory_span", capture_span)
+    monkeypatch.setattr(service, "_ensure_initialized", AsyncMock())
+    monkeypatch.setattr(
+        service,
+        "_add_day_memory_agent",
+        AsyncMock(return_value=(DayWriteOutcome.COMPLETE, [])),
+    )
+
+    await service.add_day_memory(
+        "A sufficiently long day digest.",
+        "2026-08-06",
+        "user-one",
+        day_index_digest="A sufficiently long index digest.",
+        source_run_id="run-one",
+        source_episode_ids=["episode-one"],
+        source_conversation_ids=["conversation-one"],
+    )
+
+    attributes = captured["attributes"]
+    assert captured["name"] == "memory_write_day"
+    assert "gen_ai.conversation.id" not in attributes
+    assert attributes["session.id"] == ("timeline-day:user-one:2026-08-06:run-one")
+    assert attributes["langfuse.session.id"] == attributes["session.id"]
+    assert attributes["chronicle.memory.source_run_id"] == "run-one"
+    assert attributes["chronicle.memory.source_episode_ids"] == ["episode-one"]
+    assert attributes["chronicle.memory.source_conversation_ids"] == [
+        "conversation-one"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fallback_trace_exposes_reason_and_agent_path(tmp_path, monkeypatch):
+    captured = []
+
+    @contextmanager
+    def capture_span(name, *, attributes=None, parent_context=None):
+        span = _Span()
+        span.attributes.update(attributes or {})
+        captured.append((name, span))
+        yield span
+
+    class IncompleteAgent:
+        def __init__(self, _root):
+            pass
+
+        async def run(self, _transcript, conversation_id, **_kwargs):
+            return MemoryAgentResult(
+                conversation_id=conversation_id,
+                rounds=1,
+                touched=[],
+                summary="stopped",
+                truncated=True,
+            )
+
+    service = chronicle.MemoryService(
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend=None,
+            review_writes=False,
+        )
+    )
+    monkeypatch.setattr(chronicle, "memory_span", capture_span)
+    monkeypatch.setattr(chronicle, "record_event_sync", lambda **_event: None)
+
+    await service._run_agent_with_note_guarantee(
+        IncompleteAgent,
+        tmp_path,
+        "Speaker: preserve this source.",
+        "conversation-fallback-trace",
+        source_date="2026-08-18T10:00:00+00:00",
+    )
+
+    fallback_span = next(
+        span for name, span in captured if name == "memory_write.source_fallback"
+    )
+    assert fallback_span.attributes["chronicle.memory.primary_backend"] == "pi"
+    assert fallback_span.attributes["chronicle.memory.recovery_backend"] == "none"
+    assert fallback_span.attributes["chronicle.memory.fallback_reasons"] == [
+        "invalid_note",
+        "incomplete_agent",
+    ]
 
 
 def test_vault_tools_retain_attempt_across_dispatch_thread_boundary(

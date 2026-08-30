@@ -52,8 +52,7 @@ fi
 
 npm ci
 npm run typecheck
-npm run test:voice-protocol
-npm run test:phone-duplex
+npm run test:durable-audio-spool
 npm run check:theme
 npx --no-install expo config --type public --json >/dev/null
 npx --no-install expo-modules-autolinking verify --platform ios --verbose

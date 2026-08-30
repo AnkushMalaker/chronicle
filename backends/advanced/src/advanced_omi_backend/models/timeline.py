@@ -337,6 +337,10 @@ class TimelineEpisode(Document):
     # Human pinning, orthogonal to settlement. ``confirmed_fields`` lists the pinned
     # fields for both pipelines.
     pinned: bool = False
+    # Vault semantics are independent from Timeline visibility. ``auto`` keeps ordinary
+    # episodes eligible for semantic memory but treats ``media`` kinds as reference-only;
+    # ``remember`` is the person's explicit opt-in for media worth retaining.
+    memory_policy: Literal["auto", "reference", "remember"] = "auto"
     salience: Literal["background", "routine", "notable", "highlight"] = "routine"
     confidence: float = Field(ge=0, le=1)
     activity_mode: Literal["foreground", "background", "ambient", "idle"]
@@ -460,11 +464,13 @@ class DirtyEvidenceRange(Document):
 
 
 class EpisodeDispatchLatch(Document):
-    """Exactly-once latch for user-facing events per ``(episode_key, event_type)``.
+    """Exactly-once latch for a classified Timeline side effect.
 
-    ``conversation.complete`` and the per-conversation memory write fire on the first
-    settled conversational revision of an episode key; resettlement or supersession
-    finds the latch and does nothing.
+    ``conversation.complete`` uses the literal Episode key. ``memory.extraction`` uses
+    ``conversation:<conversation_id>`` because two Episodes may reference the same
+    source Conversation. The field name stays ``episode_key`` because this is an
+    internal active-development collection, but its invariant is a stable effect
+    subject key paired with ``event_type``.
     """
 
     user_id: str
@@ -484,6 +490,129 @@ class EpisodeDispatchLatch(Document):
             ),
             IndexModel([("user_id", ASCENDING), ("dispatched_at", DESCENDING)]),
         ]
+
+
+class PotentialMemoryChange(BaseModel):
+    """One vault mutation proposed by a reviewed Timeline day.
+
+    The full before/after text is durable review evidence. ``before_hash`` is also the
+    apply-time fence: a proposal is never merged into a note that changed after the
+    memory agent read it.
+    """
+
+    change_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    note_path: str = Field(min_length=1)
+    operation: Literal["create", "update", "delete"]
+    before_hash: Optional[str] = None
+    after_hash: Optional[str] = None
+    before_text: Optional[str] = None
+    after_text: Optional[str] = None
+    summary: str = ""
+    source_episode_keys: list[str] = Field(default_factory=list)
+
+
+class MemoryReviewProposal(Document):
+    """An isolated vault diff awaiting a person's decision.
+
+    Proposals never feed later days. The queue advances only after this row becomes a
+    terminal decision, so the next extraction always reads the real accepted vault.
+    """
+
+    proposal_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    local_date: date
+    timezone: str
+    timeline_run_id: str
+    vault_base_hash: Optional[str] = None
+    state: Literal[
+        "generating",
+        "pending",
+        "applying",
+        "applied",
+        "rejected",
+        "no_changes",
+        "stale",
+        "failed",
+    ] = "generating"
+    changes: list[PotentialMemoryChange] = Field(default_factory=list)
+    accepted_change_ids: list[str] = Field(default_factory=list)
+    rejected_change_ids: list[str] = Field(default_factory=list)
+    error: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    generated_at: Optional[datetime] = None
+    resolved_at: Optional[datetime] = None
+
+    class Settings:
+        name = "memory_review_proposals"
+        indexes = [
+            IndexModel([("proposal_id", ASCENDING)], unique=True),
+            IndexModel(
+                [
+                    ("user_id", ASCENDING),
+                    ("local_date", ASCENDING),
+                    ("timezone", ASCENDING),
+                    ("timeline_run_id", ASCENDING),
+                ],
+                unique=True,
+                name="memory_review_day_generation",
+            ),
+            IndexModel([("user_id", ASCENDING), ("state", ASCENDING)]),
+        ]
+
+
+class TimelineSemanticGroup(BaseModel):
+    """A person's accepted semantic relationship between distinct episodes.
+
+    The member episodes retain their own bounds and evidence claims.  ``started_at``
+    and ``ended_at`` are only the group's envelope; consumers must use the member
+    intervals when drawing time or calculating captured duration.
+    """
+
+    group_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    run_id: str
+    episode_ids: list[str] = Field(min_length=2)
+    episode_keys: list[str] = Field(min_length=2)
+    title: str = Field(min_length=1, max_length=160)
+    summary: str = Field(max_length=1200)
+    started_at: datetime
+    ended_at: datetime
+    suggestion_id: Optional[str] = None
+    reason: str = Field(default="", max_length=500)
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    model: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+
+    @model_validator(mode="after")
+    def validate_membership(self) -> "TimelineSemanticGroup":
+        if len(set(self.episode_ids)) != len(self.episode_ids):
+            raise ValueError("semantic group episode ids must be unique")
+        if len(set(self.episode_keys)) != len(self.episode_keys):
+            raise ValueError("semantic group episode keys must be unique")
+        if self.ended_at <= self.started_at:
+            raise ValueError("semantic group must have a positive envelope")
+        return self
+
+
+class TimelineReviewDecision(BaseModel):
+    """Append-only training evidence from one human Timeline action."""
+
+    decision_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    run_id: str
+    action: Literal[
+        "grouping_accept",
+        "grouping_reject",
+        "grouping_remove",
+        "episode_update",
+        "episode_split",
+        "episode_merge",
+        "episode_delete",
+    ]
+    episode_ids: list[str] = Field(default_factory=list)
+    suggestion_id: Optional[str] = None
+    model: Optional[str] = None
+    before: dict[str, Any] = Field(default_factory=dict)
+    after: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class TimelineDay(Document):
@@ -517,6 +646,41 @@ class TimelineDay(Document):
     # diagnostic rather than being re-attempted on every tick forever.
     memory_attempts: int = 0
     memory_error: Optional[str] = None
+    # Human review is the gate in front of semantic memory extraction. Episode
+    # generations may be computed independently, but only the oldest reviewed day may
+    # generate a proposal, and the queue advances only after that proposal is accepted
+    # or rejected against the live vault.
+    review_state: Literal[
+        "episodes_pending",
+        "memory_queued",
+        "memory_generating",
+        "memory_pending",
+        "memory_applying",
+        "finalized",
+        "failed",
+    ] = "episodes_pending"
+    review_run_id: Optional[str] = None
+    memory_review_proposal_id: Optional[str] = None
+    episodes_reviewed_at: Optional[datetime] = None
+    review_resolved_at: Optional[datetime] = None
+    review_outcome: Optional[Literal["applied", "rejected", "no_changes"]] = None
+    review_error: Optional[str] = None
+    # Disposable, run-fenced second opinion over the published episode set.
+    consolidation_state: Literal[
+        "", "queued", "generating", "ready", "resolved", "failed"
+    ] = ""
+    consolidation_run_id: Optional[str] = None
+    consolidation_model: Optional[str] = None
+    consolidation_suggestions: list[dict[str, Any]] = Field(default_factory=list)
+    consolidation_error: Optional[str] = None
+    consolidation_started_at: Optional[datetime] = None
+    consolidation_generated_at: Optional[datetime] = None
+    consolidation_resolved_at: Optional[datetime] = None
+    # Accepted groups are run-fenced semantic overlays. They never widen or replace an
+    # episode's time/evidence claim. Decisions persist across reanalysis so later
+    # prompt work has an exact proposed -> accepted/rejected/edit trail.
+    semantic_groups: list[TimelineSemanticGroup] = Field(default_factory=list)
+    review_decisions: list[TimelineReviewDecision] = Field(default_factory=list)
     revised_at: datetime = Field(default_factory=utcnow)
 
     class Settings:
@@ -534,5 +698,13 @@ class TimelineDay(Document):
             IndexModel(
                 [("memory_state", ASCENDING), ("local_date", ASCENDING)],
                 name="timeline_day_memory_state",
+            ),
+            IndexModel(
+                [
+                    ("user_id", ASCENDING),
+                    ("review_state", ASCENDING),
+                    ("local_date", ASCENDING),
+                ],
+                name="timeline_day_review_queue",
             ),
         ]

@@ -1,15 +1,22 @@
+import asyncio
+import json
 from datetime import datetime, timezone
 
 import pytest
 from google.protobuf import duration_pb2, timestamp_pb2
+from opuslib import Encoder
 
 from advanced_omi_backend.audio_contract.v2 import audio_pb2
 from advanced_omi_backend.audio_contract.v2.codec import (
     AudioProtocolV2Error,
+    RawOpusDecoder,
     parse_client_control_json,
     parse_media_envelope,
     serialize_client_control_json,
     serialize_media_envelope,
+)
+from advanced_omi_backend.controllers.audio_v2_controller import (
+    _subscribe_v2_transcripts,
 )
 
 pytestmark = pytest.mark.unit
@@ -29,6 +36,13 @@ def _spec() -> audio_pb2.AudioSpec:
         frame_duration=duration_pb2.Duration(nanos=20_000_000),
         bitrate_bps=24_000,
     )
+
+
+def test_raw_opus_decoder_accepts_three_byte_silence_packet():
+    packet = Encoder(16_000, 1, "audio").encode(bytes(640), 320)
+    assert len(packet) == 3
+
+    assert len(RawOpusDecoder().decode_packet(packet)) == 640
 
 
 def test_generated_control_json_round_trips_without_dictionary_contracts():
@@ -114,3 +128,85 @@ def test_schema_has_no_untyped_maps_any_or_struct():
                 "google.protobuf.Any",
                 "google.protobuf.Struct",
             }
+
+
+@pytest.mark.asyncio
+async def test_transcript_pubsub_is_forwarded_as_typed_bound_server_control():
+    class FakePubSub:
+        def __init__(self):
+            self.messages = asyncio.Queue()
+            self.subscribed = None
+
+        async def subscribe(self, channel):
+            self.subscribed = channel
+
+        async def get_message(self, **_kwargs):
+            return await self.messages.get()
+
+        async def unsubscribe(self, _channel):
+            pass
+
+        async def close(self):
+            pass
+
+    class FakeRedis:
+        def __init__(self, pubsub):
+            self._pubsub = pubsub
+
+        def pubsub(self):
+            return self._pubsub
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = asyncio.Queue()
+
+        async def send_text(self, value):
+            await self.sent.put(value)
+
+    binding = audio_pb2.CaptureBinding(
+        capture_session_id=audio_pb2.CaptureSessionId(value="capture-1"),
+        capture_epoch=0,
+    )
+    pubsub = FakePubSub()
+    websocket = FakeWebSocket()
+    subscribed = asyncio.Event()
+    task = asyncio.create_task(
+        _subscribe_v2_transcripts(
+            websocket=websocket,
+            redis_client=FakeRedis(pubsub),
+            binding=binding,
+            subscribed=subscribed,
+        )
+    )
+    await asyncio.wait_for(subscribed.wait(), timeout=1)
+    assert pubsub.subscribed == "transcription:interim:capture-1"
+
+    await pubsub.messages.put(
+        {
+            "type": "message",
+            "data": json.dumps(
+                {
+                    "text": "hello from the browser",
+                    "is_final": True,
+                    "confidence": 0.91,
+                    "speaker_name": "Ankush",
+                }
+            ),
+        }
+    )
+    raw = await asyncio.wait_for(websocket.sent.get(), timeout=1)
+    control = audio_pb2.ServerControl()
+    # Local import keeps this assertion's protobuf JSON helper scoped to the test.
+    from google.protobuf import json_format
+
+    json_format.Parse(raw, control)
+    assert control.WhichOneof("event") == "transcript_update"
+    assert control.transcript_update.binding == binding
+    assert control.transcript_update.text == "hello from the browser"
+    assert control.transcript_update.is_final is True
+    assert control.transcript_update.confidence == pytest.approx(0.91)
+    assert control.transcript_update.speaker_name == "Ankush"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

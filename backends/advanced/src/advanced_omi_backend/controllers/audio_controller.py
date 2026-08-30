@@ -106,7 +106,7 @@ async def materialize_and_process_audio_claim(
     external_source_type: str,
     data_purpose: str = "conversation",
     memory_excluded: bool = True,
-    memory_exclusion_reason: str = "continuous_capture",
+    memory_exclusion_reason: str | None = "continuous_capture",
     skip_memory_extraction: bool = True,
     skip_title_summary: bool = True,
 ) -> Conversation:
@@ -197,10 +197,11 @@ async def upload_and_process_audio_files(
     # Wall-clock time of the first sample. Continuous capture knows this (the source
     # chunks are timestamped); a plain file upload does not, and passes None.
     captured_at: datetime | None = None,
-    # Continuous capture wants speaker identification (so the timeline agent learns who
-    # spoke) but not per-session memory extraction or an LLM-generated title. The
-    # terminal event-dispatch job always runs — it owns end_reason/completed_at/status,
-    # and it already declines to fire plugins for memory-excluded conversations.
+    # Continuous capture can independently skip per-session memory extraction while
+    # retaining speaker identification and title/summary enrichment for user-visible
+    # detected conversations. The terminal event-dispatch job always runs — it owns
+    # end_reason/completed_at/status, and it already declines to fire plugins for
+    # memory-excluded conversations.
     skip_memory_extraction: bool = False,
     skip_title_summary: bool = False,
 ) -> dict:

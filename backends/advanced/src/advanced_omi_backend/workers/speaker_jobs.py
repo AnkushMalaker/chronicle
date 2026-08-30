@@ -642,6 +642,21 @@ def _merge_adjacent_projected_speech(
     return merged
 
 
+def _speaker_identification_mode(
+    *,
+    ran_pyannote_diarization: bool,
+    used_word_timeline_fallback: bool,
+    use_per_segment: bool,
+) -> str:
+    """Describe the identity decision that actually produced the projection."""
+
+    if used_word_timeline_fallback:
+        return "none"
+    if ran_pyannote_diarization:
+        return "cluster_centroid"
+    return "per_segment" if use_per_segment else "majority_vote"
+
+
 async def _compact_embedded_speaker_history(
     conversation: Conversation,
     *,
@@ -1320,7 +1335,7 @@ async def recognise_speakers_job(
     # - "pyannote": always re-diarize with pyannote (when word timestamps allow it)
     diarization_settings = get_diarization_settings()
     preferred_source = diarization_source_override or diarization_settings.get(
-        "diarization_source", "provider"
+        "diarization_source", "pyannote"
     )
     use_provider_diarization = provider_diarized and preferred_source == "provider"
 
@@ -1865,8 +1880,10 @@ async def recognise_speakers_job(
 
         sr_metadata = {
             "enabled": True,
-            "identification_mode": (
-                "per_segment" if use_per_segment else "majority_vote"
+            "identification_mode": _speaker_identification_mode(
+                ran_pyannote_diarization=ran_pyannote_diarization,
+                used_word_timeline_fallback=used_word_timeline_fallback,
+                use_per_segment=use_per_segment,
             ),
             "identified_speakers": list(identified_speakers),
             "speaker_count": len(identified_speakers),

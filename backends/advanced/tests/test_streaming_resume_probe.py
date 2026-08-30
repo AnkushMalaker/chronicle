@@ -29,6 +29,7 @@ import pytest
 from fakeredis import aioredis as fake_aioredis
 
 import advanced_omi_backend.services.transcription.streaming_consumer as sc_module
+from advanced_omi_backend.audio_contract.v2 import audio_pb2
 from advanced_omi_backend.services.audio_stream.session_store import SessionStore
 from advanced_omi_backend.services.transcription.streaming_consumer import (
     StreamingTranscriptionConsumer,
@@ -37,7 +38,7 @@ from advanced_omi_backend.services.transcription.streaming_consumer import (
 pytestmark = pytest.mark.unit
 
 SESSION_ID = "989f33-plugin-tes-b43abe11e4a640f58c7f2ca8eee2aa20"
-STREAM = f"audio:stream:{SESSION_ID}"
+STREAM = f"audio:v2:realtime:{SESSION_ID}"
 
 
 class _StubProvider:
@@ -62,10 +63,21 @@ async def _append_chunk(redis, *, age_seconds: float = 0.0, end_marker: bool = F
     the id, so an explicit id makes staleness deterministic without sleeping.
     """
     entry_id = f"{int((time.time() - age_seconds) * 1000)}-*"
-    fields = {b"audio_data": b"\x00" * 8000, b"session_id": SESSION_ID.encode()}
+    binding = audio_pb2.CaptureBinding(
+        capture_session_id=audio_pb2.CaptureSessionId(value=SESSION_ID)
+    )
+    event = audio_pb2.CaptureStreamEvent(
+        frame=audio_pb2.CanonicalPcmFrame(
+            binding=binding,
+            delivery_class=audio_pb2.DELIVERY_CLASS_LIVE,
+            pcm_s16le=b"\x00" * 8000,
+        )
+    )
     if end_marker:
-        fields = {b"audio_data": b"", b"end_marker": b"true", b"chunk_id": b"END"}
-    await redis.xadd(STREAM, fields, id=entry_id)
+        event = audio_pb2.CaptureStreamEvent(
+            ended=audio_pb2.CaptureStreamEnded(binding=binding)
+        )
+    await redis.xadd(STREAM, {b"event": event.SerializeToString()}, id=entry_id)
 
 
 async def _finalize_like_producer(redis, *, write_end_marker: bool = True):

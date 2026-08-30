@@ -11,13 +11,16 @@ Runtime: reuses Chronicle's existing provider-agnostic tool-calling primitive
 The loop mirrors the one already in ``chat_service`` tool mode.
 """
 
+import base64
 import json
 import logging
+import mimetypes
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from advanced_omi_backend.llm_client import async_chat_with_tools
 from advanced_omi_backend.prompt_registry import get_prompt_registry
@@ -145,6 +148,11 @@ thing as `<Title>.md` at the vault root. Create a new organic hub only through
   existing category/property over inventing a near-duplicate.
 - Use `list` properties (`["[[A]]", "[[B]]"]`) for anything that may hold more than one value.
 - Capture what was actually said; quote key facts verbatim; never invent.
+- Treat frontmatter properties as typed state. Preserve existing values unless the
+  evidence establishes a change. `created` is immutable. `updated` must be the later
+  of its existing value and the source date; never move it backward.
+- Distinguish durable facts from time-bound claims. Date and attribute claims whose
+  truth may change over time rather than presenting them as timeless facts.
 - `Unknown Speaker N` is a diarization placeholder, not a person. Never put it in
   `people:`, create a `People/Unknown Speaker N.md` note, or wikilink it.
 - Hermes is Chronicle's voice assistant/system, not a human. Link it as the recurring
@@ -298,6 +306,18 @@ the bounded episode summaries, entities, attributes, and role-labelled assertion
 - Update only the People, Topics, and other category notes the day touches, exactly as
   you would for a conversation: smallest edits, link profusely, never duplicate a fact
   the note already holds.
+- Every edit_note, edit_section, or write_note call MUST include source_episode_keys:
+  the exact episode_key value(s) that support that mutation. Cite only episodes that
+  support the durable fact being added. Chronicle records these links separately; do
+  not write episode keys or provenance links into the Markdown note.
+- Do not search or read `Conversations/` or other `Daily/` notes. They are provenance,
+  not an identity or topic index, and their large contents cannot add evidence beyond
+  this bounded digest. Search only semantic category notes such as People and Topics.
+  Pi still chooses which semantic notes and files are relevant.
+- Keep discovery bounded: use no more than twelve search/read calls for the whole day.
+  An unchanged result is final evidence, not a reason to repeat or slightly vary a
+  query. When that budget is spent, either make the smallest grounded edits and call
+  `verify_vault`, or call `verify_vault` without edits when nothing durable is new.
 - Be selective. Routine and background episodes usually deserve no durable
   People/Topic note of their own; record only what was genuinely new, decided, or
   learned. It is valid to make no edits after verifying the vault when the day adds no
@@ -326,6 +346,9 @@ the bounded episode summaries, entities, attributes, and role-labelled assertion
   `application_state`, and `assistant_generated` are NOT things the user said, did, or
   believes. Only `user_action`/`user_statement` support a fact about the user, and
   `third_party` a fact about someone else.
+- Reference-only media is omitted from this semantic digest entirely. A media episode
+  appears here only when the person explicitly chose to remember its content; even then,
+  remember the content itself, never recast its dialogue as the user's activity or belief.
 - An episode summary is an observation about the day, not a quote. Do not attribute it
   to a speaker."""
 
@@ -363,6 +386,12 @@ def build_write_task(
         f"duration_minutes: "
         f"{duration_minutes if duration_minutes is not None else 'unknown'}\n\n"
         f"source_title: {title or 'unknown'}\n\n"
+        f"Required source note: Conversations/{source_id}.md\n"
+        f"Work only on this exact Conversation note; never glob, audit, or read other "
+        f"Conversations/*.md files. If it already exists, read it first and surgically "
+        f"improve that note instead of creating or inspecting another Conversation. "
+        f"You still choose which relevant People/Topic/category notes to inspect or "
+        f"update.\n\n"
         f"Transcript (speaker-labelled):\n{transcript}"
         f"{guidance_block}"
     )
@@ -397,6 +426,7 @@ class MemoryAgentResult:
     # would otherwise read as a deliberate no-op. Qwen3.6 and DeepSeek V4 Pro both do
     # this — narrate the next tool call as prose instead of emitting it, ending the run.
     verified: bool = False
+    source_episode_keys_by_path: Dict[str, List[str]] = field(default_factory=dict)
 
 
 def _accumulate_response_usage(total: Dict[str, int], response: Any) -> None:
@@ -545,12 +575,16 @@ class MemoryAgent:
         vault_summary: str = "",
         guidance: str = "",
         record: str = "conversation",
+        images: Optional[List[Tuple[str, bytes]]] = None,
     ) -> MemoryAgentResult:
         date = date or datetime.now(timezone.utc).isoformat()
         self.tools.required_notes = required_notes(record, conversation_id)
         self.tools.forbidden_folders = forbidden_folders(record)
         self.tools.immutable_sections = immutable_sections(record)
         self.tools.allow_new_categories = allow_new_categories(record)
+        episode_keys = set(re.findall(r"(?m)^episode_key:\s*([^\s]+)\s*$", transcript))
+        self.tools.allowed_source_episode_keys = episode_keys
+        self.tools.require_source_episode_keys = record == "day" and bool(episode_keys)
         system_prompt = await _get_prompt(
             AGENT_SYSTEM_PROMPT_ID, DEFAULT_AGENT_SYSTEM_PROMPT, vault_summary
         )
@@ -564,9 +598,23 @@ class MemoryAgent:
             guidance=guidance,
             record=record,
         )
+        user_content: Any = task
+        if images:
+            user_content = [{"type": "text", "text": task}]
+            for filename, data in images:
+                content_type = mimetypes.guess_type(filename)[0] or "image/jpeg"
+                encoded = base64.b64encode(data).decode("ascii")
+                user_content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{content_type};base64,{encoded}",
+                        },
+                    }
+                )
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": task},
+            {"role": "user", "content": user_content},
         ]
 
         tool_calls = 0
@@ -622,6 +670,10 @@ class MemoryAgent:
                         removed=list(self.tools.removed),
                         errors=errors,
                         usage=usage,
+                        source_episode_keys_by_path={
+                            path: sorted(keys)
+                            for path, keys in self.tools.source_episode_keys_by_path.items()
+                        },
                         truncated=True,
                     )
                 logger.info(
@@ -641,6 +693,10 @@ class MemoryAgent:
                     removed=list(self.tools.removed),
                     errors=errors,
                     usage=usage,
+                    source_episode_keys_by_path={
+                        path: sorted(keys)
+                        for path, keys in self.tools.source_episode_keys_by_path.items()
+                    },
                 )
 
             messages.append(msg.model_dump())
@@ -694,6 +750,10 @@ class MemoryAgent:
                         removed=list(self.tools.removed),
                         errors=errors,
                         usage=usage,
+                        source_episode_keys_by_path={
+                            path: sorted(keys)
+                            for path, keys in self.tools.source_episode_keys_by_path.items()
+                        },
                         stalled=True,
                     )
             else:
@@ -714,6 +774,10 @@ class MemoryAgent:
             removed=list(self.tools.removed),
             errors=errors,
             usage=usage,
+            source_episode_keys_by_path={
+                path: sorted(keys)
+                for path, keys in self.tools.source_episode_keys_by_path.items()
+            },
             truncated=True,
         )
 

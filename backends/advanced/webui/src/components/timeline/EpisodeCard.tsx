@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { CheckCircle2, ChevronDown, ChevronRight, Clock3, Layers3 } from 'lucide-react'
 import { TimelineEpisode, timelineApi } from '../../services/api'
+import { episodeDisplayTitle } from './episodePresentation'
 
 function durationLabel(startedAt: string, endedAt: string) {
   const seconds = Math.max(0, Math.round((Date.parse(endedAt) - Date.parse(startedAt)) / 1000))
@@ -47,7 +48,7 @@ export default function EpisodeCard({ episode, nested = false }: { episode: Time
               to={`/timeline/${episode.episode_id}`}
               className="rounded outline-none hover:text-blue-700 focus-visible:ring-2 focus-visible:ring-blue-500 dark:hover:text-blue-400"
             >
-              {episode.title}
+              {episodeDisplayTitle(episode)}
             </Link>
           </h3>
         </div>

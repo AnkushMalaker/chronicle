@@ -11,20 +11,18 @@ from advanced_omi_backend.controllers import system_controller
 
 def _registry(*, api_family="openai", model_type="llm", url="http://llm.test/v1"):
     model = SimpleNamespace(
+        name="local-qwen",
         model_type=model_type,
         api_family=api_family,
         model_params={},
         context_window=None,
         resolved_url=lambda: url,
     )
-    return SimpleNamespace(
-        get_by_name=lambda name: model if name == "local-qwen" else None
-    )
+    operation = SimpleNamespace(model_def=model)
+    return SimpleNamespace(get_llm_operation=lambda _name: operation)
 
 
-def _pi_memory(
-    *, context_window=8192, max_tokens=2048, model="local-qwen", compat=None
-):
+def _pi_memory(*, context_window=8192, max_tokens=2048, compat=None):
     return {
         "provider": "chronicle",
         "agents": {
@@ -33,7 +31,6 @@ def _pi_memory(
         },
         "backends": {
             "pi": {
-                "model": model,
                 "context_window": context_window,
                 "max_tokens": max_tokens,
                 "thinking": "off",
@@ -82,7 +79,6 @@ def test_memory_config_semantics_validates_consecutive_pi_call_guard(monkeypatch
 @pytest.mark.parametrize(
     ("memory", "message"),
     [
-        (_pi_memory(model="missing"), "unknown registry model"),
         (
             _pi_memory(context_window=8192, max_tokens=7500),
             "leave at least 1024 tokens",
@@ -97,6 +93,15 @@ def test_memory_config_semantics_reject_invalid_pi(monkeypatch, memory, message)
     monkeypatch.setattr(system_controller, "get_models_registry", _registry)
 
     with pytest.raises(ValueError, match=message):
+        system_controller._validate_memory_mapping(memory)
+
+
+def test_memory_config_semantics_rejects_obsolete_pi_model_pin(monkeypatch):
+    monkeypatch.setattr(system_controller, "get_models_registry", _registry)
+    memory = _pi_memory()
+    memory["backends"]["pi"]["model"] = "local-qwen"
+
+    with pytest.raises(ValueError, match=r"memory\.backends\.pi\.model"):
         system_controller._validate_memory_mapping(memory)
 
 
@@ -316,6 +321,13 @@ async def test_llm_operations_preserve_reasoning_effort_on_get_and_save(monkeypa
         defaults={"llm": "local-qwen"},
         get_all_by_type=lambda _model_type: [],
         get_by_name=lambda name: object() if name == "local-qwen" else None,
+        explain_llm_operation=lambda _name: {
+            "model": "local-qwen",
+            "model_name": "upstream/local-qwen",
+            "provider": "llamacpp",
+            "role": None,
+            "source": "llm_operations.memory_write.model",
+        },
     )
     saved = {}
     events = []
@@ -346,6 +358,10 @@ async def test_llm_operations_preserve_reasoning_effort_on_get_and_save(monkeypa
     result = await system_controller.save_llm_operations(current["operations"])
 
     assert current["operations"]["memory_write"]["reasoning_effort"] == "off"
+    assert current["effective_routing"]["memory_write"]["model"] == "local-qwen"
+    assert current["effective_routing"]["memory_write"]["source"] == (
+        "llm_operations.memory_write.model"
+    )
     assert result["status"] == "success"
     assert result["requires_worker_restart"] is True
     assert events == ["memory", "chat", "workers"]

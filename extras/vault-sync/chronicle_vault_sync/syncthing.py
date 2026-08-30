@@ -294,6 +294,20 @@ class SyncthingManager:
         except httpx.HTTPError:
             return unknown
 
+    def set_folder_paused(self, folder_id: str, paused: bool) -> None:
+        """Freeze or resume one vault without stopping unrelated scoped folders."""
+        with self._client() as client:
+            response = client.get(f"/rest/config/folders/{folder_id}")
+            response.raise_for_status()
+            folder = response.json()
+            folder["paused"] = paused
+            response = client.put(f"/rest/config/folders/{folder_id}", json=folder)
+            response.raise_for_status()
+            if not paused:
+                client.post(
+                    "/rest/db/scan", params={"folder": folder_id}
+                ).raise_for_status()
+
     def collect_errors(self) -> List[str]:
         """Return detailed Syncthing-side errors (system + per-folder pull failures).
 

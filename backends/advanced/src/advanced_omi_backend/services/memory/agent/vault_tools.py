@@ -307,6 +307,11 @@ class VaultTools:
         self._trace_context = trace_context
         self._trace_attempt = current_memory_attempt()
         self.touched: set = set()  # vault-relative paths created/edited this run
+        # Day writes attach durable Timeline episode keys to each semantic mutation.
+        # This stays out of Markdown and follows the note into the review/audit UI.
+        self.allowed_source_episode_keys: set[str] = set()
+        self.require_source_episode_keys = False
+        self.source_episode_keys_by_path: Dict[str, set[str]] = {}
         self.verified = False  # whether the agent called verify_vault before finishing
         # Unlike ``touched``, this is monotonic: editing the same note twice must
         # still mark both tool observations as mutating.
@@ -1052,7 +1057,37 @@ class VaultTools:
                 span,
                 input={"arguments": text_payload(serialized_args)},
             )
+            source_keys: list[str] = []
+            if name in {"edit_note", "edit_section", "write_note"}:
+                raw_keys = args.get("source_episode_keys", [])
+                if not isinstance(raw_keys, list) or not all(
+                    isinstance(key, str) and key.strip() for key in raw_keys
+                ):
+                    raise VaultToolError(
+                        "source_episode_keys must be an array of episode_key strings."
+                    )
+                source_keys = list(dict.fromkeys(key.strip() for key in raw_keys))
+                unknown = set(source_keys) - self.allowed_source_episode_keys
+                if unknown:
+                    raise VaultToolError(
+                        "Unknown source_episode_keys: " + ", ".join(sorted(unknown))
+                    )
+                if self.require_source_episode_keys and not source_keys:
+                    raise VaultToolError(
+                        "Day mutations require source_episode_keys from the supplied "
+                        "episode_key fields."
+                    )
+            elif self.require_source_episode_keys and name == "rename_person":
+                raise VaultToolError(
+                    "rename_person is not available during a day write."
+                )
+
             result = self._dispatch(name, args)
+            if source_keys:
+                rel = self._resolve_ci(_safe_relpath(args["path"]))
+                self.source_episode_keys_by_path.setdefault(rel, set()).update(
+                    source_keys
+                )
             set_safe_span_attributes(
                 span,
                 {
@@ -1287,6 +1322,11 @@ _EDIT_TOOL = {
                         "required": ["old_text", "new_text"],
                     },
                 },
+                "source_episode_keys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "For day writes, exact episode_key values supporting this mutation.",
+                },
             },
             "required": ["path", "edits"],
         },
@@ -1324,6 +1364,11 @@ _EDIT_SECTION_TOOL = {
                     "type": "string",
                     "enum": ["append", "prepend", "replace"],
                 },
+                "source_episode_keys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "For day writes, exact episode_key values supporting this mutation.",
+                },
             },
             "required": ["path", "target", "text"],
         },
@@ -1343,6 +1388,11 @@ _WRITE_TOOL = {
                 "path": {"type": "string"},
                 "content": {"type": "string"},
                 "overwrite": {"type": "boolean"},
+                "source_episode_keys": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "For day writes, exact episode_key values supporting this mutation.",
+                },
             },
             "required": ["path", "content"],
         },

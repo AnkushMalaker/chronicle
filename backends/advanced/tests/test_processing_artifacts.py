@@ -102,6 +102,80 @@ async def test_diarization_artifact_persists_from_capture_claim_without_conversa
     insert.assert_awaited_once_with(artifact)
 
 
+@pytest.mark.asyncio
+async def test_transcript_artifact_clips_small_provider_overrun_to_audio_claim(
+    monkeypatch,
+):
+    """Provider frame rounding must not kill an otherwise valid Conversation."""
+    start = datetime(2026, 8, 30, 5, 28, tzinfo=timezone.utc)
+    audio_ranges = [_range("webui", "64b64b64b64b64b64b64b641", start, 56.548)]
+
+    class QueryField:
+        def __eq__(self, value):
+            return ("retry_key", value)
+
+    class StoredArtifact:
+        retry_key = QueryField()
+        find_one = AsyncMock(return_value=None)
+
+        def __init__(self, **values):
+            self.__dict__.update(values)
+            self.artifact_id = "artifact-1"
+
+        async def insert(self):
+            return None
+
+    monkeypatch.setattr(processing_artifacts, "TranscriptArtifact", StoredArtifact)
+
+    artifact = await processing_artifacts.persist_transcript_artifact(
+        user_id="user-1",
+        audio_ranges=audio_ranges,
+        retry_key="streaming-transcription:conversation-1:version-1",
+        provider="smallest",
+        model="pulse",
+        transcript="final word",
+        words=[{"word": "word", "start": 56.422, "end": 56.662}],
+        segments=[{"text": "final word", "start": 55.9, "end": 56.662}],
+    )
+
+    assert artifact.words[0].start_seconds == pytest.approx(56.422)
+    assert artifact.words[0].end_seconds == pytest.approx(56.548)
+    assert artifact.words[0].audio_spans[0].ended_at == start + timedelta(
+        seconds=56.548
+    )
+    assert artifact.utterances[0].end_seconds == pytest.approx(56.548)
+    # Immutable raw provider evidence remains available for audits and reprocessing.
+    assert artifact.raw_response["relative_words"][0]["end"] == pytest.approx(56.662)
+
+
+@pytest.mark.asyncio
+async def test_transcript_artifact_rejects_large_provider_overrun(monkeypatch):
+    start = datetime(2026, 8, 30, 5, 28, tzinfo=timezone.utc)
+    audio_ranges = [_range("webui", "64b64b64b64b64b64b64b641", start, 10)]
+
+    class QueryField:
+        def __eq__(self, value):
+            return ("retry_key", value)
+
+    class StoredArtifact:
+        retry_key = QueryField()
+        find_one = AsyncMock(return_value=None)
+
+    monkeypatch.setattr(processing_artifacts, "TranscriptArtifact", StoredArtifact)
+
+    with pytest.raises(ValueError, match="outside 10.0 seconds of audio"):
+        await processing_artifacts.persist_transcript_artifact(
+            user_id="user-1",
+            audio_ranges=audio_ranges,
+            retry_key="streaming-transcription:conversation-1:bad-version",
+            provider="smallest",
+            model="pulse",
+            transcript="impossible word",
+            words=[{"word": "word", "start": 10.8, "end": 11.0}],
+            segments=[],
+        )
+
+
 def test_presentation_interval_splits_across_overlapping_wall_clock_ranges():
     start = datetime(2026, 8, 12, 10, tzinfo=timezone.utc)
     ranges = [

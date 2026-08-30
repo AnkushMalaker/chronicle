@@ -1,4 +1,8 @@
-"""Reasoning parameter compatibility for versioned GPT-5 models."""
+"""Reasoning parameter compatibility for configured LLM operations."""
+
+from pathlib import Path
+
+from omegaconf import OmegaConf
 
 from advanced_omi_backend.model_registry import ModelDef, ResolvedLLMOperation
 
@@ -36,6 +40,23 @@ def test_openrouter_qualified_gpt_5_6_uses_reasoning_parameters():
     assert "temperature" not in params
 
 
+def test_openrouter_non_openai_model_receives_reasoning_off():
+    operation = ResolvedLLMOperation(
+        model_def=ModelDef(
+            name="qwen",
+            model_name="qwen/qwen3.8-27b",
+            model_type="llm",
+            model_provider="openrouter",
+            model_url="https://openrouter.ai/api/v1",
+        ),
+        temperature=0.0,
+        max_tokens=8192,
+        reasoning_effort="none",
+    )
+
+    assert operation.to_api_params()["extra_body"] == {"reasoning": {"effort": "none"}}
+
+
 def test_muse_sampling_and_reasoning_prompt_follow_model_card():
     operation = ResolvedLLMOperation(
         model_def=ModelDef(
@@ -71,3 +92,11 @@ def test_muse_sampling_and_reasoning_prompt_follow_model_card():
         }
     ]
     assert original == [{"role": "system", "content": "Use Chronicle tools."}]
+
+
+def test_detailed_summary_disables_local_model_thinking():
+    defaults = OmegaConf.load(
+        Path(__file__).resolve().parents[3] / "config" / "defaults.yml"
+    )
+
+    assert defaults.llm_operations.detailed_summary.reasoning_effort == "none"

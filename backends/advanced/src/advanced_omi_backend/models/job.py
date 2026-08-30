@@ -62,10 +62,16 @@ async def _ensure_beanie_initialized():
             )
             from advanced_omi_backend.models.manual_memory import ManualMemory
             from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
+            from advanced_omi_backend.models.memory_space import (
+                DeferredSpaceEvent,
+                MemorySpace,
+                SpaceMergeProposal,
+            )
             from advanced_omi_backend.models.timeline import (
                 AudioEvidenceSpan,
                 DirtyEvidenceRange,
                 EpisodeDispatchLatch,
+                MemoryReviewProposal,
                 TimelineAnalysisRun,
                 TimelineDay,
                 TimelineEpisode,
@@ -103,6 +109,9 @@ async def _ensure_beanie_initialized():
                     Annotation,
                     MemoryAuditEntry,
                     ManualMemory,
+                    MemorySpace,
+                    SpaceMergeProposal,
+                    DeferredSpaceEvent,
                     CaptureSource,
                     PairingCode,
                     DeviceInputItem,
@@ -113,6 +122,7 @@ async def _ensure_beanie_initialized():
                     TimelineDay,
                     DirtyEvidenceRange,
                     EpisodeDispatchLatch,
+                    MemoryReviewProposal,
                 ],
             )
 

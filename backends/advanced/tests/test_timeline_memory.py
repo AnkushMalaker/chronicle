@@ -1,11 +1,17 @@
 """Settled-day episode memory: digest budgeting and the write latch."""
 
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from advanced_omi_backend.models.timeline import TimelineAssertion, TimelineEvidenceRef
+from advanced_omi_backend.models.timeline import (
+    TimelineAssertion,
+    TimelineAudioRange,
+    TimelineEvidenceRef,
+    TimelineSemanticGroup,
+)
 from advanced_omi_backend.services.memory.base import DayWriteOutcome
 from advanced_omi_backend.services.timeline import memory as memory_module
 from advanced_omi_backend.services.timeline.memory import (
@@ -14,6 +20,7 @@ from advanced_omi_backend.services.timeline.memory import (
     build_day_digest,
     build_day_index_digest,
 )
+from advanced_omi_backend.services.timeline.projection import render_day_episode_index
 
 DAY = date(2026, 8, 6)
 ZONE = "Asia/Kolkata"
@@ -32,7 +39,10 @@ def make_episode(
     minutes: int = 30,
     related_conversation_ids: list[str] | None = None,
     evidence_conversation_id: str | None = None,
+    audio_conversation_ids: list[str] | None = None,
     assertions: list[TimelineAssertion] | None = None,
+    kind: str | None = None,
+    memory_policy: str = "auto",
 ) -> SimpleNamespace:
     started = datetime(2026, 8, 6, hour, 0, tzinfo=timezone.utc)
     refs = [
@@ -51,16 +61,18 @@ def make_episode(
     ]
     return SimpleNamespace(
         episode_id=episode_id,
+        episode_key=f"key-{episode_id}",
         run_id="run-one",
         user_id="user-one",
         local_date=DAY,
         timezone=ZONE,
         started_at=started,
         ended_at=started + timedelta(minutes=minutes),
-        kind="meeting" if conversational else "work",
+        kind=kind or ("meeting" if conversational else "work"),
         title=title,
         summary=summary,
         conversational=conversational,
+        memory_policy=memory_policy,
         salience=salience,
         confidence=0.9,
         activity_mode="foreground",
@@ -68,6 +80,20 @@ def make_episode(
         attributes={},
         evidence_refs=refs,
         related_conversation_ids=related_conversation_ids or [],
+        audio_ranges=(
+            [
+                TimelineAudioRange(
+                    capture_source_id="capture-one",
+                    time_basis="recorded",
+                    chunk_ids=[f"chunk-{episode_id}"],
+                    started_at=started,
+                    ended_at=started + timedelta(minutes=minutes),
+                    conversation_ids=list(audio_conversation_ids),
+                )
+            ]
+            if audio_conversation_ids
+            else []
+        ),
         assertions=assertions or [],
     )
 
@@ -82,6 +108,35 @@ def test_digest_never_copies_raw_transcript_evidence_into_the_vault_prompt():
 
     assert "RAW TRANSCRIPT" not in digest
     assert "transcript" not in digest.lower()
+    assert dropped == []
+
+
+def test_digest_renders_an_accepted_semantic_group_once_with_all_episode_keys():
+    first = make_episode(
+        "first", hour=9, title="Initial ASR check", summary="Checked live capture."
+    )
+    second = make_episode(
+        "second", hour=10, title="VibeVoice check", summary="Checked music detection."
+    )
+    group = TimelineSemanticGroup(
+        group_id="group-one",
+        run_id="run-one",
+        episode_ids=[first.episode_id, second.episode_id],
+        episode_keys=[first.episode_key, second.episode_key],
+        title="Live recording and ASR tests",
+        summary="Two tests of the same live recording setup.",
+        started_at=first.started_at,
+        ended_at=second.ended_at,
+    )
+
+    digest, dropped = build_day_digest(
+        [first, second], DAY, ZONE, semantic_groups=[group]
+    )
+
+    assert "1 reviewed semantic item(s) from 2 episode(s)" in digest
+    assert digest.count("### Semantic group") == 1
+    assert first.episode_key in digest
+    assert second.episode_key in digest
     assert dropped == []
 
 
@@ -117,6 +172,43 @@ def test_digest_records_assertion_role_and_confidence():
     # Role and confidence are what stop media dialogue being recorded as user fact.
     assert "media_content" in digest
     assert "0.40" in digest
+
+
+def test_media_is_reference_only_by_default_and_uses_neutral_daily_wording():
+    episode = make_episode(
+        "media",
+        hour=9,
+        kind="media",
+        title="Discussing a deal and doubts about fishing",
+        summary="People discuss whether a deal is truthful.",
+    )
+
+    semantic_digest, dropped = build_day_digest([episode], DAY, ZONE)
+    index_digest = build_day_index_digest([episode], DAY, ZONE)
+    rendered_index = render_day_episode_index(index_digest)
+
+    assert semantic_digest == ""
+    assert dropped == []
+    assert "Discussing a deal" not in index_digest
+    assert "Media: a deal and doubts about fishing" in rendered_index
+    assert "episode_key:key-media" in rendered_index
+
+
+def test_media_content_reaches_semantic_memory_only_after_explicit_opt_in():
+    episode = make_episode(
+        "media",
+        hour=9,
+        kind="media",
+        memory_policy="remember",
+        title="Watching a documentary about octopuses",
+        summary="The documentary explains octopus camouflage.",
+    )
+
+    digest, dropped = build_day_digest([episode], DAY, ZONE)
+
+    assert dropped == []
+    assert "Watching a documentary about octopuses" in digest
+    assert "The documentary explains octopus camouflage" in digest
 
 
 def test_digest_sheds_lowest_salience_first_and_never_the_conversation():
@@ -216,6 +308,28 @@ def test_day_index_keeps_every_range_when_semantic_digest_sheds_an_episode():
     assert "incidental incidental" not in index_digest
 
 
+def test_day_index_preserves_episode_and_authoritative_conversation_sources():
+    episode = make_episode(
+        "meeting",
+        hour=9,
+        conversational=True,
+        related_conversation_ids=["lineage-only"],
+        audio_conversation_ids=["canonical-conversation"],
+    )
+
+    semantic_digest, _ = build_day_digest([episode], DAY, ZONE)
+    index_digest = build_day_index_digest([episode], DAY, ZONE)
+    rendered_index = render_day_episode_index(index_digest)
+
+    for digest in (semantic_digest, index_digest):
+        assert "episode_key: key-meeting" in digest
+        assert "canonical-conversation" in digest
+        assert "lineage-only" in digest
+    assert "[[Conversations/canonical-conversation|source]]" in rendered_index
+    assert "[[Conversations/lineage-only|source]]" in rendered_index
+    assert "<!-- episode_key:key-meeting -->" in rendered_index
+
+
 def test_claim_query_excludes_terminal_states_and_exhausted_attempts():
     day = SimpleNamespace(
         user_id="user-one", local_date=DAY, timezone=ZONE, active_run_id="run-one"
@@ -234,6 +348,22 @@ def test_claim_query_excludes_terminal_states_and_exhausted_attempts():
     assert states[0]["memory_state"] == {"$in": ["", None]}
     assert states[1]["memory_state"] == "claimed"
     assert "$lt" in states[1]["memory_claimed_at"]
+
+
+def test_explicit_repair_claim_can_reclaim_partial_beyond_cron_attempt_budget():
+    day = SimpleNamespace(
+        user_id="user-one", local_date=DAY, timezone=ZONE, active_run_id="run-one"
+    )
+
+    query = _claim_query(
+        day,
+        claim_timeout_minutes=120,
+        max_attempts=3,
+        retry_partial=True,
+    )
+
+    assert "memory_attempts" not in query
+    assert query["$or"][0]["memory_state"] == {"$in": ["", None, "partial"]}
 
 
 def test_digest_keeps_all_episode_summaries_when_they_fit():
@@ -374,6 +504,128 @@ async def test_write_day_records_a_truncated_run_as_partial(monkeypatch):
     # complete write either.
     assert recorded["memory_state"] == "partial"
     assert recorded["vault_paths"] == ["Daily/2026-08-06.md"]
+
+
+@pytest.mark.asyncio
+async def test_write_day_forwards_typed_timeline_source_identity(monkeypatch):
+    episode = make_episode(
+        "episode-one",
+        hour=9,
+        related_conversation_ids=["lineage-one"],
+        audio_conversation_ids=["canonical-one"],
+    )
+    captured: dict = {}
+
+    class FakeCollection:
+        async def update_many(self, _query, _update):
+            return None
+
+    class FakeEpisodeCursor:
+        async def to_list(self):
+            return [episode]
+
+    class FakeEpisodeModel:
+        run_id = "run_id"
+        user_id = "user_id"
+
+        @staticmethod
+        def find(*_args, **_kwargs):
+            return FakeEpisodeCursor()
+
+        @staticmethod
+        def get_pymongo_collection():
+            return FakeCollection()
+
+    @contextmanager
+    def capture_provenance(*args, **kwargs):
+        captured["provenance"] = (args, kwargs)
+        yield
+
+    async def add_day_memory(*_args, **kwargs):
+        captured["provider"] = kwargs
+        return DayWriteOutcome.COMPLETE, []
+
+    monkeypatch.setattr(memory_module, "TimelineEpisode", FakeEpisodeModel)
+    monkeypatch.setattr(memory_module, "memory_provenance", capture_provenance)
+    monkeypatch.setattr(
+        memory_module,
+        "get_memory_service",
+        lambda: SimpleNamespace(add_day_memory=add_day_memory),
+    )
+
+    day = SimpleNamespace(
+        user_id="user-one", local_date=DAY, timezone=ZONE, active_run_id="run-one"
+    )
+    assert await memory_module._write_day(day) == "no_changes"
+
+    _args, provenance = captured["provenance"]
+    assert provenance["source_type"] == "timeline_day"
+    assert provenance["source_id"] == DAY.isoformat()
+    assert provenance["source_episode_ids"] == ("episode-one",)
+    assert provenance["source_conversation_ids"] == (
+        "canonical-one",
+        "lineage-one",
+    )
+    assert provenance["timeline_run_id"] == "run-one"
+    assert captured["provider"]["source_run_id"] == "run-one"
+    assert captured["provider"]["source_episode_ids"] == ["episode-one"]
+    assert captured["provider"]["source_conversation_ids"] == [
+        "canonical-one",
+        "lineage-one",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_write_day_sends_default_media_only_to_the_reference_index(monkeypatch):
+    episode = make_episode(
+        "media",
+        hour=9,
+        kind="media",
+        title="Discussing a deal and doubts about fishing",
+        summary="People discuss whether a deal is truthful.",
+    )
+    captured: dict = {}
+
+    class FakeCollection:
+        async def update_many(self, _query, _update):
+            return None
+
+    class FakeEpisodeCursor:
+        async def to_list(self):
+            return [episode]
+
+    class FakeEpisodeModel:
+        run_id = "run_id"
+        user_id = "user_id"
+
+        @staticmethod
+        def find(*_args, **_kwargs):
+            return FakeEpisodeCursor()
+
+        @staticmethod
+        def get_pymongo_collection():
+            return FakeCollection()
+
+    async def add_day_memory(day_digest, *_args, **kwargs):
+        captured["semantic"] = day_digest
+        captured["index"] = kwargs["day_index_digest"]
+        return DayWriteOutcome.COMPLETE, ["Daily/2026-08-06.md"]
+
+    monkeypatch.setattr(memory_module, "TimelineEpisode", FakeEpisodeModel)
+    monkeypatch.setattr(
+        memory_module,
+        "get_memory_service",
+        lambda: SimpleNamespace(add_day_memory=add_day_memory),
+    )
+
+    day = SimpleNamespace(
+        user_id="user-one", local_date=DAY, timezone=ZONE, active_run_id="run-one"
+    )
+
+    assert await memory_module._write_day(day) == "written"
+    assert captured["semantic"] == ""
+    assert "Discussing a deal" not in captured["index"]
+    assert "Media: a deal and doubts about fishing" in captured["index"]
 
 
 def _returns(value):

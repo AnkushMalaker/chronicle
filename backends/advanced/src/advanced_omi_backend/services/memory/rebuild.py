@@ -35,10 +35,13 @@ from advanced_omi_backend.services.timeline.timezone import canonical_timezone
 from advanced_omi_backend.workers.memory_jobs import enqueue_memory_processing
 from advanced_omi_backend.workers.speaker_jobs import recognise_speakers_job
 
-VAULT_ROOTS = ("conversation_docs", "memory_md")
+# Chronicle has one Markdown memory source of truth. Keep this as a tuple because
+# backup manifests record roots as a list, but do not add compatibility roots here:
+# rebuild must never seed or write a shadow vault.
+VAULT_ROOTS = ("conversation_docs",)
 MEMORY_REBUILD_JOB_TIMEOUT = 7200
-# One day = a segmentation agent run over the day's evidence plus a vault write agent
-# run; both are slow, and a dense day escalates the segmentation effort.
+# One day can require a long segmentation-agent run, and a dense day escalates the
+# reasoning effort. Memory review happens later and has its own queue lifecycle.
 TIMELINE_REBUILD_JOB_TIMEOUT = 10800
 
 logger = logging.getLogger(__name__)
@@ -339,10 +342,10 @@ async def _clear_timeline_state(database: Any, user_ids: tuple[str, ...]) -> int
 def _enqueue_timeline_rebuild(
     day: RebuildDay, *, run_id: str, sequence: int, depends_on: Optional[str]
 ) -> Job:
-    """Analysis and the day write, chained one day at a time.
+    """Episode analysis chained one day at a time.
 
-    Serial by construction: the write agent takes the per-user vault lock, so parallel
-    days would queue on it anyway while holding worker slots.
+    These jobs never write memory. They prepare the chronological episode ledger; the
+    human-gated review queue later proposes one day's vault diff at a time.
     """
 
     # Imported here to break the circular import: the job module reaches back into
@@ -633,8 +636,8 @@ async def execute_memory_rebuild(
                 user_speaker_jobs.append(job.id)
             speaker_jobs.extend(user_speaker_jobs)
 
-            # Days do not: each one's write takes this user's vault lock, and the first
-            # cannot start until every recording it might cite has been diarized.
+            # Days do not: the requested rebuild is intentionally chronological, and
+            # the first cannot start until every recording it might cite is diarized.
             dependency: Any = user_speaker_jobs or None
             for sequence, day in enumerate(by_user_days[user_id], start=1):
                 job = _enqueue_timeline_rebuild(

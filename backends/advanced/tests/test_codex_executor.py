@@ -220,6 +220,32 @@ async def test_run_derives_touched_and_removed_from_fs_diff(
 
 
 @pytest.mark.asyncio
+async def test_codex_writer_attaches_selected_images_to_initial_prompt(
+    tmp_path, monkeypatch, unlocked
+):
+    root = _seed_vault(tmp_path)
+    captured = {}
+    monkeypatch.setattr(
+        codex_agent, "codex_executor_available", lambda: (True, "/usr/bin/codex")
+    )
+
+    def capture_run(cmd, **kwargs):
+        image_path = cmd[cmd.index("--image") + 1]
+        captured["image"] = open(image_path, "rb").read()
+        return _fake_codex_run(root)(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", capture_run)
+
+    await CodexMemoryAgent(root).run(
+        "I am showing the notebook now.",
+        "conv1",
+        images=[("rainbow.jpg", b"selected-frame")],
+    )
+
+    assert captured["image"] == b"selected-frame"
+
+
+@pytest.mark.asyncio
 async def test_run_failure_is_truncated_with_errors(tmp_path, monkeypatch, unlocked):
     root = _seed_vault(tmp_path)
     monkeypatch.setattr(

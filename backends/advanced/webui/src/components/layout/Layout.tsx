@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link, useLocation, Outlet } from 'react-router-dom'
-import { Music, MessageSquare, MessageCircle, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network, Sparkles, ScrollText, AlertTriangle, Menu, X, CalendarDays, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
+import { Music, MessageSquare, MessageCircle, Users, Upload, Settings, LogOut, Sun, Moon, Shield, Radio, Layers, Puzzle, Zap, Activity, Network, Sparkles, ScrollText, AlertTriangle, Menu, X, CalendarDays, PanelLeftClose, PanelLeftOpen, BookOpen } from 'lucide-react'
 import { useAuth } from '../../contexts/AuthContext'
 import { useTheme } from '../../contexts/ThemeContext'
 import { useSSE, SSEStatus } from '../../hooks/useSSE'
@@ -58,6 +58,7 @@ export default function Layout() {
     { path: '/recordings', label: 'Recordings', icon: MessageSquare },
     { path: '/timeline', label: 'Timeline', icon: CalendarDays },
     { path: '/memory-ledger', label: 'Memory Ledger', icon: ScrollText },
+    { path: '/spaces', label: 'Memory Spaces', icon: BookOpen },
     { path: '/users', label: 'User Management', icon: Users },
 
     ...(isAdmin ? [
@@ -82,6 +83,7 @@ export default function Layout() {
         to={path}
         className={`flex items-center space-x-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
           location.pathname === path ||
+          (path === '/spaces' && location.pathname.startsWith('/spaces/')) ||
           (path === '/data-audit' && location.pathname === '/wakeword-lab')
             ? 'bg-blue-100 text-blue-900 dark:bg-blue-900 dark:text-blue-100'
             : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'

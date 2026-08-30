@@ -43,6 +43,15 @@ from .memory_jobs import enqueue_memory_processing, process_memory_job
 # Import from speaker_jobs
 from .speaker_jobs import check_enrolled_speakers_job, recognise_speakers_job
 
+# Import from timeline_jobs. Rebuild tooling enqueues this through the stable package
+# export because a long-running RQ worker may already have ``workers`` imported without
+# the ``timeline_jobs`` module attribute that RQ's dotted-path fallback expects.
+from .timeline_jobs import (
+    generate_timeline_consolidation_job,
+    rebuild_timeline_day_job,
+    record_timeline_day_memory_job,
+)
+
 # Import from transcription_jobs
 from .transcription_jobs import stream_speech_detection_job, transcribe_full_audio_job
 
@@ -59,6 +68,10 @@ __all__ = [
     # Memory jobs
     "process_memory_job",
     "enqueue_memory_processing",
+    # Timeline rebuild jobs
+    "rebuild_timeline_day_job",
+    "record_timeline_day_memory_job",
+    "generate_timeline_consolidation_job",
     # Queue utils
     "get_queue",
     "get_job_stats",

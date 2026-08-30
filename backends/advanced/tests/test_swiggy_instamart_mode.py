@@ -674,10 +674,10 @@ async def test_free_form_turn_uses_fast_bounded_agent_and_survives_hung_primary(
     )
     primary = _ToolChatOperation(_NeverToolCompletions(), "slow-local")
     fallback = _ToolChatOperation(_SearchToolCompletions(), "fast-fallback")
-    resolved_default_types = []
+    resolved_operations = []
 
-    def get_operation(_name, *, default_model_type="llm"):
-        resolved_default_types.append(default_model_type)
+    def get_operation(name):
+        resolved_operations.append(name)
         return primary
 
     registry = SimpleNamespace(
@@ -694,7 +694,7 @@ async def test_free_form_turn_uses_fast_bounded_agent_and_survives_hung_primary(
     assert result.phase == "shopping"
     assert result.plugin_state["candidates"][0]["spin_id"] == "milk-spin"
     assert [name for name, _ in fake.calls] == ["search_products"]
-    assert resolved_default_types == ["fast_llm"]
+    assert resolved_operations == ["plugin_assistant"]
 
 
 async def test_existing_cart_requires_explicit_keep_or_clear():

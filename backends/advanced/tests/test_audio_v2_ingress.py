@@ -13,9 +13,8 @@ pytestmark = pytest.mark.unit
 
 
 class Decoder:
-    def decode_packet(self, payload, *, strip_header):
+    def decode_packet(self, payload):
         assert payload == b"raw-opus"
-        assert strip_header is False
         return b"\x00\x00" * 320
 
 
@@ -57,6 +56,41 @@ def test_v2_start_preserves_noninteractive_source_native_provenance():
     assert provenance.processing_profile == "source_native"
     assert provenance.data_purpose == "annotation"
     assert provenance.effects.aec.reporting == "unreported"
+    assert provenance.memory_space_id is None
+
+
+def test_v2_start_preserves_typed_memory_space_id():
+    start = audio_pb2.StartCapture(
+        capture_epoch=0,
+        processing_profile=audio_pb2.PROCESSING_PROFILE_SOURCE_NATIVE,
+        data_purpose=audio_pb2.DATA_PURPOSE_NORMAL_CAPTURE,
+        delivery_class=audio_pb2.DELIVERY_CLASS_LIVE,
+        memory_space_id=audio_pb2.MemorySpaceId(
+            value="9f3523c8-af75-469d-995a-7179531f3fc8"
+        ),
+    )
+
+    provenance = audio_v2_controller._start_provenance(start)
+
+    assert provenance.memory_space_id == "9f3523c8-af75-469d-995a-7179531f3fc8"
+
+
+def test_v2_rejects_nonzero_source_native_epoch_at_protocol_boundary():
+    start = audio_pb2.StartCapture(
+        capture_epoch=1,
+        processing_profile=audio_pb2.PROCESSING_PROFILE_SOURCE_NATIVE,
+        data_purpose=audio_pb2.DATA_PURPOSE_NORMAL_CAPTURE,
+        delivery_class=audio_pb2.DELIVERY_CLASS_LIVE,
+        audio_spec=audio_pb2.AudioSpec(
+            codec=audio_pb2.AUDIO_CODEC_OPUS,
+            sample_rate_hz=16_000,
+            channel_count=1,
+            frame_duration=duration_pb2.Duration(nanos=20_000_000),
+        ),
+    )
+
+    with pytest.raises(AudioProtocolV2Error, match="source-native.*epoch zero"):
+        audio_v2_controller._start_provenance(start)
 
 
 async def test_v2_opus_decodes_once_then_crosses_realtime_and_durable_seams(

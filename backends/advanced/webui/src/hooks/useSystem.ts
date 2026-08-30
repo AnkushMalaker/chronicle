@@ -98,6 +98,17 @@ export function useMiscSettings() {
   })
 }
 
+export function useTimelineGroupingSettings() {
+  return useQuery({
+    queryKey: ['system', 'timelineGroupingSettings'],
+    queryFn: async () => {
+      const response = await systemApi.getTimelineGroupingSettings()
+      return response.data.status === 'success' ? response.data.settings : null
+    },
+    staleTime: 5 * 60_000,
+  })
+}
+
 export function useLLMOperations() {
   return useQuery({
     queryKey: ['system', 'llmOperations'],

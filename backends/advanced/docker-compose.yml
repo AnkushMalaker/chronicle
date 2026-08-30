@@ -220,8 +220,8 @@ services:
   # for HTTPS. compose-stack.md#webui-dev
   webui-dev:
     build:
-      context: ./webui
-      dockerfile: Dockerfile.dev
+      context: ../..
+      dockerfile: backends/advanced/webui/Dockerfile.dev
     ports:
       - "${WEBUI_DEV_PORT:-5173}:5173"
     environment:
@@ -229,13 +229,15 @@ services:
       - VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS:-localhost 127.0.0.1}
       - VITE_HMR_PORT=${VITE_HMR_PORT:-5173}
     volumes:
-      - ./webui/src:/app/src
-      - ./webui/public:/app/public
+      - ./webui/src:/workspace/backends/advanced/webui/src
+      - ../../contracts/audio/v2/typescript:/workspace/contracts/audio/v2/typescript:ro
+      - ./webui/public:/workspace/backends/advanced/webui/public
       # Vite's entry document. Baked into the image otherwise, so edits to the
       # page title/meta silently kept serving the built-in copy until a rebuild.
-      - ./webui/index.html:/app/index.html:ro
-      - ./webui/tailwind.config.js:/app/tailwind.config.js:ro
-      - ./webui/chronicle-espresso-preset.js:/app/chronicle-espresso-preset.js:ro
+      - ./webui/index.html:/workspace/backends/advanced/webui/index.html:ro
+      - ./webui/vite.config.ts:/workspace/backends/advanced/webui/vite.config.ts:ro
+      - ./webui/tailwind.config.js:/workspace/backends/advanced/webui/tailwind.config.js:ro
+      - ./webui/chronicle-espresso-preset.js:/workspace/backends/advanced/webui/chronicle-espresso-preset.js:ro
     depends_on:
       chronicle-backend:
         condition: service_healthy
@@ -287,6 +289,7 @@ services:
     volumes:
       - ./data/syncthing_config:/var/syncthing/config
       - ./data/conversation_docs:/vaults   # backend exposes per-user folders under here
+      - ./data/memory_spaces:/memory-spaces # isolated space vaults are sibling folders
     ports:
       - "22000:22000/tcp"   # sync protocol (reachable via Tailscale)
       - "22000:22000/udp"   # QUIC

@@ -410,13 +410,22 @@ class WakeWordConsumer:
 
         try:
             while self.running:
-                messages = await self.redis_client.xreadgroup(
-                    GROUP_NAME,
-                    self.consumer_name,
-                    {str(stream_name): ">"},
-                    count=10,
-                    block=1000,
-                )
+                try:
+                    messages = await self.redis_client.xreadgroup(
+                        GROUP_NAME,
+                        self.consumer_name,
+                        {str(stream_name): ">"},
+                        count=10,
+                        block=1000,
+                    )
+                except redis_exceptions.ResponseError as error:
+                    if "NOGROUP" not in str(error):
+                        raise
+                    logger.info(
+                        "Wake stream '%s' was reclaimed after drainage — ending",
+                        stream_name,
+                    )
+                    return
 
                 if not messages:
                     if time.time() - last_activity > STREAM_IDLE_TIMEOUT_SECONDS:

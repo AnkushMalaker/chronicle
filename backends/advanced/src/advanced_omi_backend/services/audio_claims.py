@@ -176,6 +176,106 @@ async def load_chunks_by_id(chunk_ids: Sequence[str]) -> list[AudioChunkDocument
     return [by_id[chunk_id] for chunk_id in chunk_ids]
 
 
+async def _load_capture_chunks_before(
+    capture_session_id: str, sequence: int
+) -> list[AudioChunkDocument]:
+    return (
+        await AudioChunkDocument.find(
+            AudioChunkDocument.capture_session_id == capture_session_id,
+            AudioChunkDocument.sequence < sequence,
+        )
+        .sort("+sequence")
+        .to_list()
+    )
+
+
+async def capture_clock_offset_for_ranges(
+    capture_session_id: str,
+    ranges: Sequence[AudioRangeRef],
+) -> float:
+    """Return the first claimed sample's offset on a capture audio clock.
+
+    Streaming transcription providers count successfully sent PCM duration.  That
+    clock is not wall time: capture timestamps can contain gaps or overlaps while
+    the provider clock advances only with audio bytes.  Re-basing provider words to
+    a conversation therefore means summing the persisted audio before the first
+    claimed sample, not subtracting either a wall-clock delta or the first word.
+
+    A single scalar offset is valid only when every claimed range and chunk belongs
+    to the same capture session as the provider stream.  The persisted prefix must
+    also be complete from sequence zero through the chunk immediately before the
+    claim; otherwise there is no defensible way to reconstruct the provider's PCM
+    clock and the caller must fail closed.
+    """
+    if not ranges:
+        raise AudioClaimError("cannot resolve a capture clock without audio ranges")
+
+    for audio_range in ranges:
+        if audio_range.capture_session_ids != [capture_session_id]:
+            raise AudioClaimError(
+                "A scalar capture-clock offset requires every range to belong "
+                f"only to provider session {capture_session_id}; range "
+                f"{audio_range.range_id} declares "
+                f"{audio_range.capture_session_ids or 'no capture session'}"
+            )
+
+    claimed_chunks = await load_chunks_by_id(ordered_chunk_ids(ranges))
+    foreign_chunk = next(
+        (
+            chunk
+            for chunk in claimed_chunks
+            if chunk.capture_session_id != capture_session_id
+        ),
+        None,
+    )
+    if foreign_chunk is not None:
+        raise AudioClaimError(
+            f"Claimed chunk {foreign_chunk.id} belongs to capture session "
+            f"{foreign_chunk.capture_session_id}, not provider session "
+            f"{capture_session_id}"
+        )
+
+    first_range = ranges[0]
+    first_chunk = claimed_chunks[0]
+
+    chunk_start = as_utc(first_chunk.captured_at)
+    chunk_end = _chunk_end(first_chunk)
+    claim_start = as_utc(first_range.started_at)
+    claim_end = as_utc(first_range.ended_at)
+    clip_start = max(claim_start, chunk_start)
+    if min(claim_end, chunk_end) <= clip_start:
+        raise AudioClaimError(
+            f"Range {first_range.range_id} does not overlap its first chunk"
+        )
+
+    preceding = await _load_capture_chunks_before(
+        capture_session_id, first_chunk.sequence
+    )
+    sequences = [int(chunk.sequence) for chunk in preceding]
+    expected_sequences = list(range(int(first_chunk.sequence)))
+    if sequences != expected_sequences:
+        raise AudioClaimError(
+            f"Capture session {capture_session_id} has an incomplete audio-clock "
+            f"prefix before sequence {first_chunk.sequence}: got {sequences}"
+        )
+    prefix_durations = [float(chunk.duration) for chunk in preceding]
+    if any(
+        not math.isfinite(duration) or duration <= 0 for duration in prefix_durations
+    ):
+        raise AudioClaimError(
+            f"Capture session {capture_session_id} has an invalid duration in its "
+            "audio-clock prefix"
+        )
+    clip_offset = (clip_start - chunk_start).total_seconds()
+    offset = sum(prefix_durations) + clip_offset
+    if not math.isfinite(offset) or offset < 0:
+        raise AudioClaimError(
+            f"Capture session {capture_session_id} produced an invalid audio-clock "
+            f"offset {offset}"
+        )
+    return offset
+
+
 async def resolve_audio_ranges(
     ranges: Sequence[AudioRangeRef],
 ) -> list[ClaimedChunk]:

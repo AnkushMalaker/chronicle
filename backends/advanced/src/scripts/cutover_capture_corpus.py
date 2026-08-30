@@ -197,10 +197,7 @@ def _recover_promoted_media(
             f"Unsafe promoted media path {promoted_path!r} on {source['_id']}"
         )
     user_id = str(source["user_id"])
-    direct = [
-        data_dir / "conversation_docs" / user_id / Path(*relative.parts),
-        data_dir / "memory_md" / user_id / Path(*relative.parts),
-    ]
+    direct = [data_dir / "conversation_docs" / user_id / Path(*relative.parts)]
     archived: list[Path] = []
     backup_root = data_dir / "backups"
     if backup_root.is_dir():

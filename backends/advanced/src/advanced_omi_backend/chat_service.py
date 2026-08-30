@@ -38,7 +38,10 @@ from advanced_omi_backend.services.memory.base import (
     MemoryEntry,
     VaultSearchUnavailable,
 )
-from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
+from advanced_omi_backend.services.plugin_service import (
+    dispatch_or_defer_space_event,
+    dispatch_plugin_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +151,7 @@ class ChatMessage:
         timestamp: Optional[datetime] = None,
         memories_used: Optional[List[str]] = None,
         metadata: Optional[Dict] = None,
+        memory_space_id: Optional[str] = None,
     ):
         self.message_id = message_id
         self.session_id = session_id
@@ -157,6 +161,7 @@ class ChatMessage:
         self.timestamp = timestamp or datetime.now(timezone.utc)
         self.memories_used = memories_used or []
         self.metadata = metadata or {}
+        self.memory_space_id = memory_space_id
 
     def to_dict(self) -> Dict:
         """Convert message to dictionary for storage."""
@@ -169,6 +174,7 @@ class ChatMessage:
             "timestamp": self.timestamp,
             "memories_used": self.memories_used,
             "metadata": self.metadata,
+            "memory_space_id": self.memory_space_id,
         }
 
     @classmethod
@@ -183,6 +189,7 @@ class ChatMessage:
             timestamp=data["timestamp"],
             memories_used=data.get("memories_used", []),
             metadata=data.get("metadata", {}),
+            memory_space_id=data.get("memory_space_id"),
         )
 
 
@@ -274,14 +281,21 @@ class ChatService:
             raise
 
     async def create_session(
-        self, user_id: str, title: Optional[str] = None
+        self,
+        user_id: str,
+        title: Optional[str] = None,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> ChatSession:
         """Create a new chat session."""
         if not self._initialized:
             await self.initialize()
 
         session = ChatSession(
-            session_id=str(uuid4()), user_id=user_id, title=title or "New Chat"
+            session_id=str(uuid4()),
+            user_id=user_id,
+            title=title or "New Chat",
+            memory_space_id=memory_space_id,
         )
 
         await self.sessions_collection.insert_one(session.to_dict())
@@ -289,14 +303,20 @@ class ChatService:
         return session
 
     async def get_user_sessions(
-        self, user_id: str, limit: int = 50
+        self,
+        user_id: str,
+        limit: int = 50,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> List[ChatSession]:
         """Get all chat sessions for a user."""
         if not self._initialized:
             await self.initialize()
 
         cursor = (
-            self.sessions_collection.find({"user_id": user_id})
+            self.sessions_collection.find(
+                {"user_id": user_id, "memory_space_id": memory_space_id}
+            )
             .sort("updated_at", -1)
             .limit(limit)
         )
@@ -307,13 +327,23 @@ class ChatService:
 
         return sessions
 
-    async def get_session(self, session_id: str, user_id: str) -> Optional[ChatSession]:
+    async def get_session(
+        self,
+        session_id: str,
+        user_id: str,
+        *,
+        memory_space_id: Optional[str] = None,
+    ) -> Optional[ChatSession]:
         """Get a specific chat session."""
         if not self._initialized:
             await self.initialize()
 
         doc = await self.sessions_collection.find_one(
-            {"session_id": session_id, "user_id": user_id}
+            {
+                "session_id": session_id,
+                "user_id": user_id,
+                "memory_space_id": memory_space_id,
+            }
         )
 
         if doc:
@@ -393,7 +423,12 @@ class ChatService:
             return False
 
     async def get_relevant_memories(
-        self, query: str, user_id: str, limit: Optional[int] = None
+        self,
+        query: str,
+        user_id: str,
+        limit: Optional[int] = None,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> List[MemoryEntry]:
         """Get relevant memories for the user's query.
 
@@ -404,7 +439,10 @@ class ChatService:
         try:
             memory_limit = limit if limit is not None else MAX_MEMORY_CONTEXT
             memories = await self.memory_service.search_memories(
-                query=query, user_id=user_id, limit=memory_limit
+                query=query,
+                user_id=user_id,
+                limit=memory_limit,
+                memory_space_id=memory_space_id,
             )
             logger.info(
                 f"Retrieved {len(memories)} relevant memories for query: {query[:50]}..."
@@ -447,6 +485,7 @@ class ChatService:
         user_id: str,
         message_content: str,
         memory_limit: Optional[int] = None,
+        memory_space_id: Optional[str] = None,
     ) -> AsyncGenerator[Dict, None]:
         """Generate response using tool-based memory retrieval (LLM decides when to search)."""
         if not self._initialized:
@@ -546,7 +585,10 @@ class ChatService:
 
                             try:
                                 memories = await self.get_relevant_memories(
-                                    query, user_id, limit=limit
+                                    query,
+                                    user_id,
+                                    limit=limit,
+                                    memory_space_id=memory_space_id,
                                 )
                             except VaultSearchUnavailable as search_error:
                                 # Say the search broke. Reporting this as zero
@@ -672,7 +714,15 @@ class ChatService:
         tool when a question needs personal context, and that tool runs the
         agentic vault search. There is no upfront RAG injection.
         """
+        if not self._initialized:
+            await self.initialize()
         set_otel_session(session_id)
+        session = await self.sessions_collection.find_one(
+            {"session_id": session_id, "user_id": user_id}
+        )
+        if session is None:
+            raise ValueError("Chat session not found")
+        memory_space_id = session.get("memory_space_id")
 
         tracer = get_tracer() if is_otel_enabled() else None
         span_ctx = (
@@ -698,6 +748,7 @@ class ChatService:
                 user_id=user_id,
                 message_content=message_content,
                 memory_limit=memory_limit,
+                memory_space_id=memory_space_id,
             ):
                 yield event
 
@@ -811,6 +862,7 @@ class ChatService:
                 user_id=user_id,
                 user_email=user_email,
                 allow_update=True,
+                memory_space_id=session.get("memory_space_id"),
             )
 
             if success:
@@ -824,23 +876,38 @@ class ChatService:
                     memory_provider = getattr(
                         self.memory_service, "provider_identifier", "unknown"
                     )
-                    await dispatch_plugin_event(
-                        event=PluginEvent.MEMORY_PROCESSED,
-                        user_id=user_id,
-                        data={
-                            "memories": memory_ids or [],
-                            "conversation": {
-                                "conversation_id": source_id,
-                                "client_id": "chat_interface",
-                                "user_id": user_id,
-                                "user_email": user_email,
-                            },
-                            "memory_count": memory_count,
+                    event_data = {
+                        "memories": memory_ids or [],
+                        "conversation": {
                             "conversation_id": source_id,
+                            "client_id": "chat_interface",
+                            "user_id": user_id,
+                            "user_email": user_email,
                         },
-                        metadata={"memory_provider": memory_provider},
-                        description=f"chat={session_id[:12]}, memories={memory_count}",
-                    )
+                        "memory_count": memory_count,
+                        "conversation_id": source_id,
+                    }
+                    event_metadata = {"memory_provider": memory_provider}
+                    description = f"chat={session_id[:12]}, memories={memory_count}"
+                    if session.get("memory_space_id"):
+                        await dispatch_or_defer_space_event(
+                            event=PluginEvent.MEMORY_PROCESSED,
+                            user_id=user_id,
+                            memory_space_id=session["memory_space_id"],
+                            source_kind="chat",
+                            source_id=source_id,
+                            data=event_data,
+                            metadata=event_metadata,
+                            description=description,
+                        )
+                    else:
+                        await dispatch_plugin_event(
+                            event=PluginEvent.MEMORY_PROCESSED,
+                            user_id=user_id,
+                            data=event_data,
+                            metadata=event_metadata,
+                            description=description,
+                        )
                 except Exception as e:
                     logger.warning(
                         f"⚠️ Error triggering memory-level plugins for chat {session_id}: {e}"

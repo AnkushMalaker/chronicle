@@ -32,6 +32,15 @@ from advanced_omi_backend.openai_factory import create_openai_client, is_reasoni
 
 logger = logging.getLogger(__name__)
 
+# Operations whose normal routing role is not the primary LLM. Keeping this policy
+# beside the resolver makes the effective route inspectable without teaching every
+# caller or diagnostic which default it should use.
+LLM_OPERATION_DEFAULT_ROLES: Dict[str, str] = {
+    "followup_resolution": "fast_llm",
+    "plugin_assistant": "fast_llm",
+    "timeline_merge": "fast_llm",
+}
+
 # Tailnet service-URL discovery cache. A model whose model_url is empty but which
 # carries a `discovery_service` (e.g. chronicle-asr / chronicle-llm) resolves its URL
 # live from minidisc — so a remote ASR/LLM node coming online is picked up without
@@ -333,6 +342,10 @@ class ResolvedLLMOperation(BaseModel):
                 if effort in ("none", "off", "0") and not supports_none:
                     effort = "minimal"
                 params["reasoning_effort"] = effort
+            elif self.model_def.model_provider == "openrouter":
+                extra_body["reasoning"] = {
+                    "effort": self.reasoning_effort.strip().lower()
+                }
             elif self.model_def.thinking:
                 # "none"/"minimal"/"off"/"0" → thinking off; any other level → on.
                 enable = self.reasoning_effort.strip().lower() not in (
@@ -450,6 +463,10 @@ class AppModels(BaseModel):
         """
         return [m for m in self.models.values() if m.model_type == model_type]
 
+    def llm_operation_role(self, name: str) -> str:
+        """Return the deployment-wide default role used by an unpinned operation."""
+        return LLM_OPERATION_DEFAULT_ROLES.get(name, "llm")
+
     def list_model_types(self) -> List[str]:
         """Get all unique model types in the registry.
 
@@ -462,7 +479,6 @@ class AppModels(BaseModel):
         self,
         name: str,
         *,
-        default_model_type: str = "llm",
         model_override: Optional[str] = None,
     ) -> ResolvedLLMOperation:
         """Resolve a named LLM operation to a self-contained config.
@@ -470,15 +486,12 @@ class AppModels(BaseModel):
         Resolution:
           1. Look up llm_operations[name] (empty LLMOperationConfig if missing)
           2. Resolve model_def: model_override → get_by_name, else op.model →
-             get_by_name, else defaults[default_model_type] (falling back to
-             defaults.llm — so e.g. an unset fast_llm reuses the main LLM)
+             get_by_name, else the operation's centrally defined default role
           3. Merge parameters: operation > model_def.model_params > safe fallback
           4. Return ResolvedLLMOperation ready for use
 
         Args:
             name: Operation name (e.g. "memory_extraction", "chat")
-            default_model_type: defaults key to use when the operation pins no model
-                (e.g. "fast_llm"); falls back to "llm" when that default is unset.
             model_override: pin a specific model by name, overriding both the
                 operation's model and the defaults (used for fallback retries).
 
@@ -489,6 +502,7 @@ class AppModels(BaseModel):
             RuntimeError: If no model can be resolved for the operation
         """
         op_config = self.llm_operations.get(name, LLMOperationConfig())
+        default_role = self.llm_operation_role(name)
 
         # Resolve model definition
         if model_override:
@@ -506,8 +520,8 @@ class AppModels(BaseModel):
                     f"which is not defined in the models list"
                 )
         else:
-            model_def = self.get_default(default_model_type)
-            if not model_def and default_model_type != "llm":
+            model_def = self.get_default(default_role)
+            if not model_def and default_role != "llm":
                 model_def = self.get_default("llm")
             if not model_def:
                 raise RuntimeError(
@@ -546,12 +560,29 @@ class AppModels(BaseModel):
             reasoning_effort=reasoning_effort,
         )
 
+    def explain_llm_operation(self, name: str) -> Dict[str, Optional[str]]:
+        """Return the effective model and the one configuration source that chose it."""
+        op_config = self.llm_operations.get(name, LLMOperationConfig())
+        if op_config.model:
+            role = None
+            source = f"llm_operations.{name}.model"
+        else:
+            role = self.llm_operation_role(name)
+            source = f"defaults.{role}"
+        resolved = self.get_llm_operation(name)
+        return {
+            "model": resolved.model_def.name,
+            "model_name": resolved.model_name,
+            "provider": resolved.model_def.model_provider,
+            "role": role,
+            "source": source,
+        }
+
     def get_fallback_llm_operation(
         self,
         name: str,
         *,
         primary: ResolvedLLMOperation,
-        default_model_type: str = "llm",
     ) -> Optional[ResolvedLLMOperation]:
         """Resolve operation ``name`` against ``defaults.fallback_llm``.
 
@@ -569,9 +600,7 @@ class AppModels(BaseModel):
                 fb_name,
             )
             return None
-        return self.get_llm_operation(
-            name, default_model_type=default_model_type, model_override=fb_name
-        )
+        return self.get_llm_operation(name, model_override=fb_name)
 
 
 # Global registry singleton
@@ -589,6 +618,34 @@ def _find_config_path() -> Path:
         Path to config.yml
     """
     return get_config_yml_path()
+
+
+def validate_model_routing_authority(config: Any) -> None:
+    """Reject executor-level model pins that bypass the model registry's routing.
+
+    Executors may keep execution knobs such as timeout, context window, and Pi
+    compatibility. Model selection belongs only to ``defaults`` and
+    ``llm_operations`` so changing a deployment route has one authoritative seam.
+    """
+    obsolete_paths = (
+        ("memory", "backends", "pi", "model"),
+        ("timeline", "pi", "model"),
+    )
+    for path in obsolete_paths:
+        value: Any = config
+        for key in path:
+            if not hasattr(value, "get"):
+                value = None
+                break
+            value = value.get(key)
+            if value is None:
+                break
+        if value not in (None, ""):
+            dotted = ".".join(path)
+            raise ValueError(
+                f"{dotted} is obsolete; select models with defaults or "
+                "llm_operations instead"
+            )
 
 
 def load_models_config(force_reload: bool = False) -> Optional[AppModels]:
@@ -618,6 +675,8 @@ def load_models_config(force_reload: bool = False) -> Optional[AppModels]:
     except Exception as e:
         logging.error(f"Failed to load merged configuration: {e}")
         return None
+
+    validate_model_routing_authority(raw)
 
     # Extract sections
     defaults = raw.get("defaults", {}) or {}

@@ -48,6 +48,29 @@ async def test_production_session_init_requires_capture_provenance():
         )
 
 
+async def test_session_memory_space_survives_redis_round_trip():
+    store = ProductionSessionStore(_fake_redis())
+    await store.init_session(
+        "sess-space",
+        user_id="u1",
+        client_id="c1",
+        stream_name="audio:stream:c1",
+        capture_epoch=0,
+        processing_profile="source_native",
+        effects={
+            "aec": {"reporting": "unreported"},
+            "noise_suppression": {"reporting": "unreported"},
+        },
+        voice_session_id=None,
+        memory_space_id="9f3523c8-af75-469d-995a-7179531f3fc8",
+    )
+
+    view = await store.read("sess-space")
+
+    assert view is not None
+    assert view.memory_space_id == "9f3523c8-af75-469d-995a-7179531f3fc8"
+
+
 def _fake_redis(decode_responses=False):
     return fake_aioredis.FakeRedis(decode_responses=decode_responses)
 

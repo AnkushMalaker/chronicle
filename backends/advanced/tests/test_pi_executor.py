@@ -224,6 +224,54 @@ def _successful_events(*, summary, tool_name, usage):
     ]
 
 
+@pytest.mark.asyncio
+async def test_pi_writer_attaches_selected_images_to_initial_message(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "user"
+    root.mkdir()
+    captured = {}
+    monkeypatch.setattr(
+        pi_agent,
+        "_resolve_pi_config",
+        lambda operation, force_fallback=False: _runtime_config(),
+    )
+
+    async def prompt(*_args, **_kwargs):
+        return "record carefully"
+
+    monkeypatch.setattr(pi_agent, "_get_prompt", prompt)
+    monkeypatch.setattr(
+        pi_agent.asyncio,
+        "create_subprocess_exec",
+        _fake_spawn(
+            captured,
+            events=[
+                {"type": "session", "version": 3, "id": "test"},
+                {
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "done"}],
+                        "stopReason": "stop",
+                    },
+                },
+                {"type": "agent_end", "messages": []},
+            ],
+        ),
+    )
+
+    await PiMemoryAgent(root).run(
+        "I am showing the notebook now.",
+        "conversation-1",
+        images=[("rainbow.png", b"selected-frame")],
+    )
+
+    attachments = [arg for arg in captured["command"] if arg.startswith("@")]
+    assert any(arg.endswith(".png") for arg in attachments)
+    assert captured["stdin"] == ""
+
+
 def test_pi_executor_availability_only_checks_binary(monkeypatch):
     monkeypatch.setenv("PI_BINARY", "custom-pi")
     monkeypatch.setattr(
@@ -255,7 +303,9 @@ def test_pi_settings_reject_falsy_non_mapping_sections(memory, message):
         pi_agent._pi_settings(registry)
 
 
-def test_config_uses_exact_pi_backend_and_registry_operation(monkeypatch):
+def test_config_uses_registry_operation_budget_without_backend_model_override(
+    monkeypatch,
+):
     model_def = SimpleNamespace(
         name="qwen-registry-entry",
         model_provider="Llama.cpp Local",
@@ -279,10 +329,9 @@ def test_config_uses_exact_pi_backend_and_registry_operation(monkeypatch):
         memory={
             "backends": {
                 "pi": {
-                    "model": "qwen-registry-entry",
                     "thinking": "low",
                     "timeout_seconds": 77,
-                    "context_window": 8192,
+                    "context_window": 16384,
                     "max_tokens": 4096,
                 }
             },
@@ -300,14 +349,14 @@ def test_config_uses_exact_pi_backend_and_registry_operation(monkeypatch):
 
     config = pi_agent._resolve_pi_config("memory_write")
 
-    assert calls == [("memory_write", "qwen-registry-entry")]
+    assert calls == [("memory_write", None)]
     assert config.provider == "chronicle-llama-cpp-local"
     assert config.model == "upstream/qwen:Q4_K_M"
     assert config.base_url == "http://kraken:8083/v1"
     assert config.api_key == "no-key"
     assert config.thinking == "low"
-    assert config.max_tokens == 4096
-    assert config.context_window == 8192
+    assert config.max_tokens == 9000
+    assert config.context_window == 16384
     assert config.timeout_seconds == 77
     assert config.temperature == 0.37
     assert config.input_modalities == ["text"]
@@ -318,6 +367,15 @@ def test_config_uses_exact_pi_backend_and_registry_operation(monkeypatch):
         "maxTokensField": "max_tokens",
         "thinkingFormat": "qwen-chat-template",
     }
+
+
+def test_pi_settings_rejects_obsolete_model_pin():
+    registry = SimpleNamespace(
+        memory={"backends": {"pi": {"model": "duplicated-routing-policy"}}}
+    )
+
+    with pytest.raises(PiExecutorError, match=r"memory\.backends\.pi\.model"):
+        pi_agent._pi_settings(registry)
 
 
 def test_config_accepts_max_thinking_and_explicit_compat_overrides(monkeypatch):

@@ -650,6 +650,8 @@ async def _publish(
         "local_date": encoded_local_date,
         "timezone": run.timezone,
     }
+    consolidation_settings = settings_dict().get("consolidation") or {}
+    pregenerate_consolidation = consolidation_settings.get("pregenerate", True)
     await collection.update_one(
         identity,
         {
@@ -659,14 +661,18 @@ async def _publish(
                 "active_run_created_at": None,
                 "evidence_revision": None,
                 "coverage": {},
+                "review_state": "episodes_pending",
                 "revised_at": utcnow(),
             }
         },
         upsert=True,
     )
-    await collection.update_one(
+    published = await collection.update_one(
         {
             **identity,
+            # A person is committing a proposal derived from the current generation.
+            # Do not switch the active generation underneath that fenced vault apply.
+            "review_state": {"$ne": "memory_applying"},
             "$or": [
                 {"active_run_created_at": {"$lte": run.created_at}},
                 {"active_run_created_at": None},
@@ -684,10 +690,60 @@ async def _publish(
                 "memory_claimed_at": None,
                 "memory_error": None,
                 "memory_attempts": 0,
+                # A new generation invalidates both the episode decision and any
+                # vault diff derived from it. The prior proposal remains in the ledger
+                # as stale history but is no longer reachable from this day.
+                "review_state": "episodes_pending",
+                "review_run_id": None,
+                "memory_review_proposal_id": None,
+                "episodes_reviewed_at": None,
+                "review_resolved_at": None,
+                "review_outcome": None,
+                "review_error": None,
+                "consolidation_state": "queued" if pregenerate_consolidation else "",
+                "consolidation_run_id": run.run_id,
+                "consolidation_model": None,
+                "consolidation_suggestions": [],
+                "consolidation_error": None,
+                "consolidation_started_at": None,
+                "consolidation_generated_at": None,
+                "consolidation_resolved_at": None,
                 "revised_at": utcnow(),
             },
         },
     )
+    if published.modified_count and pregenerate_consolidation:
+        # A durable independent job lets multiple completed days be consumed by the
+        # worker pool concurrently; the active-run fence rejects stale results.
+        from advanced_omi_backend.controllers.queue_controller import default_queue
+        from advanced_omi_backend.workers.timeline_jobs import (
+            generate_timeline_consolidation_job,
+        )
+
+        try:
+            default_queue.enqueue(
+                generate_timeline_consolidation_job,
+                run.user_id,
+                str(run.local_date),
+                run.timezone,
+                run.run_id,
+                job_timeout=int(consolidation_settings.get("timeout_seconds", 300)),
+            )
+        except Exception as error:
+            # Suggestions are optional review help. A Redis interruption must never
+            # turn an already-published semantic day into a failed analysis run.
+            logger.exception(
+                "Could not queue timeline consolidation for %s", run.run_id
+            )
+            await collection.update_one(
+                {**identity, "active_run_id": run.run_id},
+                {
+                    "$set": {
+                        "consolidation_state": "failed",
+                        "consolidation_error": str(error)[:1000],
+                    }
+                },
+            )
     run.output_episode_ids = episode_ids + [episode.episode_id for episode in carried]
 
 

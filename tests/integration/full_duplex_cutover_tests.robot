@@ -48,6 +48,15 @@ Audio V2 Enforces Bound Capture Playback And Connection Fences
     ...    /workspace/backends/advanced/tests/test_voice_session_coordinator.py
     ...    /workspace/backends/advanced/tests/test_voice_properties.py
 
+Wake Consumer Contract And Post Stop Conversation Materialization Stay Wired
+    [Documentation]    Guards the two deployed multi-service failures found by the
+    ...                real-browser replay: health must reject a wake service consuming
+    ...                the retired Redis contract, and speech detected after stop_capture
+    ...                must still materialize a Conversation from the terminal capture.
+    Run Backend Contract Tests
+    ...    /workspace/backends/advanced/tests/test_wakeword_health_contract.py
+    ...    /workspace/backends/advanced/tests/test_conversation_lifecycle.py
+
 Committed Turn Consumers Recover Without Duplicate Routes Or Effects
     [Documentation]    Exercises the real committed-turn router and pending-stream
     ...                recovery paths, including worker replacement and the irreversible

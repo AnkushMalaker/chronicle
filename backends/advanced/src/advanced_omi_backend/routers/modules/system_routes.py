@@ -134,6 +134,20 @@ async def save_misc_settings(
     return await system_controller.save_misc_settings_controller(settings)
 
 
+@router.get("/timeline-grouping-settings")
+async def get_timeline_grouping_settings(
+    current_user: User = Depends(current_superuser),
+):
+    return await system_controller.get_timeline_grouping_settings()
+
+
+@router.post("/timeline-grouping-settings")
+async def save_timeline_grouping_settings(
+    settings: dict, current_user: User = Depends(current_superuser)
+):
+    return await system_controller.save_timeline_grouping_settings(settings)
+
+
 @router.get("/cleanup-settings")
 async def get_cleanup_settings(current_user: User = Depends(current_superuser)):
     """Get cleanup configuration settings. Admin only."""

@@ -30,8 +30,9 @@ async def test_process_audio_chunk_propagates_transport_failure():
             "sample_rate": 16000,
             "final": None,
             "interim": [],
+            "pending_audio": bytearray(),
         }
     }
 
     with pytest.raises(OSError, match="provider transport closed"):
-        await provider.process_audio_chunk("session-1", b"\x00\x00")
+        await provider.process_audio_chunk("session-1", bytes(3200))

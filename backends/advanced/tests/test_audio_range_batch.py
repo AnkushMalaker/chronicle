@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
+from advanced_omi_backend.models.audio_capture import AudioRangeRef
 from advanced_omi_backend.services import audio_claims
 from advanced_omi_backend.services.audio_claims import ClaimedChunk
 from advanced_omi_backend.utils import audio_chunk_utils
@@ -39,6 +40,182 @@ def _claimed(
 def first_pcm_sample(wav_bytes):
     with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
         return np.frombuffer(wav_file.readframes(1), dtype="<i2")[0]
+
+
+@pytest.mark.asyncio
+async def test_capture_clock_offset_counts_audio_before_first_claim_not_wall_time(
+    monkeypatch,
+):
+    captured_at = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    first_claimed = SimpleNamespace(
+        id="chunk-3",
+        capture_session_id="session-1",
+        sequence=2,
+        captured_at=captured_at + timedelta(seconds=30),
+        duration=10.0,
+    )
+    preceding = [
+        SimpleNamespace(sequence=0, duration=10.0),
+        SimpleNamespace(sequence=1, duration=8.0),
+    ]
+    audio_range = AudioRangeRef(
+        capture_source_id="source-1",
+        capture_session_ids=["session-1"],
+        time_basis="received",
+        chunk_ids=["chunk-3"],
+        started_at=captured_at + timedelta(seconds=32),
+        ended_at=captured_at + timedelta(seconds=40),
+    )
+    monkeypatch.setattr(
+        audio_claims,
+        "load_chunks_by_id",
+        AsyncMock(return_value=[first_claimed]),
+    )
+    monkeypatch.setattr(
+        audio_claims,
+        "_load_capture_chunks_before",
+        AsyncMock(return_value=preceding),
+    )
+
+    offset = await audio_claims.capture_clock_offset_for_ranges(
+        "session-1", [audio_range]
+    )
+
+    # The provider clock counts PCM duration: 10s + 8s + a 2s clip.  The
+    # first claimed sample happens 32 wall-clock seconds after capture start,
+    # but wall gaps are not audio and must not move transcript timestamps.
+    assert offset == pytest.approx(20.0)
+
+
+@pytest.mark.asyncio
+async def test_capture_clock_offset_rejects_a_different_provider_session(monkeypatch):
+    captured_at = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    first_claimed = SimpleNamespace(
+        id="chunk-1",
+        capture_session_id="other-session",
+        sequence=0,
+        captured_at=captured_at,
+        duration=10.0,
+    )
+    audio_range = AudioRangeRef(
+        capture_source_id="source-1",
+        capture_session_ids=["other-session"],
+        time_basis="received",
+        chunk_ids=["chunk-1"],
+        started_at=captured_at,
+        ended_at=captured_at + timedelta(seconds=10),
+    )
+    monkeypatch.setattr(
+        audio_claims,
+        "load_chunks_by_id",
+        AsyncMock(return_value=[first_claimed]),
+    )
+
+    with pytest.raises(audio_claims.AudioClaimError, match="provider session"):
+        await audio_claims.capture_clock_offset_for_ranges("session-1", [audio_range])
+
+
+@pytest.mark.asyncio
+async def test_capture_clock_offset_rejects_ranges_from_multiple_sessions(monkeypatch):
+    captured_at = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    first_range = AudioRangeRef(
+        capture_source_id="source-1",
+        capture_session_ids=["session-1"],
+        time_basis="received",
+        chunk_ids=["chunk-1"],
+        started_at=captured_at,
+        ended_at=captured_at + timedelta(seconds=10),
+    )
+    second_range = AudioRangeRef(
+        capture_source_id="source-1",
+        capture_session_ids=["session-2"],
+        time_basis="received",
+        chunk_ids=["chunk-2"],
+        started_at=captured_at + timedelta(seconds=10),
+        ended_at=captured_at + timedelta(seconds=20),
+    )
+    load_chunks = AsyncMock()
+    monkeypatch.setattr(audio_claims, "load_chunks_by_id", load_chunks)
+
+    with pytest.raises(audio_claims.AudioClaimError, match="scalar capture-clock"):
+        await audio_claims.capture_clock_offset_for_ranges(
+            "session-1", [first_range, second_range]
+        )
+
+    load_chunks.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capture_clock_offset_rejects_foreign_chunk_despite_range_metadata(
+    monkeypatch,
+):
+    captured_at = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    audio_range = AudioRangeRef(
+        capture_source_id="source-1",
+        capture_session_ids=["session-1"],
+        time_basis="received",
+        chunk_ids=["chunk-1", "chunk-2"],
+        started_at=captured_at,
+        ended_at=captured_at + timedelta(seconds=20),
+    )
+    monkeypatch.setattr(
+        audio_claims,
+        "load_chunks_by_id",
+        AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    id="chunk-1",
+                    capture_session_id="session-1",
+                    sequence=0,
+                    captured_at=captured_at,
+                    duration=10.0,
+                ),
+                SimpleNamespace(
+                    id="chunk-2",
+                    capture_session_id="session-2",
+                    sequence=0,
+                    captured_at=captured_at + timedelta(seconds=10),
+                    duration=10.0,
+                ),
+            ]
+        ),
+    )
+
+    with pytest.raises(audio_claims.AudioClaimError, match="Claimed chunk chunk-2"):
+        await audio_claims.capture_clock_offset_for_ranges("session-1", [audio_range])
+
+
+@pytest.mark.asyncio
+async def test_capture_clock_offset_rejects_an_incomplete_chunk_prefix(monkeypatch):
+    captured_at = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    first_claimed = SimpleNamespace(
+        id="chunk-3",
+        capture_session_id="session-1",
+        sequence=2,
+        captured_at=captured_at + timedelta(seconds=20),
+        duration=10.0,
+    )
+    audio_range = AudioRangeRef(
+        capture_source_id="source-1",
+        capture_session_ids=["session-1"],
+        time_basis="received",
+        chunk_ids=["chunk-3"],
+        started_at=captured_at + timedelta(seconds=20),
+        ended_at=captured_at + timedelta(seconds=30),
+    )
+    monkeypatch.setattr(
+        audio_claims,
+        "load_chunks_by_id",
+        AsyncMock(return_value=[first_claimed]),
+    )
+    monkeypatch.setattr(
+        audio_claims,
+        "_load_capture_chunks_before",
+        AsyncMock(return_value=[SimpleNamespace(sequence=1, duration=10.0)]),
+    )
+
+    with pytest.raises(audio_claims.AudioClaimError, match="incomplete"):
+        await audio_claims.capture_clock_offset_for_ranges("session-1", [audio_range])
 
 
 @pytest.mark.asyncio

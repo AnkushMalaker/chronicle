@@ -48,6 +48,7 @@ from ..conversation_note import (
     canonicalize_conversation_note,
     write_source_fallback_conversation_note,
 )
+from ..scope import MemoryScope, MemoryScopeResolver
 from ..telemetry import (
     memory_attempt,
     memory_span,
@@ -146,6 +147,15 @@ class MemoryService(MemoryServiceBase):
         super().__init__()
         self.config = config
         self.vault = ConvDocVaultManager()
+        self.scope_resolver = MemoryScopeResolver(self.vault._base_dir.parent)
+        self.last_day_source_episode_keys_by_path: dict[str, list[str]] = {}
+
+    def _scope_root(self, user_id: str, memory_space_id: Optional[str]) -> Path:
+        if not memory_space_id:
+            return self.vault.user_root(str(user_id))
+        return self.scope_resolver.vault_root(
+            MemoryScope(str(user_id), memory_space_id)
+        )
 
     async def initialize(self) -> None:
         if self._initialized:
@@ -251,6 +261,11 @@ class MemoryService(MemoryServiceBase):
         from ..agent.pi_agent import PiMemoryAgent
 
         if agent_class is PiMemoryAgent:
+            # Pi has already chosen and completed its edits once the required source
+            # note exists, at least one mutation landed, and verify_vault passes. End
+            # at that deterministic success boundary instead of paying for another
+            # free-text turn that can itself consume the response cap.
+            kwargs.setdefault("terminate_on_verified", True)
             limit = getattr(
                 self.config,
                 "write_max_consecutive_identical_tool_calls",
@@ -328,6 +343,10 @@ class MemoryService(MemoryServiceBase):
         source_date: Optional[str] = None,
         source_duration_minutes: Optional[float] = None,
         source_title: Optional[str] = None,
+        source_people: Optional[List[str]] = None,
+        source_images: Optional[List[Tuple[str, bytes]]] = None,
+        memory_space_id: Optional[str] = None,
+        admitted_space_write: bool = False,
     ) -> Tuple[bool, List[str]]:
         write_backend = (
             getattr(self.config, "write_agent_backend", "direct") or "direct"
@@ -361,6 +380,12 @@ class MemoryService(MemoryServiceBase):
                 },
             )
             await self._ensure_initialized()
+            if memory_space_id:
+                await self.scope_resolver.require_space(
+                    MemoryScope(str(user_id), memory_space_id),
+                    writable=True,
+                    allow_merging=admitted_space_write,
+                )
             success, touched = await self._add_memory_agent(
                 transcript,
                 source_id,
@@ -368,6 +393,9 @@ class MemoryService(MemoryServiceBase):
                 source_date=source_date,
                 source_duration_minutes=source_duration_minutes,
                 source_title=source_title,
+                source_people=source_people,
+                source_images=source_images,
+                memory_space_id=memory_space_id,
             )
             set_safe_span_attributes(
                 span,
@@ -391,6 +419,9 @@ class MemoryService(MemoryServiceBase):
         source_date: Optional[str] = None,
         source_duration_minutes: Optional[float] = None,
         source_title: Optional[str] = None,
+        source_people: Optional[List[str]] = None,
+        source_images: Optional[List[Tuple[str, bytes]]] = None,
+        memory_space_id: Optional[str] = None,
     ) -> Tuple[bool, List[str]]:
         """Write path via the tool-calling memory agent.
 
@@ -404,7 +435,7 @@ class MemoryService(MemoryServiceBase):
             return True, []
 
         t0 = time.perf_counter()
-        user_root = self.vault.user_root(user_id)
+        user_root = self._scope_root(user_id, memory_space_id)
         # Concurrent memory jobs for the same user may run on different RQ workers;
         # each individual vault mutation is serialised inside VaultTools via the
         # per-user vault_note_lock (lock-write-unlock, never across LLM calls).
@@ -418,6 +449,8 @@ class MemoryService(MemoryServiceBase):
             source_date=source_date,
             source_duration_minutes=source_duration_minutes,
             source_title=source_title,
+            source_people=source_people,
+            source_images=source_images,
         )
         if (result.truncated or result.stalled) and not result.touched:
             reason = (
@@ -440,6 +473,7 @@ class MemoryService(MemoryServiceBase):
             result.touched,
             existing_before,
             removed=result.removed,
+            memory_space_id=memory_space_id,
         )
         expected_note = user_root / "Conversations" / f"{Path(source_id).name}.md"
         if not expected_note.is_file():
@@ -483,6 +517,9 @@ class MemoryService(MemoryServiceBase):
         *,
         day_index_digest: str,
         source_date: Optional[str] = None,
+        source_run_id: Optional[str] = None,
+        source_episode_ids: Optional[List[str]] = None,
+        source_conversation_ids: Optional[List[str]] = None,
     ) -> Tuple[DayWriteOutcome, List[str]]:
         """Record one settled local day of timeline episodes into the vault.
 
@@ -499,30 +536,46 @@ class MemoryService(MemoryServiceBase):
             getattr(self.config, "write_agent_backend", "direct") or "direct"
         ).lower()
         recovery_backend = getattr(self.config, "write_recovery_backend", None)
+        episode_ids = list(dict.fromkeys(source_episode_ids or []))
+        conversation_ids = list(dict.fromkeys(source_conversation_ids or []))
+        session_id = (
+            f"timeline-day:{user_id}:{local_date}:{source_run_id or 'unversioned'}"
+        )
+        span_attributes = {
+            "openinference.span.kind": "CHAIN",
+            "gen_ai.operation.name": "invoke_agent",
+            "session.id": session_id,
+            "langfuse.session.id": session_id,
+            "chronicle.user_id": str(user_id),
+            "langfuse.user.id": str(user_id),
+            "chronicle.pipeline.stage": "memory_write",
+            "chronicle.memory.operation": "write_day",
+            "chronicle.memory.local_date": local_date,
+            "chronicle.memory.primary_backend": write_backend,
+            "chronicle.memory.recovery_backend": recovery_backend or "none",
+            "chronicle.memory.transcript_chars": len(day_digest or ""),
+            "chronicle.memory.day_index_chars": len(day_index_digest or ""),
+        }
+        if source_run_id:
+            span_attributes["chronicle.memory.source_run_id"] = source_run_id
+        if episode_ids:
+            span_attributes["chronicle.memory.source_episode_ids"] = episode_ids
+        if conversation_ids:
+            span_attributes["chronicle.memory.source_conversation_ids"] = (
+                conversation_ids
+            )
         with memory_span(
             "memory_write_day",
-            attributes={
-                "openinference.span.kind": "CHAIN",
-                "gen_ai.operation.name": "invoke_agent",
-                "gen_ai.conversation.id": local_date,
-                "session.id": local_date,
-                "langfuse.session.id": local_date,
-                "chronicle.user_id": str(user_id),
-                "langfuse.user.id": str(user_id),
-                "chronicle.pipeline.stage": "memory_write",
-                "chronicle.memory.operation": "write_day",
-                "chronicle.memory.local_date": local_date,
-                "chronicle.memory.primary_backend": write_backend,
-                "chronicle.memory.recovery_backend": recovery_backend or "none",
-                "chronicle.memory.transcript_chars": len(day_digest or ""),
-                "chronicle.memory.day_index_chars": len(day_index_digest or ""),
-            },
+            attributes=span_attributes,
         ) as span:
             set_observation_io(
                 span,
                 input={
                     "local_date": local_date,
                     "transcript": text_payload(day_digest),
+                    "source_run_id": source_run_id,
+                    "source_episode_ids": episode_ids,
+                    "source_conversation_ids": conversation_ids,
                 },
             )
             await self._ensure_initialized()
@@ -580,10 +633,17 @@ class MemoryService(MemoryServiceBase):
             and (self.config.write_recovery_backend or "direct")
             in VERIFY_CAPABLE_BACKENDS
         )
+        provenance: dict[str, set[str]] = {}
+        self.last_day_source_episode_keys_by_path = {}
 
-        if not day_digest or len(day_digest.strip()) < 10:
-            memory_logger.info("Skipping empty day digest for %s", local_date)
-            return DayWriteOutcome.COMPLETE, []
+        def retain_provenance(agent_result) -> None:
+            if agent_result is None:
+                return
+            for path, keys in agent_result.source_episode_keys_by_path.items():
+                provenance.setdefault(path, set()).update(keys)
+            self.last_day_source_episode_keys_by_path = {
+                path: sorted(keys) for path, keys in provenance.items()
+            }
 
         t0 = time.perf_counter()
         trusted_date = source_date or datetime.now(timezone.utc).isoformat()
@@ -601,6 +661,16 @@ class MemoryService(MemoryServiceBase):
         # Chronicle deterministically replaces after the run anyway.
         if _ensure_day_episode_index(user_root / day_rel, local_date, index_digest):
             system_touched.append(day_rel)
+
+        # A reference-only day (for example, passive media) still gets Chronicle's
+        # deterministic Daily index, but there is deliberately nothing to send to the
+        # semantic memory agent.
+        if not day_digest or len(day_digest.strip()) < 10:
+            memory_logger.info(
+                "Recorded reference-only day index for %s; skipping semantic memory",
+                local_date,
+            )
+            return DayWriteOutcome.COMPLETE, system_touched
 
         def day_range_findings():
             return verify_day_episode_ranges(user_root / day_rel, index_digest)
@@ -678,6 +748,7 @@ class MemoryService(MemoryServiceBase):
                         guidance=guidance,
                         record="day",
                     )
+                    retain_provenance(result)
                 except Exception as exc:  # noqa: BLE001 - recovery/caller handles it
                     diagnostic = _safe_exception_diagnostic(exc)
                     memory_logger.error(
@@ -755,6 +826,7 @@ class MemoryService(MemoryServiceBase):
                         _safe_exception_diagnostic(exc),
                     )
                 else:
+                    retain_provenance(repair)
                     result.touched = list(
                         dict.fromkeys([*result.touched, *repair.touched])
                     )
@@ -915,9 +987,22 @@ class MemoryService(MemoryServiceBase):
         source_date: Optional[str] = None,
         source_duration_minutes: Optional[float] = None,
         source_title: Optional[str] = None,
+        source_people: Optional[List[str]] = None,
+        source_images: Optional[List[Tuple[str, bytes]]] = None,
     ):
         """Recover when the primary fails or its conversation note is invalid."""
         trusted_date = source_date or datetime.now(timezone.utc).isoformat()
+        primary_backend = (
+            getattr(self.config, "write_agent_backend", "direct") or "direct"
+        ).lower()
+        configured_recovery_backend = getattr(
+            self.config, "write_recovery_backend", None
+        )
+        recovery_backend = (
+            configured_recovery_backend.lower()
+            if configured_recovery_backend
+            else "none"
+        )
         before_primary = self._vault_note_set(user_root)
         with memory_attempt("primary"):
             try:
@@ -933,6 +1018,7 @@ class MemoryService(MemoryServiceBase):
                     duration_minutes=source_duration_minutes,
                     title=source_title,
                     guidance=guidance,
+                    images=source_images,
                 )
             except Exception as exc:  # noqa: BLE001 - recovery backend handles it
                 # Lazy import: circular dependency (agent → memory_agent →
@@ -1065,6 +1151,7 @@ class MemoryService(MemoryServiceBase):
                         duration_minutes=source_duration_minutes,
                         title=source_title,
                         guidance=recovery_guidance,
+                        images=source_images,
                     )
                 except Exception as exc:  # noqa: BLE001 - never lose the note
                     # Lazy import: circular dependency (agent → memory_agent →
@@ -1108,6 +1195,11 @@ class MemoryService(MemoryServiceBase):
         )
         recovery_incomplete = bool(recovery.truncated or recovery.stalled)
         if not recovery_valid or recovery_incomplete:
+            fallback_reasons = []
+            if not recovery_valid:
+                fallback_reasons.append("invalid_note")
+            if recovery_incomplete:
+                fallback_reasons.append("incomplete_agent")
             memory_logger.warning(
                 "Memory-agent attempts did not produce a complete valid note for %s; "
                 "writing the deterministic source-preserving fallback",
@@ -1120,6 +1212,12 @@ class MemoryService(MemoryServiceBase):
                         "openinference.span.kind": "CHAIN",
                         "chronicle.memory.operation": "write_source_fallback",
                         "chronicle.memory.attempt": "fallback",
+                        "chronicle.memory.fallback_type": (
+                            "deterministic_source_preserving_note"
+                        ),
+                        "chronicle.memory.fallback_reasons": fallback_reasons,
+                        "chronicle.memory.primary_backend": primary_backend,
+                        "chronicle.memory.recovery_backend": recovery_backend,
                         "gen_ai.conversation.id": source_id,
                     },
                 ) as span:
@@ -1138,12 +1236,8 @@ class MemoryService(MemoryServiceBase):
                         date=trusted_date,
                         duration_minutes=source_duration_minutes,
                         title=source_title,
+                        source_people=source_people or (),
                     )
-                    fallback_reasons = []
-                    if not recovery_valid:
-                        fallback_reasons.append("invalid_note")
-                    if recovery_incomplete:
-                        fallback_reasons.append("incomplete_agent")
                     record_event_sync(
                         severity="warning",
                         category="memory",
@@ -1160,6 +1254,8 @@ class MemoryService(MemoryServiceBase):
                             "fallback_type": "deterministic_source_preserving_note",
                             "note_path": f"Conversations/{note_name}.md",
                             "reasons": fallback_reasons,
+                            "primary_backend": primary_backend,
+                            "recovery_backend": recovery_backend,
                             "agent_truncated": bool(recovery.truncated),
                             "agent_stalled": bool(recovery.stalled),
                             "agent_error_count": len(recovery.errors),
@@ -1213,6 +1309,8 @@ class MemoryService(MemoryServiceBase):
         source_id: str,
         user_id: str,
         transcript_diff: Optional[list],
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> Tuple[bool, List[str]]:
         """Reprocess path.
 
@@ -1226,7 +1324,7 @@ class MemoryService(MemoryServiceBase):
             memory_logger.info(f"Skipping empty transcript for {source_id}")
             return True, []
 
-        user_root = self.vault.user_root(user_id)
+        user_root = self._scope_root(user_id, memory_space_id)
         guidance = self._speaker_rename_guidance(transcript_diff)
 
         t0 = time.perf_counter()
@@ -1265,6 +1363,7 @@ class MemoryService(MemoryServiceBase):
             result.touched,
             existing_before,
             removed=result.removed,
+            memory_space_id=memory_space_id,
         )
         if not conv_note.is_file():
             memory_logger.error(
@@ -1317,6 +1416,7 @@ class MemoryService(MemoryServiceBase):
         touched: Iterable[str],
         existing_before: dict[str, str],
         removed: Optional[Iterable[dict]] = None,
+        memory_space_id: Optional[str] = None,
     ) -> None:
         """Record one audit-ledger entry per note the memory agent changed.
 
@@ -1336,6 +1436,7 @@ class MemoryService(MemoryServiceBase):
                 agent_mode=True,
                 summary=f"renamed/merged into {entry.get('new_path')}",
                 new_path=entry.get("new_path"),
+                memory_space_id=memory_space_id,
             )
         for rel in sorted(touched):
             try:
@@ -1360,6 +1461,7 @@ class MemoryService(MemoryServiceBase):
                         else "updated"
                     )
                 ),
+                memory_space_id=memory_space_id,
             )
 
     # Diarization placeholders ("Speaker 0", "Unknown Speaker 1") — the only labels a
@@ -1413,14 +1515,31 @@ class MemoryService(MemoryServiceBase):
     # =========================================================================
 
     async def search_memories(
-        self, query: str, user_id: str, limit: int = 10, score_threshold: float = 0.0
+        self,
+        query: str,
+        user_id: str,
+        limit: int = 10,
+        score_threshold: float = 0.0,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> List[MemoryEntry]:
         if not self._initialized:
             await self.initialize()
-        return await self._search_vault_grep(query, user_id, limit)
+        if memory_space_id:
+            await self.scope_resolver.require_space(
+                MemoryScope(str(user_id), memory_space_id)
+            )
+        return await self._search_vault_grep(
+            query, user_id, limit, memory_space_id=memory_space_id
+        )
 
     async def _search_vault_grep(
-        self, query: str, user_id: str, limit: int
+        self,
+        query: str,
+        user_id: str,
+        limit: int,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> List[MemoryEntry]:
         """Read path: a read-only retrieval agent drives ripgrep over the vault.
 
@@ -1432,7 +1551,9 @@ class MemoryService(MemoryServiceBase):
         # Lazy: ..agent imports llm_client, which imports this package's config back.
         from ..agent.memory_agent import is_search_failure_answer
 
-        result, backend = await self._run_search_agent(query, user_id, limit)
+        result, backend = await self._run_search_agent(
+            query, user_id, limit, memory_space_id=memory_space_id
+        )
 
         if result.errors:
             # Log the errors themselves, not just a count. A count tells you a
@@ -1477,7 +1598,11 @@ class MemoryService(MemoryServiceBase):
                 MemoryEntry(
                     id=f"search:{user_id}",
                     content=result.answer,
-                    metadata={"user_id": user_id, "kind": "vault_search_answer"},
+                    metadata={
+                        "user_id": user_id,
+                        "memory_space_id": memory_space_id,
+                        "kind": "vault_search_answer",
+                    },
                     score=1.0,
                     created_at=None,
                 )
@@ -1493,6 +1618,7 @@ class MemoryService(MemoryServiceBase):
                     content=note["content"][:1500],
                     metadata={
                         "user_id": user_id,
+                        "memory_space_id": memory_space_id,
                         "note": path,
                         "conversation_id": conv_id,
                         "kind": "vault_note",
@@ -1507,7 +1633,14 @@ class MemoryService(MemoryServiceBase):
         )
         return results[:limit]
 
-    async def _run_search_agent(self, query: str, user_id: str, limit: int):
+    async def _run_search_agent(
+        self,
+        query: str,
+        user_id: str,
+        limit: int,
+        *,
+        memory_space_id: Optional[str] = None,
+    ):
         """Run and trace one configured retrieval backend without exposing note text."""
         # Lazy: ..agent imports llm_client, which imports this package's config back.
         from ..agent.memory_agent import is_search_failure_answer
@@ -1540,7 +1673,7 @@ class MemoryService(MemoryServiceBase):
 
                 result = await search_vault(
                     query,
-                    self.vault.user_root(user_id),
+                    self._scope_root(user_id, memory_space_id),
                     operation="memory_search",
                     user_id=user_id,
                 )
@@ -1550,7 +1683,7 @@ class MemoryService(MemoryServiceBase):
 
                 result = await search_vault_with_pi(
                     query,
-                    self.vault.user_root(user_id),
+                    self._scope_root(user_id, memory_space_id),
                     operation="memory_search",
                     user_id=user_id,
                 )
@@ -1599,7 +1732,12 @@ class MemoryService(MemoryServiceBase):
     # =========================================================================
 
     def _vault_entry_from_path(
-        self, user_id: str, path: Path, root: Path, content_limit: Optional[int] = None
+        self,
+        user_id: str,
+        path: Path,
+        root: Path,
+        content_limit: Optional[int] = None,
+        memory_space_id: Optional[str] = None,
     ) -> Optional[MemoryEntry]:
         """Build a MemoryEntry from one vault note (id = vault-relative path)."""
         try:
@@ -1617,6 +1755,7 @@ class MemoryService(MemoryServiceBase):
             content=content,
             metadata={
                 "user_id": user_id,
+                "memory_space_id": memory_space_id,
                 "note": rel,
                 "conversation_id": conv_id,
                 "kind": "vault_note",
@@ -1625,13 +1764,17 @@ class MemoryService(MemoryServiceBase):
         )
 
     def _vault_entries(
-        self, user_id: str, limit: Optional[int] = None
+        self,
+        user_id: str,
+        limit: Optional[int] = None,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> List[MemoryEntry]:
         """Enumerate a user's vault notes as MemoryEntry objects (newest first).
 
         One entry per note, recursive over Conversations/People/Topics.
         """
-        root = self.vault.user_root(user_id)
+        root = self._scope_root(user_id, memory_space_id)
         if not root.exists():
             return []
         paths = sorted(
@@ -1643,25 +1786,45 @@ class MemoryService(MemoryServiceBase):
             paths = paths[:limit]
         entries: List[MemoryEntry] = []
         for p in paths:
-            entry = self._vault_entry_from_path(user_id, p, root, content_limit=1500)
+            entry = self._vault_entry_from_path(
+                user_id,
+                p,
+                root,
+                content_limit=1500,
+                memory_space_id=memory_space_id,
+            )
             if entry is not None:
                 entries.append(entry)
         return entries
 
     async def get_all_memories(
-        self, user_id: str, limit: int = 100
+        self,
+        user_id: str,
+        limit: int = 100,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> List[MemoryEntry]:
         if not self._initialized:
             await self.initialize()
-        return self._vault_entries(user_id, limit)
+        if memory_space_id:
+            await self.scope_resolver.require_space(
+                MemoryScope(str(user_id), memory_space_id)
+            )
+        return self._vault_entries(user_id, limit, memory_space_id=memory_space_id)
 
-    async def count_memories(self, user_id: str) -> Optional[int]:
+    async def count_memories(
+        self, user_id: str, *, memory_space_id: Optional[str] = None
+    ) -> Optional[int]:
         if not self._initialized:
             await self.initialize()
-        return len(self.vault.list_docs(user_id))
+        return len(self._vault_entries(user_id, memory_space_id=memory_space_id))
 
     async def get_memory(
-        self, memory_id: str, user_id: Optional[str] = None
+        self,
+        memory_id: str,
+        user_id: Optional[str] = None,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> Optional[MemoryEntry]:
         if not self._initialized:
             await self.initialize()
@@ -1673,24 +1836,33 @@ class MemoryService(MemoryServiceBase):
             return None
 
         # Memory ids are vault-relative note paths (see add_memory).
-        root = self.vault.user_root(user_id)
+        root = self._scope_root(user_id, memory_space_id)
         fp = root / memory_id
         if not fp.is_file():
             return None
-        return self._vault_entry_from_path(user_id, fp, root)
+        return self._vault_entry_from_path(
+            user_id, fp, root, memory_space_id=memory_space_id
+        )
 
     async def get_memories_by_source(
-        self, user_id: str, source_id: str, limit: int = 100
+        self,
+        user_id: str,
+        source_id: str,
+        limit: int = 100,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> List[MemoryEntry]:
         """Return the conversation note for ``source_id`` (the vault's per-source record)."""
         if not self._initialized:
             await self.initialize()
 
-        root = self.vault.user_root(user_id)
+        root = self._scope_root(user_id, memory_space_id)
         conv_note = root / "Conversations" / f"{Path(source_id).name}.md"
         if not conv_note.is_file():
             return []
-        entry = self._vault_entry_from_path(user_id, conv_note, root)
+        entry = self._vault_entry_from_path(
+            user_id, conv_note, root, memory_space_id=memory_space_id
+        )
         return [entry] if entry is not None else []
 
     async def update_memory(
@@ -1714,6 +1886,8 @@ class MemoryService(MemoryServiceBase):
         memory_id: str,
         user_id: Optional[str] = None,
         user_email: Optional[str] = None,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> bool:
         if not self._initialized:
             await self.initialize()
@@ -1725,7 +1899,11 @@ class MemoryService(MemoryServiceBase):
             return False
 
         # Memory ids are vault-relative note paths.
-        root = self.vault.user_root(user_id)
+        if memory_space_id:
+            await self.scope_resolver.require_space(
+                MemoryScope(str(user_id), memory_space_id), writable=True
+            )
+        root = self._scope_root(user_id, memory_space_id)
         fp = root / memory_id
         try:
             if not fp.is_file():
@@ -1737,6 +1915,7 @@ class MemoryService(MemoryServiceBase):
                 note_path=Path(memory_id).as_posix(),
                 agent_mode=False,
                 summary=f"deleted {memory_id}",
+                memory_space_id=memory_space_id,
             )
             memory_logger.info(f"🗑️ Deleted memory note {memory_id}")
             return True
@@ -1767,6 +1946,8 @@ class MemoryService(MemoryServiceBase):
         user_email: str,
         transcript_diff: Optional[list] = None,
         previous_transcript: Optional[str] = None,
+        memory_space_id: Optional[str] = None,
+        admitted_space_write: bool = False,
     ) -> Tuple[bool, List[str]]:
         """Delete the stale conversation note and re-record from the transcript."""
         write_backend = (
@@ -1803,8 +1984,18 @@ class MemoryService(MemoryServiceBase):
                 },
             )
             await self._ensure_initialized()
+            if memory_space_id:
+                await self.scope_resolver.require_space(
+                    MemoryScope(str(user_id), memory_space_id),
+                    writable=True,
+                    allow_merging=admitted_space_write,
+                )
             success, touched = await self._reprocess_memory_agent(
-                transcript, source_id, user_id, transcript_diff
+                transcript,
+                source_id,
+                user_id,
+                transcript_diff,
+                memory_space_id=memory_space_id,
             )
             set_safe_span_attributes(
                 span,

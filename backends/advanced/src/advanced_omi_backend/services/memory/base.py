@@ -148,6 +148,10 @@ class MemoryServiceBase(ABC):
         source_date: Optional[str] = None,
         source_duration_minutes: Optional[float] = None,
         source_title: Optional[str] = None,
+        source_people: Optional[List[str]] = None,
+        source_images: Optional[List[Tuple[str, bytes]]] = None,
+        memory_space_id: Optional[str] = None,
+        admitted_space_write: bool = False,
     ) -> Tuple[bool, List[str]]:
         """Add memories extracted from a transcript.
 
@@ -162,6 +166,12 @@ class MemoryServiceBase(ABC):
             source_date: Trusted source conversation timestamp
             source_duration_minutes: Trusted source audio duration in minutes
             source_title: Trusted source conversation title
+            source_people: Deterministically identified transcript speakers
+            source_images: Deliberately selected visual evidence passed to a
+                multimodal-capable write agent
+            admitted_space_write: Permit an already-enqueued processing job to finish
+                while its space is draining in the ``merging`` state. Interactive and
+                newly admitted writes must leave this false.
 
         Returns:
             Tuple of (success: bool, created_memory_ids: List[str])
@@ -177,6 +187,9 @@ class MemoryServiceBase(ABC):
         *,
         day_index_digest: str,
         source_date: Optional[str] = None,
+        source_run_id: Optional[str] = None,
+        source_episode_ids: Optional[List[str]] = None,
+        source_conversation_ids: Optional[List[str]] = None,
     ) -> Tuple["DayWriteOutcome", List[str]]:
         """Record one settled local day of timeline episodes.
 
@@ -192,6 +205,9 @@ class MemoryServiceBase(ABC):
             local_date: The user-local date being recorded, ISO ``YYYY-MM-DD``
             user_id: User identifier
             source_date: Trusted timestamp for the day's record
+            source_run_id: Timeline analysis run projected into this day
+            source_episode_ids: Episode rows included in the source projection
+            source_conversation_ids: Conversation sources cited by those episodes
 
         Returns:
             Tuple of (outcome: DayWriteOutcome, touched_note_paths: List[str])
@@ -200,7 +216,13 @@ class MemoryServiceBase(ABC):
 
     @abstractmethod
     async def search_memories(
-        self, query: str, user_id: str, limit: int = 10, score_threshold: float = 0.0
+        self,
+        query: str,
+        user_id: str,
+        limit: int = 10,
+        score_threshold: float = 0.0,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> List[MemoryEntry]:
         """Search memories using semantic similarity.
 
@@ -224,7 +246,11 @@ class MemoryServiceBase(ABC):
 
     @abstractmethod
     async def get_all_memories(
-        self, user_id: str, limit: int = 100
+        self,
+        user_id: str,
+        limit: int = 100,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> List[MemoryEntry]:
         """Get all memories for a specific user.
 
@@ -237,7 +263,9 @@ class MemoryServiceBase(ABC):
         """
         pass
 
-    async def count_memories(self, user_id: str) -> Optional[int]:
+    async def count_memories(
+        self, user_id: str, *, memory_space_id: Optional[str] = None
+    ) -> Optional[int]:
         """Count total number of memories for a user.
 
         This is an optional method that providers can implement for efficient
@@ -252,7 +280,11 @@ class MemoryServiceBase(ABC):
         return None
 
     async def get_memory(
-        self, memory_id: str, user_id: Optional[str] = None
+        self,
+        memory_id: str,
+        user_id: Optional[str] = None,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> Optional[MemoryEntry]:
         """Get a specific memory by ID.
 
@@ -295,7 +327,12 @@ class MemoryServiceBase(ABC):
         return False
 
     async def get_memories_by_source(
-        self, user_id: str, source_id: str, limit: int = 100
+        self,
+        user_id: str,
+        source_id: str,
+        limit: int = 100,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> List[MemoryEntry]:
         """Get all memories extracted from a specific source (conversation).
 
@@ -340,6 +377,8 @@ class MemoryServiceBase(ABC):
         user_email: str,
         transcript_diff: Optional[List[Dict[str, Any]]] = None,
         previous_transcript: Optional[str] = None,
+        memory_space_id: Optional[str] = None,
+        admitted_space_write: bool = False,
     ) -> Tuple[bool, List[str]]:
         """Reprocess memories after transcript or speaker changes.
 
@@ -367,7 +406,14 @@ class MemoryServiceBase(ABC):
             Tuple of (success: bool, affected_memory_ids: List[str])
         """
         return await self.add_memory(
-            transcript, client_id, source_id, user_id, user_email, allow_update=True
+            transcript,
+            client_id,
+            source_id,
+            user_id,
+            user_email,
+            allow_update=True,
+            memory_space_id=memory_space_id,
+            admitted_space_write=admitted_space_write,
         )
 
     @abstractmethod
@@ -376,6 +422,8 @@ class MemoryServiceBase(ABC):
         memory_id: str,
         user_id: Optional[str] = None,
         user_email: Optional[str] = None,
+        *,
+        memory_space_id: Optional[str] = None,
     ) -> bool:
         """Delete a specific memory by ID.
 

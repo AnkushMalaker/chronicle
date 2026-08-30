@@ -33,6 +33,7 @@ from rich.progress import (
     TextColumn,
     TimeElapsedColumn,
 )
+from rq.job import Dependency
 
 from advanced_omi_backend.controllers.queue_controller import memory_queue
 from advanced_omi_backend.database import get_database
@@ -43,7 +44,6 @@ from advanced_omi_backend.services.memory.rebuild import (
 )
 from advanced_omi_backend.services.memory.vault_scaffold import canonical_vault_scaffold
 from advanced_omi_backend.services.memory.vault_verify import verify_vault_changes
-from advanced_omi_backend.workers.timeline_jobs import rebuild_timeline_day_job
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("finish_day_rebuild")
@@ -150,7 +150,11 @@ async def _chain_idle() -> bool:
     connection = memory_queue.connection
     if memory_queue.count or memory_queue.deferred_job_registry.count:
         return False
-    return not connection.keys("rq:executions:timeline_*")
+    # RQ 2 tracks every executing job in the queue's started registry. Looking for
+    # original ``timeline_rebuild_*`` execution keys misses this script's
+    # ``day_retry_*`` jobs and can start another repair round while the prior round's
+    # last day is still writing the vault.
+    return not connection.zcard(memory_queue.started_job_registry.key)
 
 
 def _rebuild_job_states(run_id: str) -> Counter:
@@ -278,8 +282,16 @@ def _enqueue(
     sequence: str,
     depends_on,
 ):
+    dependency = (
+        Dependency(jobs=[depends_on], allow_failure=True) if depends_on else None
+    )
+    entrypoint = (
+        "advanced_omi_backend.workers.record_timeline_day_memory_job"
+        if row.get("state") == "partial"
+        else "advanced_omi_backend.workers.rebuild_timeline_day_job"
+    )
     return memory_queue.enqueue(
-        rebuild_timeline_day_job,
+        entrypoint,
         user_id,
         row["local_date"].isoformat(),
         row["timezone"],
@@ -287,7 +299,7 @@ def _enqueue(
         result_ttl=JOB_RESULT_TTL,
         job_id=(f"day_retry_{repair_scope}_{sequence}_{row['local_date'].isoformat()}"),
         description=f"Retry day {row['local_date'].isoformat()}",
-        depends_on=depends_on,
+        depends_on=dependency,
         meta={
             "user_id": user_id,
             "rebuild_run_id": repair_scope,

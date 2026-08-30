@@ -42,6 +42,8 @@ services:
       LLAMA_ARG_CACHE_TYPE_K: ${LLAMA_ARG_CACHE_TYPE_K:-f16}
       LLAMA_ARG_CACHE_TYPE_V: ${LLAMA_ARG_CACHE_TYPE_V:-f16}
       LLAMA_ARG_MMPROJ_AUTO: ${LLAMA_ARG_MMPROJ_AUTO:-true}
+      # Qwen-VL's own llama.cpp loader warns that grounding is unreliable below this.
+      LLAMA_ARG_IMAGE_MIN_TOKENS: ${LLAMA_ARG_IMAGE_MIN_TOKENS:-1024}
       LLAMA_ARG_REASONING: ${LLAMA_ARG_REASONING:-auto}
       # `--reasoning-budget`: -1 is llama.cpp's unrestricted default. Bound it for a
       # thinking model so a runaway trace cannot eat the context the caller needs.

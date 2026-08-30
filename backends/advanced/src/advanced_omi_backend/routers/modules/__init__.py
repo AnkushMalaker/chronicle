@@ -33,6 +33,7 @@ from .finetuning_routes import router as finetuning_router
 from .health_routes import router as health_router
 from .manual_memory_routes import router as manual_memory_router
 from .memory_routes import router as memory_router
+from .memory_space_routes import router as memory_space_router
 from .openai_compat_routes import router as openai_compat_router
 from .queue_routes import router as queue_router
 from .sse_routes import router as sse_router

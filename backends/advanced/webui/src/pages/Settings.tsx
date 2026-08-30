@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Settings as SettingsIcon, CheckCircle, AlertCircle, RefreshCw, Volume2, Sliders, Mic, Users, Cpu, Play, Loader2, X, Check, UserCircle, Database, Plus, Trash2, Pencil } from 'lucide-react'
 import { systemApi, speakerApi, authApi } from '../services/api'
 import { useAuth } from '../contexts/AuthContext'
-import { useDiarizationSettings, useLLMOperations, useMiscSettings, useModels, ModelView, ModelType } from '../hooks/useSystem'
+import { useDiarizationSettings, useLLMOperations, useMiscSettings, useModels, useTimelineGroupingSettings, ModelView, ModelType } from '../hooks/useSystem'
 import ApiKeysCard from '../components/ApiKeysCard'
 import ExternalServices from '../components/ExternalServices'
 import AsrContextSettings from '../components/AsrContextSettings'
@@ -27,6 +27,7 @@ export default function Settings() {
   const { data: diarizationData } = useDiarizationSettings()
   const { data: miscSettingsData } = useMiscSettings()
   const { data: llmOpsData, refetch: refetchLLMOps } = useLLMOperations()
+  const { data: timelineGroupingData } = useTimelineGroupingSettings()
 
   // Local state for editable settings
   const [diarizationSettings, setDiarizationSettings] = useState<DiarizationSettings>({
@@ -51,6 +52,9 @@ export default function Settings() {
   const [miscMessage, setMiscMessage] = useState('')
   const [audioFilterLoading, setAudioFilterLoading] = useState(false)
   const [audioFilterMessage, setAudioFilterMessage] = useState('')
+  const [timelineGrouping, setTimelineGrouping] = useState({ pregenerate: true, prefetch_days: 5 })
+  const [timelineGroupingLoading, setTimelineGroupingLoading] = useState(false)
+  const [timelineGroupingMessage, setTimelineGroupingMessage] = useState('')
 
   // Identity settings (how the user/assistant are labeled when extracting chat memories)
   const [displayName, setDisplayName] = useState('')
@@ -67,6 +71,24 @@ export default function Settings() {
   useEffect(() => {
     if (miscSettingsData) setMiscSettings(miscSettingsData)
   }, [miscSettingsData])
+
+  useEffect(() => {
+    if (timelineGroupingData) setTimelineGrouping(timelineGroupingData)
+  }, [timelineGroupingData])
+
+  const saveTimelineGrouping = async () => {
+    try {
+      setTimelineGroupingLoading(true)
+      setTimelineGroupingMessage('')
+      await systemApi.saveTimelineGroupingSettings(timelineGrouping)
+      setTimelineGroupingMessage('Review buffer saved')
+      setTimeout(() => setTimelineGroupingMessage(''), 3000)
+    } catch (err: any) {
+      setTimelineGroupingMessage('Error: ' + (err.response?.data?.detail || err.message))
+    } finally {
+      setTimelineGroupingLoading(false)
+    }
+  }
 
   // Load current identity from the user's profile
   useEffect(() => {
@@ -629,6 +651,34 @@ export default function Settings() {
         {/* Speaker Configuration */}
         <SpeakerConfiguration user={user} />
 
+        <div className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2 flex items-center">
+            <Sliders className="h-5 w-5 mr-2 text-blue-600" /> Timeline review buffer
+          </h3>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+            Prepare grouping suggestions ahead of the day you are reviewing, so the next days are ready without waiting.
+          </p>
+          <label className="flex items-start gap-3 mb-4">
+            <input type="checkbox" checked={timelineGrouping.pregenerate}
+              onChange={(event) => setTimelineGrouping(current => ({ ...current, pregenerate: event.target.checked }))}
+              className="mt-1" />
+            <span><span className="block text-sm font-medium text-gray-900 dark:text-gray-100">Prepare suggestions automatically</span>
+              <span className="block text-xs text-gray-500 dark:text-gray-400">Runs in the background for reviewable Timeline days.</span></span>
+          </label>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1" htmlFor="timeline-prefetch-days">Days ready ahead</label>
+          <div className="flex items-center gap-3">
+            <Input id="timeline-prefetch-days" type="number" min={1} max={30}
+              value={timelineGrouping.prefetch_days} disabled={!timelineGrouping.pregenerate}
+              onChange={(event) => setTimelineGrouping(current => ({ ...current, prefetch_days: Number(event.target.value) }))}
+              className="w-24" />
+            <span className="text-sm text-gray-500 dark:text-gray-400">oldest pending review days</span>
+          </div>
+          <Button className="mt-4" onClick={saveTimelineGrouping} disabled={timelineGroupingLoading}>
+            {timelineGroupingLoading ? 'Saving…' : 'Save review buffer'}
+          </Button>
+          {timelineGroupingMessage && <Alert tone={timelineGroupingMessage.startsWith('Error') ? 'danger' : 'success'} className="mt-3 text-xs">{timelineGroupingMessage}</Alert>}
+        </div>
+
         {/* AI Model Settings */}
         {llmOpsData && (
           <LLMOperationsCard
@@ -674,12 +724,14 @@ const OPERATION_LABELS: Record<string, string> = {
   chat: 'Chat',
   prompt_optimization: 'Prompt Optimization',
   plugin_assistant: 'Plugin Assistant',
+  timeline_consolidation: 'Timeline Grouping Suggestions',
 }
 
 interface LLMOpsData {
   operations: Record<string, { model: string | null; temperature: number | null; max_tokens: number | null; response_format: string | null }>
   available_models: Array<{ name: string; description: string; provider: string }>
   default_llm: string | null
+  effective_routing: Record<string, { model: string; model_name: string; provider: string; role: string | null; source: string }>
 }
 
 function LLMOperationsCard({ data, onSaved }: { data: LLMOpsData; onSaved: () => void }) {
@@ -780,6 +832,12 @@ function LLMOperationsCard({ data, onSaved }: { data: LLMOpsData; onSaved: () =>
                         <option key={m.name} value={m.name}>{m.name} — {m.provider}</option>
                       ))}
                     </select>
+                    {data.effective_routing?.[opName] && (
+                      <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                        Effective: {data.effective_routing[opName].model}
+                        {' · '}{data.effective_routing[opName].source}
+                      </div>
+                    )}
                   </td>
                   <td className="py-2 px-3">
                     <div className="flex items-center gap-2">

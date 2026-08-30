@@ -12,7 +12,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlencode
 
 import httpx
@@ -258,6 +258,68 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         """
         return {cap: True for cap in self._capabilities}
 
+    async def _lookup_cached_transcription(
+        self,
+        audio_data: bytes,
+        sample_rate: int,
+        *,
+        diarize: bool,
+    ) -> tuple[Any | None, dict | None, dict | None]:
+        """Return ``(collection, key, result)`` for the paid-response cache."""
+        if self.model.model_provider == "mock":
+            return None, None, None
+        try:
+            config = (
+                self.model.model_dump()
+                if hasattr(self.model, "model_dump")
+                else dict(vars(self.model))
+            )
+            config.pop("api_key", None)
+            fingerprint = json.dumps(
+                {
+                    "provider": self._name,
+                    "config": config,
+                    "diarize": diarize,
+                    "sample_rate": sample_rate,
+                },
+                sort_keys=True,
+                default=str,
+            )
+            cache_key = {
+                "audio_sha256": hashlib.sha256(audio_data).hexdigest(),
+                "request_sha256": hashlib.sha256(fingerprint.encode()).hexdigest(),
+            }
+            cache = Conversation.get_pymongo_collection().database[
+                "transcription_response_cache"
+            ]
+            row = await cache.find_one(cache_key, {"result": 1})
+            result = row.get("result") if row else None
+            return cache, cache_key, result
+        except Exception as e:
+            logger.debug(f"Transcription cache lookup skipped: {e}")
+            return None, None, None
+
+    async def get_cached_transcription(
+        self,
+        audio_data: bytes,
+        sample_rate: int,
+        *,
+        diarize: bool = False,
+    ) -> dict | None:
+        """Look up a response without ever calling the transcription provider."""
+        _cache, _cache_key, result = await self._lookup_cached_transcription(
+            audio_data,
+            sample_rate,
+            diarize=diarize,
+        )
+        if result is not None:
+            logger.info(
+                f"♻️ Transcription cache hit for '{self._name}' "
+                f"({len(audio_data)} bytes) — reusing stored response, "
+                "no provider call"
+            )
+        return result
+
     async def transcribe(
         self,
         audio_data: bytes,
@@ -279,45 +341,18 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
         a hint tweak isn't worth re-billing the whole corpus. Cache failures
         never block transcription.
         """
-        cache = None
-        cache_key = None
-        if self.model.model_provider != "mock":
-            try:
-                config = (
-                    self.model.model_dump()
-                    if hasattr(self.model, "model_dump")
-                    else dict(vars(self.model))
-                )
-                config.pop("api_key", None)
-                fingerprint = json.dumps(
-                    {
-                        "provider": self._name,
-                        "config": config,
-                        "diarize": diarize,
-                        "sample_rate": sample_rate,
-                    },
-                    sort_keys=True,
-                    default=str,
-                )
-                cache_key = {
-                    "audio_sha256": hashlib.sha256(audio_data).hexdigest(),
-                    "request_sha256": hashlib.sha256(fingerprint.encode()).hexdigest(),
-                }
-
-                cache = Conversation.get_pymongo_collection().database[
-                    "transcription_response_cache"
-                ]
-                row = await cache.find_one(cache_key, {"result": 1})
-                if row and row.get("result") is not None:
-                    logger.info(
-                        f"♻️ Transcription cache hit for '{self._name}' "
-                        f"({len(audio_data)} bytes) — reusing stored response, "
-                        "no provider call"
-                    )
-                    return row["result"]
-            except Exception as e:
-                logger.debug(f"Transcription cache lookup skipped: {e}")
-                cache = None
+        cache, cache_key, cached_result = await self._lookup_cached_transcription(
+            audio_data,
+            sample_rate,
+            diarize=diarize,
+        )
+        if cached_result is not None:
+            logger.info(
+                f"♻️ Transcription cache hit for '{self._name}' "
+                f"({len(audio_data)} bytes) — reusing stored response, "
+                "no provider call"
+            )
+            return cached_result
 
         try:
             result = await self._transcribe_uncached(
@@ -654,6 +689,8 @@ class RegistryBatchTranscriptionProvider(BatchTranscriptionProvider):
 class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
     """Streaming transcription provider using a config-driven WebSocket template."""
 
+    _MIN_AUDIO_SEND_BYTES = 3200  # 100 ms of 16 kHz mono PCM; provider wants a few KB
+
     def __init__(self):
         registry = get_models_registry()
         if not registry:
@@ -724,9 +761,6 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
             if keyterm:
                 query_dict["keyterm"] = keyterm
 
-        # NOTE: PULSE/wave (smallest.ai) does NOT support keywords on WebSocket —
-        # any `keywords` query param causes 0 responses or HTTP 400.
-
         # Normalize boolean values to lowercase strings (Deepgram expects "true"/"false", not "True"/"False")
         normalized_query = {}
         for k, v in query_dict.items():
@@ -776,6 +810,7 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
             "sample_rate": sample_rate,
             "final": None,
             "interim": [],
+            "pending_audio": bytearray(),
         }
 
     async def process_audio_chunk(
@@ -785,6 +820,16 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
             return None
         ws = self._streams[stream_id]["ws"]
         ops = self.model.operations or {}
+
+        # Audio V2 emits atomic 20 ms / 640-byte frames. Waiting up to 50 ms for a
+        # provider response after every frame throttles the uplink below real time.
+        # Coalesce to the provider's documented few-kilobyte cadence first.
+        pending = self._streams[stream_id]["pending_audio"]
+        pending.extend(audio_chunk)
+        if len(pending) < self._MIN_AUDIO_SEND_BYTES:
+            return None
+        audio_chunk = bytes(pending)
+        pending.clear()
 
         # Send chunk header if required (for providers like Parakeet)
         chunk_hdr = (ops.get("chunk_header", {}) or {}).get("message", {})
@@ -875,6 +920,10 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
             return {"text": "", "words": [], "segments": []}
         ws = self._streams[stream_id]["ws"]
         ops = self.model.operations or {}
+        pending = self._streams[stream_id].get("pending_audio")
+        if pending:
+            await ws.send(bytes(pending))
+            pending.clear()
         end_msg = (ops.get("end", {}) or {}).get("message", {"type": "stop"})
         await ws.send(json.dumps(end_msg))
 

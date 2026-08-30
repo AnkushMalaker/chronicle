@@ -541,6 +541,90 @@ def service_env_values(service_name: str) -> dict:
     return dotenv_values(env_path) if env_path.exists() else {}
 
 
+def _required_llm_endpoint_labels() -> set[str] | None:
+    """Return local llama.cpp capabilities selected by the effective model routing.
+
+    ``None`` is a conservative fallback when configuration cannot be inspected. The
+    backend performs the authoritative validation; this lightweight mirror keeps the
+    host service manager independent of backend imports while avoiding phantom health
+    failures for remote providers.
+    """
+    config_dir = Path(__file__).parent / "config"
+    try:
+        shipped = yaml.safe_load((config_dir / "defaults.yml").read_text()) or {}
+        local_path = config_dir / "config.yml"
+        local = (
+            yaml.safe_load(local_path.read_text()) or {} if local_path.exists() else {}
+        )
+    except (OSError, yaml.YAMLError, TypeError):
+        return None
+
+    default_names = dict(shipped.get("defaults") or {})
+    default_names.update(local.get("defaults") or {})
+
+    models: dict[str, dict] = {}
+    for model_list in (shipped.get("models") or [], local.get("models") or []):
+        for source in model_list:
+            if not isinstance(source, dict) or not source.get("name"):
+                continue
+            name = str(source["name"])
+            # Match config_loader: a user model replaces the shipped entry by name.
+            models[name] = dict(source)
+
+    operation_models = []
+    operation_names = set((shipped.get("llm_operations") or {})) | set(
+        local.get("llm_operations") or {}
+    )
+    for operation_name in operation_names:
+        merged_operation = {
+            **((shipped.get("llm_operations") or {}).get(operation_name) or {}),
+            **((local.get("llm_operations") or {}).get(operation_name) or {}),
+        }
+        if merged_operation.get("model"):
+            operation_models.append(str(merged_operation["model"]))
+
+    selected_llms = {
+        str(default_names[key])
+        for key in ("llm", "fast_llm", "fallback_llm")
+        if default_names.get(key)
+    }
+    selected_llms.update(operation_models)
+
+    required: set[str] = set()
+    for name in selected_llms:
+        model = models.get(name)
+        if model is None:
+            return None
+        provider = str(model.get("model_provider") or "").lower()
+        if model.get("discovery_service") == "chronicle-llm" or any(
+            marker in provider for marker in ("llamacpp", "llama.cpp")
+        ):
+            required.add("chat")
+
+    embedding_name = default_names.get("embedding")
+    if embedding_name:
+        embedding = models.get(str(embedding_name))
+        if embedding is None:
+            return None
+        provider = str(embedding.get("model_provider") or "").lower()
+        if embedding.get("discovery_service") in {
+            "chronicle-embed",
+            "chronicle-embedding",
+        } or any(marker in provider for marker in ("llamacpp", "llama.cpp")):
+            required.add("embeddings")
+    return required
+
+
+def _active_health_endpoints(service_name: str) -> list[dict]:
+    endpoints = list(SERVICES[service_name].get("health_endpoints", []))
+    if service_name != "llm-services":
+        return endpoints
+    required = _required_llm_endpoint_labels()
+    if required is None:
+        return endpoints
+    return [endpoint for endpoint in endpoints if endpoint["label"] in required]
+
+
 def service_display_label(service_name: str, env_values: dict | None = None) -> str:
     """Human label for a service, provider-aware where one compose hosts many.
 
@@ -550,6 +634,15 @@ def service_display_label(service_name: str, env_values: dict | None = None) -> 
     through here so the displayed name can't drift from the running provider.
     """
     service = SERVICES[service_name]
+    if service_name == "llm-services":
+        required = _required_llm_endpoint_labels()
+        if required == {"chat"}:
+            return "Local llama.cpp (chat)"
+        if required == {"embeddings"}:
+            return "Local llama.cpp (embeddings)"
+        if required == set():
+            return "Local llama.cpp (not required)"
+        return service["description"]
     if service_name != "asr-services":
         return service["description"]
     if env_values is None:
@@ -582,9 +675,22 @@ def service_display_ports(
                 if endpoint.get("port_env")
                 else endpoint["default_port"]
             ).strip("'\"")
-            for endpoint in service.get("health_endpoints", [])
+            for endpoint in _active_health_endpoints(service_name)
         }
-        return [replacements.get(str(port), str(port)) for port in service["ports"]]
+        active_defaults = {
+            str(endpoint["default_port"])
+            for endpoint in _active_health_endpoints(service_name)
+        }
+        return [
+            replacements.get(str(port), str(port))
+            for port in service["ports"]
+            if str(port) in active_defaults
+            or str(port)
+            not in {
+                str(endpoint["default_port"])
+                for endpoint in service.get("health_endpoints", [])
+            }
+        ]
 
     ports: list[str] = []
     batch = (env_values.get("ASR_PROVIDER") or "").strip("'\"")
@@ -608,9 +714,13 @@ def _get_advertised_services() -> list[tuple[str, int, str]]:
         if svc_name not in SERVICES or not check_service_enabled(svc_name):
             continue
         service = SERVICES[svc_name]
-        endpoints = service.get("health_endpoints", [])
+        endpoints = _active_health_endpoints(svc_name)
         if not endpoints:
             continue
+        if svc_name == "llm-services":
+            endpoints = [e for e in endpoints if e["label"] == "chat"]
+            if not endpoints:
+                continue
         endpoint = endpoints[0]
         port_env = endpoint.get("port_env")
         default_port = endpoint["default_port"]
@@ -737,8 +847,10 @@ def check_service_health(service_name):
         "stopped"  — not reachable at all
     """
     service = SERVICES[service_name]
-    endpoints = service.get("health_endpoints", [])
+    endpoints = _active_health_endpoints(service_name)
     if not endpoints:
+        if service_name == "llm-services":
+            return ("healthy", "not required")
         return ("stopped", "no endpoints defined")
 
     results = []  # list of (label, ok: bool)
@@ -779,7 +891,7 @@ def service_health_endpoint_urls(service_name: str) -> list[tuple[str, str]]:
     env_values = service_env_values(service_name)
     urls: list[tuple[str, str]] = []
 
-    for endpoint in service.get("health_endpoints", []):
+    for endpoint in _active_health_endpoints(service_name):
         port_env = endpoint.get("port_env")
         default_port = endpoint["default_port"]
         if service_name == "asr-services" and port_env == "ASR_PORT":

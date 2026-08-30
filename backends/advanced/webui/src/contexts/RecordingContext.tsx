@@ -48,7 +48,7 @@ export interface RecordingContextType {
   liveTranscript: string
 
   // Actions
-  startRecording: () => Promise<void>
+  startRecording: (memorySpaceId?: string) => Promise<void>
   stopRecording: () => void
   setMode: (mode: RecordingMode) => void
   audioSource: AudioSource
@@ -149,7 +149,6 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const responseDrainActiveRef = useRef(false)
   const chunkCountRef = useRef(0)
   const audioProcessingStartedRef = useRef(false)
-  const captureEpochRef = useRef(0)
 
   // Check if we're on localhost or using HTTPS
   const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
@@ -265,6 +264,21 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     cleanupCapture()
     cleanupTransport()
   }, [cleanupCapture, cleanupTransport])
+
+  const handleAudioSessionFailure = useCallback((failure: Error) => {
+    audioProcessingStartedRef.current = false
+    audioSessionRef.current = null
+    setActiveWakeClientId(null)
+    setError(failure.message)
+    setCurrentStep('error')
+    setIsRecording(false)
+    setDebugStats(prev => ({
+      ...prev,
+      lastError: failure.message,
+      lastErrorTime: new Date(),
+    }))
+    cleanupCapture()
+  }, [cleanupCapture])
 
   // Step 1: Get microphone access
   const getMicrophoneAccess = useCallback(async (): Promise<MediaStream> => {
@@ -415,17 +429,22 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     base.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:'
     base.pathname = `${base.pathname.replace(/\/$/, '')}/ws/audio`
     base.search = ''
-    const session = new WebAudioV2Session(base.toString(), token, clientId => setActiveWakeClientId(clientId || null))
+    const session = new WebAudioV2Session(
+      base.toString(),
+      token,
+      clientId => setActiveWakeClientId(clientId || null),
+      text => setLiveTranscript(text),
+      handleAudioSessionFailure,
+    )
     await session.connect()
     audioSessionRef.current = session
     setDebugStats(prev => ({ ...prev, connectionAttempts: prev.connectionAttempts + 1, sessionStartTime: new Date() }))
     return session
-  }, [])
+  }, [handleAudioSessionFailure])
 
   // Step 3: Open a source-native capture under the V2 binding.
-  const startAudioSession = useCallback(async (session: WebAudioV2Session): Promise<void> => {
-    captureEpochRef.current += 1
-    await session.start(captureEpochRef.current)
+  const startAudioSession = useCallback(async (session: WebAudioV2Session, memorySpaceId?: string): Promise<void> => {
+    await session.start(memorySpaceId)
   }, [])
 
   // Step 4: Start audio streaming
@@ -546,7 +565,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   }, [])
 
   // Main start recording function - sequential flow
-  const startRecording = useCallback(async () => {
+  const startRecording = useCallback(async (memorySpaceId?: string) => {
     const needsMic = audioSource !== 'tab'
     const needsDisplayAudio = audioSource !== 'mic'
 
@@ -588,7 +607,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
       setCurrentStep('audio-start')
       // Step 3: Send audio-start message (uses audioContextRef for sample rate)
-      await startAudioSession(session)
+      await startAudioSession(session, memorySpaceId)
 
       setCurrentStep('streaming')
       // Step 4: Start audio streaming (reuses existing AudioContext)

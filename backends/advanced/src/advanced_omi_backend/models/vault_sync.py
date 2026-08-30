@@ -1,5 +1,7 @@
 """Request models for the vault sync pairing broker."""
 
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 # Syncthing's canonical device ID is eight groups of seven base32 characters.
@@ -10,3 +12,4 @@ _DEVICE_ID_PATTERN = r"^[A-Z2-7]{7}(?:-[A-Z2-7]{7}){7}$"
 class PairRequest(BaseModel):
     device_id: str = Field(pattern=_DEVICE_ID_PATTERN)
     device_name: str = "mac"
+    memory_space_id: Optional[str] = None

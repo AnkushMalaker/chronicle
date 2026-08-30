@@ -116,12 +116,11 @@ def users_collection() -> Collection:
 
 
 @pytest.mark.asyncio
-async def test_registered_day_worker_runs_analysis_then_glimmer_vault_write(
+async def test_registered_day_worker_prepares_review_without_writing_the_vault(
     monkeypatch,
 ):
     calls = []
     run = SimpleNamespace(run_id="pi-run")
-    stored_day = SimpleNamespace(active_run_id="pi-run")
 
     async def request(user_id, local_date, timezone_name, force=False):
         calls.append(("request", user_id, str(local_date), timezone_name, force))
@@ -131,15 +130,34 @@ async def test_registered_day_worker_runs_analysis_then_glimmer_vault_write(
         calls.append(("process", run_id, retain_unconfirmed_existing))
         return {"processed": 1, "failed": 0, "deferred": 0}
 
+    monkeypatch.setattr(timeline_jobs, "request_timeline_analysis", request)
+    monkeypatch.setattr(timeline_jobs, "process_timeline_run", process)
+
+    result = await timeline_jobs.rebuild_timeline_day_job.__wrapped__(
+        USER, "2026-08-06", "Asia/Kolkata", redis_client=None
+    )
+
+    assert calls == [
+        ("request", USER, "2026-08-06", "Asia/Kolkata", True),
+        ("process", "pi-run", False),
+    ]
+    assert result["memory"] == "pending_review"
+
+
+@pytest.mark.asyncio
+async def test_registered_memory_repair_worker_uses_the_active_timeline_generation(
+    monkeypatch,
+):
+    calls = []
+    stored_day = SimpleNamespace(active_run_id="active-run")
+
     async def find_one(*_args, **_kwargs):
         return stored_day
 
-    async def write(day):
-        calls.append(("write", day.active_run_id))
+    async def write(day, *, retry_partial=False):
+        calls.append(("write", day.active_run_id, retry_partial))
         return "written_by_pi"
 
-    monkeypatch.setattr(timeline_jobs, "request_timeline_analysis", request)
-    monkeypatch.setattr(timeline_jobs, "process_timeline_run", process)
     monkeypatch.setattr(
         timeline_jobs,
         "TimelineDay",
@@ -152,16 +170,12 @@ async def test_registered_day_worker_runs_analysis_then_glimmer_vault_write(
     )
     monkeypatch.setattr(timeline_jobs, "write_day_memory", write)
 
-    result = await timeline_jobs.rebuild_timeline_day_job.__wrapped__(
+    result = await timeline_jobs.record_timeline_day_memory_job.__wrapped__(
         USER, "2026-08-06", "Asia/Kolkata", redis_client=None
     )
 
-    assert calls == [
-        ("request", USER, "2026-08-06", "Asia/Kolkata", True),
-        ("process", "pi-run", False),
-        ("write", "pi-run"),
-    ]
-    assert result["memory"] == "written_by_pi"
+    assert calls == [("write", "active-run", True)]
+    assert result == {"local_date": "2026-08-06", "memory": "written_by_pi"}
 
 
 @pytest.mark.asyncio

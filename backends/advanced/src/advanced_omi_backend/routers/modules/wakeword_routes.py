@@ -176,6 +176,13 @@ class PrimeRequest(BaseModel):
     wakeword: str | None = None
 
 
+class ProbeRequest(BaseModel):
+    client_id: str
+    audio_session_id: str
+    wakeword: str
+    timeout_seconds: float = 15
+
+
 class LabelRequest(BaseModel):
     label: str  # "wake" -> positive, "not_wake" -> negative
 
@@ -581,6 +588,78 @@ async def unprime(req: PrimeRequest, current_user: User = Depends(current_active
                 status_code=503, detail=f"Wake-word service unreachable: {e}"
             )
     return resp.json()
+
+
+@router.post("/probes", status_code=201)
+async def start_probe(
+    req: ProbeRequest, current_user: User = Depends(current_active_user)
+):
+    """Start a caller-owned production detector probe with no plugin dispatch."""
+    if not _owns(current_user, req.client_id):
+        raise HTTPException(status_code=403, detail="Not your stream")
+    async with _client() as client:
+        try:
+            resp = await client.post(
+                "/probes",
+                json={
+                    "client_id": req.client_id,
+                    "audio_session_id": req.audio_session_id,
+                    "wakeword": req.wakeword,
+                    "timeout_seconds": req.timeout_seconds,
+                },
+            )
+            if resp.status_code in (400, 404, 409):
+                raise HTTPException(
+                    status_code=resp.status_code, detail=resp.json().get("detail")
+                )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"Wake-word service unreachable: {exc}"
+            ) from exc
+    return resp.json()
+
+
+async def _owned_probe(
+    client: httpx.AsyncClient, probe_id: str, current_user: User
+) -> dict[str, Any]:
+    resp = await client.get(f"/probes/{probe_id}")
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail=resp.json().get("detail"))
+    resp.raise_for_status()
+    probe = resp.json()
+    if not _owns(current_user, probe.get("client_id", "")):
+        raise HTTPException(status_code=403, detail="Not your wake probe")
+    return probe
+
+
+@router.get("/probes/{probe_id}")
+async def get_probe(probe_id: str, current_user: User = Depends(current_active_user)):
+    async with _client() as client:
+        try:
+            return await _owned_probe(client, probe_id, current_user)
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"Wake-word service unreachable: {exc}"
+            ) from exc
+
+
+@router.delete("/probes/{probe_id}")
+async def cancel_probe(
+    probe_id: str, current_user: User = Depends(current_active_user)
+):
+    async with _client() as client:
+        try:
+            await _owned_probe(client, probe_id, current_user)
+            resp = await client.delete(f"/probes/{probe_id}")
+            if resp.status_code == 404:
+                raise HTTPException(status_code=404, detail=resp.json().get("detail"))
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=503, detail=f"Wake-word service unreachable: {exc}"
+            ) from exc
 
 
 @router.get("/samples")

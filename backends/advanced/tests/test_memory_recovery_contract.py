@@ -108,6 +108,8 @@ async def test_incomplete_valid_note_is_replaced_by_lossless_source_fallback(
                 "fallback_type": "deterministic_source_preserving_note",
                 "note_path": "Conversations/conversation-partial.md",
                 "reasons": ["incomplete_agent"],
+                "primary_backend": "pi",
+                "recovery_backend": "none",
                 "agent_truncated": True,
                 "agent_stalled": False,
                 "agent_error_count": 0,
@@ -263,6 +265,46 @@ async def test_day_write_fails_when_no_backend_completes(tmp_path, monkeypatch):
     assert touched == []
     # The earlier run's note is left alone; failure means unwritten, not clobbered.
     assert day_note.read_text(encoding="utf-8") == "# Written by an earlier run\n"
+
+
+@pytest.mark.asyncio
+async def test_reference_only_day_installs_index_without_running_semantic_agent(
+    tmp_path, monkeypatch
+):
+    service = MemoryService(
+        SimpleNamespace(
+            write_agent_backend="pi",
+            write_recovery_backend=None,
+            review_writes=False,
+        )
+    )
+    root = tmp_path / "user-one"
+    monkeypatch.setattr(service.vault, "user_root", lambda _uid: root)
+
+    class ForbiddenAgent:
+        def __init__(self, _root):
+            raise AssertionError("reference-only media must not start a semantic agent")
+
+    monkeypatch.setattr(service, "_write_agent_class", lambda: ForbiddenAgent)
+    index_digest = """Local day 2026-08-05 (Asia/Kolkata), 1 episode(s).
+
+### 09:00–09:30 · media · routine
+title: Media: a documentary
+episode_key: media-one"""
+
+    outcome, touched = await service._add_day_memory_agent(
+        "",
+        "2026-08-05",
+        "user-one",
+        day_index_digest=index_digest,
+        source_date="2026-08-05T00:00:00+05:30",
+    )
+
+    assert outcome is DayWriteOutcome.COMPLETE
+    assert touched == ["Daily/2026-08-05.md"]
+    note = (root / "Daily/2026-08-05.md").read_text(encoding="utf-8")
+    assert "Media: a documentary" in note
+    assert "episode_key:media-one" in note
 
 
 @pytest.mark.asyncio

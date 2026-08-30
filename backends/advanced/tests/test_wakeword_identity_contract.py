@@ -34,7 +34,22 @@ def test_wake_detection_event_keeps_session_and_client_identity_distinct():
         "user_id": "user-1",
         "audio_b64": "",
         "sample_rate": 16000,
-        "detected_at": 123.5,
+        "wake_trace_id": "7ce4d46b-232f-47f9-8148-d595ed344cf2",
+        "capture_epoch": 7,
+        "armed_at": 123.5,
+        "end_of_turn_at": 124.5,
+        "trigger_interval": {
+            "start_ms": 500.0,
+            "end_ms": 1500.0,
+            "started_at": 122.5,
+            "ended_at": 123.5,
+        },
+        "command_interval": {
+            "start_ms": 1500.0,
+            "end_ms": 2500.0,
+            "started_at": 123.5,
+            "ended_at": 124.5,
+        },
         "has_speech": False,
         "wakeword": "hey_hermes",
         "also_fired": ["hermes"],
@@ -47,3 +62,17 @@ def test_wake_detection_event_keeps_session_and_client_identity_distinct():
     assert str(event.client_id) == "a421c9-elato"
     assert str(event.session_id) == "session-uuid"
     assert str(event.downlink_channel) == "device:downlink:a421c9-elato"
+    assert event.wake_trace_id == "7ce4d46b-232f-47f9-8148-d595ed344cf2"
+    assert event.command_interval.end_ms == 2500.0
+
+
+def test_wake_detection_event_rejects_arrival_clock_without_capture_clock():
+    payload = {
+        "session_id": "session-uuid",
+        "client_id": "a421c9-elato",
+        "user_id": "user-1",
+        "detected_at": 123.5,
+    }
+
+    with pytest.raises(ValueError, match="wake_trace_id"):
+        WakeDetectionEvent.from_payload(payload)

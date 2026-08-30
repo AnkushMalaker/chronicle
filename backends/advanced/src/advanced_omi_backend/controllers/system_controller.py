@@ -707,6 +707,38 @@ async def get_misc_settings():
         raise e
 
 
+async def get_timeline_grouping_settings():
+    cfg = load_config().get("timeline", {}).get("consolidation", {})
+    values = dict(cfg) if cfg else {}
+    return {
+        "status": "success",
+        "settings": {
+            "pregenerate": bool(values.get("pregenerate", True)),
+            "prefetch_days": int(values.get("prefetch_days", 5)),
+        },
+    }
+
+
+async def save_timeline_grouping_settings(settings: dict):
+    if set(settings) - {"pregenerate", "prefetch_days"}:
+        raise HTTPException(status_code=400, detail="Unknown Timeline grouping setting")
+    pregenerate = settings.get("pregenerate")
+    days = settings.get("prefetch_days")
+    if not isinstance(pregenerate, bool):
+        raise HTTPException(status_code=400, detail="pregenerate must be a boolean")
+    if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 30:
+        raise HTTPException(
+            status_code=400, detail="prefetch_days must be between 1 and 30"
+        )
+    if not save_config_section(
+        "timeline.consolidation", {"pregenerate": pregenerate, "prefetch_days": days}
+    ):
+        raise HTTPException(
+            status_code=500, detail="Could not save Timeline grouping settings"
+        )
+    return {"status": "success", "settings": settings}
+
+
 async def save_misc_settings_controller(settings: dict):
     """Save miscellaneous settings."""
     try:
@@ -1214,31 +1246,46 @@ def _validate_memory_mapping(memory_section: dict) -> None:
     pi = backends.get("pi") or {}
     if not isinstance(pi, dict):
         raise ValueError("memory.backends.pi must be a mapping")
-    model_name = str(pi.get("model") or "muse-glimmer-llm").strip()
+    if pi.get("model") not in (None, ""):
+        raise ValueError(
+            "memory.backends.pi.model is obsolete; select models with defaults or "
+            "llm_operations"
+        )
     registry = get_models_registry()
-    model = registry.get_by_name(model_name) if registry else None
-    if model is None:
-        raise ValueError(
-            f"memory.backends.pi.model references unknown registry model {model_name!r}"
+    if registry is None:
+        raise ValueError("Chronicle model registry is unavailable")
+    operation_names = set()
+    if "pi" in {write_backend, recovery_backend}:
+        operation_names.add("memory_write")
+    if search_backend == "pi":
+        operation_names.add("memory_search")
+    context_defaults = []
+    for operation_name in sorted(operation_names):
+        operation = registry.get_llm_operation(operation_name)
+        model = operation.model_def
+        model_name = model.name
+        if model.model_type != "llm" or str(model.api_family).lower() != "openai":
+            raise ValueError(
+                f"{operation_name} resolves to {model_name!r}, which must be an "
+                "OpenAI-compatible LLM for Pi"
+            )
+        if not model.resolved_url():
+            raise ValueError(
+                f"{operation_name} resolves to {model_name!r}, which has no "
+                "resolvable URL"
+            )
+        model_params = model.model_params or {}
+        context_default = getattr(model, "context_window", None)
+        if context_default in (None, ""):
+            context_default = model_params.get("context_window")
+        context_defaults.append(
+            _positive_memory_int(
+                context_default,
+                field=f"models.{model_name}.context_window",
+                default=32768,
+            )
         )
-    if model.model_type != "llm" or str(model.api_family).lower() != "openai":
-        raise ValueError(
-            f"memory.backends.pi.model {model_name!r} must be an OpenAI-compatible LLM"
-        )
-    if not model.resolved_url():
-        raise ValueError(
-            f"memory.backends.pi.model {model_name!r} has no resolvable URL"
-        )
-
-    model_params = model.model_params or {}
-    context_default = getattr(model, "context_window", None)
-    if context_default in (None, ""):
-        context_default = model_params.get("context_window")
-    context_default = _positive_memory_int(
-        context_default,
-        field=f"models.{model_name}.context_window",
-        default=32768,
-    )
+    context_default = min(context_defaults) if context_defaults else 32768
     context_window = _positive_memory_int(
         pi.get("context_window"),
         field="memory.backends.pi.context_window",
@@ -1524,6 +1571,7 @@ async def get_llm_operations():
 
         # Serialize each LLMOperationConfig to dict
         operations = {}
+        effective_routing = {}
         for op_name, op_config in registry.llm_operations.items():
             operations[op_name] = {
                 "model": op_config.model,
@@ -1532,6 +1580,7 @@ async def get_llm_operations():
                 "response_format": op_config.response_format,
                 "reasoning_effort": op_config.reasoning_effort,
             }
+            effective_routing[op_name] = registry.explain_llm_operation(op_name)
 
         # Collect available LLM models
         available_models = [
@@ -1545,6 +1594,7 @@ async def get_llm_operations():
             "operations": operations,
             "available_models": available_models,
             "default_llm": default_llm,
+            "effective_routing": effective_routing,
             "status": "success",
         }
     except Exception as e:

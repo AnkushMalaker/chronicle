@@ -208,6 +208,12 @@ class CaptureSessionId(_message.Message):
     value: str
     def __init__(self, value: _Optional[str] = ...) -> None: ...
 
+class MemorySpaceId(_message.Message):
+    __slots__ = ("value",)
+    VALUE_FIELD_NUMBER: _ClassVar[int]
+    value: str
+    def __init__(self, value: _Optional[str] = ...) -> None: ...
+
 class VoiceSessionId(_message.Message):
     __slots__ = ("value",)
     VALUE_FIELD_NUMBER: _ClassVar[int]
@@ -351,6 +357,7 @@ class StartCapture(_message.Message):
         "audio_spec",
         "capabilities",
         "recovery_batch_id",
+        "memory_space_id",
     )
     CAPTURE_EPOCH_FIELD_NUMBER: _ClassVar[int]
     PROCESSING_PROFILE_FIELD_NUMBER: _ClassVar[int]
@@ -359,6 +366,7 @@ class StartCapture(_message.Message):
     AUDIO_SPEC_FIELD_NUMBER: _ClassVar[int]
     CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
     RECOVERY_BATCH_ID_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_SPACE_ID_FIELD_NUMBER: _ClassVar[int]
     capture_epoch: int
     processing_profile: ProcessingProfile
     data_purpose: DataPurpose
@@ -366,6 +374,7 @@ class StartCapture(_message.Message):
     audio_spec: AudioSpec
     capabilities: CaptureCapabilities
     recovery_batch_id: str
+    memory_space_id: MemorySpaceId
     def __init__(
         self,
         capture_epoch: _Optional[int] = ...,
@@ -375,6 +384,7 @@ class StartCapture(_message.Message):
         audio_spec: _Optional[_Union[AudioSpec, _Mapping]] = ...,
         capabilities: _Optional[_Union[CaptureCapabilities, _Mapping]] = ...,
         recovery_batch_id: _Optional[str] = ...,
+        memory_space_id: _Optional[_Union[MemorySpaceId, _Mapping]] = ...,
     ) -> None: ...
 
 class StopCapture(_message.Message):
@@ -533,6 +543,27 @@ class CapturePacketAccepted(_message.Message):
         sequence: _Optional[int] = ...,
     ) -> None: ...
 
+class TranscriptUpdate(_message.Message):
+    __slots__ = ("binding", "text", "is_final", "confidence", "speaker_name")
+    BINDING_FIELD_NUMBER: _ClassVar[int]
+    TEXT_FIELD_NUMBER: _ClassVar[int]
+    IS_FINAL_FIELD_NUMBER: _ClassVar[int]
+    CONFIDENCE_FIELD_NUMBER: _ClassVar[int]
+    SPEAKER_NAME_FIELD_NUMBER: _ClassVar[int]
+    binding: CaptureBinding
+    text: str
+    is_final: bool
+    confidence: float
+    speaker_name: str
+    def __init__(
+        self,
+        binding: _Optional[_Union[CaptureBinding, _Mapping]] = ...,
+        text: _Optional[str] = ...,
+        is_final: bool = ...,
+        confidence: _Optional[float] = ...,
+        speaker_name: _Optional[str] = ...,
+    ) -> None: ...
+
 class PlaybackOffer(_message.Message):
     __slots__ = (
         "binding",
@@ -613,6 +644,7 @@ class ServerControl(_message.Message):
         "heartbeat",
         "error",
         "capture_packet_accepted",
+        "transcript_update",
     )
     EVENT_ID_FIELD_NUMBER: _ClassVar[int]
     SENT_AT_FIELD_NUMBER: _ClassVar[int]
@@ -624,6 +656,7 @@ class ServerControl(_message.Message):
     HEARTBEAT_FIELD_NUMBER: _ClassVar[int]
     ERROR_FIELD_NUMBER: _ClassVar[int]
     CAPTURE_PACKET_ACCEPTED_FIELD_NUMBER: _ClassVar[int]
+    TRANSCRIPT_UPDATE_FIELD_NUMBER: _ClassVar[int]
     event_id: EventId
     sent_at: _timestamp_pb2.Timestamp
     hello: ServerHello
@@ -634,6 +667,7 @@ class ServerControl(_message.Message):
     heartbeat: Heartbeat
     error: ProtocolError
     capture_packet_accepted: CapturePacketAccepted
+    transcript_update: TranscriptUpdate
     def __init__(
         self,
         event_id: _Optional[_Union[EventId, _Mapping]] = ...,
@@ -648,6 +682,7 @@ class ServerControl(_message.Message):
         capture_packet_accepted: _Optional[
             _Union[CapturePacketAccepted, _Mapping]
         ] = ...,
+        transcript_update: _Optional[_Union[TranscriptUpdate, _Mapping]] = ...,
     ) -> None: ...
 
 class CaptureMediaPacket(_message.Message):
@@ -743,6 +778,7 @@ class CaptureStreamOpened(_message.Message):
         "source_spec",
         "processing_profile",
         "data_purpose",
+        "memory_space_id",
     )
     BINDING_FIELD_NUMBER: _ClassVar[int]
     CLIENT_ID_FIELD_NUMBER: _ClassVar[int]
@@ -750,12 +786,14 @@ class CaptureStreamOpened(_message.Message):
     SOURCE_SPEC_FIELD_NUMBER: _ClassVar[int]
     PROCESSING_PROFILE_FIELD_NUMBER: _ClassVar[int]
     DATA_PURPOSE_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_SPACE_ID_FIELD_NUMBER: _ClassVar[int]
     binding: CaptureBinding
     client_id: ClientId
     source_id: CaptureSourceId
     source_spec: AudioSpec
     processing_profile: ProcessingProfile
     data_purpose: DataPurpose
+    memory_space_id: MemorySpaceId
     def __init__(
         self,
         binding: _Optional[_Union[CaptureBinding, _Mapping]] = ...,
@@ -764,6 +802,7 @@ class CaptureStreamOpened(_message.Message):
         source_spec: _Optional[_Union[AudioSpec, _Mapping]] = ...,
         processing_profile: _Optional[_Union[ProcessingProfile, str]] = ...,
         data_purpose: _Optional[_Union[DataPurpose, str]] = ...,
+        memory_space_id: _Optional[_Union[MemorySpaceId, _Mapping]] = ...,
     ) -> None: ...
 
 class CanonicalPcmFrame(_message.Message):

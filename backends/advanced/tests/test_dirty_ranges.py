@@ -246,10 +246,23 @@ async def test_reconcile_dirty_ranges_scan_enqueues_due_work(
         "enqueue_dirty_range_reconciliation",
         _fake_enqueue,
     )
+    recovery_calls = 0
+
+    async def _fake_dispatch_recovery():
+        nonlocal recovery_calls
+        recovery_calls += 1
+        return {"unlatched": 3, "dispatched": 1}
+
+    monkeypatch.setattr(
+        "advanced_omi_backend.services.timeline.dispatch.dispatch_ready_episodes",
+        _fake_dispatch_recovery,
+    )
 
     outcome = await dirty_ranges.reconcile_dirty_ranges()
 
     assert outcome["reclaimed"] == 1
     assert outcome["due"] == 2
     assert outcome["enqueued"] == 2
+    assert outcome["dispatched"] == 1
+    assert recovery_calls == 1
     assert set(enqueued) == {row.dirty_range_id, stale.dirty_range_id}

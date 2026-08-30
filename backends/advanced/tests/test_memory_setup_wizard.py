@@ -180,13 +180,11 @@ def test_wizard_removes_obsolete_flat_executor_and_operation(init_module):
         ("anthropic-llm", "is not OpenAI-compatible"),
     ],
 )
-def test_pi_model_must_be_openai_compatible_llm_in_effective_registry(
-    init_module, model, message
-):
+def test_pi_routing_must_resolve_to_openai_compatible_llm(init_module, model, message):
     setup = _setup(
         init_module,
         {
-            "defaults": {"llm": "muse-glimmer-llm"},
+            "defaults": {"llm": model},
             "models": [
                 {
                     "name": "custom-embed",
@@ -202,60 +200,19 @@ def test_pi_model_must_be_openai_compatible_llm_in_effective_registry(
             "memory": {"agents": {}, "backends": {}},
         },
         choices=("3", "2"),
-        pi_model=model,
     )
 
     with pytest.raises(ValueError, match=message):
         setup.setup_memory_agents()
 
 
-@pytest.mark.parametrize(
-    ("model", "expected_context", "expected_max_tokens"),
-    [
-        (
-            {
-                "name": "wide-context",
-                "model_type": "llm",
-                "api_family": "openai",
-                "context_window": 65536,
-            },
-            65536,
-            4096,
-        ),
-        (
-            {
-                "name": "nested-context",
-                "model_type": "llm",
-                "api_family": "openai",
-                "model_params": {"context_window": 16384},
-            },
-            16384,
-            4096,
-        ),
-        (
-            {
-                "name": "served-8k",
-                "model_type": "llm",
-                "api_family": "openai",
-                "context_window": 8192,
-            },
-            8192,
-            2048,
-        ),
-        (
-            {
-                "name": "unknown-context",
-                "model_type": "llm",
-                "api_family": "openai",
-            },
-            32768,
-            4096,
-        ),
-    ],
-)
-def test_new_pi_config_uses_model_context_or_safe_default(
-    init_module, model, expected_context, expected_max_tokens
-):
+def test_new_pi_config_does_not_copy_model_routing_or_derived_limits(init_module):
+    model = {
+        "name": "wide-context",
+        "model_type": "llm",
+        "api_family": "openai",
+        "context_window": 65536,
+    }
     setup = _setup(
         init_module,
         {
@@ -264,17 +221,17 @@ def test_new_pi_config_uses_model_context_or_safe_default(
             "memory": {"agents": {}, "backends": {}},
         },
         choices=("3", "2"),
-        pi_model=model["name"],
     )
 
     setup.setup_memory_agents()
 
     pi = setup.config_manager.saved["memory"]["backends"]["pi"]
-    assert pi["context_window"] == expected_context
-    assert pi["max_tokens"] == expected_max_tokens
+    assert "model" not in pi
+    assert "context_window" not in pi
+    assert "max_tokens" not in pi
 
 
-def test_changing_pi_model_replaces_limits_from_previous_model(init_module):
+def test_wizard_removes_obsolete_pi_model_but_preserves_explicit_limits(init_module):
     setup = _setup(
         init_module,
         {
@@ -302,17 +259,17 @@ def test_changing_pi_model_replaces_limits_from_previous_model(init_module):
             },
         },
         choices=("3", "2"),
-        pi_model="wide-context",
     )
 
     setup.setup_memory_agents()
 
     pi = setup.config_manager.saved["memory"]["backends"]["pi"]
-    assert pi["context_window"] == 65536
-    assert pi["max_tokens"] == 4096
+    assert "model" not in pi
+    assert pi["context_window"] == 8192
+    assert pi["max_tokens"] == 2048
 
 
-def test_recovery_only_pi_validates_model_and_derives_limits(init_module):
+def test_recovery_only_pi_uses_central_routing(init_module):
     setup = _setup(
         init_module,
         {
@@ -333,19 +290,18 @@ def test_recovery_only_pi_validates_model_and_derives_limits(init_module):
                     },
                     "search": {"backend": "direct"},
                 },
-                "backends": {"pi": {"model": "recovery-model"}},
+                "backends": {"pi": {"model": "obsolete-copy"}},
             },
         },
         choices=("1", "1"),
-        pi_model="recovery-model",
     )
 
     setup.setup_memory_agents()
 
     pi = setup.config_manager.saved["memory"]["backends"]["pi"]
-    assert pi["model"] == "recovery-model"
-    assert pi["context_window"] == 8192
-    assert pi["max_tokens"] == 2048
+    assert "model" not in pi
+    assert "context_window" not in pi
+    assert "max_tokens" not in pi
 
 
 def test_recovery_only_pi_rejects_incompatible_model(init_module):
@@ -372,7 +328,6 @@ def test_recovery_only_pi_rejects_incompatible_model(init_module):
             },
         },
         choices=("1", "1"),
-        pi_model="anthropic-recovery",
     )
 
     with pytest.raises(ValueError, match="is not OpenAI-compatible"):

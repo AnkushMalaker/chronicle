@@ -48,9 +48,6 @@ REPO_ROOT = SERVICE_DIR.parent.parent
 
 # Match the Pi executor's conservative fallbacks without baking one machine's
 # served context into every model selected by the wizard.
-DEFAULT_PI_CONTEXT_WINDOW = 32768
-DEFAULT_PI_MAX_TOKENS = 4096
-PI_PROMPT_HEADROOM_TOKENS = 1024
 MANAGED_LLAMACPP_REGISTRY_MODELS = {"llamacpp-llm", "muse-glimmer-llm"}
 
 
@@ -1349,10 +1346,6 @@ class ChronicleSetup:
         if not isinstance(existing_pi, dict):
             existing_pi = {}
 
-        configured_llm = str(
-            self.config_manager.get_config_defaults().get("llm") or "muse-glimmer-llm"
-        )
-
         codex_config = {
             "model": "gpt-5.6-luna",
             "reasoning_effort": "low",
@@ -1363,60 +1356,51 @@ class ChronicleSetup:
             **existing_codex,
         }
         pi_config = {
-            "model": configured_llm,
             "timeout_seconds": 900,
             "thinking": "off",
             **existing_pi,
         }
-        if not str(pi_config.get("model") or "").strip():
-            pi_config["model"] = configured_llm
+        # Model routing is owned by defaults + llm_operations. Older wizard runs
+        # copied that policy into the executor adapter, causing provider switches to
+        # require a second unrelated edit.
+        pi_config.pop("model", None)
 
         if "pi" in (selected_write, selected_search, recovery_backend):
             effective_models = self._effective_model_registry()
-            llm_models = sorted(
-                name
-                for name, model in effective_models.items()
-                if str(model.get("model_type") or "").lower() == "llm"
-                and str(model.get("api_family") or "").lower() == "openai"
-            )
-            if llm_models:
-                self.console.print(
-                    "[blue][INFO][/blue] Available OpenAI-compatible LLM registry entries: "
-                    + ", ".join(llm_models)
-                )
-            pi_model = self.prompt_value(
-                "Chronicle model registry entry for Pi",
-                str(pi_config.get("model") or configured_llm),
-            ).strip()
-            if not pi_model:
-                raise ValueError("Pi requires a Chronicle model registry entry")
-            selected_model = effective_models.get(pi_model)
-            if selected_model is None:
-                raise ValueError(
-                    f"Pi model registry entry '{pi_model}' does not exist in the "
-                    "effective defaults.yml + config.yml registry"
-                )
-            if str(selected_model.get("model_type") or "").lower() != "llm":
-                raise ValueError(f"Pi model registry entry '{pi_model}' is not an LLM")
-            if str(selected_model.get("api_family") or "").lower() != "openai":
-                raise ValueError(
-                    f"Pi model registry entry '{pi_model}' is not OpenAI-compatible"
-                )
-
-            previous_model = str(existing_pi.get("model") or "").strip()
-            model_changed = bool(previous_model and previous_model != pi_model)
-            if "context_window" not in existing_pi or model_changed:
-                context_window = self._pi_context_window(selected_model)
-                pi_config["context_window"] = context_window
-            else:
-                context_window = int(pi_config["context_window"])
-            if "max_tokens" not in existing_pi or model_changed:
-                pi_config["max_tokens"] = self._pi_max_tokens(context_window)
-            pi_config["model"] = pi_model
+            full_config = self.config_manager.get_full_config()
+            defaults = full_config.get("defaults") or {}
+            operations = full_config.get("llm_operations") or {}
+            operation_names = set()
+            if "pi" in (selected_write, recovery_backend):
+                operation_names.add("memory_write")
+            if selected_search == "pi":
+                operation_names.add("memory_search")
+            resolved_names = []
+            for operation_name in sorted(operation_names):
+                operation_config = operations.get(operation_name) or {}
+                model_name = str(
+                    operation_config.get("model") or defaults.get("llm") or ""
+                ).strip()
+                selected_model = effective_models.get(model_name)
+                if selected_model is None:
+                    raise ValueError(
+                        f"{operation_name} resolves to model registry entry "
+                        f"{model_name!r}, which does not exist"
+                    )
+                if str(selected_model.get("model_type") or "").lower() != "llm":
+                    raise ValueError(
+                        f"{operation_name} resolves to {model_name!r}, which is not an LLM"
+                    )
+                if str(selected_model.get("api_family") or "").lower() != "openai":
+                    raise ValueError(
+                        f"{operation_name} resolves to {model_name!r}, which is not "
+                        "OpenAI-compatible"
+                    )
+                resolved_names.append(f"{operation_name} → {model_name}")
             self.console.print(
-                "[green][SUCCESS][/green] Pi will use model registry entry: "
-                f"{pi_model}. No Pi auth directory or host login is required; the "
-                "backend resolves the model URL/key and creates isolated runtime config."
+                "[green][SUCCESS][/green] Pi will use central model routing: "
+                + ", ".join(resolved_names)
+                + ". No Pi auth directory or host login is required."
             )
 
         if "codex" in (selected_write, recovery_backend):
@@ -1507,30 +1491,6 @@ class ChronicleSetup:
                     # Runtime config_loader uses whole-entry replacement by name.
                     effective[str(model["name"])] = dict(model)
         return effective
-
-    @staticmethod
-    def _pi_context_window(model: Dict[str, Any]) -> int:
-        """Use a model-declared context, falling back to Pi's safe generic window."""
-        model_params = model.get("model_params") or {}
-        raw = model.get("context_window")
-        if raw in (None, "") and isinstance(model_params, dict):
-            raw = model_params.get("context_window")
-        try:
-            context_window = int(raw)
-        except (TypeError, ValueError):
-            return DEFAULT_PI_CONTEXT_WINDOW
-        if context_window <= PI_PROMPT_HEADROOM_TOKENS:
-            return DEFAULT_PI_CONTEXT_WINDOW
-        return context_window
-
-    @staticmethod
-    def _pi_max_tokens(context_window: int) -> int:
-        """Keep most context for prompts/tools while allowing larger-context models more output."""
-        return min(
-            DEFAULT_PI_MAX_TOKENS,
-            context_window // 4,
-            context_window - PI_PROMPT_HEADROOM_TOKENS,
-        )
 
     def setup_optional_services(self):
         """Configure optional services"""

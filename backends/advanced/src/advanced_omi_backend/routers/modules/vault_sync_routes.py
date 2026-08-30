@@ -16,12 +16,16 @@ so no restart is needed after pairing.
 import logging
 import os
 from pathlib import Path
+from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
 from advanced_omi_backend.auth import current_active_user
+from advanced_omi_backend.models.memory_space import MemorySpace
 from advanced_omi_backend.models.vault_sync import PairRequest
+from advanced_omi_backend.services.memory.scope import MemoryScope, MemoryScopeError
+from advanced_omi_backend.services.vault_sync import vault_sync_broker
 from advanced_omi_backend.users import User
 
 logger = logging.getLogger(__name__)
@@ -71,8 +75,18 @@ async def _server_device_id(client: httpx.AsyncClient) -> str:
 
 
 @router.get("/info")
-async def vault_sync_info(current_user: User = Depends(current_active_user)):
+async def vault_sync_info(
+    memory_space_id: Optional[str] = None,
+    current_user: User = Depends(current_active_user),
+):
     """Return what the Mac needs to dial and identify the server's vault folder."""
+    if memory_space_id:
+        scope = MemoryScope(str(current_user.user_id), memory_space_id)
+        try:
+            space = await vault_sync_broker.resolver.require_space(scope)
+            return await vault_sync_broker.info(scope, space_name=space.name)
+        except MemoryScopeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
     async with _client() as client:
         try:
             server_device_id = await _server_device_id(client)
@@ -97,6 +111,22 @@ async def vault_sync_pair(
     the existing folder rather than replacing the first.
     """
     user_id = current_user.user_id
+    if req.memory_space_id:
+        scope = MemoryScope(str(user_id), req.memory_space_id)
+        try:
+            space = await vault_sync_broker.resolver.require_space(scope, writable=True)
+            result = await vault_sync_broker.pair(
+                scope,
+                device_id=req.device_id,
+                device_name=req.device_name,
+                space_name=space.name,
+            )
+            space.sync_state = "syncing"
+            space.sync_error = None
+            await space.save()
+            return result
+        except MemoryScopeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     folder_id = _folder_id(user_id)
 
     # Ensure the per-user vault dir AND Syncthing's folder marker exist so Syncthing
@@ -135,6 +165,45 @@ async def vault_sync_pair(
         "sync_address": SYNCTHING_ADDRESS,
         "folder_id": folder_id,
         "folder_label": "Chronicle Vault",
+    }
+
+
+@router.get("/folders")
+async def vault_sync_folders(current_user: User = Depends(current_active_user)):
+    """List Main and every owned scoped folder for tray discovery."""
+    user_id = str(current_user.user_id)
+    spaces = (
+        await MemorySpace.find(MemorySpace.user_id == user_id)
+        .sort("-updated_at")
+        .to_list()
+    )
+    main = vault_sync_broker.folder(MemoryScope(user_id))
+    return {
+        "folders": [
+            {
+                "memory_space_id": None,
+                "name": "Main",
+                "state": "active",
+                "sync_state": "unknown",
+                "folder_id": main.folder_id,
+                "folder_label": main.label,
+            },
+            *[
+                {
+                    "memory_space_id": space.space_id,
+                    "name": space.name,
+                    "state": space.state,
+                    "sync_state": space.sync_state,
+                    "folder_id": vault_sync_broker.folder(
+                        MemoryScope(user_id, space.space_id), space_name=space.name
+                    ).folder_id,
+                    "folder_label": vault_sync_broker.folder(
+                        MemoryScope(user_id, space.space_id), space_name=space.name
+                    ).label,
+                }
+                for space in spaces
+            ],
+        ],
     }
 
 

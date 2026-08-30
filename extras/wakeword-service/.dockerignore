@@ -10,6 +10,8 @@
 !verifier.py
 !pyproject.toml
 !README.md
+!audio_contract/
+!audio_contract/**
 !models/
 !models/**
 !vendor/

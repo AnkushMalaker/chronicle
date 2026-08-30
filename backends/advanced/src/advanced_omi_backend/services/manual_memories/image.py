@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from advanced_omi_backend.models.manual_memory import ManualMemory, utcnow
+from advanced_omi_backend.services.memory.scope import MemoryScope, MemoryScopeResolver
 from advanced_omi_backend.services.memory.vault_lock import vault_note_lock
-from advanced_omi_backend.services.memory.vault_manager import ConvDocVaultManager
 from advanced_omi_backend.services.memory.vault_media import write_manual_memory_note
 from advanced_omi_backend.services.vision import (
     CodexVisionError,
@@ -129,7 +129,11 @@ async def analyze_image(memory_id: str, attachment_id: str) -> dict[str, Any]:
         return {"status": "skipped"}
     attachment = _attachment(memory, attachment_id)
     assert attachment is not None
-    root = ConvDocVaultManager().user_root(memory.user_id)
+    resolver = MemoryScopeResolver()
+    scope = MemoryScope(memory.user_id, memory.memory_space_id)
+    if memory.memory_space_id:
+        await resolver.require_space(scope, writable=True)
+    root = resolver.vault_root(scope)
     path = root / attachment.storage_path
     try:
         data = await asyncio.to_thread(path.read_bytes)

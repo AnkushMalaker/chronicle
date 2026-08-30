@@ -83,7 +83,8 @@ transition both pipelines publish into `timeline_episodes`, distinguished by a
   projection selects episodes by UTC-range intersection with the day's bounds;
   `local_date` on an episode row is a derived projection hint, never authority.
 - User-facing conversation events (`conversation.complete` and everything riding on
-  it) fire only from a settled conversational Episode revision, exactly once per
+  it) split: memory fires from the first non-open conversational Episode revision;
+  user-facing completion plugins wait for settlement. Each fires exactly once per
   `(episode_key, event_type)`. Resettlement or supersession never re-fires them.
 
 ## Settlement is a policy decision
@@ -276,8 +277,13 @@ signal only makes boundaries authoritative and settlement faster. A media or noi
 classification dispatches nothing, and retypes the provisional source record rather
 than leaving a false conversation note.
 
-Dispatch happens on the first settled conversational revision of an `episode_key`,
-latched idempotently per `(episode_key, event_type)`. The stated UX change: the
+The memory write happens when a source Conversation first belongs to a non-open
+(`provisional` or `settled`) conversational Episode; ``conversation.complete`` plugins
+wait for `settled`. Memory is latched per `conversation:<conversation_id>` because a
+Timeline split can make more than one Episode reference the same source. Completion is
+latched separately per `(episode_key, conversation.complete)`.
+`provisional` means the boundary may still revise; the agent has already made the
+conversation-versus-media classification that gates memory. The stated UX change: the
 summary email arrives roughly ten to fifteen minutes after close instead of about
 two, and describes one real event rather than one per recording fragment.
 
@@ -404,7 +410,8 @@ evidence during cutover.
 - A cross-midnight Episode revision refreshes both affected day projections.
 - A media-classified Episode dispatches no conversation events and retypes its
   provisional source record.
-- A settled conversational Episode dispatches exactly once per event type across
+- A conversational Episode dispatches memory at classification and completion plugins
+  at settlement, each exactly once across
   resettlement and supersession.
 - Episodes unaffected by a dirty delta carry forward with unchanged key and revision.
 

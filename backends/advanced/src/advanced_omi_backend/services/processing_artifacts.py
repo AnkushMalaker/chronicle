@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timedelta
 from typing import Any, Sequence
 
@@ -34,6 +35,13 @@ from advanced_omi_backend.services.audio_claims import (
 
 class ProcessingArtifactConflict(RuntimeError):
     """A retry key was reused for different immutable provider output."""
+
+
+# Streaming ASR providers timestamp on codec/model frames, while the durable audio
+# claim ends on the last decoded sample. A sub-frame overrun is provider quantization,
+# not evidence that audio exists beyond the claim. Keep the generic claim mapper
+# strict and reconcile only transcript evidence at this provider boundary.
+_TRANSCRIPT_BOUNDARY_TOLERANCE_SECONDS = 0.5
 
 
 def _content_digest(value: Any) -> str:
@@ -83,8 +91,11 @@ def _absolute_word(
     ranges: Sequence[AudioRangeRef], word: dict[str, Any]
 ) -> AbsoluteWord:
     text = str(word.get("word", word.get("text", "")))
-    start = float(word.get("start", 0.0))
-    end = float(word.get("end", word.get("start", 0.0)))
+    start, end = _bounded_transcript_interval(
+        ranges,
+        float(word.get("start", 0.0)),
+        float(word.get("end", word.get("start", 0.0))),
+    )
     return AbsoluteWord(
         text=text,
         start_seconds=start,
@@ -100,8 +111,11 @@ def _absolute_word(
 def _transcript_utterance(
     ranges: Sequence[AudioRangeRef], segment: dict[str, Any]
 ) -> TranscriptUtterance:
-    start = float(segment.get("start", 0.0))
-    end = float(segment.get("end", segment.get("start", 0.0)))
+    start, end = _bounded_transcript_interval(
+        ranges,
+        float(segment.get("start", 0.0)),
+        float(segment.get("end", segment.get("start", 0.0))),
+    )
     return TranscriptUtterance(
         text=str(segment.get("text", "")),
         start_seconds=start,
@@ -113,6 +127,22 @@ def _transcript_utterance(
         ),
         confidence=segment.get("confidence"),
     )
+
+
+def _bounded_transcript_interval(
+    ranges: Sequence[AudioRangeRef], start: float, end: float
+) -> tuple[float, float]:
+    total = range_duration(ranges)
+    if (
+        not math.isfinite(start)
+        or not math.isfinite(end)
+        or end < start
+        or start < -_TRANSCRIPT_BOUNDARY_TOLERANCE_SECONDS
+        or end > total + _TRANSCRIPT_BOUNDARY_TOLERANCE_SECONDS
+    ):
+        # Preserve the central mapper's precise invariant errors for real corruption.
+        map_presentation_interval(ranges, start, end)
+    return min(max(start, 0.0), total), min(max(end, 0.0), total)
 
 
 def _capture_source_ids(ranges: Sequence[AudioRangeRef]) -> list[str]:

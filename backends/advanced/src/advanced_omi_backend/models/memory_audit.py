@@ -25,6 +25,9 @@ class MemoryAuditEntry(Document):
     """One recorded change to a user's memory vault."""
 
     user_id: Indexed(str) = Field(description="Owner of the vault that changed")
+    memory_space_id: Optional[str] = Field(
+        None, description="Vault scope for the change; null means Main"
+    )
     conversation_id: Optional[str] = Field(
         None, description="Conversation whose processing caused the change (if any)"
     )

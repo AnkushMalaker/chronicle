@@ -30,6 +30,14 @@ objects. Capture and meaning are different layers.
   audio ranges are authoritative; related Conversation IDs are lineage/navigation.
 - **Vault**: the Markdown memory source of truth. It is derived from settled semantic
   inputs and can be regenerated from durable database evidence.
+- **Potential memory**: a proposed change derived from one reviewed day and the
+  currently accepted Vault. It is not memory and is invisible to retrieval until a
+  person accepts it.
+- **Review day**: one local day whose Episode account and Potential memories are being
+  decided. Review days advance in chronological order.
+- **Unexplained evidence**: captured evidence inside a reviewed interval that no active
+  Timeline episode accounts for. It is distinct from a capture gap, where no evidence
+  exists to interpret.
 
 ## Invariants
 
@@ -70,6 +78,9 @@ objects. Capture and meaning are different layers.
     conversation. Global filters, enrollment, memory, and corpus analysis must collapse
     unknowns into a category or key them by conversation plus local label; they must
     never equate matching placeholder text across conversations.
+17. A later Review day never observes an unresolved Potential memory. It is derived
+    only after every earlier Review day has either changed the accepted Vault or been
+    rejected without changing it.
 
 ## Important Modules and Interfaces
 

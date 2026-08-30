@@ -11,8 +11,7 @@ The archive contains:
 - every MongoDB collection as a BSON stream, including users, conversations,
   transcript versions, annotations, chat data, and `audio_chunks`;
 - the original Opus bytes and timing metadata stored in each audio chunk;
-- `data/conversation_docs/`, `data/memory_md/`, and legacy
-  `data/audio_chunks/` files;
+- `data/conversation_docs/` and legacy `data/audio_chunks/` files;
 - a versioned manifest with the document count, byte size, and SHA-256 digest
   of every archive member.
 
@@ -21,8 +20,8 @@ nested transcript data round-trip without conversion. Archives include password
 hashes and personal data from the users collection. Store them as sensitive data.
 
 Mongo-backed screenshots and other `DeviceInputItem` media are included with their
-documents. Filesystem-backed inference artifacts, Pi operating memory, and both vault
-roots are included from the data directory.
+documents. Filesystem-backed inference artifacts, Pi operating memory, and the canonical
+vault are included from the data directory.
 
 ## Full and incremental archives
 

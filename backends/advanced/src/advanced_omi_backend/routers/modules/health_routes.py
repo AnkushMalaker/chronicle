@@ -41,6 +41,29 @@ application_logger = logging.getLogger("audio_processing")
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://mongo:27017")
 mongo_client = AsyncIOMotorClient(MONGODB_URI)
 
+EXPECTED_WAKEWORD_CONSUMER_GROUP = "wakeword-v2"
+EXPECTED_WAKEWORD_STREAM_PATTERN = "audio:v2:realtime:*"
+
+
+def evaluate_wakeword_health(body: dict, url: str) -> dict:
+    """Validate the deployed wake worker, including its cross-service contract."""
+    contract_matches = (
+        body.get("status") == "ok"
+        and body.get("consumer_alive") is True
+        and body.get("consumer_group") == EXPECTED_WAKEWORD_CONSUMER_GROUP
+        and body.get("stream_pattern") == EXPECTED_WAKEWORD_STREAM_PATTERN
+    )
+    return {
+        "status": "Connected" if contract_matches else "Audio V2 contract mismatch",
+        "healthy": contract_matches,
+        "url": url,
+        "consumer_group": body.get("consumer_group"),
+        "stream_pattern": body.get("stream_pattern"),
+        "expected_consumer_group": EXPECTED_WAKEWORD_CONSUMER_GROUP,
+        "expected_stream_pattern": EXPECTED_WAKEWORD_STREAM_PATTERN,
+        "critical": False,
+    }
+
 
 @router.get("/auth/health")
 async def auth_health_check():
@@ -475,13 +498,12 @@ async def health_check():
                 ) as response:
                     if response.status == 200:
                         body = await response.json()
-                        health_status["services"]["wakeword"] = {
-                            "status": "✅ Connected",
-                            "healthy": True,
-                            "url": wakeword_service_url,
-                            "model_loaded": body.get("model_loaded"),
-                            "critical": False,
-                        }
+                        wakeword_health = evaluate_wakeword_health(
+                            body, wakeword_service_url
+                        )
+                        health_status["services"]["wakeword"] = wakeword_health
+                        if not wakeword_health["healthy"]:
+                            overall_healthy = False
                     else:
                         health_status["services"]["wakeword"] = {
                             "status": f"⚠️ Unhealthy: HTTP {response.status}",

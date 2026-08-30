@@ -19,7 +19,7 @@ RUN uv pip install --system --no-cache \
         "fastapi>=0.115,<1" \
         "uvicorn[standard]>=0.30,<1" \
         "redis>=5.0,<6" \
-        "protobuf>=5.29,<6" \
+        "protobuf>=6.31.1,<7" \
         "numpy>=1.26,<3" \
         "onnxruntime>=1.20,<2" \
         "pipecat-ai==0.0.108" \

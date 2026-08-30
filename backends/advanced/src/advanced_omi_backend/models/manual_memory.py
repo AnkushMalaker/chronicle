@@ -50,6 +50,7 @@ class ManualMemoryAttachment(BaseModel):
 class ManualMemory(Document):
     memory_id: str = Field(default_factory=lambda: str(uuid4()))
     user_id: str
+    memory_space_id: Optional[str] = None
     request_id: str
     note: Optional[str] = None
     source: dict[str, Any] = Field(default_factory=dict)
@@ -64,8 +65,14 @@ class ManualMemory(Document):
         name = "manual_memories"
         indexes = [
             IndexModel([("user_id", ASCENDING), ("memory_id", ASCENDING)], unique=True),
+            IndexModel([("user_id", ASCENDING), ("memory_space_id", ASCENDING)]),
             IndexModel(
-                [("user_id", ASCENDING), ("request_id", ASCENDING)], unique=True
+                [
+                    ("user_id", ASCENDING),
+                    ("memory_space_id", ASCENDING),
+                    ("request_id", ASCENDING),
+                ],
+                unique=True,
             ),
             IndexModel([("user_id", ASCENDING), ("shared_at", DESCENDING)]),
             IndexModel(

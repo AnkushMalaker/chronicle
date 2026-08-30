@@ -29,7 +29,6 @@ FILES_PREFIX = "files/"
 MANIFEST_PATH = "manifest.json"
 FILE_ROOTS = (
     "conversation_docs",
-    "memory_md",
     "audio_chunks",
     "inference_artifacts",
     "pi_operating_memory",
@@ -1016,7 +1015,7 @@ def _clear_restored_file_roots(data_dir: Path, root_names: Iterable[str]) -> Non
         root = data_dir / root_name
         if not root.is_dir():
             continue
-        if root_name in ("conversation_docs", "memory_md"):
+        if root_name == "conversation_docs":
             for entry in root.iterdir():
                 if entry.is_dir() and not entry.is_symlink():
                     clear_vault_contents(entry)

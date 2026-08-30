@@ -45,6 +45,7 @@ async def get_memory_audit(
         target_user_id = _resolve_target_user(user, user_id)
 
         query = MemoryAuditEntry.find(MemoryAuditEntry.user_id == target_user_id)
+        query = query.find(MemoryAuditEntry.memory_space_id == None)  # noqa: E711
         if conversation_id:
             query = query.find(MemoryAuditEntry.conversation_id == conversation_id)
 
@@ -85,6 +86,10 @@ async def get_memory_audit_diff(user: User, entry_id: str):
             return JSONResponse(
                 status_code=404, content={"message": "Audit entry not found"}
             )
+        if entry.memory_space_id is not None:
+            return JSONResponse(
+                status_code=404, content={"message": "Audit entry not found"}
+            )
 
         # Ownership: users may only diff their own ledger; admins may diff any.
         if entry.user_id != user.user_id and not user.is_superuser:
@@ -100,6 +105,7 @@ async def get_memory_audit_diff(user: User, entry_id: str):
             prior = (
                 await MemoryAuditEntry.find(
                     MemoryAuditEntry.user_id == entry.user_id,
+                    MemoryAuditEntry.memory_space_id == None,  # noqa: E711
                     MemoryAuditEntry.note_path == entry.note_path,
                     MemoryAuditEntry.created_at < entry.created_at,
                 )

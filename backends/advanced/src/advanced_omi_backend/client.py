@@ -55,6 +55,9 @@ class ClientState:
     processing_profile: str = "ambient"
     capture_effects: Dict = field(default_factory=dict)
     voice_session_id: Optional[str] = None
+    # Annotation captures are durable evaluation evidence, not an interaction
+    # source. The WebSocket fanout uses this to fence downstream turn routing.
+    data_purpose: str = "normal_capture"
 
     # Batch-mode accumulator: audio is buffered here until a 30-minute roll or
     # an audio-stop, then flushed into a conversation.

@@ -76,10 +76,26 @@ def render_day_episode_index(day_digest: str) -> str:
         clock, kind, salience = (part.strip() for part in match.groups())
         title = _line_value(block, "title")
         summary = _line_value(block, "summary")
+        episode_key = _line_value(block, "episode_key")
+        conversation_ids = list(
+            dict.fromkeys(
+                item.strip()
+                for item in _line_value(block, "conversation_ids").split(",")
+                if item.strip()
+            )
+        )
         text = f"- {clock} · {kind} · {salience}"
         label = title or summary
         if label:
             text += f" — {label}"
+        if conversation_ids:
+            sources = ", ".join(
+                f"[[Conversations/{conversation_id}|source]]"
+                for conversation_id in conversation_ids
+            )
+            text += f" · sources: {sources}"
+        if episode_key:
+            text += f" <!-- episode_key:{episode_key} -->"
         bullets.append(text)
     return "\n".join(bullets)
 

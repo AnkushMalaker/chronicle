@@ -1,30 +1,63 @@
 """Authenticated semantic timeline APIs."""
 
+import asyncio
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
+from zoneinfo import ZoneInfo
 
 from bson import ObjectId
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from advanced_omi_backend.auth import current_active_user
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.timeline import (
+    DirtyEvidenceRange,
+    MemoryReviewProposal,
     TimelineAnalysisRun,
     TimelineDay,
     TimelineEpisode,
+    TimelineReviewDecision,
+    TimelineSemanticGroup,
     clip_audio_ranges,
     merge_audio_ranges,
     utcnow,
 )
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.services.audio_claims import resolve_audio_ranges
+from advanced_omi_backend.services.timeline.consolidation import (
+    ConsolidationResolutionError,
+    active_semantic_groups,
+    create_manual_semantic_group,
+    queue_day_consolidation,
+    remove_semantic_group,
+    resolve_day_consolidation,
+    suggestions_match_active_episodes,
+)
 from advanced_omi_backend.services.timeline.dirty_ranges import mark_evidence_dirty
 from advanced_omi_backend.services.timeline.discovery import (
     process_timeline_run,
     request_timeline_analysis,
+)
+from advanced_omi_backend.services.timeline.evidence import load_reconciliation_evidence
+from advanced_omi_backend.services.timeline.evidence_relations import (
+    EvidenceRelationPreview,
+    infer_evidence_relations,
+)
+from advanced_omi_backend.services.timeline.merge_synthesis import (
+    synthesize_merged_episode_account,
+)
+from advanced_omi_backend.services.timeline.review import (
+    MemoryReviewError,
+    generate_memory_review,
+    process_memory_review_queue,
+    queue_memory_review_regeneration,
+    resolve_memory_review,
+)
+from advanced_omi_backend.services.timeline.review_projection import (
+    build_day_review_projection,
 )
 from advanced_omi_backend.services.timeline.timezone import canonical_timezone
 
@@ -84,6 +117,7 @@ def _episode_payload(episode: TimelineEpisode) -> dict:
         "status": episode.status,
         "confirmed_at": _utc(episode.confirmed_at),
         "confirmed_fields": episode.confirmed_fields,
+        "memory_policy": episode.memory_policy,
         "salience": episode.salience,
         "confidence": episode.confidence,
         "activity_mode": episode.activity_mode,
@@ -106,6 +140,115 @@ def _episode_payload(episode: TimelineEpisode) -> dict:
         "audio_ranges": [item.model_dump(mode="json") for item in episode.audio_ranges],
         "parent_episode_id": episode.parent_episode_id,
         "has_thumbnail": bool(episode.representative_image),
+    }
+
+
+def _proposal_payload(proposal: MemoryReviewProposal | None, *, full: bool = False):
+    if proposal is None:
+        return None
+    payload = {
+        "proposal_id": proposal.proposal_id,
+        "state": proposal.state,
+        "timeline_run_id": proposal.timeline_run_id,
+        "change_count": len(proposal.changes),
+        "accepted_change_ids": proposal.accepted_change_ids,
+        "rejected_change_ids": proposal.rejected_change_ids,
+        "error": proposal.error,
+        "created_at": _utc(proposal.created_at),
+        "generated_at": _utc(proposal.generated_at),
+        "resolved_at": _utc(proposal.resolved_at),
+    }
+    if full:
+        payload["changes"] = [
+            change.model_dump(mode="json") for change in proposal.changes
+        ]
+    return payload
+
+
+def _semantic_group_payload(group: TimelineSemanticGroup) -> dict[str, Any]:
+    return group.model_copy(
+        update={
+            "started_at": _utc(group.started_at),
+            "ended_at": _utc(group.ended_at),
+            "created_at": _utc(group.created_at),
+        }
+    ).model_dump(mode="json")
+
+
+async def _day_proposal(day: TimelineDay | None) -> MemoryReviewProposal | None:
+    if day is None or not day.memory_review_proposal_id:
+        return None
+    return await MemoryReviewProposal.find_one(
+        MemoryReviewProposal.proposal_id == day.memory_review_proposal_id
+    )
+
+
+def _consolidation_payload(
+    day: TimelineDay, active_episode_ids: set[str]
+) -> dict[str, Any]:
+    """Return only proposals derived from the day membership being displayed."""
+
+    suggestions = day.consolidation_suggestions
+    stale = not suggestions_match_active_episodes(suggestions, active_episode_ids)
+    return {
+        "state": "" if stale else day.consolidation_state,
+        "run_id": day.consolidation_run_id,
+        "model": day.consolidation_model,
+        "suggestions": [] if stale else suggestions,
+        "error": day.consolidation_error,
+        "generated_at": day.consolidation_generated_at,
+    }
+
+
+def _review_payload(day: TimelineDay | None, proposal: MemoryReviewProposal | None):
+    if day is None:
+        return None
+    return {
+        "state": day.review_state,
+        "review_run_id": day.review_run_id,
+        "episodes_reviewed_at": _utc(day.episodes_reviewed_at),
+        "resolved_at": _utc(day.review_resolved_at),
+        "outcome": day.review_outcome,
+        "error": day.review_error,
+        "proposal": _proposal_payload(proposal, full=True),
+    }
+
+
+async def _reconciliation_payload(
+    owner: str, local_date: date, timezone_name: str
+) -> dict:
+    zone = ZoneInfo(timezone_name)
+    started_at = datetime.combine(
+        local_date, datetime.min.time(), tzinfo=zone
+    ).astimezone(timezone.utc)
+    ended_at = (started_at.astimezone(zone) + timedelta(days=1)).astimezone(
+        timezone.utc
+    )
+    ranges = (
+        await DirtyEvidenceRange.find(
+            {
+                "user_id": owner,
+                "state": {"$in": ["pending", "leased", "waiting", "failed"]},
+                "started_at": {"$lt": ended_at},
+                "ended_at": {"$gt": started_at},
+            }
+        )
+        .sort("started_at")
+        .to_list()
+    )
+    return {
+        "ranges": [
+            {
+                "dirty_range_id": item.dirty_range_id,
+                "started_at": _utc(item.started_at),
+                "ended_at": _utc(item.ended_at),
+                "state": item.state,
+                "trigger_reasons": item.trigger_reasons,
+                "attempts": item.attempts,
+                "error": item.last_error,
+            }
+            for item in ranges
+        ]
     }
 
 
@@ -145,12 +288,32 @@ async def get_timeline_day(
         .sort("-created_at")
         .first_or_none()
     )
+    proposal = await _day_proposal(day)
+    semantic_groups = active_semantic_groups(day) if day else []
+    reconciliation = await _reconciliation_payload(owner, local_date, timezone)
     return {
         "date": local_date,
         "timezone": timezone,
         "active_run_id": day.active_run_id if day else None,
         "coverage": day.coverage if day else {},
         "analysis": _run_payload(latest),
+        "review": _review_payload(day, proposal),
+        "consolidation": (
+            _consolidation_payload(day, {episode.episode_id for episode in episodes})
+            if day
+            else None
+        ),
+        "semantic_groups": [
+            _semantic_group_payload(group) for group in semantic_groups
+        ],
+        "review_decision_count": len(day.review_decisions) if day else 0,
+        "reconciliation": reconciliation,
+        "review_projection": build_day_review_projection(
+            episodes,
+            semantic_groups=semantic_groups,
+            local_date=local_date,
+            timezone_name=timezone,
+        ),
         "episodes": [_episode_payload(episode) for episode in episodes],
     }
 
@@ -168,6 +331,21 @@ async def analyze_timeline_day(
     user: User = Depends(current_active_user),
 ):
     timezone = _validate_timezone(body.timezone)
+    existing_day = await TimelineDay.find_one(
+        TimelineDay.user_id == str(user.id),
+        TimelineDay.local_date == body.date,
+        TimelineDay.timezone == timezone,
+    )
+    if existing_day and existing_day.review_state in {
+        "memory_queued",
+        "memory_generating",
+        "memory_pending",
+        "memory_applying",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="Finish or reject this day's potential memory before reanalysis",
+        )
     run = await request_timeline_analysis(
         str(user.id), body.date, timezone, force=body.force
     )
@@ -182,6 +360,349 @@ class ReconcileRequest(BaseModel):
     started_at: datetime
     ended_at: datetime
     force: bool = False
+
+
+class ReviewDayRequest(BaseModel):
+    timezone: str
+
+
+class ResolveConsolidationRequest(ReviewDayRequest):
+    accepted_suggestion_ids: list[str] = Field(default_factory=list)
+
+
+class CreateSemanticGroupRequest(ReviewDayRequest):
+    episode_ids: list[str] = Field(min_length=2)
+
+
+class ResolveMemoryReviewRequest(BaseModel):
+    accepted_change_ids: list[str] = Field(default_factory=list)
+
+
+@router.post("/review/day/{local_date}/consolidation")
+async def suggest_timeline_day_consolidation(
+    local_date: date,
+    body: ReviewDayRequest,
+    user: User = Depends(current_active_user),
+):
+    """Propose, but never apply, semantic merges for the active day generation."""
+
+    timezone_name = _validate_timezone(body.timezone)
+    owner = str(user.id)
+    day = await TimelineDay.find_one(
+        TimelineDay.user_id == owner,
+        TimelineDay.local_date == local_date,
+        TimelineDay.timezone == timezone_name,
+    )
+    if day is None or not day.active_run_id:
+        raise HTTPException(status_code=404, detail="Timeline day not found")
+    if day.review_state != "episodes_pending":
+        raise HTTPException(
+            status_code=409,
+            detail="Episode grouping can only be reviewed before memory extraction",
+        )
+    await TimelineDay.get_pymongo_collection().update_one(
+        {"_id": day.id, "active_run_id": day.active_run_id},
+        {"$set": {"consolidation_state": "queued", "consolidation_error": None}},
+    )
+    try:
+        return await queue_day_consolidation(
+            owner, local_date, timezone_name, day.active_run_id
+        )
+    except Exception as error:
+        await TimelineDay.get_pymongo_collection().update_one(
+            {"_id": day.id, "active_run_id": day.active_run_id},
+            {
+                "$set": {
+                    "consolidation_state": "failed",
+                    "consolidation_error": str(error)[:1000],
+                }
+            },
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not queue grouping suggestions: {error}",
+        ) from error
+
+
+@router.post("/review/day/{local_date}/consolidation/resolve")
+async def resolve_timeline_day_consolidation(
+    local_date: date,
+    body: ResolveConsolidationRequest,
+    user: User = Depends(current_active_user),
+):
+    """Accept semantic overlays and retain every proposal decision for learning."""
+
+    timezone_name = _validate_timezone(body.timezone)
+    day = await TimelineDay.find_one(
+        TimelineDay.user_id == str(user.id),
+        TimelineDay.local_date == local_date,
+        TimelineDay.timezone == timezone_name,
+    )
+    if day is None:
+        raise HTTPException(status_code=404, detail="Timeline day not found")
+    try:
+        groups = await resolve_day_consolidation(day, body.accepted_suggestion_ids)
+    except ConsolidationResolutionError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {"groups": [_semantic_group_payload(group) for group in groups]}
+
+
+@router.post("/review/day/{local_date}/groups")
+async def create_timeline_semantic_group(
+    local_date: date,
+    body: CreateSemanticGroupRequest,
+    user: User = Depends(current_active_user),
+):
+    """Manually relate episodes without widening or replacing their intervals."""
+
+    timezone_name = _validate_timezone(body.timezone)
+    day = await TimelineDay.find_one(
+        TimelineDay.user_id == str(user.id),
+        TimelineDay.local_date == local_date,
+        TimelineDay.timezone == timezone_name,
+    )
+    if day is None:
+        raise HTTPException(status_code=404, detail="Timeline day not found")
+    try:
+        group = await create_manual_semantic_group(day, body.episode_ids)
+    except ConsolidationResolutionError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return _semantic_group_payload(group)
+
+
+@router.delete("/review/day/{local_date}/groups/{group_id}", status_code=204)
+async def delete_timeline_semantic_group(
+    local_date: date,
+    group_id: str,
+    timezone: str = Query(),
+    user: User = Depends(current_active_user),
+):
+    """Undo an accepted overlay without deleting its review history."""
+
+    timezone_name = _validate_timezone(timezone)
+    day = await TimelineDay.find_one(
+        TimelineDay.user_id == str(user.id),
+        TimelineDay.local_date == local_date,
+        TimelineDay.timezone == timezone_name,
+    )
+    if day is None:
+        raise HTTPException(status_code=404, detail="Timeline day not found")
+    try:
+        await remove_semantic_group(day, group_id)
+    except ConsolidationResolutionError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return Response(status_code=204)
+
+
+@router.get("/review/day/{local_date}/decisions")
+async def get_timeline_review_decisions(
+    local_date: date,
+    timezone: str = Query(),
+    user: User = Depends(current_active_user),
+):
+    """Return the reusable proposed -> human decision trail for one day."""
+
+    timezone_name = _validate_timezone(timezone)
+    owner = str(user.id)
+    day = await TimelineDay.find_one(
+        TimelineDay.user_id == owner,
+        TimelineDay.local_date == local_date,
+        TimelineDay.timezone == timezone_name,
+    )
+    if day is None:
+        raise HTTPException(status_code=404, detail="Timeline day not found")
+    proposals = (
+        await MemoryReviewProposal.find(
+            MemoryReviewProposal.user_id == owner,
+            MemoryReviewProposal.local_date == local_date,
+            MemoryReviewProposal.timezone == timezone_name,
+        )
+        .sort("created_at")
+        .to_list()
+    )
+    return {
+        "date": local_date,
+        "timezone": timezone_name,
+        "timeline_decisions": [
+            item.model_dump(mode="json") for item in day.review_decisions
+        ],
+        "memory_proposals": [
+            _proposal_payload(proposal, full=True) for proposal in proposals
+        ],
+    }
+
+
+@router.get("/review/queue")
+async def get_timeline_review_queue(
+    timezone: str = Query(),
+    user: User = Depends(current_active_user),
+):
+    """Every analysed day in chronological review order."""
+
+    timezone = _validate_timezone(timezone)
+    days = (
+        await TimelineDay.find(
+            TimelineDay.user_id == str(user.id),
+            TimelineDay.timezone == timezone,
+            {"active_run_id": {"$nin": [None, ""]}},
+        )
+        .sort("local_date")
+        .to_list()
+    )
+    run_ids = [day.active_run_id for day in days if day.active_run_id]
+    episode_rows = (
+        await TimelineEpisode.get_pymongo_collection()
+        .aggregate(
+            [
+                {
+                    "$match": {
+                        "user_id": str(user.id),
+                        "run_id": {"$in": run_ids},
+                        "status": {"$ne": "superseded"},
+                    }
+                },
+                {"$group": {"_id": "$run_id", "count": {"$sum": 1}}},
+            ]
+        )
+        .to_list(length=None)
+        if run_ids
+        else []
+    )
+    episode_counts = {row["_id"]: row["count"] for row in episode_rows}
+    proposal_ids = [
+        day.memory_review_proposal_id for day in days if day.memory_review_proposal_id
+    ]
+    proposal_rows = (
+        await MemoryReviewProposal.get_pymongo_collection()
+        .aggregate(
+            [
+                {"$match": {"proposal_id": {"$in": proposal_ids}}},
+                {
+                    "$project": {
+                        "_id": 0,
+                        "proposal_id": 1,
+                        "state": 1,
+                        "timeline_run_id": 1,
+                        "change_count": {"$size": {"$ifNull": ["$changes", []]}},
+                        "accepted_change_ids": 1,
+                        "rejected_change_ids": 1,
+                        "error": 1,
+                        "created_at": 1,
+                        "generated_at": 1,
+                        "resolved_at": 1,
+                    }
+                },
+            ]
+        )
+        .to_list(length=None)
+        if proposal_ids
+        else []
+    )
+    proposals = {row["proposal_id"]: row for row in proposal_rows}
+    items = []
+    for day in days:
+        intervals = (day.coverage or {}).get("unassigned_intervals") or []
+        proposal = proposals.get(day.memory_review_proposal_id or "")
+        items.append(
+            {
+                "date": day.local_date,
+                "state": day.review_state,
+                "outcome": day.review_outcome,
+                "episode_count": episode_counts.get(day.active_run_id, 0),
+                "unexplained_count": sum(
+                    1 for item in intervals if item.get("cause") != "no_capture"
+                ),
+                "capture_gap_count": sum(
+                    1 for item in intervals if item.get("cause") == "no_capture"
+                ),
+                "proposal": proposal,
+            }
+        )
+    return {"items": items}
+
+
+@router.post("/review/day/{local_date}/episodes")
+async def finalize_timeline_episode_review(
+    local_date: date,
+    body: ReviewDayRequest,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(current_active_user),
+):
+    """Freeze the current episode generation and queue its potential memory."""
+
+    timezone = _validate_timezone(body.timezone)
+    day = await TimelineDay.find_one(
+        TimelineDay.user_id == str(user.id),
+        TimelineDay.local_date == local_date,
+        TimelineDay.timezone == timezone,
+    )
+    if day is None or not day.active_run_id:
+        raise HTTPException(status_code=404, detail="No analysed Timeline day")
+    reconciliation = await _reconciliation_payload(str(user.id), local_date, timezone)
+    if reconciliation["ranges"]:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{len(reconciliation['ranges'])} evidence range(s) still need "
+                "reconciliation before this episode account can be finalized"
+            ),
+        )
+    if day.review_state not in ("episodes_pending", "failed"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Day is already in review state {day.review_state}",
+        )
+    day.review_state = "memory_queued"
+    day.review_run_id = day.active_run_id
+    day.episodes_reviewed_at = utcnow()
+    day.review_error = None
+    day.review_outcome = None
+    await day.save()
+    background_tasks.add_task(generate_memory_review, day)
+    return _review_payload(day, await _day_proposal(day))
+
+
+@router.post("/review/proposals/{proposal_id}/resolve")
+async def resolve_timeline_memory_review(
+    proposal_id: str,
+    body: ResolveMemoryReviewRequest,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(current_active_user),
+):
+    proposal = await MemoryReviewProposal.find_one(
+        MemoryReviewProposal.proposal_id == proposal_id,
+        MemoryReviewProposal.user_id == str(user.id),
+    )
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="Memory proposal not found")
+    try:
+        outcome = await resolve_memory_review(proposal, body.accepted_change_ids)
+    except MemoryReviewError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    background_tasks.add_task(process_memory_review_queue)
+    return {"outcome": outcome, "proposal": _proposal_payload(proposal, full=True)}
+
+
+@router.post("/review/proposals/{proposal_id}/regenerate")
+async def regenerate_timeline_memory_review(
+    proposal_id: str,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(current_active_user),
+):
+    """Discard a stale diff and derive it again from the current accepted vault."""
+
+    proposal = await MemoryReviewProposal.find_one(
+        MemoryReviewProposal.proposal_id == proposal_id,
+        MemoryReviewProposal.user_id == str(user.id),
+    )
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="Memory proposal not found")
+    try:
+        day = await queue_memory_review_regeneration(proposal)
+    except MemoryReviewError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    background_tasks.add_task(generate_memory_review, day)
+    return _review_payload(day, proposal)
 
 
 @router.post("/reconcile")
@@ -225,6 +746,42 @@ async def request_range_reconciliation(
         "not_before": _utc(dirty_range.not_before),
         "force_after": _utc(dirty_range.force_after),
     }
+
+
+@router.get("/evidence-preview")
+async def preview_evidence_relations(
+    started_at: datetime,
+    ended_at: datetime,
+    timezone: str,
+    user: User = Depends(current_active_user),
+) -> EvidenceRelationPreview:
+    """Inspect shadow cross-source candidates without mutating Timeline state.
+
+    This endpoint intentionally exposes only bounded relation diagnostics. It does not
+    enqueue reconciliation, merge Conversations, publish Episodes, or include full
+    transcript text in its response.
+    """
+
+    started_at, ended_at = _at(started_at), _at(ended_at)
+    if ended_at <= started_at:
+        raise HTTPException(status_code=422, detail="Range must have positive duration")
+    if ended_at - started_at > MANUAL_RECONCILE_MAX_RANGE:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Range must be at most "
+                f"{int(MANUAL_RECONCILE_MAX_RANGE.total_seconds() // 3600)} hours"
+            ),
+        )
+    bundle = await load_reconciliation_evidence(
+        str(user.id),
+        started_at,
+        ended_at,
+        timezone_name=_validate_timezone(timezone),
+    )
+    # A dense multi-source range can require thousands of lexical comparisons. The
+    # preview is read-only but must not monopolize FastAPI's event loop.
+    return await asyncio.to_thread(infer_evidence_relations, bundle.manifest)
 
 
 @router.get("/analysis/{run_id}")
@@ -434,6 +991,7 @@ class EpisodeUpdate(BaseModel):
     title: Optional[str] = Field(default=None, min_length=1, max_length=160)
     summary: Optional[str] = Field(default=None, max_length=1200)
     kind: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    memory_policy: Optional[Literal["auto", "reference", "remember"]] = None
     entities: Optional[list[str]] = None
     salience: Optional[Literal["background", "routine", "notable", "highlight"]] = None
     started_at: Optional[datetime] = None
@@ -447,6 +1005,7 @@ async def update_timeline_episode(
     user: User = Depends(current_active_user),
 ):
     episode = await _owned_episode(episode_id, user)
+    before = _episode_review_snapshot(episode)
     changes = body.model_dump(exclude_unset=True, exclude_none=True)
     if not changes:
         raise HTTPException(status_code=422, detail="No episode fields supplied")
@@ -458,6 +1017,13 @@ async def update_timeline_episode(
         )
     _confirm(episode, changes.keys())
     await episode.save()
+    await _record_episode_review_decision(
+        episode,
+        "episode_update",
+        before=before,
+        after=_episode_review_snapshot(episode),
+    )
+    await _invalidate_day_consolidation(episode)
     return _episode_payload(episode)
 
 
@@ -469,6 +1035,104 @@ def _confirm(episode: TimelineEpisode, fields) -> None:
     episode.confirmed_at = utcnow()
     episode.confirmed_fields = sorted(set(episode.confirmed_fields) | set(fields))
     episode.revised_at = utcnow()
+
+
+def _episode_review_snapshot(episode: TimelineEpisode) -> dict[str, Any]:
+    """Bounded semantic state used by the prompt-learning ledger."""
+
+    return {
+        "episode_id": episode.episode_id,
+        "episode_key": episode.episode_key,
+        "started_at": _utc(episode.started_at).isoformat(),
+        "ended_at": _utc(episode.ended_at).isoformat(),
+        "kind": episode.kind,
+        "title": episode.title,
+        "summary": episode.summary,
+        "memory_policy": episode.memory_policy,
+        "salience": episode.salience,
+        "entities": episode.entities,
+        "confirmed_fields": episode.confirmed_fields,
+    }
+
+
+async def _record_episode_review_decision(
+    episode: TimelineEpisode,
+    action: Literal[
+        "episode_update", "episode_split", "episode_merge", "episode_delete"
+    ],
+    *,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    episode_ids: list[str] | None = None,
+) -> None:
+    decision = TimelineReviewDecision(
+        run_id=episode.run_id,
+        action=action,
+        episode_ids=episode_ids or [episode.episode_id],
+        before=before,
+        after=after,
+    )
+    await TimelineDay.get_pymongo_collection().update_one(
+        {
+            "user_id": episode.user_id,
+            "local_date": datetime.combine(episode.local_date, datetime.min.time()),
+            "timezone": episode.timezone,
+            "active_run_id": episode.run_id,
+        },
+        {
+            "$push": {"review_decisions": decision.model_dump(mode="python")},
+            "$set": {"revised_at": utcnow()},
+        },
+    )
+
+
+async def _invalidate_day_consolidation(episode: TimelineEpisode) -> None:
+    """Fence visual grouping proposals whenever their episode snapshot changes."""
+
+    collection = TimelineDay.get_pymongo_collection()
+    query = {
+        "user_id": episode.user_id,
+        "local_date": datetime.combine(episode.local_date, datetime.min.time()),
+        "timezone": episode.timezone,
+        "active_run_id": episode.run_id,
+    }
+    day = await collection.find_one(
+        query,
+        {
+            "consolidation_state": 1,
+            "consolidation_model": 1,
+            "consolidation_suggestions": 1,
+        },
+    )
+    invalidated = []
+    if day and day.get("consolidation_state") == "ready":
+        invalidated = [
+            TimelineReviewDecision(
+                run_id=episode.run_id,
+                action="grouping_reject",
+                episode_ids=item.get("episode_ids") or [],
+                suggestion_id=item.get("suggestion_id"),
+                model=day.get("consolidation_model"),
+                before=item,
+                after={"invalidated_by": "episode_change"},
+            ).model_dump(mode="python")
+            for item in day.get("consolidation_suggestions") or []
+        ]
+    update: dict[str, Any] = {
+        "$set": {
+            "consolidation_state": "",
+            "consolidation_run_id": None,
+            "consolidation_model": None,
+            "consolidation_suggestions": [],
+            "consolidation_error": None,
+            "consolidation_started_at": None,
+            "consolidation_generated_at": None,
+            "consolidation_resolved_at": None,
+        }
+    }
+    if invalidated:
+        update["$push"] = {"review_decisions": {"$each": invalidated}}
+    await collection.update_one(query, update)
 
 
 async def _chunk_spans(episode: TimelineEpisode) -> dict:
@@ -524,6 +1188,7 @@ async def split_timeline_episode(
     """
 
     episode = await _owned_episode(episode_id, user)
+    before = _episode_review_snapshot(episode)
     at = _at(body.at)
     if not (_at(episode.started_at) < at < _at(episode.ended_at)):
         raise HTTPException(
@@ -571,6 +1236,19 @@ async def split_timeline_episode(
 
     await tail.insert()
     await episode.save()
+    await _record_episode_review_decision(
+        episode,
+        "episode_split",
+        before=before,
+        after={
+            "episodes": [
+                _episode_review_snapshot(episode),
+                _episode_review_snapshot(tail),
+            ]
+        },
+        episode_ids=[episode.episode_id, tail.episode_id],
+    )
+    await _invalidate_day_consolidation(episode)
     return {
         "episodes": [_episode_payload(episode), _episode_payload(tail)],
     }
@@ -598,9 +1276,15 @@ async def merge_timeline_episodes(
             status_code=422, detail="Episodes must belong to the same analysis run"
         )
     episodes.sort(key=lambda episode: _at(episode.started_at))
+    before = {"episodes": [_episode_review_snapshot(item) for item in episodes]}
     survivor, absorbed = episodes[0], episodes[1:]
+    # A widened semantic event needs a widened account. Generate it before mutating
+    # any rows so an unavailable or malformed model response leaves the day intact.
+    account = await synthesize_merged_episode_account(episodes)
 
     survivor.ended_at = max(_at(episode.ended_at) for episode in episodes)
+    survivor.title = account.title
+    survivor.summary = account.summary
     # The survivor now spans every absorbed episode, so it has to claim their audio
     # too. Without this it kept only its own ranges and the rest were deleted with
     # their documents, leaving a merged episode able to play a fraction of itself.
@@ -627,7 +1311,7 @@ async def merge_timeline_episodes(
         {*survivor.predecessor_keys, *(episode.episode_key for episode in absorbed)}
         - {survivor.episode_key}
     )
-    _confirm(survivor, ["started_at", "ended_at", "entities"])
+    _confirm(survivor, ["started_at", "ended_at", "title", "summary", "entities"])
 
     await survivor.save()
     for episode in absorbed:
@@ -637,7 +1321,60 @@ async def merge_timeline_episodes(
         episode.successor_keys = sorted({*episode.successor_keys, survivor.episode_key})
         episode.revised_at = utcnow()
         await episode.save()
+    await _record_episode_review_decision(
+        survivor,
+        "episode_merge",
+        before=before,
+        after=_episode_review_snapshot(survivor),
+        episode_ids=[episode.episode_id for episode in episodes],
+    )
+    await _invalidate_day_consolidation(survivor)
     return _episode_payload(survivor)
+
+
+@router.post("/episodes/{episode_id}/regenerate-account")
+async def regenerate_timeline_episode_account(
+    episode_id: str, user: User = Depends(current_active_user)
+):
+    """Regenerate title and summary from an episode's complete semantic evidence.
+
+    This repairs episodes merged before merge-time synthesis existed and remains a
+    safe retry seam: only the derived account changes; bounds, evidence and audio do
+    not. The inference finishes before either field is written.
+    """
+
+    collection = TimelineEpisode.get_pymongo_collection()
+    query = {"episode_id": episode_id, "user_id": str(user.id)}
+    try:
+        episode = await _owned_episode(episode_id, user)
+    except ValidationError:
+        # A pre-fix merge could persist an overlong generated summary before Beanie
+        # rejected its returned document. Construct only enough trusted shape to run
+        # synthesis; the corrected result below is validated before being returned.
+        raw = await collection.find_one(query)
+        if raw is None:
+            raise HTTPException(status_code=404, detail="Episode not found")
+        episode = TimelineEpisode.model_construct(**raw)
+    account = await synthesize_merged_episode_account([episode], force=True)
+    now = utcnow()
+    confirmed_fields = sorted(set(episode.confirmed_fields) | {"title", "summary"})
+    await collection.update_one(
+        query,
+        {
+            "$set": {
+                "title": account.title,
+                "summary": account.summary,
+                "pinned": True,
+                "status": "confirmed",
+                "confirmed_at": now,
+                "confirmed_fields": confirmed_fields,
+                "revised_at": now,
+            }
+        },
+    )
+    await _invalidate_day_consolidation(episode)
+    repaired = await collection.find_one(query)
+    return _episode_payload(TimelineEpisode.model_validate(repaired))
 
 
 @router.delete("/episodes/{episode_id}", status_code=204)
@@ -650,7 +1387,16 @@ async def delete_timeline_episode(
     unexplained, so a later analysis run may propose an episode there again.
     """
 
-    await (await _owned_episode(episode_id, user)).delete()
+    episode = await _owned_episode(episode_id, user)
+    before = _episode_review_snapshot(episode)
+    await episode.delete()
+    await _record_episode_review_decision(
+        episode,
+        "episode_delete",
+        before=before,
+        after={"deleted": True},
+    )
+    await _invalidate_day_consolidation(episode)
     return Response(status_code=204)
 
 

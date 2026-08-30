@@ -1,10 +1,14 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import path from 'node:path'
 
 export default defineConfig({
   plugins: [react()],
   base: process.env.VITE_BASE_PATH || '/',
   server: {
+    fs: {
+      allow: [process.cwd(), path.resolve(process.cwd(), '../../..', 'contracts'), '/contracts'],
+    },
     port: 5173,
     host: '0.0.0.0',
     allowedHosts: process.env.VITE_ALLOWED_HOSTS

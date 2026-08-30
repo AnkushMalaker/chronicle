@@ -7,7 +7,12 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useSystemEvents, useSystemEventsSummary } from '../hooks/useSystemEvents'
-import { systemEventsApi, type SystemEvent, type SystemEventsFilter } from '../services/api'
+import {
+  systemEventsApi,
+  type SystemEvent,
+  type SystemEventsFilter,
+  type SystemEventsSummary,
+} from '../services/api'
 import { Button, Alert, Checkbox } from '../components/ui'
 
 // ---- Severity + category styling ------------------------------------------
@@ -26,6 +31,7 @@ const CATEGORY_CHIP: Record<string, string> = {
   client: 'text-cyan-700 bg-cyan-50 dark:bg-cyan-900/30 dark:text-cyan-300',
   pipeline: 'text-indigo-700 bg-indigo-50 dark:bg-indigo-900/30 dark:text-indigo-300',
   job: 'text-orange-700 bg-orange-50 dark:bg-orange-900/30 dark:text-orange-300',
+  memory: 'text-amber-800 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-300',
   plugin: 'text-pink-700 bg-pink-50 dark:bg-pink-900/30 dark:text-pink-300',
   config: 'text-yellow-700 bg-yellow-50 dark:bg-yellow-900/30 dark:text-yellow-300',
   api: 'text-teal-700 bg-teal-50 dark:bg-teal-900/30 dark:text-teal-300',
@@ -33,7 +39,7 @@ const CATEGORY_CHIP: Record<string, string> = {
 }
 
 const SEVERITIES: Severity[] = ['critical', 'error', 'warning', 'info']
-const CATEGORIES = ['service', 'client', 'pipeline', 'job', 'plugin', 'config', 'api', 'log']
+const CATEGORIES = ['service', 'client', 'pipeline', 'job', 'memory', 'plugin', 'config', 'api', 'log']
 const SYSTEM_EVENTS_TIME_ZONE = 'Asia/Kolkata'
 const systemEventsTimeFormatter = new Intl.DateTimeFormat('en-GB', {
   timeZone: SYSTEM_EVENTS_TIME_ZONE,
@@ -202,7 +208,7 @@ function EventRow({
 
 // ---- Summary strip ---------------------------------------------------------
 
-function SummaryStrip({ summary }: { summary?: { total: number; unacked: number; by_severity: Record<string, number> } }) {
+function SummaryStrip({ summary }: { summary?: SystemEventsSummary }) {
   const bySev = summary?.by_severity ?? {}
   const cards: { label: string; value: number; cls: string }[] = [
     { label: 'Total (window)', value: summary?.total ?? 0, cls: 'text-gray-900 dark:text-gray-100' },
@@ -221,6 +227,101 @@ function SummaryStrip({ summary }: { summary?: { total: number; unacked: number;
         </div>
       ))}
     </div>
+  )
+}
+
+function metricLabel(value: string): string {
+  return value.replace(/_/g, ' ')
+}
+
+function MemoryFallbackBand({
+  summary,
+  onInspect,
+}: {
+  summary?: SystemEventsSummary
+  onInspect: () => void
+}) {
+  const stats = summary?.memory_fallbacks
+  if (!stats) {
+    return (
+      <section className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 dark:border-gray-700 dark:bg-gray-900/40" aria-label="Deterministic memory fallback statistics">
+        <div className="text-sm font-medium text-gray-700 dark:text-gray-300">Deterministic memory fallback</div>
+        <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">Loading fallback telemetry…</div>
+      </section>
+    )
+  }
+
+  const hasFallbacks = stats.occurrences > 0
+  const reasons = Object.entries(stats.by_reason).sort((a, b) => b[1] - a[1])
+
+  return (
+    <section
+      className={`rounded-lg border px-4 py-3 ${
+        hasFallbacks
+          ? 'border-amber-200 bg-amber-50/70 dark:border-amber-800/70 dark:bg-amber-950/20'
+          : 'border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-900/40'
+      }`}
+      aria-label="Deterministic memory fallback statistics"
+    >
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center">
+        <div className="flex min-w-0 items-start gap-3 lg:w-80 lg:flex-shrink-0">
+          <span className={`mt-0.5 rounded-md p-1.5 ${hasFallbacks ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' : 'bg-gray-200 text-gray-600 dark:bg-gray-800 dark:text-gray-300'}`}>
+            {hasFallbacks ? <AlertTriangle className="h-4 w-4" /> : <Check className="h-4 w-4" />}
+          </span>
+          <div>
+            <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">Deterministic memory fallback</div>
+            <div className="mt-0.5 text-xs text-gray-600 dark:text-gray-400">
+              {hasFallbacks
+                ? `${stats.occurrences} write${stats.occurrences === 1 ? '' : 's'} across ${stats.affected_conversations} conversation${stats.affected_conversations === 1 ? '' : 's'}`
+                : 'No fallback writes in this window'}
+            </div>
+          </div>
+        </div>
+
+        <div className="min-w-0 flex-1 border-t border-gray-200 pt-3 dark:border-gray-700 lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
+          {hasFallbacks ? (
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="font-medium text-gray-500 dark:text-gray-400">Agent path</span>
+                {stats.agent_paths.length > 0 ? stats.agent_paths.slice(0, 3).map(path => (
+                  <span key={`${path.primary_backend}:${path.recovery_backend}`} className="rounded bg-white/80 px-2 py-1 font-mono text-gray-700 ring-1 ring-inset ring-amber-200 dark:bg-gray-900/60 dark:text-gray-200 dark:ring-amber-800/70">
+                    {path.primary_backend} → {path.recovery_backend === 'none' ? 'no recovery' : path.recovery_backend} → deterministic
+                    <span className="ml-1 text-gray-400">×{path.occurrences}</span>
+                  </span>
+                )) : (
+                  <span className="text-gray-500 dark:text-gray-400">Unavailable for earlier events</span>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="font-medium text-gray-500 dark:text-gray-400">Reasons</span>
+                {reasons.map(([reason, count]) => (
+                  <span key={reason} className="rounded bg-white/80 px-2 py-1 text-gray-700 ring-1 ring-inset ring-gray-200 dark:bg-gray-900/60 dark:text-gray-200 dark:ring-gray-700">
+                    {metricLabel(reason)} <span className="text-gray-400">×{count}</span>
+                  </span>
+                ))}
+                {stats.latest_at && (
+                  <span className="text-gray-500 dark:text-gray-400">Latest {formatTime(stats.latest_at)}</span>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="text-xs text-gray-500 dark:text-gray-400">
+              Counts are derived from the durable event ledger; rapid retries are counted individually.
+            </div>
+          )}
+        </div>
+
+        {hasFallbacks && (
+          <button
+            type="button"
+            onClick={onInspect}
+            className="self-start rounded-md px-2.5 py-1.5 text-xs font-medium text-amber-800 ring-1 ring-inset ring-amber-300 hover:bg-amber-100 dark:text-amber-300 dark:ring-amber-700 dark:hover:bg-amber-900/30 lg:self-center"
+          >
+            Inspect memory events
+          </button>
+        )}
+      </div>
+    </section>
   )
 }
 
@@ -475,8 +576,15 @@ export default function SystemEvents() {
         </Alert>
       )}
 
-      <div className="mb-5">
+      <div className="mb-5 space-y-3">
         <SummaryStrip summary={summary} />
+        <MemoryFallbackBand
+          summary={summary}
+          onInspect={() => {
+            setCategory('memory')
+            setShowAcked(true)
+          }}
+        />
       </div>
 
       {/* Controls */}

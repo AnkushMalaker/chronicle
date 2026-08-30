@@ -1,7 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Scissors, Trash2 } from 'lucide-react'
-import { TimelineEpisode } from '../../services/api'
+import { TimelineEpisode, TimelineEpisodeUpdate } from '../../services/api'
 import { Button } from '../ui'
+import EpisodeKindField from './EpisodeKindField'
+import { isMediaKind } from './episodePresentation'
 
 /** `HH:MM` in the viewer's timezone, which is the timezone the day was analyzed in. */
 function toTimeValue(iso: string) {
@@ -25,7 +27,7 @@ interface Props {
   episode: TimelineEpisode
   selected: boolean
   onToggleSelected: () => void
-  onAdjust: (changes: { started_at?: string; ended_at?: string }) => void
+  onAdjust: (changes: TimelineEpisodeUpdate) => void
   onSplit: (at: string) => void
   onDelete: () => void
   busy?: boolean
@@ -37,6 +39,9 @@ export default function EpisodeLabelBar({
   episode, selected, onToggleSelected, onAdjust, onSplit, onDelete, busy, nested,
 }: Props) {
   const [splitAt, setSplitAt] = useState('')
+  const [kind, setKind] = useState(episode.kind)
+
+  useEffect(() => setKind(episode.kind), [episode.kind])
 
   const field = 'min-h-9 rounded-md border border-gray-300 bg-white px-2 py-1 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100'
   const splitIso = splitAt ? fromTimeValue(episode.started_at, splitAt) : null
@@ -44,6 +49,7 @@ export default function EpisodeLabelBar({
     !!splitIso &&
     Date.parse(splitIso) > Date.parse(episode.started_at) &&
     Date.parse(splitIso) < Date.parse(episode.ended_at)
+  const media = isMediaKind(kind)
 
   return (
     <div className={`-mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-b-xl border border-t-0 border-gray-200 bg-gray-50 px-4 py-2 dark:border-gray-700 dark:bg-gray-800/60 ${nested ? 'ml-6' : ''}`}>
@@ -55,6 +61,35 @@ export default function EpisodeLabelBar({
           className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-2 focus:ring-blue-500"
         />
         Select
+      </label>
+
+      {media && (
+        <label
+          className="flex items-center gap-2 text-xs font-medium text-gray-700 dark:text-gray-200"
+          title="Reference-only media stays in the Daily index but is not sent to semantic memory."
+        >
+          <input
+            type="checkbox"
+            checked={episode.memory_policy === 'remember'}
+            disabled={busy}
+            onChange={event => onAdjust({ memory_policy: event.target.checked ? 'remember' : 'auto' })}
+            className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-2 focus:ring-blue-500"
+          />
+          Remember content
+        </label>
+      )}
+
+      <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300">
+        Type
+        <EpisodeKindField
+          value={kind}
+          onChange={setKind}
+          onCommit={next => {
+            if (next !== episode.kind) onAdjust({ kind: next })
+          }}
+          disabled={busy}
+          className={`${field} w-40`}
+        />
       </label>
 
       <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-300">

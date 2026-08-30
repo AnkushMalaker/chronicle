@@ -7,6 +7,7 @@ binary Protobuf message per WebSocket frame.
 
 from __future__ import annotations
 
+import opuslib
 from google.protobuf import json_format
 from google.protobuf.message import DecodeError, Message
 
@@ -20,6 +21,21 @@ _OGG_CAPTURE_PATTERN = b"OggS"
 
 class AudioProtocolV2Error(ValueError):
     """A v2 envelope failed schema or Chronicle invariant validation."""
+
+
+class RawOpusDecoder:
+    """Stateful decoder for Chronicle's 16 kHz mono, 20 ms raw-Opus uplink."""
+
+    def __init__(self) -> None:
+        self._decoder = opuslib.Decoder(16_000, 1)
+
+    def decode_packet(self, payload: bytes) -> bytes:
+        if not payload:
+            raise AudioProtocolV2Error("capture packet has no Opus payload")
+        try:
+            return self._decoder.decode(payload, 320, decode_fec=False)
+        except Exception as error:
+            raise AudioProtocolV2Error("invalid raw Opus packet") from error
 
 
 def _require_id(value: str, label: str) -> None:

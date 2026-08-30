@@ -8,17 +8,19 @@ those services are migrated to generated Redis messages.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from functools import partial
 
-from chronicle_wearable_sdk.decoder import OmiOpusDecoder
 from fastapi import WebSocket, WebSocketDisconnect
 from google.protobuf import timestamp_pb2
 
 from advanced_omi_backend.audio_contract.v2 import audio_pb2
 from advanced_omi_backend.audio_contract.v2.codec import (
     AudioProtocolV2Error,
+    RawOpusDecoder,
     parse_client_control_json,
     parse_media_envelope,
     serialize_media_envelope,
@@ -45,6 +47,11 @@ from advanced_omi_backend.services.audio_stream.producer import (
     get_audio_stream_producer,
 )
 from advanced_omi_backend.services.audio_stream.v2_streams import AudioV2Streams
+from advanced_omi_backend.services.memory.scope import (
+    MemoryScope,
+    MemoryScopeError,
+    MemoryScopeResolver,
+)
 from advanced_omi_backend.services.response_coordinator import (
     ResponseCoordinator,
     ResponseCoordinatorError,
@@ -52,6 +59,8 @@ from advanced_omi_backend.services.response_coordinator import (
 from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
 
 AUDIO_SUBPROTOCOL = "chronicle.audio.v2"
+logger = logging.getLogger(__name__)
+_memory_scopes = MemoryScopeResolver()
 
 _PROFILE_TO_DOMAIN = {
     audio_pb2.PROCESSING_PROFILE_AMBIENT: "ambient",
@@ -166,10 +175,59 @@ async def _subscribe_v2_downlink(
         await pubsub.close()
 
 
-async def _decode_opus(decoder: OmiOpusDecoder, payload: bytes) -> bytes:
+async def _subscribe_v2_transcripts(
+    *,
+    websocket: WebSocket,
+    redis_client,
+    binding: audio_pb2.CaptureBinding,
+    subscribed: asyncio.Event | None = None,
+) -> None:
+    """Forward streaming STT pub/sub messages as typed, capture-bound controls."""
+
+    channel = f"transcription:interim:{binding.capture_session_id.value}"
+    pubsub = redis_client.pubsub()
+    await pubsub.subscribe(channel)
+    if subscribed is not None:
+        subscribed.set()
+    logger.info("Subscribed Audio V2 transcript channel: %s", channel)
+    try:
+        while True:
+            message = await pubsub.get_message(
+                ignore_subscribe_messages=True, timeout=1.0
+            )
+            if not message or message["type"] != "message":
+                continue
+            try:
+                payload = json.loads(message["data"])
+            except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                logger.warning("Ignored malformed transcript update on %s", channel)
+                continue
+            text = payload.get("text")
+            if not isinstance(text, str) or not text:
+                continue
+            await _send_control(
+                websocket,
+                transcript_update=audio_pb2.TranscriptUpdate(
+                    binding=binding,
+                    text=text,
+                    is_final=bool(payload.get("is_final", False)),
+                    confidence=float(payload.get("confidence") or 0.0),
+                    speaker_name=(
+                        payload.get("speaker_name")
+                        if isinstance(payload.get("speaker_name"), str)
+                        else ""
+                    ),
+                ),
+            )
+    finally:
+        await pubsub.unsubscribe(channel)
+        await pubsub.close()
+
+
+async def _decode_opus(decoder: RawOpusDecoder, payload: bytes) -> bytes:
     return await asyncio.get_running_loop().run_in_executor(
         DECODER_EXECUTOR,
-        partial(decoder.decode_packet, payload, strip_header=False),
+        partial(decoder.decode_packet, payload),
     )
 
 
@@ -202,12 +260,15 @@ def _effects(start: audio_pb2.StartCapture) -> CaptureEffects:
 
 def _start_provenance(start: audio_pb2.StartCapture) -> CaptureStartProvenance:
     profile = _PROFILE_TO_DOMAIN[start.processing_profile]
+    if profile == "source_native" and start.capture_epoch != 0:
+        raise AudioProtocolV2Error("source-native capture requires epoch zero")
     return CaptureStartProvenance(
         protocol=2,
         capture_epoch=start.capture_epoch,
         processing_profile=profile,
         effects=_effects(start),
         data_purpose=_PURPOSE_TO_DOMAIN[start.data_purpose],
+        memory_space_id=start.memory_space_id.value or None,
     )
 
 
@@ -263,7 +324,7 @@ async def ingest_capture_packet(
     client_state,
     audio_stream_producer,
     user,
-    decoder: OmiOpusDecoder,
+    decoder: RawOpusDecoder,
     v2_streams: AudioV2Streams,
 ) -> None:
     """Decode one bound Opus packet and cross the durable/realtime seams."""
@@ -367,7 +428,7 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
             ),
         )
 
-        decoder = OmiOpusDecoder()
+        decoder = RawOpusDecoder()
         active_delivery_class = audio_pb2.DELIVERY_CLASS_UNSPECIFIED
         last_sequence = -1
         while True:
@@ -382,6 +443,17 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                         raise AudioProtocolV2Error("capture is already active")
                     start = control.start_capture
                     active_delivery_class = start.delivery_class
+                    provenance = _start_provenance(start)
+                    if provenance.memory_space_id:
+                        try:
+                            await _memory_scopes.require_space(
+                                MemoryScope(
+                                    str(user.user_id), provenance.memory_space_id
+                                ),
+                                writable=True,
+                            )
+                        except MemoryScopeError as exc:
+                            raise AudioProtocolV2Error(str(exc)) from exc
                     await initialize_capture_session(
                         client_state=client_state,
                         producer=producer,
@@ -396,7 +468,7 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                             "frame_duration_ms": 20,
                             "mode": "streaming",
                         },
-                        provenance=_start_provenance(start),
+                        provenance=provenance,
                     )
                     binding = audio_pb2.CaptureBinding(
                         capture_session_id=audio_pb2.CaptureSessionId(
@@ -417,10 +489,21 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                                 source_spec=start.audio_spec,
                                 processing_profile=start.processing_profile,
                                 data_purpose=start.data_purpose,
+                                memory_space_id=start.memory_space_id,
                             )
                         ),
                         delivery_class=start.delivery_class,
                     )
+                    transcript_subscribed = asyncio.Event()
+                    interim_task = asyncio.create_task(
+                        _subscribe_v2_transcripts(
+                            websocket=websocket,
+                            redis_client=producer.redis_client,
+                            binding=binding,
+                            subscribed=transcript_subscribed,
+                        )
+                    )
+                    await transcript_subscribed.wait()
                     job_ids = await asyncio.to_thread(
                         start_streaming_jobs,
                         session_id=client_state.stream_session_id,
@@ -468,6 +551,10 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                         websocket,
                         capture_stopped=audio_pb2.CaptureStopped(binding=binding),
                     )
+                    if interim_task is not None:
+                        interim_task.cancel()
+                        await asyncio.gather(interim_task, return_exceptions=True)
+                        interim_task = None
                     active_delivery_class = audio_pb2.DELIVERY_CLASS_UNSPECIFIED
                     last_sequence = -1
                     v2_streams = None
@@ -573,6 +660,12 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     except AudioProtocolV2Error as error:
+        logger.warning(
+            "Rejecting audio-v2 client=%s session=%s: %s",
+            client_id,
+            getattr(client_state, "stream_session_id", None),
+            error,
+        )
         try:
             await _send_control(
                 websocket,

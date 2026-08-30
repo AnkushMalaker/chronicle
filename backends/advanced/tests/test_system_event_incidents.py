@@ -1,5 +1,6 @@
 """Regression tests for durable system-event incidents."""
 
+import json
 from datetime import datetime
 
 import pytest
@@ -47,6 +48,20 @@ def _event(*, title, incident_key=None, resolves_incident=False):
         "incident_key": incident_key,
         "resolves_incident": resolves_incident,
     }
+
+
+def test_sync_recorder_uses_process_local_test_queue(isolated_system_event_ingest):
+    system_events.record_event_sync(
+        severity="warning",
+        category="memory",
+        source="test",
+        title="synthetic event",
+    )
+
+    assert len(isolated_system_event_ingest.items) == 1
+    key, payload = isolated_system_event_ingest.items[0]
+    assert key == system_events.INGEST_KEY
+    assert json.loads(payload)["title"] == "synthetic event"
 
 
 @pytest.mark.asyncio

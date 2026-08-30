@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import unquote, urlsplit
 
 from advanced_omi_backend.model_registry import (
@@ -234,6 +234,11 @@ def _pi_settings(registry: AppModels) -> Dict[str, Any]:
         settings = {}
     if not isinstance(settings, dict):
         raise PiExecutorError("memory.backends.pi must be a mapping")
+    if settings.get("model") not in (None, ""):
+        raise PiExecutorError(
+            "memory.backends.pi.model is obsolete; select models with defaults or "
+            "llm_operations"
+        )
     return dict(settings)
 
 
@@ -378,8 +383,7 @@ def _resolve_pi_config(
         raise PiExecutorError("Chronicle model registry is unavailable")
     settings = _pi_settings(registry)
 
-    configured_model = str(settings.get("model") or "").strip() or None
-    resolved = registry.get_llm_operation(operation, model_override=configured_model)
+    resolved = registry.get_llm_operation(operation, model_override=None)
     if force_fallback:
         fallback = registry.get_fallback_llm_operation(operation, primary=resolved)
         if fallback is None:
@@ -413,7 +417,11 @@ def _resolve_pi_config(
         default=DEFAULT_CONTEXT_WINDOW,
     )
     max_tokens = _positive_int(
-        settings.get("max_tokens", resolved.max_tokens),
+        (
+            resolved.max_tokens
+            if resolved.max_tokens is not None
+            else settings.get("max_tokens")
+        ),
         name="max_tokens",
         default=DEFAULT_MAX_TOKENS,
     )
@@ -1395,6 +1403,7 @@ async def _invoke_pi(
     tool_handler: Any = None,
     terminate_on_verified: bool = False,
     max_identical_tool_calls: Optional[int] = None,
+    images: Optional[List[Tuple[str, bytes]]] = None,
 ) -> tuple[_PiEventResult, _VaultToolGateway]:
     """Run Pi and preserve gateway audit state for every post-start failure."""
     started_ns = time.time_ns()
@@ -1493,6 +1502,29 @@ async def _invoke_pi(
                 )
                 command.extend(["--tools", tool_names])
 
+            stdin_payload: bytes | None = prompt.encode("utf-8")
+            if images:
+                prompt_path = temp_dir / "recording-prompt.md"
+                prompt_path.write_text(prompt, encoding="utf-8")
+                prompt_path.chmod(0o600)
+                attachments = [f"@{prompt_path}"]
+                for index, (filename, data) in enumerate(images):
+                    suffix = Path(filename).suffix.lower()
+                    if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+                        suffix = ".jpg"
+                    image_path = temp_dir / f"screen-context-{index + 1}{suffix}"
+                    image_path.write_bytes(data)
+                    image_path.chmod(0o600)
+                    attachments.append(f"@{image_path}")
+                command.extend(
+                    [
+                        *attachments,
+                        "Follow the attached recording prompt. Treat the attached "
+                        "images as user-selected supporting evidence for that recording.",
+                    ]
+                )
+                stdin_payload = None
+
             try:
                 process = await asyncio.create_subprocess_exec(
                     *command,
@@ -1505,9 +1537,7 @@ async def _invoke_pi(
             except OSError as exc:
                 raise PiExecutorError(f"Pi failed to start: {exc}") from exc
 
-            communication_task = asyncio.create_task(
-                process.communicate(prompt.encode("utf-8"))
-            )
+            communication_task = asyncio.create_task(process.communicate(stdin_payload))
             limit_task = asyncio.create_task(limit_signal.wait())
             failures: List[str] = []
             terminated_by_chronicle = False
@@ -1684,6 +1714,7 @@ class PiMemoryAgent:
         vault_summary: str = "",
         guidance: str = "",
         record: str = "conversation",
+        images: Optional[List[Tuple[str, bytes]]] = None,
     ) -> MemoryAgentResult:
         config = _resolve_pi_config(self.operation, force_fallback=self.force_fallback)
         date = date or datetime.now(timezone.utc).isoformat()
@@ -1737,6 +1768,13 @@ class PiMemoryAgent:
                 allow_new_categories=allow_new_categories(record),
                 user_id=user_id,
             )
+            episode_keys = set(
+                re.findall(r"(?m)^episode_key:\s*([^\s]+)\s*$", transcript)
+            )
+            vault_tools.allowed_source_episode_keys = episode_keys
+            vault_tools.require_source_episode_keys = record == "day" and bool(
+                episode_keys
+            )
             schemas = list(VAULT_TOOL_SCHEMAS)
             tool_handler: Any = vault_tools
             if operating_store.has_active_skills():
@@ -1760,6 +1798,7 @@ class PiMemoryAgent:
                 user_id=user_id,
                 tool_handler=tool_handler,
                 terminate_on_verified=self.terminate_on_verified,
+                images=images,
             )
             result = MemoryAgentResult(
                 conversation_id=conversation_id,
@@ -1772,6 +1811,10 @@ class PiMemoryAgent:
                 usage=events.usage,
                 truncated=events.truncated,
                 verified=gateway.tools.verified,
+                source_episode_keys_by_path={
+                    path: sorted(keys)
+                    for path, keys in vault_tools.source_episode_keys_by_path.items()
+                },
             )
             try:
                 artifact_stdout, stdout_compaction = _compact_artifact_stdout(

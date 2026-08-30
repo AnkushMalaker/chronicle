@@ -345,7 +345,6 @@ async def async_generate(
     model: str | None = None,
     temperature: float | None = None,
     operation: str | None = None,
-    default_model_type: str = "llm",
 ) -> str:
     """Async wrapper for LLM text generation.
 
@@ -364,17 +363,13 @@ async def async_generate(
     if operation:
         registry = get_models_registry()
         if registry:
-            op = registry.get_llm_operation(
-                operation, default_model_type=default_model_type
-            )
+            op = registry.get_llm_operation(operation)
             try:
                 return await _generate_with_op(
                     op, prompt, model, temperature, operation
                 )
             except _FALLBACK_EXCEPTIONS as e:
-                fb_op = registry.get_fallback_llm_operation(
-                    operation, primary=op, default_model_type=default_model_type
-                )
+                fb_op = registry.get_fallback_llm_operation(operation, primary=op)
                 if fb_op is None:
                     raise
                 logger.warning(
@@ -415,15 +410,14 @@ async def async_chat_with_tools(
     temperature: float | None = None,
     operation: str | None = None,
     force_fallback: bool = False,
-    default_model_type: str = "llm",
     timeout_seconds: float | None = None,
 ):
     """Async wrapper for chat completion with tool calling.
 
     When ``operation`` is provided, parameters are resolved from config.
     Unreachable-primary and context-overflow calls retry once against
-    ``defaults.fallback_llm``. ``default_model_type`` lets latency-sensitive callers
-    resolve through ``defaults.fast_llm`` without pinning a deployment-specific model.
+    ``defaults.fallback_llm``. The model registry owns which operations use routing
+    roles such as ``fast_llm``.
     ``timeout_seconds`` bounds each primary/fallback attempt independently.
     ``force_fallback`` is used for a semantic retry after a provider returned a
     syntactically valid but incomplete result.
@@ -450,14 +444,11 @@ async def async_chat_with_tools(
     if operation:
         registry = get_models_registry()
         if registry:
-            op = registry.get_llm_operation(
-                operation, default_model_type=default_model_type
-            )
+            op = registry.get_llm_operation(operation)
             if force_fallback:
                 fb_op = registry.get_fallback_llm_operation(
                     operation,
                     primary=op,
-                    default_model_type=default_model_type,
                 )
                 if fb_op is None:
                     raise RuntimeError(
@@ -479,7 +470,6 @@ async def async_chat_with_tools(
                 fb_op = registry.get_fallback_llm_operation(
                     operation,
                     primary=op,
-                    default_model_type=default_model_type,
                 )
                 if fb_op is None:
                     raise

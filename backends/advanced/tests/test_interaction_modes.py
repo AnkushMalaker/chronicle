@@ -13,6 +13,7 @@ from fakeredis import aioredis as fake_aioredis
 
 from advanced_omi_backend.plugins import BasePlugin
 from advanced_omi_backend.plugins.router import PluginRouter
+from advanced_omi_backend.redis_keys import ClientId, SessionId
 from advanced_omi_backend.services.audio_stream.session_store import (
     SessionStore as ProductionSessionStore,
 )
@@ -37,7 +38,12 @@ from advanced_omi_backend.services.transcription.streaming_consumer import (
     StreamingTranscriptionConsumer,
 )
 from advanced_omi_backend.services.voice_sessions import VoiceSessionCoordinator
+from advanced_omi_backend.services.wakeword.activations import (
+    WakeActivation,
+    WakeActivationStore,
+)
 from advanced_omi_backend.services.wakeword.dispatcher import WakeWordDispatcher
+from advanced_omi_backend.services.wakeword.executor import execute_voice_command
 from advanced_omi_backend.workers import interaction_mode_worker
 from advanced_omi_backend.workers.interaction_mode_worker import InteractionModeWorker
 
@@ -261,7 +267,7 @@ async def test_streaming_fragments_do_not_enter_interaction_modes():
     normal_dispatch.assert_awaited_once()
 
 
-async def test_streaming_fragment_is_inert_for_protocol_v1_voice_session():
+async def test_streaming_fragment_is_inert_for_bound_voice_session():
     redis_client = fake_aioredis.FakeRedis(decode_responses=True)
     router = PluginRouter()
     normal_dispatch = AsyncMock()
@@ -314,7 +320,22 @@ async def test_acoustic_wake_does_not_bypass_committed_turn_router(monkeypatch):
         "user_id": "user-1",
         "audio_b64": base64.b64encode(b"\x00\x00").decode(),
         "sample_rate": 16000,
-        "detected_at": time.time(),
+        "wake_trace_id": "7ce4d46b-232f-47f9-8148-d595ed344cf2",
+        "capture_epoch": 0,
+        "armed_at": time.time() - 0.001,
+        "end_of_turn_at": time.time(),
+        "trigger_interval": {
+            "start_ms": 1,
+            "end_ms": 2,
+            "started_at": time.time() - 1,
+            "ended_at": time.time() - 0.5,
+        },
+        "command_interval": {
+            "start_ms": 2,
+            "end_ms": 3,
+            "started_at": time.time() - 0.5,
+            "ended_at": time.time(),
+        },
         "has_speech": True,
         "wakeword": "hermes",
     }
@@ -325,7 +346,7 @@ async def test_acoustic_wake_does_not_bypass_committed_turn_router(monkeypatch):
     command_dispatch.assert_awaited_once()
 
 
-async def test_acoustic_wake_is_inert_while_protocol_v1_turn_owns_audio(monkeypatch):
+async def test_acoustic_wake_is_inert_while_committed_turn_owns_audio(monkeypatch):
     redis_client = fake_aioredis.FakeRedis(decode_responses=True)
     router = PluginRouter()
     dispatcher = WakeWordDispatcher(redis_client, router)
@@ -353,7 +374,22 @@ async def test_acoustic_wake_is_inert_while_protocol_v1_turn_owns_audio(monkeypa
         "user_id": "user-1",
         "audio_b64": base64.b64encode(b"\x00\x00").decode(),
         "sample_rate": 16000,
-        "detected_at": time.time(),
+        "wake_trace_id": "965f573d-b050-4c25-9b59-1bc564806bd4",
+        "capture_epoch": 0,
+        "armed_at": time.time() - 0.001,
+        "end_of_turn_at": time.time(),
+        "trigger_interval": {
+            "start_ms": 1,
+            "end_ms": 2,
+            "started_at": time.time() - 1,
+            "ended_at": time.time() - 0.5,
+        },
+        "command_interval": {
+            "start_ms": 2,
+            "end_ms": 3,
+            "started_at": time.time() - 0.5,
+            "ended_at": time.time(),
+        },
         "has_speech": True,
         "wakeword": "hermes",
     }
@@ -361,6 +397,19 @@ async def test_acoustic_wake_is_inert_while_protocol_v1_turn_owns_audio(monkeypa
     await dispatcher._handle_message({"event": json.dumps(payload)})
 
     command_dispatch.assert_not_awaited()
+    dispatcher._resolve_command.assert_not_awaited()
+    activation = await WakeActivationStore(redis_client).claim(
+        AudioInterval(
+            audio_session_id="audio-1",
+            capture_epoch=0,
+            start_ms=0,
+            end_ms=10,
+            voice_session_id="voice-1",
+            turn_id="turn-1",
+        )
+    )
+    assert activation is not None
+    assert activation.wake_trace_id == payload["wake_trace_id"]
 
 
 async def test_wake_tone_request_enters_response_coordinator_facade(monkeypatch):
@@ -389,6 +438,141 @@ async def test_wake_tone_request_enters_response_coordinator_facade(monkeypatch)
     assert str(play_tone.await_args.args[1]) == "device-1"
     assert str(play_tone.await_args.args[2]) == "audio-1"
     assert play_tone.await_args.args[3] == "armed"
+
+
+async def test_wake_stream_ack_happens_only_after_handler_success(monkeypatch):
+    redis_client = AsyncMock()
+    dispatcher = WakeWordDispatcher(redis_client, PluginRouter())
+    play_tone = AsyncMock()
+    monkeypatch.setattr(
+        "advanced_omi_backend.services.wakeword.dispatcher.play_tone_on_device",
+        play_tone,
+    )
+
+    await dispatcher._handle_message_safe(
+        {
+            "event": json.dumps(
+                {
+                    "kind": "tone",
+                    "client_id": "device-1",
+                    "session_id": "audio-1",
+                    "tone": "armed",
+                }
+            )
+        },
+        "42-0",
+    )
+
+    redis_client.xack.assert_awaited_once_with(
+        "wakeword:detections", "wakeword-dispatch", "42-0"
+    )
+
+
+async def test_wake_stream_failure_remains_pending_for_recovery():
+    redis_client = AsyncMock()
+    dispatcher = WakeWordDispatcher(redis_client, PluginRouter())
+
+    await dispatcher._handle_message_safe(
+        {
+            "event": json.dumps(
+                {
+                    "kind": "tone",
+                    "client_id": "device-1",
+                    "session_id": "audio-1",
+                    "tone": "invalid",
+                }
+            )
+        },
+        "43-0",
+    )
+
+    redis_client.xack.assert_not_awaited()
+
+
+async def test_wake_dispatcher_reclaims_stale_pending_detection():
+    redis_client = AsyncMock()
+    redis_client.xautoclaim.return_value = (
+        b"0-0",
+        [(b"42-0", {b"event": b"{}"})],
+        [],
+    )
+    dispatcher = WakeWordDispatcher(redis_client, PluginRouter())
+    dispatcher._handle_message_safe = AsyncMock()
+
+    await dispatcher._recover_pending_once()
+
+    dispatcher._handle_message_safe.assert_awaited_once_with({b"event": b"{}"}, "42-0")
+
+
+async def test_acoustic_entry_writes_armed_and_end_of_turn_facts(monkeypatch):
+    redis_client = fake_aioredis.FakeRedis(decode_responses=True)
+    ledger = Mock(append=AsyncMock())
+    dispatcher = WakeWordDispatcher(redis_client, PluginRouter(), ledger)
+    dispatcher._check_speaker_gate = AsyncMock(
+        return_value={"allowed": False, "reason": "test", "identified": None}
+    )
+    monkeypatch.setattr(
+        "advanced_omi_backend.services.wakeword.dispatcher.set_device_led", AsyncMock()
+    )
+    payload = {
+        "session_id": "audio-1",
+        "client_id": "device-1",
+        "user_id": "user-1",
+        "wake_trace_id": "7ce4d46b-232f-47f9-8148-d595ed344cf2",
+        "capture_epoch": 4,
+        "armed_at": 1_770_000_001.0,
+        "end_of_turn_at": 1_770_000_002.0,
+        "trigger_interval": {
+            "start_ms": 100,
+            "end_ms": 1100,
+            "started_at": 1_770_000_000.0,
+            "ended_at": 1_770_000_001.0,
+        },
+        "command_interval": {
+            "start_ms": 1100,
+            "end_ms": 2100,
+            "started_at": 1_770_000_001.0,
+            "ended_at": 1_770_000_002.0,
+        },
+        "wakeword": "hermes",
+    }
+
+    await dispatcher._handle_message({"event": json.dumps(payload)})
+
+    facts = [call.args[0] for call in ledger.append.await_args_list]
+    assert [(fact.stage, fact.ordinal) for fact in facts] == [
+        ("armed", 0),
+        ("end_of_turn", 1),
+    ]
+    assert facts[0].audio_interval.end_ms == 1100
+    assert facts[1].audio_interval.end_ms == 2100
+
+
+async def test_voice_executor_reports_dispatch_action_and_followup_stages():
+    redis_client = fake_aioredis.FakeRedis(decode_responses=True)
+    router = Mock()
+    router.dispatch_event = AsyncMock(
+        return_value=[Mock(success=True, message="", should_continue=False)]
+    )
+    record_stage = AsyncMock()
+
+    await execute_voice_command(
+        redis_client,
+        router,
+        user_id="user-1",
+        session_id=SessionId.from_value("audio-1"),
+        client_id=ClientId.from_value("device-1"),
+        command="turn on the lights",
+        quiet=True,
+        wake_trace_id="7ce4d46b-232f-47f9-8148-d595ed344cf2",
+        interaction_stage_callback=record_stage,
+    )
+
+    assert [call.args[0] for call in record_stage.await_args_list] == [
+        "dispatched",
+        "acted",
+        "followup_opened",
+    ]
 
 
 async def test_distinct_audio_interval_is_not_suppressed_by_assistant_text(registry):
@@ -677,6 +861,18 @@ async def test_worker_routes_ordinary_committed_turn_through_voice_executor(
         channels=1,
         sample_width=2,
     )
+    activation = WakeActivation(
+        wake_trace_id="7ce4d46b-232f-47f9-8148-d595ed344cf2",
+        user_id="user-1",
+        client_id="device-1",
+        audio_session_id="audio-1",
+        capture_epoch=3,
+        wakeword="hey_hermes",
+        armed_at=1_770_000_001.0,
+        end_of_turn_at=1_770_000_001.8,
+        command_start_ms=100,
+        command_end_ms=900,
+    )
 
     await InteractionModeWorker(redis_client, router)._dispatch_committed_command(
         turn,
@@ -684,6 +880,7 @@ async def test_worker_routes_ordinary_committed_turn_through_voice_executor(
         "user-1",
         "device-1",
         4,
+        activation,
     )
 
     execute.assert_awaited_once_with(
@@ -699,7 +896,28 @@ async def test_worker_routes_ordinary_committed_turn_through_voice_executor(
         response_generation=4,
         response_turn_id="turn-1",
         response_turn_revision=0,
+        wakeword="hey_hermes",
+        wake_trace_id=activation.wake_trace_id,
+        interaction_stage_callback=execute.await_args.kwargs[
+            "interaction_stage_callback"
+        ],
     )
+    record_stage = execute.await_args.kwargs["interaction_stage_callback"]
+    await record_stage(
+        "dispatched",
+        {
+            "dispatch_ms": 4250.0,
+            "plugins": [{"plugin_id": "hermes", "duration_ms": 4200.0}],
+        },
+    )
+    rows = await redis_client.xrange("wakeword:interaction-events")
+    event = json.loads(rows[0][1]["event"])
+    assert event["stage"] == "command_resolved"
+    assert event["occurred_at"] >= activation.end_of_turn_at
+    event = json.loads(rows[1][1]["event"])
+    assert event["stage"] == "dispatched"
+    assert event["wake_trace_id"] == activation.wake_trace_id
+    assert event["payload"]["dispatch_ms"] == 4250.0
 
 
 async def test_effect_fence_finishes_mutation_but_suppresses_stale_speech():
@@ -749,6 +967,7 @@ async def test_effect_fence_finishes_mutation_but_suppresses_stale_speech():
 
 async def test_worker_main_initializes_otel_before_plugins(monkeypatch):
     events = []
+    redis_options = []
 
     class _Redis:
         async def aclose(self):
@@ -771,9 +990,12 @@ async def test_worker_main_initializes_otel_before_plugins(monkeypatch):
     monkeypatch.setattr(
         interaction_mode_worker, "init_otel", lambda: events.append("otel_initialized")
     )
-    monkeypatch.setattr(
-        interaction_mode_worker, "create_async_redis", lambda **_kwargs: _Redis()
-    )
+
+    def create_redis(**kwargs):
+        redis_options.append(kwargs)
+        return _Redis()
+
+    monkeypatch.setattr(interaction_mode_worker, "create_async_redis", create_redis)
     monkeypatch.setattr(
         interaction_mode_worker, "initialize_redis_for_client_manager", Mock()
     )
@@ -789,6 +1011,7 @@ async def test_worker_main_initializes_otel_before_plugins(monkeypatch):
     await interaction_mode_worker.main()
 
     assert events.index("otel_initialized") < events.index("plugins_initialized")
+    assert redis_options == [{"decode_responses": False}]
     assert "worker_run" in events
     assert events[-1] == "redis_closed"
 

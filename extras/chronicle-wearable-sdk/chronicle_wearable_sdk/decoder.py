@@ -6,13 +6,16 @@ class OmiOpusDecoder:
         self.decoder = Decoder(16000, 1)  # 16kHz mono
 
     def decode_packet(self, data: bytes, strip_header: bool = True):
-        if len(data) <= 3:
-            return b""
-
-        # Remove 3-byte header
         if strip_header:
+            if len(data) <= 3:
+                return b""
+            # OMI/Neo transport packets carry a three-byte device-local header.
             clean_data = bytes(data[3:])
         else:
+            # Raw Opus silence is legitimately only three bytes. Length cannot be
+            # used as a wearable-header heuristic at the typed Audio V2 boundary.
+            if not data:
+                return b""
             clean_data = data
 
         # Decode Opus to PCM 16-bit

@@ -71,6 +71,15 @@ class Conversation(Document):
         REPROCESS_TRANSCRIPT = "reprocess_transcript"  # Operator asked for a re-run
         REBOUND = "rebound"  # Recording bounds were recomputed and re-split
 
+    class MemoryContextFrame(BaseModel):
+        """One user-reviewable ScreenPipe frame staged for note extraction."""
+
+        source_id: str
+        frame_id: int
+        captured_at: Optional[datetime] = None
+        content_type: str = "image/jpeg"
+        data: bytes
+
     # Nested Models
     class Word(BaseModel):
         """Individual word with timestamp in a transcript."""
@@ -258,6 +267,47 @@ class Conversation(Document):
     memory_exclusion_reason: Optional[str] = Field(
         None,
         description="Why memory processing is disabled for this conversation",
+    )
+    memory_space_id: Optional[str] = Field(
+        None,
+        description="Isolated memory space that owns this semantic claim; null means Main",
+    )
+    published_to_main_at: Optional[datetime] = Field(
+        None,
+        description="When a space-owned conversation became visible to Main consumers",
+    )
+    published_by_merge_proposal_id: Optional[str] = Field(
+        None,
+        description="Space merge proposal that published this conversation to Main",
+    )
+    memory_review_state: Literal[
+        "automatic",
+        "awaiting_context",
+        "context_requested",
+        "ready",
+        "extracting",
+        "extracted",
+        "failed",
+    ] = Field(
+        default="automatic",
+        description=(
+            "Space-only checkpoint between transcript completion and note extraction; "
+            "Main conversations remain automatic"
+        ),
+    )
+    memory_context_frames: List["Conversation.MemoryContextFrame"] = Field(
+        default_factory=list,
+        description="Bounded ScreenPipe contact sheet offered for explicit selection",
+    )
+    selected_memory_context_frame_keys: List[str] = Field(
+        default_factory=list,
+        description="User-selected source_id:frame_id keys admitted to extraction",
+    )
+    memory_context_description: Optional[str] = Field(
+        None, description="Vision-grounded description of the selected screen evidence"
+    )
+    memory_review_error: Optional[str] = Field(
+        None, description="Last context-review or user-triggered extraction error"
     )
 
     # MongoDB chunk-based audio storage (new system)
@@ -610,6 +660,7 @@ def create_conversation(
     started_at: Optional[datetime] = None,
     ended_at: Optional[datetime] = None,
     segmentation_key: Optional[str] = None,
+    memory_space_id: Optional[str] = None,
 ) -> Conversation:
     """
     Factory function to create a new conversation.
@@ -639,6 +690,8 @@ def create_conversation(
         "origin": origin,
         "audio_ranges": audio_ranges or [],
         "segmentation_key": segmentation_key,
+        "memory_space_id": memory_space_id,
+        "memory_review_state": ("awaiting_context" if memory_space_id else "automatic"),
         "title": title,
         "summary": summary,
         "transcript_versions": [],

@@ -92,12 +92,167 @@ export interface CurrentUser {
   email: string
   display_name: string | null
   assistant_name: string | null
+  timezone: string | null
   is_superuser: boolean
 }
 
 export interface AuthToken {
   access_token: string
   token_type: string
+}
+
+export interface MemorySpace {
+  space_id: string
+  name: string
+  state: 'active' | 'merging' | 'archived'
+  seed_notes: Array<{ note_path: string; content_hash: string; byte_size: number }>
+  sync_state: 'unpaired' | 'syncing' | 'healthy' | 'frozen' | 'error'
+  sync_error: string | null
+  merge_checkpoint: string | null
+  created_at: string
+  updated_at: string
+  archived_at: string | null
+}
+
+export interface MemorySpaceNote {
+  note_path: string
+  content: string
+  updated_at: string
+}
+
+export interface SpaceMergeChange {
+  change_id: string
+  note_path: string
+  operation: 'create' | 'update' | 'delete'
+  before_hash: string | null
+  before_text: string | null
+  after_text: string | null
+  conflict: string | null
+  source_refs: Array<{ kind: 'conversation' | 'chat' | 'manual' | 'obsidian'; source_id: string }>
+  validation_findings: Array<{ rule: string; detail: string; severity: 'semantic' | 'conflict' }>
+}
+
+export interface SpaceMergeProposal {
+  proposal_id: string
+  space_id: string
+  state: 'generating' | 'pending' | 'applying' | 'applied' | 'stale' | 'failed'
+  changes: SpaceMergeChange[]
+  accepted_change_ids: string[]
+  rejected_change_ids: string[]
+  deferred_event_count: number
+  error: string | null
+}
+
+export interface DeferredSpaceEvent {
+  event_id: string
+  source_kind: 'conversation' | 'chat' | 'manual' | 'obsidian'
+  source_id: string
+  event_type: string
+  causal_order: number
+  idempotency_key: string
+  state: 'pending' | 'dispatching' | 'dispatched' | 'failed'
+  attempts: number
+  error: string | null
+  created_at: string
+  dispatched_at: string | null
+}
+
+export interface SpaceNoteReviewFrame {
+  key: string
+  source_id: string
+  frame_id: number
+  captured_at: string | null
+  content_type: string
+}
+
+export interface SpaceNoteReview {
+  conversation_id: string
+  title: string | null
+  transcript: string
+  created_at: string
+  started_at: string
+  ended_at: string | null
+  review_state: 'automatic' | 'awaiting_context' | 'context_requested' | 'ready' | 'extracting' | 'extracted' | 'failed'
+  review_error: string | null
+  selected_frame_keys: string[]
+  context_description: string | null
+  sources: Array<{
+    source_id: string
+    name: string
+    platform: string
+    status: 'pairing' | 'online' | 'offline' | 'error'
+    last_seen_at: string | null
+    health: Record<string, unknown>
+  }>
+  jobs: Array<{
+    job_id: string
+    source_id: string
+    status: 'pending' | 'claimed' | 'complete' | 'failed'
+    error: string | null
+    created_at: string
+    completed_at: string | null
+  }>
+  frames: SpaceNoteReviewFrame[]
+  memory_job_id?: string
+}
+
+export const memorySpacesApi = {
+  list: () => api.get<MemorySpace[]>('/api/spaces'),
+  mainNotes: (query = '') => api.get<Array<{ note_path: string; byte_size: number; excerpt: string }>>(
+    '/api/spaces/main-notes', { params: { query } },
+  ),
+  get: (spaceId: string) => api.get<MemorySpace>(`/api/spaces/${spaceId}`),
+  previewSeed: (notePaths: string[]) => api.post('/api/spaces/seed-preview', { note_paths: notePaths }),
+  create: (name: string, seedNotePaths: string[]) => api.post<MemorySpace>('/api/spaces', {
+    name,
+    seed_note_paths: seedNotePaths,
+  }),
+  rename: (spaceId: string, name: string) => api.patch<MemorySpace>(`/api/spaces/${spaceId}`, { name }),
+  reopen: (spaceId: string) => api.post<MemorySpace>(`/api/spaces/${spaceId}/reopen`),
+  notes: (spaceId: string) => api.get<MemorySpaceNote[]>(`/api/spaces/${spaceId}/notes`),
+  writeNote: (spaceId: string, notePath: string, content: string | null) => api.put(
+    `/api/spaces/${spaceId}/notes/${encodeURIComponent(notePath).replace(/%2F/g, '/')}`,
+    { content },
+  ),
+  search: (spaceId: string, query: string) => api.get(`/api/spaces/${spaceId}/search`, { params: { query } }),
+  recordings: (spaceId: string) => api.get(`/api/spaces/${spaceId}/recordings`),
+  noteReview: (spaceId: string, conversationId: string) => api.get<SpaceNoteReview>(
+    `/api/spaces/${spaceId}/recordings/${conversationId}/note-review`,
+  ),
+  requestNoteContext: (spaceId: string, conversationId: string, sourceId: string) => api.post<SpaceNoteReview>(
+    `/api/spaces/${spaceId}/recordings/${conversationId}/note-review/context`,
+    { source_id: sourceId },
+  ),
+  noteReviewFrame: (spaceId: string, conversationId: string, sourceId: string, frameId: number) => api.get<Blob>(
+    `/api/spaces/${spaceId}/recordings/${conversationId}/note-review/frames/${encodeURIComponent(sourceId)}/${frameId}`,
+    { responseType: 'blob' },
+  ),
+  extractReviewedNote: (spaceId: string, conversationId: string, selectedFrameKeys: string[]) => api.post<SpaceNoteReview>(
+    `/api/spaces/${spaceId}/recordings/${conversationId}/note-review/extract`,
+    { selected_frame_keys: selectedFrameKeys },
+  ),
+  createChatSession: (spaceId: string, title?: string) => api.post(`/api/spaces/${spaceId}/chat/sessions`, { title }),
+  chat: (spaceId: string, message: string, sessionId?: string) => api.post(`/api/spaces/${spaceId}/chat/completions`, {
+    session_id: sessionId,
+    message,
+  }),
+  prepareMerge: (spaceId: string, acknowledgeSyncWarnings = false) => api.post<SpaceMergeProposal>(
+    `/api/spaces/${spaceId}/merge-proposals`,
+    { acknowledge_sync_warnings: acknowledgeSyncWarnings },
+  ),
+  latestMergeProposal: (spaceId: string) => api.get<SpaceMergeProposal | null>(
+    `/api/spaces/${spaceId}/merge-proposals/latest`,
+  ),
+  resolveMerge: (proposalId: string, acceptedChangeIds: string[]) => api.post<SpaceMergeProposal>(
+    `/api/spaces/merge-proposals/${proposalId}/resolve`,
+    { accepted_change_ids: acceptedChangeIds },
+  ),
+  sync: (spaceId: string) => api.get(`/api/spaces/${spaceId}/sync`),
+  rescanSync: (spaceId: string) => api.post(`/api/spaces/${spaceId}/sync/rescan`),
+  deferredEvents: (spaceId: string) => api.get<DeferredSpaceEvent[]>(`/api/spaces/${spaceId}/deferred-events`),
+  retryDeferredEvent: (spaceId: string, eventId: string) => api.post<DeferredSpaceEvent>(
+    `/api/spaces/${spaceId}/deferred-events/${eventId}/retry`,
+  ),
 }
 
 // API endpoints
@@ -305,6 +460,7 @@ export interface TimelineEpisode {
   confirmed_at: string | null
   /** Fields a person has edited; later runs must not regenerate them. */
   confirmed_fields: string[]
+  memory_policy: 'auto' | 'reference' | 'remember'
   salience: 'background' | 'routine' | 'notable' | 'highlight'
   confidence: number
   activity_mode: 'foreground' | 'background' | 'ambient' | 'idle'
@@ -370,7 +526,160 @@ export interface TimelineDay {
     }>
   }
   analysis: TimelineAnalysis | null
+  consolidation: TimelineConsolidationProposal | null
+  semantic_groups: TimelineSemanticGroup[]
+  review_decision_count: number
+  review_projection: DayReviewProjection
+  review: TimelineDayReview | null
+  reconciliation: {
+    ranges: Array<{
+      dirty_range_id: string
+      started_at: string
+      ended_at: string
+      state: 'pending' | 'leased' | 'waiting' | 'failed'
+      trigger_reasons: string[]
+      attempts: number
+      error: string | null
+    }>
+  }
   episodes: TimelineEpisode[]
+}
+
+export interface DayReviewGroup {
+  group_id: string
+  started_at: string
+  ended_at: string
+  title: string
+  summary: string
+  semantic: boolean
+  lane: 'conversation' | 'foreground' | 'background'
+  episode_ids: string[]
+  episode_count: number
+  conversational_count: number
+  confirmed_count: number
+  duration_seconds: number
+  span_seconds: number
+  gap_seconds: number
+  intervals: Array<{
+    episode_id: string
+    started_at: string
+    ended_at: string
+  }>
+  entities: string[]
+  salience: TimelineEpisode['salience']
+  attention_reasons: Array<'low_confidence' | 'missing_evidence' | 'missing_audio' | 'long_episode'>
+  needs_attention: boolean
+}
+
+export interface DayReviewProjection {
+  version: string
+  day_started_at: string
+  day_ended_at: string
+  episode_count: number
+  group_count: number
+  needs_attention_count: number
+  confirmed_count: number
+  groups: DayReviewGroup[]
+}
+
+export interface TimelineConsolidationSuggestion {
+  suggestion_id: string
+  episode_ids: string[]
+  title: string
+  reason: string
+  confidence: number
+}
+
+export interface TimelineConsolidationProposal {
+  state: 'queued' | 'generating' | 'ready' | 'resolved' | 'failed' | 'stale' | ''
+  run_id: string | null
+  model: string | null
+  suggestions: TimelineConsolidationSuggestion[]
+  error?: string | null
+  generated_at?: string | null
+}
+
+export interface TimelineSemanticGroup {
+  group_id: string
+  run_id: string
+  episode_ids: string[]
+  episode_keys: string[]
+  title: string
+  summary: string
+  started_at: string
+  ended_at: string
+  suggestion_id: string | null
+  reason: string
+  confidence: number | null
+  model: string | null
+  created_at: string
+}
+
+export interface TimelineReviewDecision {
+  decision_id: string
+  run_id: string
+  action: 'grouping_accept' | 'grouping_reject' | 'grouping_remove' | 'episode_update' | 'episode_split' | 'episode_merge' | 'episode_delete'
+  episode_ids: string[]
+  suggestion_id: string | null
+  model: string | null
+  before: Record<string, unknown>
+  after: Record<string, unknown>
+  created_at: string
+}
+
+export type TimelineReviewState =
+  | 'episodes_pending'
+  | 'memory_queued'
+  | 'memory_generating'
+  | 'memory_pending'
+  | 'memory_applying'
+  | 'finalized'
+  | 'failed'
+
+export interface PotentialMemoryChange {
+  change_id: string
+  note_path: string
+  operation: 'create' | 'update' | 'delete'
+  before_hash: string | null
+  after_hash: string | null
+  before_text: string | null
+  after_text: string | null
+  summary: string
+  source_episode_keys: string[]
+}
+
+export interface MemoryReviewProposal {
+  proposal_id: string
+  state: 'generating' | 'pending' | 'applying' | 'applied' | 'rejected' | 'no_changes' | 'stale' | 'failed'
+  timeline_run_id: string
+  change_count: number
+  accepted_change_ids: string[]
+  rejected_change_ids: string[]
+  error: string | null
+  created_at: string
+  generated_at: string | null
+  resolved_at: string | null
+  changes?: PotentialMemoryChange[]
+}
+
+export interface TimelineDayReview {
+  state: TimelineReviewState
+  review_run_id: string | null
+  episodes_reviewed_at: string | null
+  resolved_at: string | null
+  outcome: 'applied' | 'rejected' | 'no_changes' | null
+  error: string | null
+  proposal: MemoryReviewProposal | null
+}
+
+export interface TimelineReviewQueueItem {
+  date: string
+  state: TimelineReviewState
+  outcome: TimelineDayReview['outcome']
+  episode_count: number
+  unexplained_count: number
+  capture_gap_count: number
+  proposal: MemoryReviewProposal | null
 }
 
 /**
@@ -412,14 +721,48 @@ export const timelineApi = {
   /** Collapse episodes into the earliest one, unioning their evidence. */
   mergeEpisodes: (episodeIds: string[]) =>
     api.post<TimelineEpisode>('/api/timeline/episodes/merge', { episode_ids: episodeIds }),
+  /** Relate episodes semantically while preserving every exact interval. */
+  groupEpisodes: (date: string, timezone: string, episodeIds: string[]) =>
+    api.post<TimelineSemanticGroup>(`/api/timeline/review/day/${date}/groups`, {
+      timezone,
+      episode_ids: episodeIds,
+    }),
+  removeSemanticGroup: (date: string, timezone: string, groupId: string) =>
+    api.delete<void>(`/api/timeline/review/day/${date}/groups/${groupId}`, { params: { timezone } }),
+  getReviewDecisions: (date: string, timezone: string) =>
+    api.get<{
+      date: string
+      timezone: string
+      timeline_decisions: TimelineReviewDecision[]
+      memory_proposals: MemoryReviewProposal[]
+    }>(`/api/timeline/review/day/${date}/decisions`, { params: { timezone } }),
   deleteEpisode: (episodeId: string) =>
     api.delete<void>(`/api/timeline/episodes/${episodeId}`),
+  getReviewQueue: (timezone: string) =>
+    api.get<{ items: TimelineReviewQueueItem[] }>('/api/timeline/review/queue', { params: { timezone } }),
+  finalizeEpisodes: (date: string, timezone: string) =>
+    api.post<TimelineDayReview>(`/api/timeline/review/day/${date}/episodes`, { timezone }),
+  suggestConsolidation: (date: string, timezone: string) =>
+    api.post<TimelineConsolidationProposal>(`/api/timeline/review/day/${date}/consolidation`, { timezone }),
+  resolveConsolidation: (date: string, timezone: string, acceptedSuggestionIds: string[]) =>
+    api.post<{ groups: TimelineSemanticGroup[] }>(`/api/timeline/review/day/${date}/consolidation/resolve`, {
+      timezone,
+      accepted_suggestion_ids: acceptedSuggestionIds,
+    }),
+  resolveMemoryProposal: (proposalId: string, acceptedChangeIds: string[]) =>
+    api.post<{ outcome: 'applied' | 'rejected'; proposal: MemoryReviewProposal }>(
+      `/api/timeline/review/proposals/${proposalId}/resolve`,
+      { accepted_change_ids: acceptedChangeIds },
+    ),
+  regenerateMemoryProposal: (proposalId: string) =>
+    api.post<TimelineDayReview>(`/api/timeline/review/proposals/${proposalId}/regenerate`),
 }
 
 export interface TimelineEpisodeUpdate {
   title?: string
   summary?: string
   kind?: string
+  memory_policy?: TimelineEpisode['memory_policy']
   entities?: string[]
   salience?: TimelineEpisode['salience']
   started_at?: string
@@ -680,6 +1023,9 @@ export const systemApi = {
     audio_filtering_require_speech?: boolean;
     live_segmentation?: 'streaming_stt' | 'windowed_batch' | 'off';
   }) => api.post('/api/misc-settings', settings),
+  getTimelineGroupingSettings: () => api.get('/api/timeline-grouping-settings'),
+  saveTimelineGroupingSettings: (settings: { pregenerate: boolean; prefetch_days: number }) =>
+    api.post('/api/timeline-grouping-settings', settings),
 
   // Plugin Configuration Management (YAML-based)
   getPluginsConfigRaw: () => api.get('/api/admin/plugins/config'),
@@ -838,6 +1184,23 @@ export interface SystemEventsList {
   offset: number
 }
 
+export interface MemoryFallbackAgentPath {
+  primary_backend: string
+  recovery_backend: string
+  occurrences: number
+}
+
+export interface MemoryFallbackSummary {
+  occurrences: number
+  affected_conversations: number
+  by_reason: Record<string, number>
+  by_user: Record<string, number>
+  by_primary_backend: Record<string, number>
+  by_recovery_backend: Record<string, number>
+  agent_paths: MemoryFallbackAgentPath[]
+  latest_at: string | null
+}
+
 export interface SystemEventsSummary {
   window_hours: number
   total: number
@@ -845,6 +1208,7 @@ export interface SystemEventsSummary {
   by_severity: Record<string, number>
   by_category: Record<string, number>
   by_source: Record<string, number>
+  memory_fallbacks: MemoryFallbackSummary
 }
 
 export interface SystemEventsFilter {

@@ -1,16 +1,23 @@
 # Development Dockerfile for React app
-FROM node:18-alpine
+FROM node:22-alpine
 
-WORKDIR /app
+WORKDIR /workspace/backends/advanced/webui
 
-# Copy package files
-COPY package.json package-lock.json ./
+# The WebUI consumes the generated Audio V2 package through a repository-local
+# file dependency. Keep the container layout compatible with
+# ../../../contracts/audio/v2/typescript from package.json.
+COPY contracts/audio/v2/typescript /workspace/contracts/audio/v2/typescript
+
+# Copy package files explicitly. Podman/Buildah does not reliably preserve both
+# sources when this is expressed as one multi-source COPY into a relative target.
+COPY backends/advanced/webui/package.json ./package.json
+COPY backends/advanced/webui/package-lock.json ./package-lock.json
 
 # Install dependencies
 RUN npm ci
 
 # Copy source code
-COPY . .
+COPY backends/advanced/webui/ .
 
 # Expose port
 EXPOSE 5173

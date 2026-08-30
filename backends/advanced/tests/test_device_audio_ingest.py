@@ -415,4 +415,10 @@ async def test_speech_materializes_a_visible_conversation_claim(monkeypatch, tmp
 
     assert conversation_id == "conversation-1"
     assert received["data_purpose"] == "conversation"
-    assert received["memory_excluded"] is True
+    # VAD creates a provisional source record. It must remain memory-eligible so a
+    # later settled conversational Timeline episode can dispatch the memory write;
+    # ``skip_memory_extraction`` below prevents the provisional close path from
+    # writing too early.
+    assert received["memory_excluded"] is False
+    assert received["skip_memory_extraction"] is True
+    assert received["skip_title_summary"] is False

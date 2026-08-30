@@ -151,18 +151,46 @@ def actor_for(cause: Optional[str], agent_mode: bool, operation: Optional[str]) 
 class _Provenance(NamedTuple):
     cause: Optional[str]
     strategy: Optional[str]
+    source_type: Optional[str]
+    source_id: Optional[str]
+    source_conversation_ids: tuple[str, ...]
+    source_episode_ids: tuple[str, ...]
+    timeline_run_id: Optional[str]
 
 
 _current_provenance: contextvars.ContextVar[_Provenance] = contextvars.ContextVar(
-    "memory_audit_provenance", default=_Provenance(None, None)
+    "memory_audit_provenance",
+    default=_Provenance(None, None, None, None, (), (), None),
+)
+
+_audit_suppressed: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "memory_audit_suppressed", default=False
 )
 
 
 @contextlib.contextmanager
+def suppress_memory_audit() -> Iterator[None]:
+    """Suppress ledger writes while an agent edits an isolated review vault."""
+
+    token = _audit_suppressed.set(True)
+    try:
+        yield
+    finally:
+        _audit_suppressed.reset(token)
+
+
+@contextlib.contextmanager
 def memory_provenance(
-    cause: Optional[str], strategy: Optional[str] = None
+    cause: Optional[str],
+    strategy: Optional[str] = None,
+    *,
+    source_type: Optional[str] = None,
+    source_id: Optional[str] = None,
+    source_conversation_ids: tuple[str, ...] = (),
+    source_episode_ids: tuple[str, ...] = (),
+    timeline_run_id: Optional[str] = None,
 ) -> Iterator[None]:
-    """Set the cause/strategy recorded by vault changes within this block.
+    """Set typed provenance recorded by vault changes within this block.
 
     ``cause`` and ``strategy`` may be :class:`MemoryCause`/:class:`UpdateStrategy`
     members or their string values; both are normalised to plain strings.
@@ -171,6 +199,11 @@ def memory_provenance(
         _Provenance(
             cause.value if isinstance(cause, Enum) else cause,
             strategy.value if isinstance(strategy, Enum) else strategy,
+            source_type,
+            source_id,
+            tuple(dict.fromkeys(str(item) for item in source_conversation_ids if item)),
+            tuple(dict.fromkeys(str(item) for item in source_episode_ids if item)),
+            timeline_run_id,
         )
     )
     try:
@@ -219,6 +252,7 @@ def _active_trace_context() -> dict[str, str]:
 async def record_vault_change(
     *,
     user_id: str,
+    memory_space_id: Optional[str] = None,
     operation: str,
     conversation_id: Optional[str] = None,
     note_path: Optional[str] = None,
@@ -236,11 +270,34 @@ async def record_vault_change(
     so a before→after diff can later be reconstructed from the note's history.
     Pass ``after=None`` for deletions.
     """
+    if _audit_suppressed.get():
+        return
     provenance = _current_provenance.get()
+    provenance_extra: dict[str, Any] = {}
+    if provenance.source_type:
+        provenance_extra["source_type"] = provenance.source_type
+    if provenance.source_id:
+        provenance_extra["source_id"] = provenance.source_id
+    if provenance.source_conversation_ids:
+        provenance_extra["source_conversation_ids"] = list(
+            provenance.source_conversation_ids
+        )
+    if provenance.source_episode_ids:
+        provenance_extra["source_episode_ids"] = list(provenance.source_episode_ids)
+    if provenance.timeline_run_id:
+        provenance_extra["timeline_run_id"] = provenance.timeline_run_id
+
+    # A local date is not a Conversation id. Day writes retain the legacy source_id
+    # passed by VaultTools only in typed metadata so the indexed conversation field
+    # remains semantically honest.
+    audit_conversation_id = (
+        None if provenance.source_type == "timeline_day" else conversation_id
+    )
     try:
         entry = MemoryAuditEntry(
             user_id=str(user_id),
-            conversation_id=conversation_id,
+            memory_space_id=memory_space_id,
+            conversation_id=audit_conversation_id,
             operation=operation,
             note_path=note_path,
             cause=provenance.cause,
@@ -252,7 +309,11 @@ async def record_vault_change(
             after_bytes=len(after.encode("utf-8")) if after is not None else None,
             after_text=after,
             summary=summary or _line_delta_summary(before, after),
-            extra={**dict(extra), **_active_trace_context()},
+            extra={
+                **dict(extra),
+                **provenance_extra,
+                **_active_trace_context(),
+            },
         )
         await entry.insert()
     except Exception as e:  # noqa: BLE001 — audit must never break processing

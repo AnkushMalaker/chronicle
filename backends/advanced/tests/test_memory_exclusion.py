@@ -44,8 +44,16 @@ async def test_memory_worker_surfaces_deterministic_note_fallback_as_system_warn
         memory_excluded=False,
         client_id="test-client",
         user_id="test-user",
-        segments=[],
-        transcript="Speaker: preserve this source when the memory agent truncates.",
+        segments=[
+            SimpleNamespace(
+                start=0,
+                end=60,
+                text="Preserve this source when the memory agent truncates.",
+                speaker="alex",
+                segment_type="speech",
+            )
+        ],
+        transcript="alex: Preserve this source when the memory agent truncates.",
         created_at=datetime(2026, 8, 15, tzinfo=timezone.utc),
         audio_total_duration=60,
         title="Worker fallback",
@@ -92,6 +100,7 @@ async def test_memory_worker_surfaces_deterministic_note_fallback_as_system_warn
             source_date=kwargs["source_date"],
             source_duration_minutes=kwargs["source_duration_minutes"],
             source_title=kwargs["source_title"],
+            source_people=kwargs["source_people"],
         )
         return True, result.touched
 
@@ -127,3 +136,9 @@ async def test_memory_worker_surfaces_deterministic_note_fallback_as_system_warn
         "invalid_note",
         "incomplete_agent",
     ]
+    assert system_events[0]["metadata"]["primary_backend"] == "pi"
+    assert system_events[0]["metadata"]["recovery_backend"] == "none"
+    note = (
+        tmp_path / "test-user" / "Conversations" / f"{conversation_id}.md"
+    ).read_text(encoding="utf-8")
+    assert 'people:\n  - "[[alex]]"' in note

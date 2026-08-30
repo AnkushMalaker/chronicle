@@ -35,6 +35,8 @@ const WakeWordLab = lazy(() => import('./pages/WakeWordLab'))
 const MemoryLedger = lazy(() => import('./pages/MemoryLedger'))
 const SystemEvents = lazy(() => import('./pages/SystemEvents'))
 const Timeline = lazy(() => import('./pages/Timeline'))
+const MemorySpaces = lazy(() => import('./pages/MemorySpaces'))
+const MemorySpaceWorkspace = lazy(() => import('./pages/MemorySpaceWorkspace'))
 
 
 function PageSkeleton() {
@@ -135,6 +137,16 @@ function App() {
                     <Suspense fallback={<PageSkeleton />}>
                       <MemoryLedger />
                     </Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="spaces" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}><MemorySpaces /></Suspense>
+                  </PageErrorBoundary>
+                } />
+                <Route path="spaces/:spaceId/:tab?" element={
+                  <PageErrorBoundary>
+                    <Suspense fallback={<PageSkeleton />}><MemorySpaceWorkspace /></Suspense>
                   </PageErrorBoundary>
                 } />
                 <Route path="users" element={

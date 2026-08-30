@@ -7,6 +7,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from google.protobuf import timestamp_pb2
+from redis import exceptions as redis_exceptions
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -154,6 +155,25 @@ async def test_process_stream_keeps_client_and_session_id_distinct():
     assert [(str(event.client_id), str(event.session_id)) for event in events] == [
         ("a421c9-elato", "session-uuid")
     ]
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_drained_stream_ends_without_task_failure():
+    class ReclaimedRedis(FakeRedis):
+        async def xreadgroup(self, *args, **kwargs):
+            raise redis_exceptions.ResponseError(
+                "NOGROUP No such key 'audio:v2:realtime:session-uuid' "
+                "or consumer group 'wakeword-v2'"
+            )
+
+    consumer = WakeWordConsumer(FakeDetector(), "redis://unused", SimpleNamespace())
+    consumer.redis_client = ReclaimedRedis()
+    consumer.running = True
+
+    await consumer._process_stream(
+        AudioStreamName.from_value("audio:v2:realtime:session-uuid"),
+        SessionId.from_value("session-uuid"),
+    )
 
 
 def test_device_downlink_channel_requires_client_identity():

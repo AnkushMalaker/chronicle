@@ -8,7 +8,7 @@ Features:
 - Strict backup verification before cleanup proceeds
 - Conversation-filtered audio export (only conversations with transcripts)
 - Comprehensive backup manifest with checksums
-- Per-user vault backup (conversation_docs + memory_md tarred into vault.tar.gz)
+- Per-user vault backup (conversation_docs tarred into vault.tar.gz)
 - MongoDB, Redis, and vault cleanup (Syncthing markers preserved)
 """
 
@@ -94,14 +94,14 @@ def _human_size(nbytes: int) -> str:
 # Mongo ObjectId; anything else (bench-*, agenttest, ...) is test data
 # that backup/cleanup must not touch.
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
-VAULT_BASE_DIRS = ("conversation_docs", "memory_md")
+VAULT_BASE_DIRS = ("conversation_docs",)
 _USER_ID_RE = re.compile(r"^[0-9a-f]{24}$")
 # Syncthing folder markers — deleting these breaks the sync pairing
 _SYNCTHING_MARKERS = (".stfolder", ".stignore")
 
 
 def _iter_user_vaults():
-    """Yield per-user vault directories under conversation_docs/ and memory_md/."""
+    """Yield per-user vault directories under the canonical conversation_docs root."""
     for base_name in VAULT_BASE_DIRS:
         base = DATA_DIR / base_name
         if not base.is_dir():
@@ -532,7 +532,7 @@ class BackupManager:
         return path
 
     def _export_vault(self, result: BackupResult) -> Path:
-        """Tar per-user markdown vaults (conversation_docs + memory_md)."""
+        """Tar per-user Markdown vaults from the canonical conversation_docs root."""
         path = self.backup_path / "vault.tar.gz"
         with tarfile.open(path, "w:gz") as tar:
             for vault in _iter_user_vaults():

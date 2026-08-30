@@ -173,6 +173,7 @@ async def initialize_capture_session(
             effects=provenance.effects,
             voice_session_id=voice_session_id,
             data_purpose=provenance.data_purpose,
+            memory_space_id=provenance.memory_space_id,
         )
     except Exception:
         if pending_voice is not None:

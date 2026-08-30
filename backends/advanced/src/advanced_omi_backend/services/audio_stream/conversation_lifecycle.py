@@ -69,6 +69,7 @@ async def materialize_detected_conversation(
         origin="detected",
         started_at=started_at,
         segmentation_key=segmentation_key,
+        memory_space_id=getattr(capture, "memory_space_id", None),
     )
     try:
         await conversation.insert()

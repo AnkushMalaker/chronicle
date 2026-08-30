@@ -289,6 +289,32 @@ def get_streaming_fallback_timeout() -> int:
     return int(timeout)
 
 
+def get_batch_chunk_seconds(provider_name: str) -> float:
+    """Return the maximum audio duration for one batch-STT request.
+
+    The global ceiling protects every provider. Provider-specific ceilings live
+    under ``backend.transcription`` rather than in a model definition so changing
+    request partitioning does not invalidate paid transcription cache keys.
+    """
+    cfg = get_backend_config("transcription")
+    settings = OmegaConf.to_container(cfg, resolve=True) if cfg else {}
+    settings = settings or {}
+
+    global_ceiling = float(settings.get("batch_chunk_seconds", 3600.0))
+    if global_ceiling <= 0:
+        raise ValueError("backend.transcription.batch_chunk_seconds must be positive")
+
+    overrides = settings.get("batch_chunk_seconds_by_provider") or {}
+    provider_ceiling = float(
+        overrides.get((provider_name or "").strip().lower(), global_ceiling)
+    )
+    if provider_ceiling <= 0:
+        raise ValueError(
+            "backend.transcription.batch_chunk_seconds_by_provider values must be positive"
+        )
+    return min(global_ceiling, provider_ceiling)
+
+
 def get_live_segmentation() -> str:
     """
     Get the live-transcription mode (top-level ``defaults.live_segmentation``).

@@ -25,6 +25,31 @@ os.environ.setdefault("ADMIN_PASSWORD", "test-admin-password")
 os.environ.setdefault("ADMIN_EMAIL", "admin@example.com")
 
 
+class _InMemorySystemEventQueue:
+    """Minimal Redis-list surface that keeps test events inside the test process."""
+
+    def __init__(self):
+        self.items = []
+
+    def lpush(self, key, value):
+        self.items.insert(0, (key, value))
+
+    def ltrim(self, _key, _start, max_index):
+        del self.items[max_index + 1 :]
+
+
+@pytest.fixture(autouse=True)
+def isolated_system_event_ingest(monkeypatch):
+    """Never let a unit test enqueue operational events into a live Redis."""
+
+    # Fixture-local import lets tests reset module state without escaping this guard.
+    from advanced_omi_backend.services.observability import system_events
+
+    queue = _InMemorySystemEventQueue()
+    monkeypatch.setattr(system_events, "_get_sync_redis", lambda: queue)
+    return queue
+
+
 # --- Tests that need a real backing service ---------------------------------
 #
 # A few modules genuinely exercise Redis or MongoDB rather than mocking them.

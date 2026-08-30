@@ -136,9 +136,7 @@ def _parse_llm_json(raw: str) -> Optional[dict]:
 async def _llm_resolve(last_command: str, follow_up: str) -> Optional[str]:
     prompt = _LLM_PROMPT.format(last=last_command, follow_up=follow_up)
     try:
-        raw = await async_generate(
-            prompt, operation="followup_resolution", default_model_type="fast_llm"
-        )
+        raw = await async_generate(prompt, operation="followup_resolution")
     except Exception as e:  # noqa: BLE001 - degrade gracefully if the LLM is down
         logger.warning("follow-up LLM resolve failed: %s", e)
         return None

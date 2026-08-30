@@ -735,6 +735,44 @@ async def complete_preview_batch_job(
     job = await DeviceInputJob.get(job_id)
     if job is None or job.source_id != source.source_id or job.kind != "thumbnail":
         raise HTTPException(status_code=404, detail="Preview job not found")
+    if job.purpose == "memory_space_note_review":
+        # Lazy import keeps the optional vision path out of ordinary device uploads.
+        from advanced_omi_backend.services.memory_space_context import (
+            FRAMES_PER_REVIEW,
+            store_contact_sheet,
+        )
+
+        frames: list[dict[str, Any]] = []
+        for upload in files[:FRAMES_PER_REVIEW]:
+            content_type = (upload.content_type or "").split(";", 1)[0]
+            if not content_type.startswith("image/"):
+                raise HTTPException(status_code=415, detail="Frames must be images")
+            frame_id = _frame_id_from_filename(upload.filename)
+            if frame_id is None:
+                raise HTTPException(
+                    status_code=422, detail="Frame filename must name an id"
+                )
+            data = await upload.read(_MAX_IMAGE_BYTES + 1)
+            if len(data) > _MAX_IMAGE_BYTES:
+                raise HTTPException(
+                    status_code=413, detail="Frame exceeds the media limit"
+                )
+            frames.append(
+                {"frame_id": frame_id, "data": data, "content_type": content_type}
+            )
+        try:
+            conversation = await store_contact_sheet(job, frames)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        job.status = "complete"
+        job.completed_at = utcnow()
+        job.payload = {**job.payload, "frames_stored": len(frames)}
+        await job.save()
+        return {
+            "ok": True,
+            "conversation_id": conversation.conversation_id,
+            "frames": len(frames),
+        }
     episode_id = job.payload.get("episode_id")
     if episode_id:
         return await _store_episode_frames(job, episode_id, files)

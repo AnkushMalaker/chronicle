@@ -4,6 +4,7 @@ import { Card } from '../ui'
 
 interface SimplifiedControlsProps {
   recording: RecordingContextType
+  memorySpaceId?: string
 }
 
 const getStepText = (step: string): string => {
@@ -24,7 +25,7 @@ const isProcessing = (step: string): boolean => {
   return ['mic', 'display-audio', 'websocket', 'audio-start', 'streaming', 'stopping'].includes(step)
 }
 
-export default function SimplifiedControls({ recording }: SimplifiedControlsProps) {
+export default function SimplifiedControls({ recording, memorySpaceId }: SimplifiedControlsProps) {
   const processing = isProcessing(recording.currentStep)
   const canStart = recording.canAccessMicrophone && !processing && !recording.isRecording
 
@@ -32,7 +33,7 @@ export default function SimplifiedControls({ recording }: SimplifiedControlsProp
     if (recording.isRecording) {
       recording.stopRecording()
     } else if (canStart) {
-      recording.startRecording()
+      recording.startRecording(memorySpaceId)
     }
   }
 

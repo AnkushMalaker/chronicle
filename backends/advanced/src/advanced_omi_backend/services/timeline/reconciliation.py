@@ -48,6 +48,7 @@ from advanced_omi_backend.models.timeline import (
     utcnow,
 )
 from advanced_omi_backend.models.user import User
+from advanced_omi_backend.services.memory.visibility import conversation_scope_filter
 
 from .contracts import (
     AgentEpisode,
@@ -60,7 +61,7 @@ from .contracts import (
     WaitForFutureEvidence,
 )
 from .dirty_ranges import LEASE_MINUTES, MAX_ATTEMPTS, complete_range, park_waiting
-from .dispatch import dispatch_settled_episodes
+from .dispatch import dispatch_classified_episodes
 from .episode_bounds import speech_profile_for_range
 from .evidence import load_reconciliation_evidence
 from .executor import (
@@ -201,6 +202,7 @@ async def _pending_prerequisites(user_id: str, start: datetime, end: datetime) -
 
     conversations = await Conversation.find(
         {
+            "$and": [conversation_scope_filter()],
             "user_id": user_id,
             "started_at": {"$lt": end},
             "ended_at": {"$gt": start},
@@ -271,10 +273,15 @@ async def assess_settlement(
 
     closed = _closed_by_meeting(episode, bundle)
     if not closed:
-        if _evidence_after(bundle, end, end + quiet):
-            return "provisional"
         measured_quiet = await _boundary_is_quiet(end, quiet)
         if measured_quiet is False:
+            return "provisional"
+        # ScreenPipe keeps producing frames and application observations while the
+        # microphone is quiet. When VAD measured this exact post-boundary window, its
+        # result is the authoritative speech signal; generic evidence after the
+        # boundary must not keep every episode provisional forever. Only fall back to
+        # the evidence watermark when audio was not measured there.
+        if measured_quiet is None and _evidence_after(bundle, end, end + quiet):
             return "provisional"
 
     if user_id and await _pending_prerequisites(user_id, start, end):
@@ -506,6 +513,8 @@ async def publish_reconciliation(
     run_id = f"rolling:{dirty_range.dirty_range_id}"
     documents: list[TimelineEpisode] = []
     supersessions: list[tuple[TimelineEpisode, list[str]]] = []
+    status_updates: list[tuple[TimelineEpisode, SettlementStatus]] = []
+    status_rank = {"open": 0, "provisional": 1, "settled": 2}
 
     for prior_indices, new_indices in _components(priors, result.episodes):
         group_priors = [priors[index] for index in prior_indices]
@@ -514,7 +523,12 @@ async def publish_reconciliation(
         if len(group_priors) == 1 and len(group_new) == 1:
             prior, episode = group_priors[0], group_new[0]
             if _unchanged(prior, episode):
-                # Carry-forward: same key, same revision, no row written at all.
+                # Semantic carry-forward keeps the same key and revision, but the
+                # deterministic lifecycle may advance as later evidence proves the
+                # boundary quiet. Status is operational state, not a semantic edit.
+                status = await assess_settlement(episode, bundle, now, user_id=user_id)
+                if status_rank.get(status, -1) > status_rank.get(prior.status, 2):
+                    status_updates.append((prior, status))
                 continue
             status = await assess_settlement(episode, bundle, now, user_id=user_id)
             documents.append(
@@ -559,19 +573,46 @@ async def publish_reconciliation(
         for prior in group_priors:
             supersessions.append((prior, minted))
 
+    collection = TimelineEpisode.get_pymongo_collection()
+    stamp = _utc(now) if now else utcnow()
+
+    async def apply_status_updates() -> list[str]:
+        transitioned: list[str] = []
+        for prior, status in status_updates:
+            updated = await collection.update_one(
+                {
+                    "episode_id": prior.episode_id,
+                    "revision": int(prior.revision),
+                    "status": prior.status,
+                },
+                {"$set": {"status": status, "revised_at": stamp}},
+            )
+            if updated.modified_count == 1 and status == "settled":
+                transitioned.append(prior.episode_id)
+        return transitioned
+
     if not documents:
+        transitioned_ids = await apply_status_updates()
         logger.debug(
             "🩹 Reconciliation of %s produced no material change",
             dirty_range.dirty_range_id,
         )
+        if transitioned_ids:
+            dispatch = dispatch_fn or dispatch_classified_episodes
+            try:
+                await dispatch(user_id, transitioned_ids)
+            except Exception:
+                logger.error(
+                    "❌ Settled-episode dispatch failed after lifecycle update for %s",
+                    dirty_range.dirty_range_id,
+                    exc_info=True,
+                )
         return PublishResult(fenced=True, material_change=False)
 
     # (2) Conditionally supersede every carried row before inserting anything. A failed
     # condition is a lost race with a newer generation: restore what was already
     # superseded and report the fence rather than writing a half generation.
-    collection = TimelineEpisode.get_pymongo_collection()
     applied: list[TimelineEpisode] = []
-    stamp = _utc(now) if now else utcnow()
     for prior, successors in supersessions:
         updated = await collection.update_one(
             {"episode_id": prior.episode_id, "revision": int(prior.revision)},
@@ -605,6 +646,7 @@ async def publish_reconciliation(
 
     # (3) Every fence has passed; the new generation can land.
     await TimelineEpisode.insert_many(documents)
+    transitioned_ids = await apply_status_updates()
 
     dates: list[Any] = []
     for document in documents:
@@ -627,12 +669,15 @@ async def publish_reconciliation(
             exc_info=True,
         )
 
-    # User-facing events fire from settlement, not from the recording closing. Like the
-    # projection refresh above, this is downstream of a valid publish: a dispatch
-    # failure is reported, never allowed to undo or fail the generation that landed.
-    dispatch = dispatch_fn or dispatch_settled_episodes
+    # Memory fires from Timeline classification and user-facing plugins from settlement,
+    # never directly from recording close. Like projection refresh, both are downstream
+    # of a valid publish: dispatch failure never undoes the generation that landed.
+    dispatch = dispatch_fn or dispatch_classified_episodes
     try:
-        await dispatch(user_id, [document.episode_id for document in documents])
+        await dispatch(
+            user_id,
+            transitioned_ids + [document.episode_id for document in documents],
+        )
     except Exception:
         logger.error(
             "❌ Settled-episode dispatch failed after publishing %s",

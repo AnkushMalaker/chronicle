@@ -42,6 +42,7 @@ from advanced_omi_backend.services.memory.audit import (
     source_kind_for,
     source_label_for,
 )
+from advanced_omi_backend.services.memory.visibility import conversation_scope_filter
 from advanced_omi_backend.services.plugin_service import get_plugin_router
 from advanced_omi_backend.users import User
 from advanced_omi_backend.workers.memory_jobs import (
@@ -64,6 +65,10 @@ async def _get_conversation_or_error(conversation_id: str, user: User):
         Conversation.conversation_id == conversation_id
     )
     if not conversation:
+        return None, JSONResponse(
+            status_code=404, content={"error": "Conversation not found"}
+        )
+    if conversation.memory_space_id and conversation.published_to_main_at is None:
         return None, JSONResponse(
             status_code=404, content={"error": "Conversation not found"}
         )
@@ -258,6 +263,11 @@ def _conversation_to_list_dict(conv: Conversation) -> dict:
         "active_transcript_version_number": conv.active_transcript_version_number,
         "starred": conv.starred,
         "starred_at": conv.starred_at.isoformat() if conv.starred_at else None,
+        "memory_space_id": conv.memory_space_id,
+        "published_to_main_at": (
+            conv.published_to_main_at.isoformat() if conv.published_to_main_at else None
+        ),
+        "memory_review_state": doc.get("memory_review_state", "automatic"),
     }
 
 
@@ -325,6 +335,12 @@ def _raw_doc_to_list_dict(doc: dict) -> dict:
         "active_transcript_version_number": active_transcript_version_number,
         "starred": doc.get("starred", False),
         "starred_at": starred_at.isoformat() if starred_at else None,
+        "memory_space_id": doc.get("memory_space_id"),
+        "published_to_main_at": (
+            doc["published_to_main_at"].isoformat()
+            if doc.get("published_to_main_at")
+            else None
+        ),
     }
 
 
@@ -350,6 +366,9 @@ _LIST_PROJECTION = {
     "detailed_summary": 1,
     "starred": 1,
     "starred_at": 1,
+    "memory_space_id": 1,
+    "published_to_main_at": 1,
+    "memory_review_state": 1,
     "active_transcript_version": 1,
     # Lightweight version metadata. Full segments (including text and word-level
     # timestamps) are loaded by the detail endpoint only when a transcript is opened.
@@ -370,6 +389,7 @@ async def get_conversations(
     offset: int = 0,
     sort_by: str = "created_at",
     sort_order: str = "desc",
+    memory_space_id: str | None = None,
 ):
     """Get conversations with speech only (speech-driven architecture).
 
@@ -418,10 +438,14 @@ async def get_conversations(
             )
 
         # Assemble final query
-        if len(conditions) == 1:
-            query = {**user_filter, **conditions[0]}
-        else:
-            query = {**user_filter, "$or": conditions}
+        state_filter = conditions[0] if len(conditions) == 1 else {"$or": conditions}
+        query = {
+            "$and": [
+                user_filter,
+                conversation_scope_filter(memory_space_id),
+                state_filter,
+            ]
+        }
 
         # Validate and build sort
         if sort_by not in ALLOWED_SORT_FIELDS:
@@ -545,6 +569,7 @@ async def _regex_search_conversations(
 
     match_filter: dict = {
         "deleted": False,
+        "$and": [conversation_scope_filter()],
     }
     if not user.is_superuser:
         match_filter["user_id"] = str(user.user_id)
@@ -836,6 +861,7 @@ def _enqueue_transcript_reprocessing(
     source: str,
     job_id_prefix: str,
     trigger: str,
+    memory_space_id: str | None = None,
 ) -> tuple:
     """Enqueue transcribe job + post-conversation chain.
 
@@ -865,6 +891,7 @@ def _enqueue_transcript_reprocessing(
         depends_on_job=transcript_job,
         trigger=trigger,
         memory_cause=MemoryCause.TRANSCRIPT_REPROCESS,
+        memory_space_id=memory_space_id,
     )
 
     return version_id, transcript_job, post_jobs
@@ -1071,6 +1098,7 @@ async def reprocess_orphan(conversation_id: str, user: User):
             source="reprocess_orphan",
             job_id_prefix="orphan_transcribe",
             trigger=Conversation.ProcessingTrigger.REPROCESS_ORPHAN.value,
+            memory_space_id=conversation.memory_space_id,
         )
 
         logger.info(
@@ -1132,6 +1160,7 @@ async def reprocess_transcript(conversation_id: str, user: User):
             source="reprocess",
             job_id_prefix="reprocess",
             trigger=Conversation.ProcessingTrigger.REPROCESS_TRANSCRIPT.value,
+            memory_space_id=conversation_model.memory_space_id,
         )
 
         logger.info(

@@ -5,6 +5,7 @@ worker jobs to trigger plugins without accessing FastAPI app state directly.
 """
 
 import asyncio
+import hashlib
 import importlib
 import inspect
 import logging
@@ -20,6 +21,7 @@ from dotenv import dotenv_values
 from dotenv import set_key as dotenv_set_key
 
 from advanced_omi_backend.config_loader import get_plugins_yml_path
+from advanced_omi_backend.models.memory_space import DeferredSpaceEvent
 from advanced_omi_backend.plugins import (
     BasePlugin,
     PluginConnectivityError,
@@ -1045,6 +1047,94 @@ async def dispatch_plugin_event(
                 logger.info(f"  Plugin result: {result.message}")
 
     return plugin_results
+
+
+_SPACE_TERMINAL_EVENT_ORDER = {
+    PluginEvent.TRANSCRIPT_BATCH: 10,
+    PluginEvent.CONVERSATION_COMPLETE: 20,
+    PluginEvent.MEMORY_PROCESSED: 30,
+}
+
+
+async def dispatch_or_defer_space_event(
+    *,
+    event: PluginEvent,
+    user_id: str,
+    data: dict,
+    memory_space_id: Optional[str],
+    source_kind: str,
+    source_id: str,
+    metadata: Optional[dict] = None,
+    description: str = "",
+    require_router: bool = False,
+) -> Optional[list]:
+    """Dispatch a Main event or durably defer an isolated-space terminal event.
+
+    Streaming events are deliberately suppressed inside spaces. Terminal events are
+    stored exactly once and released only when their source is accepted by a merge.
+    """
+    if not memory_space_id:
+        return await dispatch_plugin_event(
+            event=event,
+            user_id=user_id,
+            data=data,
+            metadata=metadata,
+            description=description,
+            require_router=require_router,
+        )
+    if event == PluginEvent.TRANSCRIPT_STREAMING:
+        logger.debug(
+            "Suppressing %s for isolated memory space %s", event.value, memory_space_id
+        )
+        return None
+    causal_order = _SPACE_TERMINAL_EVENT_ORDER.get(event)
+    if causal_order is None:
+        logger.debug(
+            "Suppressing non-terminal %s for isolated memory space %s",
+            event.value,
+            memory_space_id,
+        )
+        return None
+
+    stable_material = ":".join(
+        (str(user_id), memory_space_id, source_kind, source_id, event.value)
+    )
+    idempotency_key = (
+        "space-event:" + hashlib.sha256(stable_material.encode("utf-8")).hexdigest()
+    )
+    existing = await DeferredSpaceEvent.find_one(
+        DeferredSpaceEvent.idempotency_key == idempotency_key
+    )
+    if existing is None:
+        event_doc = DeferredSpaceEvent(
+            user_id=str(user_id),
+            space_id=memory_space_id,
+            source_kind=source_kind,
+            source_id=source_id,
+            event_type=event.value,
+            idempotency_key=idempotency_key,
+            causal_order=causal_order,
+            data=data,
+            metadata={**(metadata or {}), "idempotency_key": idempotency_key},
+            description=description,
+        )
+        try:
+            await event_doc.insert()
+        except Exception:
+            # Concurrent terminal jobs may race. The unique idempotency index is the
+            # authority; re-read before deciding this was a persistence failure.
+            existing = await DeferredSpaceEvent.find_one(
+                DeferredSpaceEvent.idempotency_key == idempotency_key
+            )
+            if existing is None:
+                raise
+    logger.info(
+        "Deferred %s for isolated memory space %s source=%s",
+        event.value,
+        memory_space_id,
+        source_id,
+    )
+    return None
 
 
 async def cleanup_plugin_router() -> None:

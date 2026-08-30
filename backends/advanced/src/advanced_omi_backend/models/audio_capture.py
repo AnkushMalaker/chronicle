@@ -127,6 +127,7 @@ class CaptureStartProvenance(BaseModel):
     effects: CaptureEffects
     voice_session_id: str | None = None
     data_purpose: CaptureDataPurpose = "normal_capture"
+    memory_space_id: str | None = None
 
 
 class AudioRangeRef(BaseModel):
@@ -180,6 +181,10 @@ class AudioCaptureSession(Document):
     data_purpose: str = Field(
         default="normal_capture",
         description="Operational use of the capture (annotation data is not lived timeline evidence)",
+    )
+    memory_space_id: Optional[str] = Field(
+        default=None,
+        description="Semantic memory space selected when the capture started; null means Main",
     )
     started_at: datetime = Field(default_factory=utcnow)
     ended_at: Optional[datetime] = None

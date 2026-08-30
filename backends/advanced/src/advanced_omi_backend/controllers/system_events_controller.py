@@ -17,6 +17,8 @@ from advanced_omi_backend.services.observability.system_events import record_eve
 
 logger = logging.getLogger(__name__)
 
+_DETERMINISTIC_MEMORY_FALLBACK = "deterministic_source_preserving_note"
+
 
 def _system_event_to_dict(doc) -> dict[str, Any]:
     return {
@@ -152,8 +154,9 @@ async def list_system_events(
 
 
 async def get_system_events_summary(*, window_hours: float = 24) -> dict[str, Any]:
-    """Counts by severity/category/source over a time window (for the strip + badge)."""
+    """Counts and memory-fallback statistics over an operational time window."""
     since = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    collection = SystemEvent.get_pymongo_collection()
     pipeline = [
         {"$match": {"created_at": {"$gte": since}}},
         {
@@ -173,15 +176,126 @@ async def get_system_events_summary(*, window_hours: float = 24) -> dict[str, An
             }
         },
     ]
-    cursor = SystemEvent.get_pymongo_collection().aggregate(pipeline)
+    cursor = collection.aggregate(pipeline)
     rows = await cursor.to_list(length=1)
     facet = rows[0] if rows else {}
+
+    # One ledger row may represent several observations because the recorder
+    # de-duplicates rapid repeats. Unwind the recorded timestamps so this is an
+    # occurrence count for the selected window, not a document count. Matching the
+    # timestamps also includes a retry in the window when its row was created earlier.
+    fallback_pipeline = [
+        {
+            "$match": {
+                "category": "memory",
+                "metadata.fallback_type": _DETERMINISTIC_MEMORY_FALLBACK,
+                "occurrence_times": {"$gte": since},
+            }
+        },
+        {"$unwind": "$occurrence_times"},
+        {"$match": {"occurrence_times": {"$gte": since}}},
+        {
+            "$facet": {
+                "total": [{"$count": "n"}],
+                "affected_conversations": [
+                    {"$match": {"conversation_id": {"$ne": None}}},
+                    {"$group": {"_id": "$conversation_id"}},
+                    {"$count": "n"},
+                ],
+                "by_reason": [
+                    {"$unwind": "$metadata.reasons"},
+                    {
+                        "$group": {
+                            "_id": "$metadata.reasons",
+                            "count": {"$sum": 1},
+                        }
+                    },
+                    {"$sort": {"count": -1}},
+                ],
+                "by_user": [
+                    {"$match": {"user_id": {"$ne": None}}},
+                    {"$group": {"_id": "$user_id", "count": {"$sum": 1}}},
+                    {"$sort": {"count": -1}},
+                ],
+                "by_primary_backend": [
+                    {
+                        "$group": {
+                            "_id": "$metadata.primary_backend",
+                            "count": {"$sum": 1},
+                        }
+                    },
+                    {"$sort": {"count": -1}},
+                ],
+                "by_recovery_backend": [
+                    {
+                        "$group": {
+                            "_id": "$metadata.recovery_backend",
+                            "count": {"$sum": 1},
+                        }
+                    },
+                    {"$sort": {"count": -1}},
+                ],
+                "by_agent_path": [
+                    {
+                        "$match": {
+                            "metadata.primary_backend": {"$ne": None},
+                            "metadata.recovery_backend": {"$ne": None},
+                        }
+                    },
+                    {
+                        "$group": {
+                            "_id": {
+                                "primary": "$metadata.primary_backend",
+                                "recovery": "$metadata.recovery_backend",
+                            },
+                            "count": {"$sum": 1},
+                        }
+                    },
+                    {"$sort": {"count": -1}},
+                ],
+                "latest": [
+                    {"$sort": {"occurrence_times": -1}},
+                    {"$limit": 1},
+                    {"$project": {"_id": 0, "at": "$occurrence_times"}},
+                ],
+            }
+        },
+    ]
+    fallback_cursor = collection.aggregate(fallback_pipeline)
+    fallback_rows = await fallback_cursor.to_list(length=1)
+    fallback_facet = fallback_rows[0] if fallback_rows else {}
 
     def _kv(items: list) -> dict[str, int]:
         return {i["_id"]: i["count"] for i in items if i.get("_id") is not None}
 
     def _n(items: list) -> int:
         return items[0]["n"] if items else 0
+
+    def _agent_paths(items: list) -> list[dict[str, Any]]:
+        paths = []
+        for item in items:
+            path = item.get("_id") or {}
+            primary = path.get("primary")
+            recovery = path.get("recovery")
+            if primary is None or recovery is None:
+                continue
+            paths.append(
+                {
+                    "primary_backend": primary,
+                    "recovery_backend": recovery,
+                    "occurrences": item["count"],
+                }
+            )
+        return paths
+
+    latest_items = fallback_facet.get("latest", [])
+    latest_at = latest_items[0].get("at") if latest_items else None
+    if isinstance(latest_at, datetime):
+        if latest_at.tzinfo is None:
+            latest_at = latest_at.replace(tzinfo=timezone.utc)
+        else:
+            latest_at = latest_at.astimezone(timezone.utc)
+        latest_at = latest_at.isoformat()
 
     return {
         "window_hours": window_hours,
@@ -190,6 +304,18 @@ async def get_system_events_summary(*, window_hours: float = 24) -> dict[str, An
         "by_severity": _kv(facet.get("by_severity", [])),
         "by_category": _kv(facet.get("by_category", [])),
         "by_source": _kv(facet.get("by_source", [])),
+        "memory_fallbacks": {
+            "occurrences": _n(fallback_facet.get("total", [])),
+            "affected_conversations": _n(
+                fallback_facet.get("affected_conversations", [])
+            ),
+            "by_reason": _kv(fallback_facet.get("by_reason", [])),
+            "by_user": _kv(fallback_facet.get("by_user", [])),
+            "by_primary_backend": _kv(fallback_facet.get("by_primary_backend", [])),
+            "by_recovery_backend": _kv(fallback_facet.get("by_recovery_backend", [])),
+            "agent_paths": _agent_paths(fallback_facet.get("by_agent_path", [])),
+            "latest_at": latest_at,
+        },
     }
 
 

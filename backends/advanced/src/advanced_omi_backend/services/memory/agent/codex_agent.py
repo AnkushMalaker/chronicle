@@ -33,7 +33,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ...codex_langfuse import upload_codex_trace
 from ...inference_artifacts import canonical_hash, persist_inference_run
@@ -346,6 +346,7 @@ class CodexMemoryAgent:
         vault_summary: str = "",
         guidance: str = "",
         record: str = "conversation",
+        images: Optional[List[Tuple[str, bytes]]] = None,
     ) -> MemoryAgentResult:
         available, detail = codex_executor_available()
         if not available:
@@ -444,6 +445,7 @@ class CodexMemoryAgent:
                     model,
                     reasoning_effort,
                     service_tier,
+                    images,
                 )
                 set_safe_span_attributes(
                     span,
@@ -509,6 +511,7 @@ class CodexMemoryAgent:
         model: str,
         reasoning_effort: str,
         service_tier: str,
+        images: Optional[List[Tuple[str, bytes]]] = None,
     ) -> MemoryAgentResult:
 
         with vault_run_lock(self.root.name, ttl_seconds=timeout + 60):
@@ -535,6 +538,19 @@ class CodexMemoryAgent:
                 cmd += ["-c", f'model_reasoning_effort="{reasoning_effort}"']
             if service_tier:
                 cmd += ["-c", f'service_tier="{service_tier}"']
+            image_dir: Optional[tempfile.TemporaryDirectory] = None
+            if images:
+                image_dir = tempfile.TemporaryDirectory(prefix="chronicle-context-")
+                for index, (filename, data) in enumerate(images):
+                    suffix = Path(filename).suffix.lower()
+                    if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+                        suffix = ".jpg"
+                    image_path = (
+                        Path(image_dir.name) / f"screen-context-{index + 1}{suffix}"
+                    )
+                    image_path.write_bytes(data)
+                    image_path.chmod(0o600)
+                    cmd += ["--image", str(image_path)]
             cmd += ["-"]  # prompt on stdin (avoids ARG_MAX / quoting)
 
             env = {**os.environ, "RUST_LOG": os.environ.get("RUST_LOG", "error")}
@@ -584,6 +600,9 @@ class CodexMemoryAgent:
                 errors.append(f"codex exec timed out after {timeout}s")
             except OSError as e:
                 errors.append(f"codex exec failed to start: {e}")
+            finally:
+                if image_dir is not None:
+                    image_dir.cleanup()
 
             ended_ns = time.time_ns()
 

@@ -11,6 +11,10 @@ from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import DeviceInputItem
 from advanced_omi_backend.models.manual_memory import ManualMemory
 from advanced_omi_backend.models.timeline import AudioEvidenceSpan, TimelineEpisode
+from advanced_omi_backend.services.memory.visibility import (
+    conversation_scope_filter,
+    main_only_filter,
+)
 from advanced_omi_backend.services.transcript_time import (
     AnchorMap,
     load_anchor_map,
@@ -422,6 +426,7 @@ async def _conversation_audio_bounds(
     collection = Conversation.get_pymongo_collection()
     rows = await collection.find(
         {
+            "$and": [conversation_scope_filter()],
             "user_id": user_id,
             "deleted": {"$ne": True},
             "data_purpose": {"$ne": "annotation"},
@@ -740,12 +745,14 @@ async def _assemble_range_manifest(
     rows = await _device_input_rows(user_id, day_start, range_end)
     manual_memories = await ManualMemory.find(
         ManualMemory.user_id == user_id,
+        main_only_filter(),
         ManualMemory.shared_at >= day_start,
         ManualMemory.shared_at < range_end,
     ).to_list()
     audio_bounds = await _conversation_audio_bounds(user_id, day_start, range_end)
     conversations = await Conversation.find(
         Conversation.user_id == user_id,
+        conversation_scope_filter(),
         {"conversation_id": {"$in": sorted(audio_bounds)}},
         # A deleted recording is not evidence. Without this an episode can cite —
         # and a promoted recording can point at — audio the user can no longer play,

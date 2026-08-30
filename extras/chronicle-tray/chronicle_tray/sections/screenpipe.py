@@ -109,6 +109,9 @@ class ScreenPipeSection(Section):
         self.pause_menu = None
         self.pause_timer = None
         self.unit_actions: dict[str, dict[str, QAction]] = {}
+        self.control_reason_items: dict[str, QAction] = {}
+        self._control_reasons: dict[str, str] = {}
+        self._component_labels: dict[str, str] = {}
         self.audio_capture = None
         self.video_capture = None
         self.settings_action = None
@@ -158,7 +161,29 @@ class ScreenPipeSection(Section):
             submenu.addAction(action)
             actions[verb] = action
         self.unit_actions[component] = actions
+        reason = submenu.addAction("Unavailable: checking…")
+        reason.setEnabled(False)
+        reason.setVisible(False)
+        self.control_reason_items[component] = reason
+        self._component_labels[component] = label
         return submenu
+
+    def _set_control_reason(self, component: str, reason: str) -> None:
+        """Explain and log transitions where every service action is disabled."""
+        item = self.control_reason_items[component]
+        item.setVisible(bool(reason))
+        if reason:
+            item.setText(f"Unavailable: {reason}")
+
+        previous = self._control_reasons.get(component, "")
+        if reason == previous:
+            return
+        label = self._component_labels[component]
+        if reason:
+            logger.warning("%s controls unavailable: %s", label, reason)
+        elif previous:
+            logger.info("%s controls available again", label)
+        self._control_reasons[component] = reason
 
     def _pause_actions(self, submenu: QMenu) -> None:
         self.pause_timer = QTimer()
@@ -425,11 +450,21 @@ class ScreenPipeSection(Section):
                 )
                 actions["stop"].setEnabled(active and runtime_owner == "chronicle")
                 actions["restart"].setEnabled(active and runtime_owner == "chronicle")
-                continue
-            active = _component_state(component) == "active"
-            actions["start"].setEnabled(not active)
-            actions["stop"].setEnabled(active)
-            actions["restart"].setEnabled(active)
+            else:
+                active = _component_state(component) == "active"
+                actions["start"].setEnabled(not active)
+                actions["stop"].setEnabled(active)
+                actions["restart"].setEnabled(active)
+
+            reason = ""
+            if not any(action.isEnabled() for action in actions.values()):
+                if component == RECORDER and not recorder_status["installed"]:
+                    reason = "Chronicle recorder is not installed"
+                elif component == RECORDER and external_owner:
+                    reason = self._engine_detail
+                else:
+                    reason = "current service state does not allow control"
+            self._set_control_reason(component, reason)
         self.stats_item.setText(_stats())
         self._refresh_capture_settings()
         self._refresh_screen_health(recorder_status)

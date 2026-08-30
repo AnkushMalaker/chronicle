@@ -51,6 +51,11 @@ from advanced_omi_backend.models.device_input import (
 )
 from advanced_omi_backend.models.manual_memory import ManualMemory
 from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
+from advanced_omi_backend.models.memory_space import (
+    DeferredSpaceEvent,
+    MemorySpace,
+    SpaceMergeProposal,
+)
 from advanced_omi_backend.models.system_event import SystemEvent
 from advanced_omi_backend.models.timeline import (
     AudioEvidenceSpan,
@@ -170,6 +175,9 @@ async def lifespan(app: FastAPI):
                 Annotation,
                 MemoryAuditEntry,
                 ManualMemory,
+                MemorySpace,
+                SpaceMergeProposal,
+                DeferredSpaceEvent,
                 SystemEvent,
                 CaptureSource,
                 PairingCode,

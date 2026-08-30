@@ -3,7 +3,53 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --tape-paper: #fbf8f1;
+    --tape-paper-raised: #fffdf8;
+    --tape-ink: #322d28;
+    --tape-line: #ded5c7;
+    --tape-grid: rgba(91, 78, 63, 0.14);
+    --tape-track: #eee8dc;
+    --tape-chip: #eee6d8;
+    --tape-chip-hover: #e4dac9;
+    --tape-media: #c5531c;
+    --tape-conversation: #336b87;
+    --tape-activity: #4c4741;
+    --tape-background: #9a8872;
+    --tape-focus: #b84919;
+    --tape-selected: #fff1e7;
+  }
+
+  .dark {
+    --tape-paper: #211f1b;
+    --tape-paper-raised: #292620;
+    --tape-ink: #f3eadc;
+    --tape-line: #4b4439;
+    --tape-grid: rgba(239, 226, 207, 0.13);
+    --tape-track: #353128;
+    --tape-chip: #3b362d;
+    --tape-chip-hover: #494238;
+    --tape-media: #e2763f;
+    --tape-conversation: #65a6c7;
+    --tape-activity: #c4b8a7;
+    --tape-background: #8f806d;
+    --tape-focus: #ef8a55;
+    --tape-selected: #3b2a20;
+  }
+
   html {
     font-family: system-ui, sans-serif;
+  }
+}
+
+@layer utilities {
+  .tape-hatch-neutral {
+    background-color: color-mix(in srgb, var(--tape-background) 22%, transparent);
+    background-image: repeating-linear-gradient(135deg, transparent 0 4px, color-mix(in srgb, var(--tape-background) 58%, transparent) 4px 6px);
+  }
+
+  .tape-hatch-attention {
+    background-color: color-mix(in srgb, #d89a24 20%, transparent);
+    background-image: repeating-linear-gradient(135deg, transparent 0 4px, color-mix(in srgb, #c88116 68%, transparent) 4px 6px);
   }
 }

@@ -580,6 +580,8 @@ def enqueue_audio_persistence(
     session_id: str,
     user_id: str,
     client_id: str,
+    *,
+    contract_version: int = 1,
 ) -> str:
     """Single-flight enqueue of the per-session audio-persistence job.
 
@@ -595,7 +597,9 @@ def enqueue_audio_persistence(
     # imports back from this module).
     from advanced_omi_backend.workers.audio_jobs import audio_streaming_persistence_job
 
-    job_id = f"audio-persist_{session_id}"
+    if contract_version not in {1, 2}:
+        raise ValueError(f"unsupported audio contract version {contract_version}")
+    job_id = f"audio-persist-v{contract_version}_{session_id}"
     lock_key = f"audio_persistence_enqueue_lock:{session_id}"
 
     if _job_is_live(job_id):
@@ -621,6 +625,7 @@ def enqueue_audio_persistence(
             session_id,
             user_id,
             client_id,
+            contract_version=contract_version,
             job_timeout=86400,  # 24 hours for all-day sessions
             ttl=None,  # No pre-run expiry (job can wait indefinitely in queue)
             result_ttl=JOB_RESULT_TTL,  # Cleanup AFTER completion
@@ -651,6 +656,8 @@ def ensure_audio_persistence(
     session_id: str,
     user_id: str,
     client_id: str,
+    *,
+    contract_version: int = 1,
 ) -> str:
     """Return a verified-live persistence job for an audio session.
 
@@ -658,7 +665,12 @@ def ensure_audio_persistence(
     WebSocket watchdog. Merely returning a deterministic RQ job id is insufficient:
     a prior recording may have left a finished job with that id behind.
     """
-    job_id = enqueue_audio_persistence(session_id, user_id, client_id)
+    job_id = enqueue_audio_persistence(
+        session_id,
+        user_id,
+        client_id,
+        contract_version=contract_version,
+    )
     if not _job_is_live(job_id):
         raise RuntimeError(
             f"Audio persistence job {job_id} is not live for session {session_id}"
@@ -804,7 +816,12 @@ def enqueue_dirty_range_reconciliation(dirty_range_id: str) -> Optional[str]:
 
 
 def start_streaming_jobs(
-    session_id: str, user_id: str, client_id: str
+    session_id: str,
+    user_id: str,
+    client_id: str,
+    *,
+    speech_detection_enabled: bool = True,
+    contract_version: int = 1,
 ) -> Dict[str, str]:
     """
     Enqueue jobs for streaming audio session (initial session setup).
@@ -827,25 +844,37 @@ def start_streaming_jobs(
     """
     # Enqueue speech detection job (single-flight: skips if one is already live
     # for this session, e.g. on a WebSocket reconnect mid-session).
-    speech_job_id = (
-        enqueue_speech_detection(session_id, user_id, client_id, reason="session_start")
-        or ""
-    )
+    speech_job_id = ""
+    if speech_detection_enabled:
+        speech_job_id = (
+            enqueue_speech_detection(
+                session_id, user_id, client_id, reason="session_start"
+            )
+            or ""
+        )
 
     # Enqueue audio persistence job on dedicated audio queue (single-flight: a
     # reconnect mid-session reuses the live job instead of starting a second
     # consumer that would split the audio stream). This job handles file rotation
     # for multiple conversations and runs for the entire session.
-    audio_job_id = ensure_audio_persistence(session_id, user_id, client_id)
+    audio_job_id = ensure_audio_persistence(
+        session_id,
+        user_id,
+        client_id,
+        contract_version=contract_version,
+    )
 
     # Notify frontend that streaming jobs are queued
+    jobs = ["audio_persistence"]
+    if speech_detection_enabled:
+        jobs.insert(0, "speech_detection")
     publish_sse_event(
         user_id,
         "jobs.queued",
         {
             "client_id": client_id,
             "session_id": session_id,
-            "jobs": ["speech_detection", "audio_persistence"],
+            "jobs": jobs,
         },
     )
 
@@ -961,6 +990,7 @@ def start_post_conversation_jobs(
     skip_title_summary: bool = False,
     memory_cause: MemoryCause = MemoryCause.AUTO_EXTRACTION,
     memory_strategy: UpdateStrategy = UpdateStrategy.FULL,
+    memory_space_id: Optional[str] = None,
 ) -> Dict[str, Optional[str]]:
     """
     Start post-conversation processing jobs after conversation is created.
@@ -989,8 +1019,11 @@ def start_post_conversation_jobs(
             by split/merge, whose transcripts already carry speaker labels
         skip_memory_extraction: Skip memory extraction even when globally enabled —
             used for annotation/training datasets that should not enter user memory
-        skip_title_summary: Skip LLM title/summary generation — used by continuous
-            capture, which is timeline evidence rather than a titled conversation
+        skip_title_summary: Skip LLM title/summary generation for callers whose
+            conversations are not user-visible recordings
+        memory_space_id: Semantic destination of the Conversation. Isolated spaces
+            settle memory and terminal events directly because they do not enter the
+            Main rolling Timeline before publication.
 
     The terminal event-dispatch job is never skippable: it owns ``end_reason``,
     ``completed_at``, and the reconciled ``processing_status``, so a conversation whose
@@ -1025,14 +1058,24 @@ def start_post_conversation_jobs(
     # speaker recognition, VAD, summaries — because reconciliation needs them. What
     # they lose is the pair of *user-facing* effects the close used to trigger
     # directly: the per-conversation memory write and the conversation.complete plugin
-    # event. Those now fire once, from the first settled conversational episode
-    # revision (services/timeline/dispatch.py). Day users take the untouched path.
-    rolling = active_pipeline_sync(user_id) == "rolling"
+    # event. Memory now fires once from the first non-open conversational Episode;
+    # the plugin event waits for settlement (services/timeline/dispatch.py). Day users
+    # take the untouched path.
+    rolling = active_pipeline_sync(user_id) == "rolling" and not memory_space_id
     if rolling:
         skip_memory_extraction = True
         logger.info(
             f"⏭️  Rolling pipeline: user-facing dispatch for conversation "
             f"{conversation_id[:8]} deferred to episode settlement"
+        )
+    if memory_space_id:
+        # A space is a deliberate notebook, not an automatic sink. Finish speaker,
+        # summary, and terminal settlement now; the user admits zero or more screen
+        # frames and starts the memory write from the scoped review endpoint.
+        skip_memory_extraction = True
+        logger.info(
+            "⏸️  Memory-space extraction for conversation %s is awaiting review",
+            conversation_id[:8],
         )
 
     version_id = transcript_version_id or str(uuid.uuid4())

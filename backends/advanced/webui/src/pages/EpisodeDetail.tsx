@@ -25,6 +25,7 @@ import { useConversationDetail } from '../hooks/useConversations'
 import { useGaplessPlayer } from '../hooks/useGaplessPlayer'
 import { Range } from '../lib/gaplessPlayer'
 import { TITLE_NOT_GENERATED } from '../lib/constants'
+import EpisodeKindField from '../components/timeline/EpisodeKindField'
 import TranscriptEditor, { Segment } from '../components/transcript/TranscriptEditor'
 import { Button, Card, StateBadge } from '../components/ui'
 
@@ -291,6 +292,7 @@ export default function EpisodeDetail() {
   const [editing, setEditing] = useState(false)
   const [draftTitle, setDraftTitle] = useState('')
   const [draftSummary, setDraftSummary] = useState('')
+  const [draftKind, setDraftKind] = useState('')
   const [enrolledSpeakers, setEnrolledSpeakers] = useState<
     Array<{ speaker_id: string; name: string }>
   >([])
@@ -310,7 +312,7 @@ export default function EpisodeDetail() {
 
   const save = useMutation({
     mutationFn: () =>
-      timelineApi.updateEpisode(episodeId!, { title: draftTitle, summary: draftSummary }),
+      timelineApi.updateEpisode(episodeId!, { title: draftTitle, summary: draftSummary, kind: draftKind.trim() }),
     onSuccess: response => {
       queryClient.setQueryData(['timeline-episode', episodeId], response.data)
       queryClient.invalidateQueries({ queryKey: ['semantic-timeline'] })
@@ -401,8 +403,17 @@ export default function EpisodeDetail() {
               aria-label="Episode summary"
               className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
             />
+            <label className="flex max-w-sm items-center gap-2 text-xs font-medium text-gray-600 dark:text-gray-300">
+              Type
+              <EpisodeKindField
+                value={draftKind}
+                onChange={setDraftKind}
+                disabled={save.isPending}
+                className="min-h-9 flex-1 rounded-md border border-gray-300 bg-white px-2 py-1 text-sm text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+              />
+            </label>
             <div className="flex items-center gap-2">
-              <Button size="sm" onClick={() => save.mutate()} disabled={save.isPending || !draftTitle.trim()}>
+              <Button size="sm" onClick={() => save.mutate()} disabled={save.isPending || !draftTitle.trim() || !draftKind.trim()}>
                 {save.isPending ? 'Saving…' : 'Save'}
               </Button>
               <Button variant="secondary" size="sm" onClick={() => setEditing(false)}>Cancel</Button>
@@ -433,6 +444,7 @@ export default function EpisodeDetail() {
               onClick={() => {
                 setDraftTitle(episode.title)
                 setDraftSummary(episode.summary)
+                setDraftKind(episode.kind)
                 setEditing(true)
               }}
             >

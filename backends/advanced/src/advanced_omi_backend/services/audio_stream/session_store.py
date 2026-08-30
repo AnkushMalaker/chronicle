@@ -110,6 +110,7 @@ class SessionView:
     processing_profile: str = ""
     effects: Optional[dict] = None
     voice_session_id: str = ""
+    memory_space_id: str = ""
     # timestamps (unix float; speech_detected_at is kept as ISO str)
     started_at: float = 0.0
     last_chunk_at: float = 0.0
@@ -213,6 +214,7 @@ class SessionView:
             processing_profile=s("processing_profile"),
             effects=fjson("effects", None),
             voice_session_id=s("voice_session_id"),
+            memory_space_id=s("memory_space_id"),
             started_at=ffloat("started_at") or 0.0,
             last_chunk_at=ffloat("last_chunk_at") or 0.0,
             finalized_at=ffloat("finalized_at"),
@@ -290,6 +292,7 @@ class SessionStore:
         processing_profile: str,
         effects: dict,
         voice_session_id: str | None,
+        memory_space_id: str | None = None,
     ) -> None:
         """Create the session hash (status=active). Single atomic write.
 
@@ -318,6 +321,7 @@ class SessionStore:
                 "processing_profile": processing_profile,
                 "effects": json.dumps(effects, separators=(",", ":"), sort_keys=True),
                 "voice_session_id": voice_session_id or "",
+                "memory_space_id": memory_space_id or "",
                 "started_at": now,
                 "last_chunk_at": now,
                 "chunks_published": "0",

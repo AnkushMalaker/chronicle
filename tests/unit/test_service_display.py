@@ -24,6 +24,36 @@ def _install_asr_env(monkeypatch, tmp_path: Path, env: str, stt_stream: str = ""
     )
 
 
+def _install_llm_config(monkeypatch, tmp_path: Path, *, llm: str, embedding: str):
+    """Install the smallest merged model registry needed by service status."""
+    monkeypatch.setattr(services, "__file__", str(tmp_path / "services.py"))
+    (tmp_path / "extras" / "llm-services").mkdir(parents=True)
+    (tmp_path / "extras" / "llm-services" / ".env").write_text(
+        "LLM_PORT=8083\nEMBED_PORT=8082\n"
+    )
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "defaults.yml").write_text(
+        "models:\n"
+        "  - name: local-chat\n"
+        "    model_type: llm\n"
+        "    model_provider: llamacpp\n"
+        "    discovery_service: chronicle-llm\n"
+        "  - name: remote-chat\n"
+        "    model_type: llm\n"
+        "    model_provider: openrouter\n"
+        "  - name: local-embed\n"
+        "    model_type: embedding\n"
+        "    model_provider: llamacpp\n"
+        "    discovery_service: chronicle-embed\n"
+        "  - name: remote-embed\n"
+        "    model_type: embedding\n"
+        "    model_provider: openai\n"
+    )
+    (tmp_path / "config" / "config.yml").write_text(
+        f"defaults:\n  llm: {llm}\n  embedding: {embedding}\n"
+    )
+
+
 def test_label_resolves_the_configured_asr_provider(monkeypatch, tmp_path):
     _install_asr_env(monkeypatch, tmp_path, "ASR_PROVIDER=vibevoice\n")
 
@@ -157,3 +187,34 @@ def test_display_ports_resolve_endpoint_port_overrides(monkeypatch, tmp_path):
     (llm_dir / ".env").write_text("LLM_PORT=18083\nEMBED_PORT=18082\n")
 
     assert services.service_display_ports("llm-services") == ["18083", "18082"]
+
+
+def test_remote_chat_only_requires_local_embedding_health(monkeypatch, tmp_path):
+    _install_llm_config(
+        monkeypatch, tmp_path, llm="remote-chat", embedding="local-embed"
+    )
+    requested = []
+    monkeypatch.setattr(
+        services.requests,
+        "get",
+        lambda url, timeout: requested.append(url) or SimpleNamespace(status_code=200),
+    )
+
+    assert services.service_display_label("llm-services") == (
+        "Local llama.cpp (embeddings)"
+    )
+    assert services.service_display_ports("llm-services") == ["8082"]
+    assert services.check_service_health("llm-services") == ("healthy", "")
+    assert requested == ["http://127.0.0.1:8082/health"]
+
+
+def test_local_chat_and_remote_embeddings_only_require_chat(monkeypatch, tmp_path):
+    _install_llm_config(
+        monkeypatch, tmp_path, llm="local-chat", embedding="remote-embed"
+    )
+
+    assert services.service_display_label("llm-services") == "Local llama.cpp (chat)"
+    assert services.service_display_ports("llm-services") == ["8083"]
+    assert services.service_health_endpoint_urls("llm-services") == [
+        ("chat", "http://127.0.0.1:8083/health")
+    ]

@@ -220,7 +220,9 @@ def test_screenpipe_controls_only_use_real_client_components(monkeypatch):
     ), f"unknown component(s): {set(used) - set(clients.CLIENT_COMPONENTS)}"
 
 
-def test_screenpipe_menu_surfaces_external_owner_and_disables_controls(monkeypatch):
+def test_screenpipe_menu_surfaces_external_owner_and_disables_controls(
+    monkeypatch, caplog
+):
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
     # Imported after importorskip so a machine without PySide6 skips this test
     # instead of failing at collection time.
@@ -245,12 +247,14 @@ def test_screenpipe_menu_surfaces_external_owner_and_disables_controls(monkeypat
 
     monkeypatch.setattr(section_module, "_clients", lambda: FakeClients)
     monkeypatch.setattr(section_module, "_stats", lambda: "1 frame")
+    caplog.set_level(logging.INFO, logger=section_module.__name__)
 
     QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     section = section_module.ScreenPipeSection()
     menu = QtWidgets.QMenu()
     section.build(menu)
     monkeypatch.setattr(section, "_refresh_capture_settings", lambda: None)
+    monkeypatch.setattr(section, "_refresh_screen_health", lambda _status: None)
     monkeypatch.setattr(section, "_refresh_update_actions", lambda: None)
     try:
         section.refresh()
@@ -261,8 +265,77 @@ def test_screenpipe_menu_surfaces_external_owner_and_disables_controls(monkeypat
         assert not section.unit_actions[section_module.RECORDER]["start"].isEnabled()
         assert not section.unit_actions[section_module.RECORDER]["stop"].isEnabled()
         assert not section.unit_actions[section_module.RECORDER]["restart"].isEnabled()
+        assert [
+            action.text()
+            for action in section.unit_actions[section_module.RECORDER].values()
+        ] == ["Start", "Stop", "Restart"]
+        reason = section.control_reason_items[section_module.RECORDER]
+        assert reason.isVisible()
+        assert reason.text() == (
+            "Unavailable: desktop app owns recording — meeting detection disabled"
+        )
         assert not section.pause_menu.isEnabled()
         assert "desktop app owns recording" in section.tooltip()
+
+        section.refresh()
+        unavailable_logs = [
+            record
+            for record in caplog.records
+            if record.message.startswith("ScreenPipe controls unavailable:")
+        ]
+        assert len(unavailable_logs) == 1
+        assert "desktop app owns recording" in unavailable_logs[0].message
+    finally:
+        section.shutdown()
+        del menu
+
+
+def test_screenpipe_menu_explains_uninstalled_recorder(monkeypatch, caplog):
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    # Import only after the optional Qt dependency has been admitted by the test.
+    from chronicle_tray.sections import screenpipe as section_module
+
+    class FakeClients:
+        @staticmethod
+        def reconcile_screenpipe_ownership():
+            return False
+
+        @staticmethod
+        def component_status(name):
+            if name == section_module.RECORDER:
+                return {
+                    "installed": False,
+                    "active": False,
+                    "runtime_owner": "none",
+                    "recording_active": False,
+                    "detail": "recorder inactive",
+                }
+            return {"installed": True, "active": True}
+
+    monkeypatch.setattr(section_module, "_clients", lambda: FakeClients)
+    monkeypatch.setattr(section_module, "_stats", lambda: "1 frame")
+    caplog.set_level(logging.INFO, logger=section_module.__name__)
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    section = section_module.ScreenPipeSection()
+    menu = QtWidgets.QMenu()
+    section.build(menu)
+    monkeypatch.setattr(section, "_refresh_capture_settings", lambda: None)
+    monkeypatch.setattr(section, "_refresh_screen_health", lambda _status: None)
+    monkeypatch.setattr(section, "_refresh_update_actions", lambda: None)
+    try:
+        section.refresh()
+
+        actions = section.unit_actions[section_module.RECORDER]
+        assert not any(action.isEnabled() for action in actions.values())
+        reason = section.control_reason_items[section_module.RECORDER]
+        assert reason.isVisible()
+        assert reason.text() == "Unavailable: Chronicle recorder is not installed"
+        assert any(
+            record.message
+            == "ScreenPipe controls unavailable: Chronicle recorder is not installed"
+            for record in caplog.records
+        )
     finally:
         section.shutdown()
         del menu

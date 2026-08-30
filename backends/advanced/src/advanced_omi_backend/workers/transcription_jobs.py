@@ -62,7 +62,7 @@ from advanced_omi_backend.services.audio_stream.session_store import (
 )
 from advanced_omi_backend.services.forced_alignment import align_audio_words
 from advanced_omi_backend.services.observability import record_event_sync
-from advanced_omi_backend.services.plugin_service import dispatch_plugin_event
+from advanced_omi_backend.services.plugin_service import dispatch_or_defer_space_event
 from advanced_omi_backend.services.processing_artifacts import (
     persist_conversation_revision,
     persist_transcript_artifact,
@@ -858,9 +858,12 @@ async def process_transcription_result(
     # Trigger transcript-level plugins BEFORE speech validation
     if transcript_text and not conversation.memory_excluded:
         try:
-            await dispatch_plugin_event(
+            await dispatch_or_defer_space_event(
                 event=PluginEvent.TRANSCRIPT_BATCH,
                 user_id=user_id,
+                memory_space_id=conversation.memory_space_id,
+                source_kind="conversation",
+                source_id=conversation_id,
                 data={
                     "transcript": transcript_text,
                     "segment_id": f"{conversation_id}_batch",
@@ -1308,6 +1311,8 @@ async def materialize_batch_conversation(
     user_id: str,
     client_id: str,
     audio_ranges: list[AudioRangeRef],
+    *,
+    memory_space_id: str | None = None,
 ) -> "Conversation":
     """Materialize a detected Conversation only after batch ASR confirms speech."""
     if not audio_ranges:
@@ -1319,7 +1324,7 @@ async def materialize_batch_conversation(
     if existing is not None:
         return existing
 
-    conversation = create_conversation(
+    conversation_kwargs = dict(
         user_id=user_id,
         client_id=client_id,
         title=TITLE_NOT_GENERATED,
@@ -1329,6 +1334,9 @@ async def materialize_batch_conversation(
         ended_at=max(audio_range.ended_at for audio_range in audio_ranges),
         segmentation_key=segmentation_key,
     )
+    if memory_space_id is not None:
+        conversation_kwargs["memory_space_id"] = memory_space_id
+    conversation = create_conversation(**conversation_kwargs)
     await apply_audio_ranges(conversation, audio_ranges, save=False)
     try:
         await conversation.insert()
@@ -1349,6 +1357,7 @@ async def transcription_fallback_check_job(
     client_id: str,
     conversation_id: str | None = None,
     timeout_seconds: int | None = None,
+    memory_space_id: str | None = None,
     *,
     redis_client=None,
 ) -> Dict[str, Any]:
@@ -1365,6 +1374,7 @@ async def transcription_fallback_check_job(
         client_id: Client ID
         conversation_id: Specific conversation ID to check (avoids matching old conversations)
         timeout_seconds: Max wait time for batch transcription (default 2 minutes)
+        memory_space_id: Semantic destination inherited from the durable capture session
         redis_client: Redis client (injected by decorator)
 
     Returns:
@@ -1504,8 +1514,11 @@ async def transcription_fallback_check_job(
         }
 
     if conversation is None:
+        materialize_kwargs: dict[str, str] = {}
+        if memory_space_id is not None:
+            materialize_kwargs["memory_space_id"] = memory_space_id
         conversation = await materialize_batch_conversation(
-            session_id, user_id, client_id, fallback_ranges
+            session_id, user_id, client_id, fallback_ranges, **materialize_kwargs
         )
     conv_id = conversation.conversation_id
 
@@ -1547,6 +1560,7 @@ async def transcription_fallback_check_job(
         client_id=client_id,
         end_reason=Conversation.EndReason.WEBSOCKET_DISCONNECT.value,
         trigger=Conversation.ProcessingTrigger.LIVE_SESSION.value,
+        memory_space_id=memory_space_id,
     )
 
     logger.info(
@@ -2182,6 +2196,12 @@ async def stream_speech_detection_job(
         except NoSuchJobError:
             fallback_depends_on = None  # persistence done & expired — chunks durable
 
+    session_view = await store.read(session_id)
+    if session_view is None:
+        raise RuntimeError(
+            f"Capture session {session_id} disappeared before fallback scheduling"
+        )
+
     fallback_job = transcription_queue.enqueue(
         transcription_fallback_check_job,
         session_id,
@@ -2189,6 +2209,7 @@ async def stream_speech_detection_job(
         client_id,
         conversation_id=conversation_id,
         timeout_seconds=config_timeout,
+        memory_space_id=session_view.memory_space_id or None,
         job_timeout=config_timeout + 120,  # 2 min overhead for fallback check
         # Key the job per-conversation, not per-session. A shared
         # fallback_check_{session_id} id meant that when several Conversations in

@@ -226,12 +226,28 @@ class TestBackendDockerComposeImages:
         assert "build" in webui
         assert "image" not in webui
 
+    def test_webui_dev_build_and_runtime_include_audio_v2_contracts(self):
+        webui = self.COMPOSE["services"]["webui-dev"]
+        assert webui["build"] == {
+            "context": "../..",
+            "dockerfile": "backends/advanced/webui/Dockerfile.dev",
+        }
+        volumes = webui["volumes"]
+        assert (
+            "../../contracts/audio/v2/typescript:"
+            "/workspace/contracts/audio/v2/typescript:ro"
+        ) in volumes
+        assert not any("voice_protocol/v1" in volume for volume in volumes)
+
     def test_webui_dev_mounts_tailwind_palette_configuration(self):
         volumes = self.COMPOSE["services"]["webui-dev"]["volumes"]
-        assert "./webui/tailwind.config.js:/app/tailwind.config.js:ro" in volumes
+        assert (
+            "./webui/tailwind.config.js:"
+            "/workspace/backends/advanced/webui/tailwind.config.js:ro"
+        ) in volumes
         assert (
             "./webui/chronicle-espresso-preset.js:"
-            "/app/chronicle-espresso-preset.js:ro"
+            "/workspace/backends/advanced/webui/chronicle-espresso-preset.js:ro"
         ) in volumes
 
     def test_backend_services_share_same_image_name(self):

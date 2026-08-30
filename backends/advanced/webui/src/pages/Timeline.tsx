@@ -1,22 +1,24 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Bookmark, CalendarDays, Combine, Copy, Image, Link2, Monitor, PencilRuler, RefreshCw } from 'lucide-react'
+import { Link, useSearchParams } from 'react-router-dom'
+import {
+  AlertTriangle, Bookmark, CalendarDays, ChevronLeft, ChevronRight,
+  Combine, Image, MoreHorizontal, RefreshCw, ScrollText,
+} from 'lucide-react'
 import EpisodeCard from '../components/timeline/EpisodeCard'
 import EpisodeLabelBar from '../components/timeline/EpisodeLabelBar'
-import { ManualMemory, TimelineEpisodeUpdate, deviceInputApi, manualMemoriesApi, timelineApi } from '../services/api'
-import { timeAgo } from '../utils/timeAgo'
-import { Button, Card, IconButton } from '../components/ui'
-
-function dayBounds(day: string) {
-  const start = new Date(`${day}T00:00:00`)
-  const end = new Date(start)
-  end.setDate(end.getDate() + 1)
-  return [start.toISOString(), end.toISOString()] as const
-}
-
-function sourceStatusLabel(status: string) {
-  return status.charAt(0).toUpperCase() + status.slice(1)
-}
+import DayReviewBoard from '../components/timeline/DayReviewBoard'
+import EpisodeReviewCheckpoint from '../components/timeline/EpisodeReviewCheckpoint'
+import { TapeCoverageInterval } from '../components/timeline/EvidenceTape'
+import { isSemanticMemoryEligible } from '../components/timeline/episodePresentation'
+import { EmptyDayHandoff, ReviewBacklogMenu } from '../components/timeline/ReviewCursor'
+import { dateFromSearch, localDate, shiftDate } from '../components/timeline/timelineNavigation'
+import { useTimelineTimezone } from '../hooks/useTimelineTimezone'
+import {
+  ManualMemory, TimelineEpisodeUpdate, deviceInputApi,
+  manualMemoriesApi, timelineApi,
+} from '../services/api'
+import { Button } from '../components/ui'
 
 function analysisMessage(state?: string, retryAfter?: string | null) {
   if (state === 'pending' || state === 'preparing') return 'Timeline analysis is queued.'
@@ -27,7 +29,11 @@ function analysisMessage(state?: string, retryAfter?: string | null) {
   return null
 }
 
-type Interval = { started_at: string; ended_at: string; reason: string }
+function reviewLabel(state?: string) {
+  if (state === 'memory_pending') return 'Memory decision ready'
+  if (state === 'failed') return 'Memory review needs attention'
+  return null
+}
 
 function clockTime(value: string) {
   return new Date(value).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
@@ -41,358 +47,314 @@ function ManualMemoryPreview({ memory }: { memory: ManualMemory }) {
     enabled: Boolean(attachment),
     staleTime: Infinity,
   })
-  const url = useMemo(
-    () => thumbnail.data ? URL.createObjectURL(thumbnail.data) : null,
-    [thumbnail.data],
-  )
-
+  const url = useMemo(() => thumbnail.data ? URL.createObjectURL(thumbnail.data) : null, [thumbnail.data])
   useEffect(() => () => {
     if (url) URL.revokeObjectURL(url)
   }, [url])
-
-  if (thumbnail.isLoading) {
-    return <div className="aspect-[4/3] animate-pulse bg-gray-100 dark:bg-gray-800" />
-  }
-  if (!url) {
-    return (
-      <div className="flex aspect-[4/3] items-center justify-center bg-gray-100 text-gray-400 dark:bg-gray-800">
-        <Image className="h-7 w-7" aria-hidden="true" />
-      </div>
-    )
-  }
+  if (thumbnail.isLoading) return <div className="aspect-[4/3] animate-pulse bg-gray-100 dark:bg-gray-800" />
+  if (!url) return <div className="flex aspect-[4/3] items-center justify-center bg-gray-100 text-gray-400 dark:bg-gray-800"><Image className="h-7 w-7" /></div>
   return <img src={url} alt="" className="aspect-[4/3] w-full bg-gray-100 object-contain dark:bg-gray-800" />
 }
 
 function ManualMemories({ items }: { items: ManualMemory[] }) {
   return (
-    <div className="mb-5 rounded-lg border border-gray-200 p-4 dark:border-gray-700">
-      <div className="mb-3">
-        <h3 className="font-medium text-gray-900 dark:text-gray-100">Manual memories</h3>
-        <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-          Everything you explicitly saved, newest first. These do not depend on timeline analysis.
-        </p>
-      </div>
+    <section className="rounded-lg border border-[var(--tape-line)] bg-[var(--tape-paper)] p-4">
+      <h3 className="font-medium text-gray-900 dark:text-gray-100">Manual memories</h3>
+      <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">Explicitly saved material for this account, independent of timeline analysis.</p>
       {items.length ? (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {items.map(item => {
             const description = item.attachments.find(attachment => attachment.description)?.description || ''
-            const origin = item.source.application || ''
             return (
-              <article key={item.memory_id} className="overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900">
+              <article key={item.memory_id} className="overflow-hidden rounded-lg border border-[var(--tape-line)] bg-[var(--tape-paper-raised)]">
                 <ManualMemoryPreview memory={item} />
                 <div className="p-3">
-                  <p className="line-clamp-2 text-sm text-gray-800 dark:text-gray-200">
-                    {item.note || description || 'Manual memory.'}
-                  </p>
-                  <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
-                    {new Date(item.shared_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
-                    {origin ? ` · ${origin}` : ''}
-                  </p>
+                  <p className="line-clamp-2 text-sm text-gray-800 dark:text-gray-200">{item.note || description || 'Manual memory.'}</p>
+                  <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">{new Date(item.shared_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}</p>
                 </div>
               </article>
             )
           })}
         </div>
-      ) : (
-        <div className="rounded-md border border-dashed border-gray-300 p-5 text-sm text-gray-500 dark:border-gray-600 dark:text-gray-400">
-          No manual memories saved yet.
-        </div>
-      )}
-    </div>
+      ) : <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">No manual memories saved yet.</p>}
+    </section>
   )
 }
 
-function IntervalList({ title, note, intervals, tone }: {
-  title: string
-  note: string
-  intervals: Interval[]
-  tone: 'amber' | 'gray'
-}) {
-  const frame = tone === 'amber'
-    ? 'border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/20'
-    : 'border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-800/50'
+function CoverageInspector({ coverage }: { coverage: TapeCoverageInterval[] }) {
+  if (!coverage.length) return null
   return (
-    <div className={`mb-4 rounded-lg border p-4 ${frame}`}>
-      <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{title}</h3>
-      <p className="mt-1 text-xs text-gray-600 dark:text-gray-300">{note}</p>
-      <ul className="mt-2 space-y-1">
-        {intervals.slice(0, 8).map(interval => (
-          <li key={`${interval.started_at}-${interval.ended_at}`} className="text-xs text-gray-700 dark:text-gray-200">
-            <time>{clockTime(interval.started_at)}</time>
-            {' – '}
-            <time>{clockTime(interval.ended_at)}</time>
-            <span className="ml-2 text-gray-500 dark:text-gray-400">{interval.reason}</span>
-          </li>
+    <details className="rounded-lg border border-[var(--tape-line)] bg-[var(--tape-paper)] px-3 py-2.5">
+      <summary className="cursor-pointer text-sm font-semibold text-gray-800 marker:text-gray-400 dark:text-gray-200">
+        Inspect {coverage.length} coverage interval{coverage.length === 1 ? '' : 's'}
+      </summary>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        {coverage.map((interval, index) => (
+          <div key={`${interval.kind}:${interval.started_at}:${interval.ended_at}:${index}`} className="rounded-md border border-[var(--tape-line)] bg-[var(--tape-paper-raised)] px-3 py-2 text-xs">
+            <p className="font-semibold text-gray-800 dark:text-gray-200">{interval.label}</p>
+            <p className="mt-0.5 text-gray-500 dark:text-gray-400">{clockTime(interval.started_at)}–{clockTime(interval.ended_at)}</p>
+          </div>
         ))}
-      </ul>
-      {intervals.length > 8 && (
-        <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">…and {intervals.length - 8} more.</p>
-      )}
-    </div>
+      </div>
+    </details>
   )
 }
 
 export default function Timeline() {
   const queryClient = useQueryClient()
-  const [day, setDay] = useState(() => {
-    const parts = new Intl.DateTimeFormat('en-CA').formatToParts(new Date())
-    const value = Object.fromEntries(parts.map(part => [part.type, part.value]))
-    return `${value.year}-${value.month}-${value.day}`
-  })
+  const [searchParams, setSearchParams] = useSearchParams()
+  const {
+    timezone, browserTimezone, storedTimezone, shouldOfferBrowserTimezone,
+    saveBrowserTimezone, savingBrowserTimezone,
+  } = useTimelineTimezone()
+  const today = localDate(new Date(), timezone)
+  const day = dateFromSearch(`?${searchParams.toString()}`, today)
   const [showRaw, setShowRaw] = useState(false)
   const [showManualMemories, setShowManualMemories] = useState(false)
-  // Labeling is opt-in: these controls mutate the day, and the day is normally read.
   const [labeling, setLabeling] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-  const [start, end] = useMemo(() => dayBounds(day), [day])
+
+  const setDay = (nextDay: string) => {
+    const next = new URLSearchParams(searchParams)
+    next.set('date', nextDay)
+    setSearchParams(next)
+    setSelected(new Set())
+    setLabeling(false)
+  }
 
   const timeline = useQuery({
     queryKey: ['semantic-timeline', day, timezone],
     queryFn: async () => (await timelineApi.getDay(day, timezone)).data,
     refetchInterval: query => {
       const state = query.state.data?.analysis?.state
+      const consolidationState = query.state.data?.consolidation?.state
+      if (consolidationState === 'queued' || consolidationState === 'generating') return 5_000
       return state && !['complete', 'failed', 'awaiting_evidence'].includes(state) ? 10_000 : false
     },
   })
+  const reviewQueue = useQuery({
+    queryKey: ['timeline-review-queue', timezone],
+    queryFn: async () => (await timelineApi.getReviewQueue(timezone)).data.items,
+    refetchInterval: query => query.state.data?.some(item => ['memory_queued', 'memory_generating', 'memory_applying'].includes(item.state)) ? 5_000 : false,
+  })
+  const projectionStart = timeline.data?.review_projection?.day_started_at
+  const projectionEnd = timeline.data?.review_projection?.day_ended_at
   const raw = useQuery({
-    queryKey: ['raw-device-timeline', day],
-    queryFn: async () => (await deviceInputApi.getTimeline(start, end)).data.items,
-    enabled: showRaw,
+    queryKey: ['raw-device-timeline', day, timezone],
+    queryFn: async () => (await deviceInputApi.getTimeline(projectionStart!, projectionEnd!)).data.items,
+    enabled: showRaw && Boolean(projectionStart && projectionEnd),
   })
   const manualMemories = useQuery({
     queryKey: ['manual-memories'],
     queryFn: async () => (await manualMemoriesApi.list()).data.items,
     enabled: showManualMemories,
   })
-  const sources = useQuery({
-    queryKey: ['device-input-sources'],
-    queryFn: async () => (await deviceInputApi.getSources()).data.sources,
-    refetchInterval: 30_000,
-  })
-  const pairing = useMutation({
-    mutationFn: async () => (await deviceInputApi.createPairingCode()).data,
-  })
   const analyze = useMutation({
     mutationFn: (force: boolean) => timelineApi.analyze(day, timezone, force),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['semantic-timeline', day, timezone] }),
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['semantic-timeline', day, timezone] }),
+      queryClient.invalidateQueries({ queryKey: ['timeline-review-queue', timezone] }),
+    ]),
   })
-
   const refreshDay = () => {
     setSelected(new Set())
     return queryClient.invalidateQueries({ queryKey: ['semantic-timeline', day, timezone] })
   }
-  const adjust = useMutation({
-    mutationFn: ({ episodeId, changes }: { episodeId: string; changes: TimelineEpisodeUpdate }) =>
-      timelineApi.updateEpisode(episodeId, changes),
-    onSuccess: refreshDay,
+  const adjust = useMutation({ mutationFn: ({ episodeId, changes }: { episodeId: string; changes: TimelineEpisodeUpdate }) => timelineApi.updateEpisode(episodeId, changes), onSuccess: refreshDay })
+  const split = useMutation({ mutationFn: ({ episodeId, at }: { episodeId: string; at: string }) => timelineApi.splitEpisode(episodeId, at), onSuccess: refreshDay })
+  const group = useMutation({ mutationFn: (episodeIds: string[]) => timelineApi.groupEpisodes(day, timezone, episodeIds), onSuccess: refreshDay })
+  const remove = useMutation({ mutationFn: (episodeId: string) => timelineApi.deleteEpisode(episodeId), onSuccess: refreshDay })
+  const finalizeEpisodes = useMutation({
+    mutationFn: () => timelineApi.finalizeEpisodes(day, timezone),
+    onSuccess: async () => {
+      setLabeling(false)
+      setSelected(new Set())
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['semantic-timeline', day, timezone] }),
+        queryClient.invalidateQueries({ queryKey: ['timeline-review-queue', timezone] }),
+      ])
+    },
   })
-  const split = useMutation({
-    mutationFn: ({ episodeId, at }: { episodeId: string; at: string }) =>
-      timelineApi.splitEpisode(episodeId, at),
-    onSuccess: refreshDay,
-  })
-  const merge = useMutation({
-    mutationFn: (episodeIds: string[]) => timelineApi.mergeEpisodes(episodeIds),
-    onSuccess: refreshDay,
-  })
-  const remove = useMutation({
-    mutationFn: (episodeId: string) => timelineApi.deleteEpisode(episodeId),
-    onSuccess: refreshDay,
-  })
-  const mutating = adjust.isPending || split.isPending || merge.isPending || remove.isPending
-  const mutationError = [adjust, split, merge, remove].find(m => m.error)?.error
-
-  useEffect(() => {
-    timelineApi.setTimezone(timezone).catch(() => undefined)
-  }, [timezone])
+  const mutating = adjust.isPending || split.isPending || group.isPending || remove.isPending
+  const mutationError = [adjust, split, group, remove].find(mutation => mutation.error)?.error
 
   const episodes = timeline.data?.episodes || []
+  const memoryEligibleCount = episodes.filter(isSemanticMemoryEligible).length
+  const referenceOnlyCount = episodes.length - memoryEligibleCount
   const status = timeline.data?.analysis
-  // Evidence the analysis could not explain. Surfaced rather than hidden: a day that
-  // silently drops hours is indistinguishable from a day where nothing happened.
-  // Only `unexplained` reflects on the analysis; `no_capture` is a recording gap and
-  // is listed separately so a blackout cannot read as a segmentation failure.
-  // Days analyzed before causes were recorded carry none; they are shown undivided
-  // rather than asserting a cause that was never determined.
   const unaccounted = timeline.data?.coverage?.unassigned_intervals || []
   const classified = unaccounted.some(interval => interval.cause)
-  const unexplained = classified ? unaccounted.filter(i => i.cause === 'unexplained') : unaccounted
-  const uncaptured = classified ? unaccounted.filter(i => i.cause === 'no_capture') : []
+  const unexplained = classified ? unaccounted.filter(item => item.cause === 'unexplained') : unaccounted
+  const uncaptured = classified ? unaccounted.filter(item => item.cause === 'no_capture') : []
+  const unreconciled = timeline.data?.reconciliation?.ranges || []
   const progressMessage = analysisMessage(status?.state, status?.retry_after)
+  const processing = !!status && ['pending', 'preparing', 'running', 'validating', 'quota_deferred'].includes(status.state)
+  const currentMemoryReviewLabel = reviewLabel(timeline.data?.review?.state)
+  const coverage = useMemo<TapeCoverageInterval[]>(() => [
+    ...unexplained.map(item => ({ started_at: item.started_at, ended_at: item.ended_at, kind: 'unexplained' as const, label: item.reason || 'Captured but unexplained' })),
+    ...uncaptured.map(item => ({ started_at: item.started_at, ended_at: item.ended_at, kind: 'no_capture' as const, label: item.reason || 'No capture' })),
+    ...unreconciled.map(item => ({ started_at: item.started_at, ended_at: item.ended_at, kind: 'unreconciled' as const, label: `Awaiting reconciliation · ${item.state}` })),
+  ], [unexplained, uncaptured, unreconciled])
+  const reviewGrouping = () => {
+    setLabeling(true)
+    setSelected(new Set())
+    requestAnimationFrame(() => document.querySelector<HTMLElement>('#suggested-grouping')?.scrollIntoView?.({ block: 'center', behavior: 'smooth' }))
+  }
 
   return (
-    <div className="space-y-8">
-      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+    <div className="space-y-4">
+      <header className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
         <div>
-          <h1 className="flex items-center gap-2 text-2xl font-bold text-gray-900 dark:text-gray-100">
-            <CalendarDays className="h-6 w-6 text-blue-600" /> Timeline
-          </h1>
+          <h1 className="flex items-center gap-2 text-2xl font-bold text-gray-900 dark:text-gray-100"><CalendarDays className="h-6 w-6 text-[var(--tape-media)]" /> Timeline</h1>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">A semantic account of the day, grounded in capture evidence.</p>
         </div>
-        <label className="flex flex-col gap-1.5 text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
-          Date
-          <input
-            type="date"
-            value={day}
-            onChange={event => setDay(event.target.value)}
-            className="min-h-10 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium normal-case tracking-normal text-gray-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
-          />
-        </label>
+        <div className="flex items-end gap-1.5">
+          <Button variant="ghost" size="sm" aria-label="Previous day" onClick={() => setDay(shiftDate(day, -1))}><ChevronLeft className="h-4 w-4" /></Button>
+          <label className="flex flex-col gap-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-gray-500 dark:text-gray-400">
+            Date
+            <input type="date" value={day} onChange={event => setDay(event.target.value)} className="min-h-9 rounded-md border border-[var(--tape-line)] bg-[var(--tape-paper-raised)] px-2.5 py-1.5 text-sm font-medium normal-case tracking-normal text-gray-900 outline-none focus:ring-2 focus:ring-[var(--tape-focus)] dark:text-gray-100" />
+          </label>
+          <Button variant="ghost" size="sm" aria-label="Next day" onClick={() => setDay(shiftDate(day, 1))}><ChevronRight className="h-4 w-4" /></Button>
+        </div>
       </header>
 
-      <section>
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="font-semibold text-gray-900 dark:text-gray-100">Sources</h2>
-          <Button variant="secondary" size="md" onClick={() => pairing.mutate()} icon={<Link2 className="h-4 w-4" />}>Pair ScreenPipe</Button>
+      {shouldOfferBrowserTimezone && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--tape-line)] bg-[var(--tape-paper)] px-3 py-2 text-xs text-gray-600 dark:text-gray-300">
+          <span>{storedTimezone ? `Times are shown in ${storedTimezone}; this browser reports ${browserTimezone}.` : `Times are shown in the browser timezone, ${browserTimezone}. Save it to keep day boundaries consistent on other devices.`}</span>
+          <Button variant="ghost" size="sm" onClick={saveBrowserTimezone} disabled={savingBrowserTimezone}>{storedTimezone ? 'Use browser timezone' : 'Save browser timezone'}</Button>
         </div>
-        {pairing.data && (
-          <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-gray-700 dark:border-blue-800 dark:bg-blue-950/30 dark:text-gray-200">
-            Pairing code <code className="mx-1 font-mono font-bold">{pairing.data.code}</code> expires {new Date(pairing.data.expires_at).toLocaleTimeString()}.
-            <IconButton label="Copy pairing code" onClick={() => navigator.clipboard.writeText(pairing.data!.code)} className="ml-2"><Copy className="h-4 w-4" /></IconButton>
-          </div>
-        )}
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {(sources.data || []).map(source => (
-            <Card key={source.source_id} className="flex gap-3">
-              <Monitor className="h-5 w-5 text-gray-500 dark:text-gray-400" />
-              <div className="min-w-0">
-                <div className="truncate font-medium text-gray-900 dark:text-gray-100">{source.name}</div>
-                <div className="text-xs text-gray-500 dark:text-gray-400">{source.provider} · {source.platform}</div>
-                <div className={`mt-1 text-xs ${source.status === 'online' ? 'text-green-600 dark:text-green-400' : source.status === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'}`}>
-                  {sourceStatusLabel(source.status)}{source.last_seen_at ? ` · ${timeAgo(source.last_seen_at)}` : ''}
-                </div>
-              </div>
-            </Card>
-          ))}
-          {!sources.isLoading && !sources.data?.length && <div className="rounded-lg border border-dashed border-gray-300 p-4 text-sm text-gray-500 dark:border-gray-600 dark:text-gray-400">No capture sources paired.</div>}
+      )}
+
+      <section className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--tape-line)] bg-[var(--tape-paper)] px-3 py-2.5 text-xs text-gray-600 dark:text-gray-300">
+        {timeline.isFetching && <RefreshCw className="h-4 w-4 animate-spin text-gray-400" />}
+        <span className="font-semibold text-gray-800 dark:text-gray-200">{episodes.length} episodes</span>
+        {timeline.data?.coverage?.window_count != null && <span>· {timeline.data.coverage.window_count} evidence windows</span>}
+        {!!coverage.length && <span className="flex items-center gap-1 text-amber-800 dark:text-amber-300"><AlertTriangle className="h-3.5 w-3.5" />{coverage.length} coverage intervals</span>}
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-1">
+          {currentMemoryReviewLabel && <Link to={`/memory-ledger?view=review&date=${day}`} className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-semibold text-[var(--tape-focus)] hover:bg-[var(--tape-chip)]"><ScrollText className="h-3.5 w-3.5" />{currentMemoryReviewLabel}</Link>}
+          <ReviewBacklogMenu items={reviewQueue.data || []} day={day} />
+          <details className="relative">
+            <summary className="flex cursor-pointer list-none items-center gap-1 rounded-md px-2 py-1 font-semibold text-gray-700 hover:bg-[var(--tape-chip)] dark:text-gray-200"><MoreHorizontal className="h-4 w-4" /> Day tools</summary>
+            <div className="absolute right-0 z-30 mt-1 w-48 space-y-1 rounded-lg border border-[var(--tape-line)] bg-[var(--tape-paper-raised)] p-1.5 shadow-lg">
+              <button type="button" onClick={() => setShowManualMemories(value => !value)} className="flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-[var(--tape-chip)]"><Bookmark className="h-4 w-4" />{showManualMemories ? 'Hide' : 'Show'} manual memories</button>
+              <button type="button" onClick={() => setShowRaw(value => !value)} className="flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-[var(--tape-chip)]"><ScanLineIcon />{showRaw ? 'Hide' : 'Show'} raw capture</button>
+              <button type="button" onClick={() => analyze.mutate(status?.state === 'failed')} disabled={analyze.isPending} className="flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-[var(--tape-chip)] disabled:opacity-40"><RefreshCw className="h-4 w-4" />{status?.state === 'failed' ? 'Retry analysis' : episodes.length ? 'Reanalyze day' : 'Analyze day'}</button>
+            </div>
+          </details>
         </div>
       </section>
 
-      <section>
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <h2 className="font-semibold text-gray-900 dark:text-gray-100">Day</h2>
-            {timeline.isFetching && <RefreshCw className="h-4 w-4 animate-spin text-gray-400" />}
-            {timeline.data?.coverage?.window_count != null && <span className="text-xs text-gray-500">{timeline.data.coverage.window_count} evidence windows</span>}
-          </div>
-          <div className="flex flex-wrap justify-end gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setShowManualMemories(value => !value)}
-              icon={<Bookmark className="h-4 w-4" />}
-            >
-              {showManualMemories ? 'Hide manual memories' : 'Manual memories'}
-            </Button>
-            <Button variant="secondary" size="sm" onClick={() => setShowRaw(value => !value)}>{showRaw ? 'Hide raw capture' : 'Raw capture'}</Button>
-            <Button
-              variant={labeling ? 'primary' : 'secondary'}
-              size="sm"
-              onClick={() => { setLabeling(value => !value); setSelected(new Set()) }}
-              icon={<PencilRuler className="h-4 w-4" />}
-            >
-              {labeling ? 'Done labeling' : 'Label'}
-            </Button>
-            <Button size="sm" onClick={() => analyze.mutate(status?.state === 'failed')} disabled={analyze.isPending || ['pending', 'preparing', 'running', 'validating'].includes(status?.state || '')}>
-              {status?.state === 'failed' ? 'Retry analysis' : episodes.length ? 'Reanalyze day' : 'Analyze day'}
-            </Button>
-          </div>
+      {progressMessage && episodes.length > 0 && <div className="rounded-lg border border-[var(--tape-line)] bg-[var(--tape-paper)] px-3 py-2.5 text-sm text-gray-600 dark:text-gray-300">{progressMessage}</div>}
+      {status?.state === 'failed' && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2.5 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+          <AlertTriangle className="h-4 w-4" /><span className="min-w-0 flex-1">Analysis failed. {status.error}</span><Button size="sm" variant="danger" onClick={() => analyze.mutate(true)}>Retry</Button>
         </div>
+      )}
+      {timeline.isError && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2.5 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+          <AlertTriangle className="h-4 w-4" />
+          <span className="min-w-0 flex-1">Could not load this day. {(timeline.error as Error).message}</span>
+          <Button size="sm" variant="danger" onClick={() => timeline.refetch()}>Retry</Button>
+        </div>
+      )}
+      <CoverageInspector coverage={coverage} />
+      {timeline.data?.review && episodes.length > 0 && (
+        <EpisodeReviewCheckpoint
+          day={day}
+          review={timeline.data.review}
+          episodeCount={episodes.length}
+          eligibleCount={memoryEligibleCount}
+          referenceOnlyCount={referenceOnlyCount}
+          unreconciledCount={unreconciled.length}
+          consolidation={timeline.data.consolidation}
+          finalizing={finalizeEpisodes.isPending}
+          error={finalizeEpisodes.error as Error | null}
+          onReviewGrouping={reviewGrouping}
+          onFinish={() => finalizeEpisodes.mutate()}
+        />
+      )}
+      {showManualMemories && (manualMemories.isLoading ? <div className="rounded-lg border border-[var(--tape-line)] p-4 text-sm text-gray-500">Loading manual memories…</div> : <ManualMemories items={manualMemories.data || []} />)}
 
-        {showManualMemories && (
-          manualMemories.isLoading
-            ? <div className="mb-5 rounded-lg border border-gray-200 p-4 text-sm text-gray-500 dark:border-gray-700 dark:text-gray-400">Loading manual memories…</div>
-            : <ManualMemories items={manualMemories.data || []} />
-        )}
+      {labeling && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[var(--tape-focus)] bg-[var(--tape-selected)] p-3 text-sm">
+          <span className="text-gray-700 dark:text-gray-200">{selected.size ? `${selected.size} selected` : 'Select two or more episodes to group, or correct one below.'}</span>
+          <Button size="sm" disabled={selected.size < 2 || mutating} onClick={() => group.mutate([...selected])} icon={<Combine className="h-4 w-4" />}>Group selected</Button>
+          {!!selected.size && <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>Clear</Button>}
+          {!!mutationError && <p className="w-full text-xs text-red-700 dark:text-red-300">{(mutationError as { message?: string }).message || 'That edit was rejected.'}</p>}
+        </div>
+      )}
 
-        {progressMessage && <div className="mb-4 rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">{progressMessage}</div>}
-        {status?.state === 'failed' && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">Analysis failed. {status.error}</div>}
-
-        {!!unexplained.length && (
-          <IntervalList
-            title={`Not accounted for (${unexplained.length})`}
-            note={classified
-              ? 'Capture exists for these stretches but no episode explains it.'
-              : 'No episode explains these stretches. Whether anything was captured was not recorded for this day — reanalyze to separate recording gaps from unexplained capture.'}
-            intervals={unexplained}
-            tone="amber"
-          />
-        )}
-        {!!uncaptured.length && (
-          <IntervalList
-            title={`Nothing captured (${uncaptured.length})`}
-            note="No recording covers these stretches, so there is nothing to explain."
-            intervals={uncaptured}
-            tone="gray"
-          />
-        )}
-
-        {labeling && (
-          <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm dark:border-blue-800 dark:bg-blue-950/30">
-            <span className="text-gray-700 dark:text-gray-200">
-              {selected.size ? `${selected.size} selected` : 'Select two or more episodes to merge them.'}
-            </span>
-            <Button
-              size="sm"
-              disabled={selected.size < 2 || mutating}
-              onClick={() => merge.mutate([...selected])}
-              icon={<Combine className="h-4 w-4" />}
-            >
-              Merge selected
-            </Button>
-            {!!selected.size && (
-              <Button size="sm" variant="secondary" onClick={() => setSelected(new Set())}>Clear</Button>
-            )}
-            <span className="ml-auto text-xs text-gray-600 dark:text-gray-300">
-              Every edit confirms the episode, which pins it against the next analysis run.
-            </span>
-            {!!mutationError && (
-              <p className="w-full text-xs text-red-700 dark:text-red-400">
-                {(mutationError as { message?: string }).message || 'That edit was rejected.'}
-              </p>
-            )}
-          </div>
-        )}
-
-        <div className="space-y-4">
-          {episodes.map(episode => (
-            <div key={episode.episode_id} className={labeling ? 'mb-4' : ''}>
+      {timeline.data?.review_projection && episodes.length ? (
+        <DayReviewBoard
+          day={day}
+          timezone={timezone}
+          projection={timeline.data.review_projection}
+          episodes={episodes}
+          coverage={coverage}
+          initialProposal={timeline.data.consolidation}
+          labeling={labeling}
+          onToggleEditing={() => { setLabeling(value => !value); setSelected(new Set()) }}
+          onSelectGroup={episodeIds => setSelected(new Set(episodeIds))}
+          renderEpisode={episode => (
+            <div key={episode.episode_id}>
               <EpisodeCard episode={episode} nested={episode.activity_mode === 'background' || !!episode.parent_episode_id} />
-              {labeling && (
-                <EpisodeLabelBar
-                  episode={episode}
-                  selected={selected.has(episode.episode_id)}
-                  busy={mutating}
-                  nested={episode.activity_mode === 'background' || !!episode.parent_episode_id}
-                  onToggleSelected={() => setSelected(current => {
-                    const next = new Set(current)
-                    next.has(episode.episode_id) ? next.delete(episode.episode_id) : next.add(episode.episode_id)
-                    return next
-                  })}
-                  onAdjust={changes => adjust.mutate({ episodeId: episode.episode_id, changes })}
-                  onSplit={at => split.mutate({ episodeId: episode.episode_id, at })}
-                  onDelete={() => remove.mutate(episode.episode_id)}
-                />
-              )}
-            </div>
-          ))}
-          {!timeline.isLoading && !episodes.length && !progressMessage && status?.state !== 'failed' && (
-            <div className="rounded-lg border border-dashed border-gray-300 p-6 text-sm text-gray-500 dark:border-gray-600 dark:text-gray-400">
-              {status?.state === 'awaiting_evidence' ? 'Nothing captured for this day.' : 'This day has not been analyzed yet.'}
+              <EpisodeLabelBar
+                episode={episode}
+                selected={selected.has(episode.episode_id)}
+                busy={mutating}
+                nested={episode.activity_mode === 'background' || !!episode.parent_episode_id}
+                onToggleSelected={() => setSelected(current => {
+                  const next = new Set(current)
+                  next.has(episode.episode_id) ? next.delete(episode.episode_id) : next.add(episode.episode_id)
+                  return next
+                })}
+                onAdjust={changes => adjust.mutate({ episodeId: episode.episode_id, changes })}
+                onSplit={at => split.mutate({ episodeId: episode.episode_id, at })}
+                onDelete={() => remove.mutate(episode.episode_id)}
+              />
             </div>
           )}
-        </div>
+        />
+      ) : !timeline.isLoading && !timeline.isError ? (
+        <EmptyDayHandoff
+          items={reviewQueue.data || []}
+          title={processing
+            ? day === today ? 'Today’s episodes are still processing.' : 'This day’s episodes are still processing.'
+            : status?.state === 'awaiting_evidence'
+            ? day === today ? 'Nothing captured today.' : 'Nothing was captured for this day.'
+            : status?.state === 'complete'
+              ? 'Analysis found no episodes for this day.'
+              : status?.state === 'failed'
+                ? 'This day’s analysis needs attention.'
+              : day === today ? 'Today has no processed episodes yet.' : 'This day has no processed episodes yet.'}
+          description={processing
+            ? `${progressMessage || 'Analysis is in progress.'} Continue reviewing an earlier episode day while it finishes.`
+            : status?.state === 'awaiting_evidence'
+            ? 'There is no capture evidence to turn into episodes. Continue with the review trail whenever you are ready.'
+            : status?.state === 'complete'
+              ? 'The analysis completed without producing a semantic episode. You can run it again or continue the review trail.'
+              : status?.state === 'failed'
+                ? 'Use Retry above for this day, or continue reviewing an earlier episode day.'
+              : 'Start processing this day, or resume the oldest review action that needs you.'}
+          canAnalyze={!status || status.state === 'complete'}
+          analyzing={analyze.isPending}
+          analyzeLabel={status?.state === 'complete' ? 'Reanalyze this day' : 'Analyze this day'}
+          onAnalyze={() => analyze.mutate(status?.state === 'complete')}
+        />
+      ) : null}
 
-        {showRaw && (
-          <div className="mt-6 rounded-lg border border-gray-200 p-4 dark:border-gray-700">
-            <h3 className="font-medium text-gray-900 dark:text-gray-100">Raw capture diagnostics</h3>
-            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">Transport and observation rows used to build evidence. This is diagnostic data, not the semantic timeline.</p>
-            {raw.isLoading && <p className="mt-3 text-sm text-gray-500">Loading raw capture…</p>}
-            {raw.data && <p className="mt-3 text-sm text-gray-600 dark:text-gray-300">{raw.data.length} raw items · {raw.data.filter(item => item.kind === 'audio').length} audio chunks · {raw.data.filter(item => item.kind !== 'audio').length} visual/context items</p>}
-          </div>
-        )}
-      </section>
+      {showRaw && (
+        <section className="rounded-lg border border-[var(--tape-line)] bg-[var(--tape-paper)] p-4">
+          <h3 className="font-medium text-gray-900 dark:text-gray-100">Raw capture diagnostics</h3>
+          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">Transport and observation rows used to build evidence, not the semantic timeline.</p>
+          {raw.isLoading && <p className="mt-3 text-sm text-gray-500">Loading raw capture…</p>}
+          {raw.data && <p className="mt-3 text-sm text-gray-600 dark:text-gray-300">{raw.data.length} raw items · {raw.data.filter(item => item.kind === 'audio').length} audio chunks · {raw.data.filter(item => item.kind !== 'audio').length} visual/context items</p>}
+        </section>
+      )}
     </div>
   )
+}
+
+function ScanLineIcon() {
+  return <span className="inline-flex h-4 w-4 items-center justify-center text-[10px] font-bold" aria-hidden="true">|||</span>
 }

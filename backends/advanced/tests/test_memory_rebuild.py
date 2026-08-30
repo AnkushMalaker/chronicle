@@ -138,6 +138,7 @@ def test_vault_backup_manifest_records_description_and_file_hashes(tmp_path: Pat
     assert manifest["schema_version"] == 1
     assert manifest["description"] == "reingest after speaker fix"
     assert manifest["user_ids"] == ["user-1"]
+    assert manifest["vault_roots"] == ["conversation_docs"]
     assert manifest["files"]["conversation_docs/user-1/Daily/2026-08-11.md"] == {
         "bytes": len(archived_note),
         "sha256": hashlib.sha256(archived_note).hexdigest(),

@@ -17,6 +17,7 @@ _FRONTMATTER_BOUNDARY = re.compile(r"^---\s*$", re.MULTILINE)
 _H2 = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 _H3 = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
 _PLACEHOLDERS = {"", "-", "none", "n/a", "unknown", "untitled", "[ ]", "- [ ]"}
+_LOCAL_SPEAKER = re.compile(r"^(?:unknown\s+)?speaker(?:[\s_]*\d+)?$", re.IGNORECASE)
 
 
 class ConversationNoteError(ValueError):
@@ -83,6 +84,25 @@ def _render_list(name: str, values: Iterable[str]) -> list[str]:
     if not values:
         return [f"{name}: []"]
     return [f"{name}:", *(f"  - {json.dumps(value)}" for value in values)]
+
+
+def _identified_person_links(values: Iterable[str]) -> list[str]:
+    """Render stable speaker identities while rejecting local diarization labels."""
+
+    links: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        name = str(value).strip()
+        if name.startswith("[[") and name.endswith("]]"):
+            name = name[2:-2].split("|", 1)[0].strip()
+        if not name or _LOCAL_SPEAKER.fullmatch(name):
+            continue
+        link = f"[[{name}]]"
+        key = link.casefold()
+        if key not in seen:
+            seen.add(key)
+            links.append(link)
+    return links
 
 
 def _encode_source_markdown(value: str) -> str:
@@ -171,6 +191,7 @@ def write_source_fallback_conversation_note(
     date: str,
     duration_minutes: float | None,
     title: str | None,
+    source_people: Iterable[str] = (),
 ) -> None:
     """Write a minimal lossless note after both semantic LLM attempts fail."""
     source = " ".join(transcript.split()).strip()
@@ -185,6 +206,7 @@ def write_source_fallback_conversation_note(
     raw_fallback_title = " ".join((title or "").split()).strip() or TITLE_NOT_GENERATED
     fallback_title = _encode_source_markdown(raw_fallback_title)
     duration = "" if duration_minutes is None else f"{float(duration_minutes):g}"
+    people = _identified_person_links(source_people)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "\n".join(
@@ -194,7 +216,7 @@ def write_source_fallback_conversation_note(
                 '  - "[[Conversations]]"',
                 f"conversation_id: {json.dumps(str(conversation_id))}",
                 f"date: {json.dumps(str(date))}",
-                "people: []",
+                *_render_list("people", people),
                 "topics: []",
                 f"duration_minutes: {duration}",
                 "---",

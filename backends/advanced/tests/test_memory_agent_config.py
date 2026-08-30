@@ -103,6 +103,7 @@ def test_memory_service_passes_consecutive_guard_only_to_pi(tmp_path, monkeypatc
     agent = service._write_agent_instance(pi_agent.PiMemoryAgent, tmp_path / "vault")
 
     assert agent.max_identical_tool_calls == 2
+    assert agent.terminate_on_verified is True
 
 
 def test_memory_config_rejects_codex_for_search(monkeypatch):
@@ -151,6 +152,17 @@ def test_all_write_prompts_forbid_about_mentions_duplication():
         assert "one canonical Topic" in prompt
 
 
+def test_memory_prompt_preserves_property_time_and_dates_contingent_claims():
+    normalized = " ".join(DEFAULT_AGENT_SYSTEM_PROMPT.split())
+
+    assert "`created` is immutable" in normalized
+    assert (
+        "`updated` must be the later of its existing value and the source date"
+        in normalized
+    )
+    assert "Date and attribute claims whose truth may change over time" in normalized
+
+
 def test_day_task_says_chronicle_owns_the_concise_episode_index():
     task = build_write_task(
         "Local day with one episode.",
@@ -166,6 +178,22 @@ def test_day_task_says_chronicle_owns_the_concise_episode_index():
     assert "high bar for creating a new semantic note" in task
     assert "Never create an empty or" in task
     assert "may not invent a new organic category" in task
+    assert "Do not search or read `Conversations/` or other `Daily/` notes" in task
+    assert "twelve search/read calls" in task
+    assert "Pi still chooses which semantic notes" in task
+
+
+def test_conversation_task_scopes_existing_note_repair_to_its_source_id():
+    task = build_write_task(
+        "Speaker: Grounded transcript.",
+        "conv-123",
+        date="2026-08-18T00:00:00+00:00",
+        record="conversation",
+    )
+
+    assert "Required source note: Conversations/conv-123.md" in task
+    assert "never glob, audit, or read other Conversations/*.md" in task
+    assert "You still choose which relevant People/Topic/category notes" in task
 
 
 @pytest.mark.parametrize("legacy_key", ["agent_executor", "codex", "pi"])

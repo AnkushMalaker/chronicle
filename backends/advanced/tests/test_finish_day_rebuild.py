@@ -167,10 +167,32 @@ def test_rebuild_job_states_ignores_rq_companion_keys(monkeypatch):
     assert states == {"finished": 1, "deferred": 1}
 
 
+@pytest.mark.asyncio
+async def test_chain_idle_waits_for_repair_jobs_in_started_registry(monkeypatch):
+    class FakeRedis:
+        def zcard(self, key):
+            assert key == "rq:wip:memory"
+            return 1
+
+    monkeypatch.setattr(
+        finish_day_rebuild,
+        "memory_queue",
+        SimpleNamespace(
+            count=0,
+            deferred_job_registry=SimpleNamespace(count=0),
+            started_job_registry=SimpleNamespace(key="rq:wip:memory"),
+            connection=FakeRedis(),
+        ),
+    )
+
+    assert await finish_day_rebuild._chain_idle() is False
+
+
 def test_repair_job_id_and_metadata_are_scoped_to_the_rebuild(monkeypatch):
     captured = {}
 
     def fake_enqueue(*args, **kwargs):
+        captured["args"] = args
         captured.update(kwargs)
         return SimpleNamespace(id=kwargs["job_id"])
 
@@ -190,12 +212,75 @@ def test_repair_job_id_and_metadata_are_scoped_to_the_rebuild(monkeypatch):
     )
 
     assert job.id == "day_retry_run-1_2_3_2026-01-06"
+    assert captured["args"][0] == (
+        "advanced_omi_backend.workers.rebuild_timeline_day_job"
+    )
     assert captured["meta"] == {
         "user_id": "user-1",
         "rebuild_run_id": "run-1",
         "local_date": "2026-01-06",
         "trigger": "timeline_rebuild_repair",
     }
+    assert captured["depends_on"] is None
+
+
+def test_partial_day_repair_reuses_active_timeline_generation(monkeypatch):
+    captured = {}
+
+    def fake_enqueue(*args, **kwargs):
+        captured["args"] = args
+        captured.update(kwargs)
+        return SimpleNamespace(id=kwargs["job_id"])
+
+    monkeypatch.setattr(
+        finish_day_rebuild,
+        "memory_queue",
+        SimpleNamespace(enqueue=fake_enqueue),
+    )
+    row = {
+        "local_date": datetime(2026, 1, 6).date(),
+        "timezone": "UTC",
+        "state": "partial",
+    }
+
+    finish_day_rebuild._enqueue(
+        "user-1",
+        row,
+        repair_scope="run-1",
+        sequence="2_3",
+        depends_on=None,
+    )
+
+    assert captured["args"][0] == (
+        "advanced_omi_backend.workers.record_timeline_day_memory_job"
+    )
+
+
+def test_repair_chain_continues_after_a_previous_day_fails(monkeypatch):
+    captured = {}
+
+    def fake_enqueue(*args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(id=kwargs["job_id"])
+
+    monkeypatch.setattr(
+        finish_day_rebuild,
+        "memory_queue",
+        SimpleNamespace(enqueue=fake_enqueue),
+    )
+    row = {"local_date": datetime(2026, 1, 7).date(), "timezone": "UTC"}
+
+    finish_day_rebuild._enqueue(
+        "user-1",
+        row,
+        repair_scope="run-1",
+        sequence="2_4",
+        depends_on="failed-previous-day",
+    )
+
+    dependency = captured["depends_on"]
+    assert dependency.dependencies == ["failed-previous-day"]
+    assert dependency.allow_failure is True
 
 
 def test_finisher_refuses_to_validate_an_incomplete_rebuild():

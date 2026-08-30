@@ -10,6 +10,7 @@ message ClientId { string value = 1; }
 message ConnectionId { string value = 1; }
 message CaptureSourceId { string value = 1; }
 message CaptureSessionId { string value = 1; }
+message MemorySpaceId { string value = 1; }
 message VoiceSessionId { string value = 1; }
 message TurnId { string value = 1; }
 message ResponseId { string value = 1; }
@@ -160,6 +161,7 @@ message StartCapture {
   AudioSpec audio_spec = 5;
   CaptureCapabilities capabilities = 6;
   string recovery_batch_id = 7;
+  MemorySpaceId memory_space_id = 8;
 }
 
 message StopCapture {
@@ -216,6 +218,14 @@ message CapturePacketAccepted {
   uint64 sequence = 2;
 }
 
+message TranscriptUpdate {
+  CaptureBinding binding = 1;
+  string text = 2;
+  bool is_final = 3;
+  float confidence = 4;
+  string speaker_name = 5;
+}
+
 message PlaybackOffer {
   CaptureBinding binding = 1;
   TurnId turn_id = 2;
@@ -251,6 +261,7 @@ message ServerControl {
     Heartbeat heartbeat = 15;
     ProtocolError error = 16;
     CapturePacketAccepted capture_packet_accepted = 17;
+    TranscriptUpdate transcript_update = 18;
   }
 }
 
@@ -296,6 +307,7 @@ message CaptureStreamOpened {
   AudioSpec source_spec = 4;
   ProcessingProfile processing_profile = 5;
   DataPurpose data_purpose = 6;
+  MemorySpaceId memory_space_id = 7;
 }
 
 message CanonicalPcmFrame {

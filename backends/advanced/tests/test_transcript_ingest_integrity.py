@@ -364,6 +364,11 @@ async def test_transcription_job_quarantines_bad_cached_timing(monkeypatch):
     monkeypatch.setattr(module, "transcribe_audio_range", transcribe)
     monkeypatch.setattr(
         module,
+        "get_diarization_settings",
+        lambda: {"diarization_source": "pyannote"},
+    )
+    monkeypatch.setattr(
+        module,
         "load_transcript_audio_ranges",
         AsyncMock(return_value=[(0.0, 130.0)]),
     )
@@ -385,6 +390,7 @@ async def test_transcription_job_quarantines_bad_cached_timing(monkeypatch):
     record_event.assert_called_once()
     assert record_event.call_args.kwargs["category"] == "data_integrity"
     assert transcribe.await_args.kwargs["provider_model_name"] == "stt-faster-whisper"
+    assert transcribe.await_args.kwargs["diarize"] is False
 
 
 @pytest.mark.asyncio

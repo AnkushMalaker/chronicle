@@ -383,6 +383,44 @@ async def test_quiet_boundary_without_pending_work_settles(documents):
 
 
 @pytest.mark.asyncio
+async def test_measured_quiet_settles_despite_continuing_screen_evidence(
+    documents, monkeypatch
+):
+    """Continuous ScreenPipe frames are not proof that people kept speaking."""
+
+    bundle = make_bundle(
+        items=[
+            evidence_item(10, 10),
+            TimelineEvidenceItem(
+                evidence_id="frame:2",
+                kind="frame",
+                started_at=START + timedelta(minutes=22),
+                ended_at=START + timedelta(minutes=23),
+                role="ambient",
+            ),
+            TimelineEvidenceItem(
+                evidence_id="frame:3",
+                kind="frame",
+                started_at=START + timedelta(minutes=40),
+                ended_at=START + timedelta(minutes=41),
+                role="ambient",
+            ),
+        ]
+    )
+
+    async def measured_quiet(_end, _window):
+        return True
+
+    monkeypatch.setattr(reconciliation, "_boundary_is_quiet", measured_quiet)
+
+    status = await assess_settlement(
+        agent_episode(10, 10), bundle, START + timedelta(minutes=60), user_id=USER
+    )
+
+    assert status == "settled"
+
+
+@pytest.mark.asyncio
 async def test_unscored_audio_span_keeps_the_episode_provisional(documents):
     await AudioEvidenceSpan(
         user_id=USER,
@@ -464,6 +502,43 @@ async def test_untouched_episode_carries_forward_without_writing(documents):
     )
     assert (survivor.status, survivor.revision) == ("provisional", 1)
     assert projection.calls == []
+
+
+@pytest.mark.asyncio
+async def test_unchanged_episode_can_advance_to_settled_without_a_new_revision(
+    documents,
+):
+    dirty = await make_dirty_range()
+    prior = await make_prior_episode(offset_minutes=10, minutes=10)
+    bundle = make_bundle(
+        items=[evidence_item(10, 10), evidence_item(40, 10, index=2)],
+        existing=[existing_payload(prior)],
+    )
+    projection = RecordingProjection()
+    dispatched: list[tuple[str, list[str]]] = []
+
+    async def dispatch(user_id, episode_ids):
+        dispatched.append((user_id, list(episode_ids)))
+
+    outcome = await publish_reconciliation(
+        USER,
+        dirty,
+        bundle,
+        TimelineAgentResult(episodes=[agent_episode(10, 10)]),
+        observed=await observed_revisions(bundle),
+        timezone_name="UTC",
+        refresh_projections_fn=projection,
+        dispatch_fn=dispatch,
+        now=START + timedelta(minutes=60),
+    )
+
+    survivor = await TimelineEpisode.find_one(
+        TimelineEpisode.episode_id == prior.episode_id
+    )
+    assert (survivor.status, survivor.revision) == ("settled", 1)
+    assert outcome.material_change is False
+    assert projection.calls == []
+    assert dispatched == [(USER, [prior.episode_id])]
 
 
 @pytest.mark.asyncio

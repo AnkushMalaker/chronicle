@@ -30,7 +30,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from active_turn_consumer import ActiveTurnConsumer
-from consumer import DETECTIONS_STREAM, GROUP_NAME, WakeWordConsumer
+from consumer import DETECTIONS_STREAM, GROUP_NAME, STREAM_PATTERN, WakeWordConsumer
 from detector import HermesDetector
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response
@@ -431,6 +431,7 @@ async def health(response: Response):
         "wakewords": _wakeword_summaries(),
         "redis_url": REDIS_URL,
         "consumer_group": GROUP_NAME,
+        "stream_pattern": STREAM_PATTERN,
         "detections_stream": DETECTIONS_STREAM,
     }
 

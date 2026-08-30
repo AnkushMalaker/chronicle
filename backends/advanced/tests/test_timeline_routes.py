@@ -1,14 +1,18 @@
 import os
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from beanie import init_beanie
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from fastapi.encoders import jsonable_encoder
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from advanced_omi_backend.models.timeline import (
+    DirtyEvidenceRange,
+    MemoryReviewProposal,
     TimelineAnalysisRun,
     TimelineAudioRange,
     TimelineDay,
@@ -24,6 +28,7 @@ from advanced_omi_backend.routers.modules.timeline_routes import (
     _refs_overlapping,
     _run_payload,
 )
+from advanced_omi_backend.services.timeline import review as timeline_review
 
 
 def assert_utc(value: str) -> None:
@@ -65,6 +70,7 @@ def test_episode_payload_marks_episode_and_evidence_datetimes_as_utc():
         status="active",
         confirmed_at=None,
         confirmed_fields=[],
+        memory_policy="auto",
         salience="routine",
         confidence=0.9,
         activity_mode="foreground",
@@ -129,6 +135,7 @@ def test_episode_payload_exposes_durable_identity_and_confirmation():
         status="confirmed",
         confirmed_at=value,
         confirmed_fields=["title"],
+        memory_policy="remember",
         salience="notable",
         confidence=0.9,
         activity_mode="foreground",
@@ -157,6 +164,7 @@ def test_episode_payload_exposes_durable_identity_and_confirmation():
     assert payload["episode_key"] == "durable-key"
     assert payload["status"] == "confirmed"
     assert payload["confirmed_fields"] == ["title"]
+    assert payload["memory_policy"] == "remember"
     # Without this the episode cannot deep-link into the recording it cites.
     assert payload["evidence"][0]["metadata"]["conversation_id"] == "conv-42"
 
@@ -321,7 +329,14 @@ async def route_db(mongo_service):
     database = client["test_timeline_routes_db"]
     await init_beanie(
         database=database,
-        document_models=[TimelineEpisode, TimelineDay, TimelineAnalysisRun, User],
+        document_models=[
+            TimelineEpisode,
+            TimelineDay,
+            TimelineAnalysisRun,
+            DirtyEvidenceRange,
+            MemoryReviewProposal,
+            User,
+        ],
     )
     yield database
     await client.drop_database("test_timeline_routes_db")
@@ -353,6 +368,189 @@ async def _stored_episode(user: User, *, start_minute: int, end_minute: int, **e
     episode = TimelineEpisode(**payload)
     await episode.insert()
     return episode
+
+
+@pytest.mark.asyncio
+async def test_day_payload_separates_unreconciled_evidence_from_episode_gaps(route_db):
+    user = await _route_user()
+    day = TimelineDay(
+        user_id=str(user.id),
+        local_date=date(2026, 8, 6),
+        timezone="Etc/UTC",
+        active_run_id="run-one",
+        coverage={"unassigned_intervals": []},
+    )
+    await day.insert()
+    await _stored_episode(user, start_minute=0, end_minute=30)
+    base = datetime(2026, 8, 6, 9, tzinfo=timezone.utc)
+    await DirtyEvidenceRange(
+        user_id=str(user.id),
+        started_at=base,
+        ended_at=base + timedelta(minutes=20),
+        evidence_revision=2,
+        trigger_reasons=["late_observation"],
+        not_before=base,
+        force_after=base + timedelta(minutes=5),
+    ).insert()
+
+    payload = await timeline_routes.get_timeline_day(
+        local_date=date(2026, 8, 6), timezone="Etc/UTC", user=user
+    )
+
+    assert payload["review"]["state"] == "episodes_pending"
+    assert payload["coverage"]["unassigned_intervals"] == []
+    assert len(payload["reconciliation"]["ranges"]) == 1
+    assert payload["reconciliation"]["ranges"][0]["trigger_reasons"] == [
+        "late_observation"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_episode_review_cannot_finalize_while_evidence_is_unreconciled(route_db):
+    user = await _route_user()
+    await TimelineDay(
+        user_id=str(user.id),
+        local_date=date(2026, 8, 6),
+        timezone="Etc/UTC",
+        active_run_id="run-one",
+    ).insert()
+    base = datetime(2026, 8, 6, 9, tzinfo=timezone.utc)
+    await DirtyEvidenceRange(
+        user_id=str(user.id),
+        started_at=base,
+        ended_at=base + timedelta(minutes=20),
+        evidence_revision=2,
+        not_before=base,
+        force_after=base + timedelta(minutes=5),
+    ).insert()
+
+    with pytest.raises(HTTPException) as raised:
+        await timeline_routes.finalize_timeline_episode_review(
+            local_date=date(2026, 8, 6),
+            body=timeline_routes.ReviewDayRequest(timezone="Etc/UTC"),
+            background_tasks=BackgroundTasks(),
+            user=user,
+        )
+
+    assert raised.value.status_code == 409
+    assert "reconciliation" in raised.value.detail
+
+
+@pytest.mark.asyncio
+async def test_episode_review_queues_the_exact_active_generation(route_db):
+    user = await _route_user()
+    await TimelineDay(
+        user_id=str(user.id),
+        local_date=date(2026, 8, 6),
+        timezone="Etc/UTC",
+        active_run_id="run-one",
+    ).insert()
+
+    payload = await timeline_routes.finalize_timeline_episode_review(
+        local_date=date(2026, 8, 6),
+        body=timeline_routes.ReviewDayRequest(timezone="Etc/UTC"),
+        background_tasks=BackgroundTasks(),
+        user=user,
+    )
+    stored = await TimelineDay.find_one(TimelineDay.user_id == str(user.id))
+
+    assert payload["state"] == "memory_queued"
+    assert stored.review_run_id == "run-one"
+    assert stored.review_state == "memory_queued"
+
+
+@pytest.mark.asyncio
+async def test_vault_fence_conflict_makes_the_proposal_regeneratable(
+    route_db, tmp_path, monkeypatch
+):
+    """A stale proposal must not remain the only action in a pending day."""
+
+    user = await _route_user()
+    user_id = str(user.id)
+    day = TimelineDay(
+        user_id=user_id,
+        local_date=date(2026, 8, 6),
+        timezone="Etc/UTC",
+        active_run_id="run-one",
+        review_run_id="run-one",
+        review_state="memory_pending",
+    )
+    await day.insert()
+    change = timeline_review.build_potential_changes(
+        {"People/Ankush.md": "accepted when generated\n"},
+        {"People/Ankush.md": "proposal\n"},
+    )[0]
+    proposal = MemoryReviewProposal(
+        user_id=user_id,
+        local_date=day.local_date,
+        timezone=day.timezone,
+        timeline_run_id="run-one",
+        state="pending",
+        changes=[change],
+    )
+    await proposal.insert()
+    day.memory_review_proposal_id = proposal.proposal_id
+    await day.save()
+
+    vault_root = tmp_path / user_id
+    (vault_root / "People").mkdir(parents=True)
+    (vault_root / "People/Ankush.md").write_text(
+        "human edit after generation\n", encoding="utf-8"
+    )
+
+    class FakeMemoryService:
+        vault = SimpleNamespace(user_root=lambda _user_id: vault_root)
+
+    monkeypatch.setattr(timeline_review, "ChronicleMemoryService", FakeMemoryService)
+    monkeypatch.setattr(timeline_review, "get_memory_service", FakeMemoryService)
+    monkeypatch.setattr(
+        timeline_review, "vault_run_lock", lambda _user_id: nullcontext()
+    )
+
+    with pytest.raises(timeline_review.MemoryReviewError, match="changed after"):
+        await timeline_review.resolve_memory_review(proposal, [change.change_id])
+
+    stored_day = await TimelineDay.get(day.id)
+    stored_proposal = await MemoryReviewProposal.get(proposal.id)
+    assert stored_day.review_state == "failed"
+    assert stored_proposal.state == "stale"
+    assert "changed after" in stored_day.review_error
+
+    queued = await timeline_review.queue_memory_review_regeneration(stored_proposal)
+    stored_proposal = await MemoryReviewProposal.get(proposal.id)
+    assert queued.review_state == "memory_queued"
+    assert queued.review_error is None
+    assert stored_proposal.state == "stale"
+
+
+@pytest.mark.asyncio
+async def test_later_memory_is_blocked_until_the_earlier_day_is_decided(route_db):
+    user = await _route_user()
+    earlier = TimelineDay(
+        user_id=str(user.id),
+        local_date=date(2026, 8, 5),
+        timezone="Etc/UTC",
+        active_run_id="run-earlier",
+        review_state="memory_pending",
+    )
+    later = TimelineDay(
+        user_id=str(user.id),
+        local_date=date(2026, 8, 6),
+        timezone="Etc/UTC",
+        active_run_id="run-later",
+        review_run_id="run-later",
+        review_state="memory_queued",
+    )
+    await earlier.insert()
+    await later.insert()
+
+    blocker = await timeline_review._earlier_unresolved(later)
+    assert blocker.local_date == date(2026, 8, 5)
+
+    earlier.review_state = "finalized"
+    earlier.review_outcome = "rejected"
+    await earlier.save()
+    assert await timeline_review._earlier_unresolved(later) is None
 
 
 async def _published_day(user: User, run_id: str = "run-one") -> TimelineDay:
@@ -466,6 +664,191 @@ async def test_a_merged_away_episode_leaves_the_day_view(route_db):
     day = await timeline_routes.get_timeline_day(date(2026, 8, 6), "Etc/UTC", user)
 
     assert [item["episode_id"] for item in day["episodes"]] == [survivor.episode_id]
+
+
+@pytest.mark.asyncio
+async def test_merging_invalidates_the_stored_grouping_proposal(route_db, monkeypatch):
+    user = await _route_user()
+    survivor = await _stored_episode(user, start_minute=0, end_minute=30)
+    absorbed = await _stored_episode(user, start_minute=30, end_minute=60)
+    day = await _published_day(user)
+    day.consolidation_state = "ready"
+    day.consolidation_run_id = "run-one"
+    day.consolidation_suggestions = [
+        {
+            "suggestion_id": "stale",
+            "episode_ids": [survivor.episode_id, absorbed.episode_id],
+        }
+    ]
+    await day.save()
+    monkeypatch.setattr(
+        timeline_routes,
+        "synthesize_merged_episode_account",
+        AsyncMock(
+            return_value=SimpleNamespace(title="Merged", summary="Merged account")
+        ),
+    )
+
+    await timeline_routes.merge_timeline_episodes(
+        timeline_routes.EpisodeMerge(
+            episode_ids=[survivor.episode_id, absorbed.episode_id]
+        ),
+        user,
+    )
+
+    refreshed = await TimelineDay.get(day.id)
+    assert refreshed.consolidation_state == ""
+    assert refreshed.consolidation_suggestions == []
+
+
+@pytest.mark.asyncio
+async def test_day_payload_hides_suggestions_with_missing_episode_ids(route_db):
+    user = await _route_user()
+    active = await _stored_episode(user, start_minute=0, end_minute=30)
+    day = await _published_day(user)
+    day.consolidation_state = "ready"
+    day.consolidation_run_id = "run-one"
+    day.consolidation_suggestions = [
+        {"suggestion_id": "stale", "episode_ids": [active.episode_id, "missing"]}
+    ]
+    await day.save()
+
+    payload = await timeline_routes.get_timeline_day(date(2026, 8, 6), "Etc/UTC", user)
+
+    assert payload["consolidation"]["state"] == ""
+    assert payload["consolidation"]["suggestions"] == []
+
+
+@pytest.mark.asyncio
+async def test_grouping_request_queues_generation_without_waiting(monkeypatch):
+    user = SimpleNamespace(id="user-one")
+    day = SimpleNamespace(
+        id="day-one", active_run_id="run-one", review_state="episodes_pending"
+    )
+    queued = AsyncMock(
+        return_value={
+            "state": "queued",
+            "run_id": "run-one",
+            "model": None,
+            "suggestions": [],
+            "error": None,
+            "generated_at": None,
+        }
+    )
+    collection = SimpleNamespace(
+        update_one=AsyncMock(return_value=SimpleNamespace(modified_count=1))
+    )
+    day_model = SimpleNamespace(
+        user_id="user_id",
+        local_date="local_date",
+        timezone="timezone",
+        find_one=AsyncMock(return_value=day),
+        get_pymongo_collection=lambda: collection,
+    )
+    monkeypatch.setattr(timeline_routes, "TimelineDay", day_model)
+    monkeypatch.setattr(timeline_routes, "queue_day_consolidation", queued)
+
+    result = await timeline_routes.suggest_timeline_day_consolidation(
+        date(2026, 8, 6),
+        timeline_routes.ReviewDayRequest(timezone="Etc/UTC"),
+        user,
+    )
+
+    assert result == {
+        "state": "queued",
+        "run_id": "run-one",
+        "model": None,
+        "suggestions": [],
+        "error": None,
+        "generated_at": None,
+    }
+    queued.assert_awaited_once_with(
+        str(user.id), date(2026, 8, 6), "Etc/UTC", day.active_run_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_merging_regenerates_the_semantic_account(route_db, monkeypatch):
+    """The survivor's narrow title must not describe a newly widened episode."""
+
+    user = await _route_user()
+    survivor = await _stored_episode(
+        user,
+        start_minute=0,
+        end_minute=30,
+        title="Career discussion",
+        summary="They discuss career direction.",
+    )
+    absorbed = await _stored_episode(
+        user,
+        start_minute=30,
+        end_minute=60,
+        title="Product discussion",
+        summary="They discuss product strategy.",
+    )
+
+    async def synthesize(episodes):
+        assert [item.episode_id for item in episodes] == [
+            survivor.episode_id,
+            absorbed.episode_id,
+        ]
+        return SimpleNamespace(
+            title="Interview about career and product strategy",
+            summary="They discuss career direction and product strategy.",
+        )
+
+    monkeypatch.setattr(
+        timeline_routes, "synthesize_merged_episode_account", synthesize
+    )
+
+    payload = await timeline_routes.merge_timeline_episodes(
+        timeline_routes.EpisodeMerge(
+            episode_ids=[survivor.episode_id, absorbed.episode_id]
+        ),
+        user,
+    )
+
+    assert payload["title"] == "Interview about career and product strategy"
+    assert payload["summary"] == "They discuss career direction and product strategy."
+    kept = await TimelineEpisode.find_one(
+        TimelineEpisode.episode_id == survivor.episode_id
+    )
+    assert kept.title == payload["title"]
+    assert kept.summary == payload["summary"]
+
+
+@pytest.mark.asyncio
+async def test_existing_merged_episode_can_regenerate_its_account(
+    route_db, monkeypatch
+):
+    user = await _route_user()
+    episode = await _stored_episode(
+        user,
+        start_minute=0,
+        end_minute=60,
+        title="Stale first segment title",
+        summary="This only describes the first segment.",
+    )
+
+    async def synthesize(episodes, *, force=False):
+        assert [item.episode_id for item in episodes] == [episode.episode_id]
+        assert force is True
+        return SimpleNamespace(
+            title="Complete interview",
+            summary="A coherent account derived from all merged evidence.",
+        )
+
+    monkeypatch.setattr(
+        timeline_routes, "synthesize_merged_episode_account", synthesize
+    )
+
+    payload = await timeline_routes.regenerate_timeline_episode_account(
+        episode.episode_id, user
+    )
+
+    assert payload["title"] == "Complete interview"
+    assert payload["summary"] == "A coherent account derived from all merged evidence."
+    assert payload["confirmed_fields"] == ["summary", "title"]
 
 
 @pytest.mark.asyncio

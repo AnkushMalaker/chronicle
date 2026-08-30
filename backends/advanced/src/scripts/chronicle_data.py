@@ -34,6 +34,7 @@ from advanced_omi_backend.services.data_archive import (
 )
 from advanced_omi_backend.services.memory.rebuild import (
     TIMELINE_STAGES,
+    VAULT_ROOTS,
     MemoryRebuildError,
     RebuildStage,
     build_rebuild_plan,
@@ -349,10 +350,7 @@ async def _run_rebuild(args: argparse.Namespace) -> None:
 async def _run_backup_vault(args: argparse.Namespace) -> None:
     user_ids = tuple(sorted(set(args.user_id or [])))
     if not user_ids:
-        roots = [
-            args.data_dir / root_name
-            for root_name in ("conversation_docs", "memory_md")
-        ]
+        roots = [args.data_dir / root_name for root_name in VAULT_ROOTS]
         user_ids = tuple(
             sorted(
                 {

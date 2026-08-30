@@ -22,7 +22,7 @@ import os
 import struct
 import time
 import wave
-from typing import Any, List, Optional
+from typing import Any, Awaitable, Callable, List, Optional
 
 import redis.asyncio as redis
 
@@ -323,6 +323,7 @@ async def speak_on_device(
     generation: int | None = None,
     turn_id: str | None = None,
     turn_revision: int = 0,
+    wake_trace_id: str | None = None,
 ) -> None:
     """Synthesize and deliver one fully bound coordinated response."""
     if not isinstance(client_id, ClientId):
@@ -338,6 +339,7 @@ async def speak_on_device(
         turn_id=turn_id,
         turn_revision=turn_revision,
         timer=timer,
+        wake_trace_id=wake_trace_id,
     )
 
 
@@ -359,10 +361,12 @@ async def execute_voice_command(
     reason: Optional[str] = None,
     capture_secs: Optional[float] = None,
     asr_ms: Optional[float] = None,
+    wake_trace_id: Optional[str] = None,
     quiet: bool = False,
     response_generation: int | None = None,
     response_turn_id: str | None = None,
     response_turn_revision: int = 0,
+    interaction_stage_callback: Callable[[str, dict], Awaitable[None]] | None = None,
 ) -> str:
     """Dispatch a voice command, speak the reply, emit SSE, and manage the window.
 
@@ -444,6 +448,7 @@ async def execute_voice_command(
         "asr_status": asr_status,
         "transcript": command,  # alias for plugins that read transcript
         "source": source,
+        "wake_trace_id": wake_trace_id,
     }
 
     logger.info(
@@ -480,6 +485,7 @@ async def execute_voice_command(
                     "score": score,
                     "reason": reason,
                     "source": source,
+                    "wake_trace_id": wake_trace_id,
                 },
                 on_plugin_done=_on_plugin_done,
             )
@@ -500,6 +506,26 @@ async def execute_voice_command(
             next((r.message for r in results if getattr(r, "message", None)), "") or ""
         )
         acted = any(getattr(r, "success", False) for r in results)
+        if interaction_stage_callback is not None:
+            await interaction_stage_callback(
+                "dispatched",
+                {
+                    "plugin_result_count": len(results),
+                    "acted": acted,
+                    "dispatch_ms": timer.dispatch_ms,
+                    "plugins": [
+                        {
+                            "plugin_id": span.plugin_id,
+                            "duration_ms": span.duration_ms,
+                            "handled": span.handled,
+                            "success": span.success,
+                        }
+                        for span in timer.plugin_spans
+                    ],
+                },
+            )
+            if acted:
+                await interaction_stage_callback("acted", {"acted": True})
 
         await publish_sse(
             redis_client,
@@ -525,11 +551,16 @@ async def execute_voice_command(
                 generation=response_generation,
                 turn_id=response_turn_id,
                 turn_revision=response_turn_revision,
+                wake_trace_id=wake_trace_id,
             )
 
         # Only arm follow-ups when the command actually did something.
         if acted:
             await open_followup_window(redis_client, session_id, command)
+            if interaction_stage_callback is not None:
+                await interaction_stage_callback(
+                    "followup_opened", {"window_secs": FOLLOWUP_WINDOW_SECS}
+                )
             # Tell the UI a follow-up window is open (no wake word needed for the
             # next utterance). window_secs lets the client self-expire the indicator.
             await publish_sse(

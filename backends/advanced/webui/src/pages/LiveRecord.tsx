@@ -8,7 +8,15 @@ import AudioVisualizer from '../components/audio/AudioVisualizer'
 import SimpleDebugPanel from '../components/audio/SimpleDebugPanel'
 import WakeFeedback from '../components/audio/WakeFeedback'
 
-export default function LiveRecord() {
+export default function LiveRecord({
+  memorySpaceId,
+  destinationLabel = 'Main',
+  embedded = false,
+}: {
+  memorySpaceId?: string
+  destinationLabel?: string
+  embedded?: boolean
+} = {}) {
   const recording = useRecording()
   const [isLoadingMicrophones, setIsLoadingMicrophones] = useState(false)
   const microphoneDevices = recording.availableDevices.filter(
@@ -28,11 +36,11 @@ export default function LiveRecord() {
   return (
     <div>
       {/* Header */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
+      <div className={`flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between ${embedded ? 'mb-4' : 'mb-6'}`}>
         <div className="flex items-center space-x-2">
           <Radio className="h-6 w-6 text-blue-600 flex-shrink-0" />
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-            Live Audio Recording
+            {embedded ? `Record into ${destinationLabel}` : 'Live Audio Recording'}
           </h1>
         </div>
 
@@ -281,7 +289,10 @@ export default function LiveRecord() {
       </div>
 
       {/* Main Controls - Single START button */}
-      <SimplifiedControls recording={recording} />
+      <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200">
+        Recording destination: <strong>{destinationLabel}</strong>
+      </div>
+      <SimplifiedControls recording={recording} memorySpaceId={memorySpaceId} />
 
       {/* System-audio capture health (meeting/tab mode) */}
       {recording.isRecording && recording.audioSource !== 'mic' && (

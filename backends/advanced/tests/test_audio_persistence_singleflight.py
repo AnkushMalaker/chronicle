@@ -76,3 +76,28 @@ def test_ensure_audio_persistence_rejects_non_live_job(qc, monkeypatch):
 
     with pytest.raises(RuntimeError, match="is not live"):
         qc.ensure_audio_persistence("sess-1", "user-1", "sess-1")
+
+
+def test_annotation_stream_starts_persistence_without_speech_detection(qc, monkeypatch):
+    monkeypatch.setattr(
+        qc, "ensure_audio_persistence", lambda *args, **kwargs: "persist-1"
+    )
+    speech_calls = []
+    monkeypatch.setattr(
+        qc,
+        "enqueue_speech_detection",
+        lambda *args, **kwargs: speech_calls.append((args, kwargs)),
+    )
+    published = []
+    monkeypatch.setattr(qc, "publish_sse_event", lambda *args: published.append(args))
+
+    result = qc.start_streaming_jobs(
+        "sess-1",
+        "user-1",
+        "client-1",
+        speech_detection_enabled=False,
+    )
+
+    assert result == {"speech_detection": "", "audio_persistence": "persist-1"}
+    assert speech_calls == []
+    assert published[0][2]["jobs"] == ["audio_persistence"]
