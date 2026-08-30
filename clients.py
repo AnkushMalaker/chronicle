@@ -420,14 +420,51 @@ def _screenpipe_health() -> dict | None:
     try:
         connection.request("GET", "/health")
         response = connection.getresponse()
-        if response.status >= 400:
-            return None
         payload = json.loads(response.read())
         return payload if isinstance(payload, dict) else None
     except (OSError, http.client.HTTPException, json.JSONDecodeError):
         return None
     finally:
         connection.close()
+
+
+def _screenpipe_vision_capture(health: dict) -> dict | None:
+    """Normalize recorder vision health across ScreenPipe versions.
+
+    New recorders expose the portal lifecycle directly. Older builds only expose
+    aggregate pipeline counters, and return that useful body with HTTP 503 once
+    capture has stalled. Keep the direct contract authoritative, but turn a
+    sustained stream of capture errors into the same tray-facing failure state.
+    """
+    capture = health.get("vision_capture")
+    if isinstance(capture, dict):
+        return capture
+
+    pipeline = health.get("pipeline")
+    if not isinstance(pipeline, dict):
+        return None
+    attempts = pipeline.get("capture_attempts")
+    dropped_errors = pipeline.get("frames_dropped_error")
+    drop_rate = pipeline.get("frame_drop_rate")
+    sustained_errors = (
+        isinstance(attempts, (int, float))
+        and attempts >= 10
+        and isinstance(dropped_errors, (int, float))
+        and dropped_errors >= 5
+        and isinstance(drop_rate, (int, float))
+        and drop_rate >= 0.8
+    )
+    if health.get("vision_db_write_stalled") is not True and not sustained_errors:
+        return None
+
+    return {
+        "requested": True,
+        "state": "failed",
+        "detail": (
+            "Screen capture is not producing frames. Restart the recorder and "
+            "share every requested monitor in the screen-sharing prompt."
+        ),
+    }
 
 
 def _desktop_meeting_detection_disabled() -> bool | None:
@@ -483,7 +520,7 @@ def screenpipe_runtime_status(chronicle_active: bool | None = None) -> dict:
                 else "Chronicle recorder starting; API not ready"
             ),
             "desktop_pids": [],
-            "vision_capture": health.get("vision_capture") if health else None,
+            "vision_capture": _screenpipe_vision_capture(health) if health else None,
         }
 
     if port_open:

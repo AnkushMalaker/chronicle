@@ -1,8 +1,9 @@
 import json
 import subprocess
 
-import clients
 import pytest
+
+import clients
 
 
 def completed(returncode=0, stdout="", stderr=""):
@@ -95,6 +96,50 @@ def test_runtime_forwards_recorder_owned_vision_capture_status(monkeypatch):
     status = clients.screenpipe_runtime_status(chronicle_active=True)
 
     assert status["vision_capture"] == vision
+
+
+def test_runtime_derives_failed_vision_capture_from_sustained_errors(monkeypatch):
+    monkeypatch.setattr(clients, "_screenpipe_desktop_processes", lambda: [])
+    monkeypatch.setattr(clients, "_screenpipe_port_open", lambda: True)
+    monkeypatch.setattr(
+        clients,
+        "_screenpipe_health",
+        lambda: {
+            "status": "healthy",
+            "pipeline": {
+                "capture_attempts": 12,
+                "frames_dropped_error": 10,
+                "frame_drop_rate": 0.9,
+            },
+            "vision_db_write_stalled": False,
+        },
+    )
+
+    status = clients.screenpipe_runtime_status(chronicle_active=True)
+
+    assert status["vision_capture"]["state"] == "failed"
+    assert "share every requested monitor" in status["vision_capture"]["detail"]
+
+
+def test_runtime_does_not_warn_during_vision_startup(monkeypatch):
+    monkeypatch.setattr(clients, "_screenpipe_desktop_processes", lambda: [])
+    monkeypatch.setattr(clients, "_screenpipe_port_open", lambda: True)
+    monkeypatch.setattr(
+        clients,
+        "_screenpipe_health",
+        lambda: {
+            "pipeline": {
+                "capture_attempts": 2,
+                "frames_dropped_error": 2,
+                "frame_drop_rate": 1.0,
+            },
+            "vision_db_write_stalled": False,
+        },
+    )
+
+    status = clients.screenpipe_runtime_status(chronicle_active=True)
+
+    assert status["vision_capture"] is None
 
 
 def test_desktop_meeting_setting_is_read_without_rewriting(tmp_path, monkeypatch):
