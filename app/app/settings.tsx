@@ -3,6 +3,7 @@ import React from 'react';
 import AuthSection from '@/components/AuthSection';
 import BackendStatus from '@/components/BackendStatus';
 import NetworkOverview from '@/components/NetworkOverview';
+import NotificationsSection from '@/components/NotificationsSection';
 import SystemAdminControls from '@/components/SystemAdminControls';
 import { Screen, SectionLabel } from '@/components/ui';
 import { useSharedAppSettings } from '@/contexts/AppSettingsContext';
@@ -23,6 +24,10 @@ export default function SettingsScreen() {
         isAuthenticated={settings.isAuthenticated}
         currentUserEmail={settings.currentUserEmail}
         onAuthStatusChange={settings.handleAuthStatusChange}
+      />
+      <NotificationsSection
+        backendUrl={settings.webSocketUrl}
+        authenticated={settings.isAuthenticated}
       />
 
       <SectionLabel>Administration</SectionLabel>

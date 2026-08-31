@@ -12,11 +12,12 @@
     "typecheck": "tsc --noEmit",
     "test:wearable-activation": "node scripts/test-wearable-activation.cjs",
     "test:durable-audio-spool": "node scripts/test-durable-audio-spool.cjs",
+    "test:push-notifications": "node scripts/test-push-notifications.cjs",
     "check:theme": "node scripts/check-theme-tokens.mjs"
   },
   "dependencies": {
-    "@chronicle/audio-contracts": "file:../contracts/audio/v2/typescript",
     "@bufbuild/protobuf": "2.14.0",
+    "@chronicle/audio-contracts": "file:../contracts/audio/v2/typescript",
     "@expo/metro-runtime": "~55.0.12",
     "@notifee/react-native": "^9.1.8",
     "@react-native-async-storage/async-storage": "^2.1.2",
@@ -34,6 +35,7 @@
     "expo-image-picker": "~55.0.18",
     "expo-linking": "~55.0.13",
     "expo-modules-core": "~55.0.22",
+    "expo-notifications": "~55.0.27",
     "expo-router": "~55.0.12",
     "expo-secure-store": "~55.0.14",
     "expo-share-intent": "6.1.1",

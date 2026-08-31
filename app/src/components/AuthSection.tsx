@@ -3,6 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet, Alert } from 'react-native';
 
 import { Button, Caption, Card, TextField } from '@/components/ui';
 import { login, logout, forgetAccount } from '@/services/auth';
+import { unregisterPushDevice } from '@/services/pushNotifications';
 import { useTheme, type Theme } from '@/theme';
 import { getAuthEmail, getAuthPassword } from '@/utils/storage';
 
@@ -61,6 +62,9 @@ export const AuthSection: React.FC<AuthSectionProps> = ({
   // storage) so re-login is one tap and silent refresh keeps working.
   const handleLogout = async () => {
     try {
+      await unregisterPushDevice(backendUrl).catch(error => {
+        console.warn('[Notifications] unregister before logout failed:', error);
+      });
       await logout();
       onAuthStatusChange(false, email || null, null);
     } catch (error) {
@@ -80,6 +84,9 @@ export const AuthSection: React.FC<AuthSectionProps> = ({
           style: 'destructive',
           onPress: async () => {
             try {
+              await unregisterPushDevice(backendUrl).catch(error => {
+                console.warn('[Notifications] unregister before forget-account failed:', error);
+              });
               await forgetAccount();
               setEmail('');
               setPassword('');

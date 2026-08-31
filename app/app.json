@@ -21,6 +21,9 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Chronicle uses the camera to scan QR codes for backend connection setup.",
         "NSMicrophoneUsageDescription": "Chronicle needs access to your microphone to stream audio to the backend for processing.",
+        "LSApplicationQueriesSchemes": [
+          "immich"
+        ],
         "UIBackgroundModes": [
           "audio"
         ],
@@ -106,6 +109,7 @@
       "./plugins/with-ats",
       "expo-asset",
       "expo-secure-store",
+      "expo-notifications",
       [
         "expo-share-intent",
         {

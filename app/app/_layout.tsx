@@ -4,9 +4,46 @@ import { ShareIntentProvider, useShareIntentContext } from 'expo-share-intent';
 
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { AppSettingsProvider } from '@/contexts/AppSettingsContext';
+import { useSharedAppSettings } from '@/contexts/AppSettingsContext';
 import { ConnectionLogProvider } from '@/contexts/ConnectionLogContext';
 import { ThemeProvider, useTheme } from '@/theme';
 import { initLogger, logInfo } from '@/utils/logger';
+import {
+  configureNotificationPresentation,
+  listenForPushTokenChanges,
+  refreshPushRegistration,
+  startNotificationTapHandling,
+} from '@/services/pushNotifications';
+
+function NotificationLifecycle() {
+  const settings = useSharedAppSettings();
+
+  useEffect(() => {
+    let stopped = false;
+    let stopTapHandling: (() => void) | undefined;
+    void configureNotificationPresentation().catch(error => {
+      console.warn('[Notifications] presentation setup failed:', error);
+    });
+    void startNotificationTapHandling().then(stop => {
+      if (stopped) stop();
+      else stopTapHandling = stop;
+    }).catch(error => console.warn('[Notifications] tap handling failed:', error));
+    return () => {
+      stopped = true;
+      stopTapHandling?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!settings.isAuthenticated || !settings.webSocketUrl) return;
+    void refreshPushRegistration(settings.webSocketUrl).catch(error => {
+      console.warn('[Notifications] launch registration refresh failed:', error);
+    });
+    return listenForPushTokenChanges(settings.webSocketUrl);
+  }, [settings.isAuthenticated, settings.webSocketUrl]);
+
+  return null;
+}
 
 /**
  * The navigator, split out because `useTheme()` requires a `ThemeProvider`
@@ -71,6 +108,7 @@ export default function RootLayout() {
         <ErrorBoundary>
           <ConnectionLogProvider>
             <AppSettingsProvider>
+              <NotificationLifecycle />
               <ShareIntentNavigator />
             </AppSettingsProvider>
           </ConnectionLogProvider>
