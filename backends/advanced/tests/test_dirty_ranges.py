@@ -44,7 +44,8 @@ async def dirty_range_documents(mongo_service, monkeypatch):
 
 
 async def _mark(offset_minutes: float, minutes: float, reason: str, **kwargs):
-    return await dirty_ranges.mark_evidence_dirty(
+    authorized = kwargs.pop("authorized", True)
+    row = await dirty_ranges.mark_evidence_dirty(
         "user",
         START + timedelta(minutes=offset_minutes),
         START + timedelta(minutes=offset_minutes + minutes),
@@ -52,6 +53,11 @@ async def _mark(offset_minutes: float, minutes: float, reason: str, **kwargs):
         reason,
         **kwargs,
     )
+    if authorized:
+        row.dispatch_authorized_at = datetime.now(timezone.utc)
+        row.reconciliation_request_id = f"request-{row.dirty_range_id}"
+        await row.save()
+    return row
 
 
 @pytest.mark.asyncio
@@ -110,6 +116,21 @@ async def test_force_override_schedules_immediately(dirty_range_documents):
 
     due = await dirty_ranges.due_ranges()
     assert [item.dirty_range_id for item in due] == [row.dirty_range_id]
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_dirty_range_never_becomes_due(dirty_range_documents):
+    row = await _mark(
+        0,
+        10,
+        "producer_update",
+        not_before=datetime.now(timezone.utc),
+        authorized=False,
+    )
+
+    assert row.dispatch_authorized_at is None
+    assert await dirty_ranges.due_ranges() == []
+    assert await dirty_ranges.lease_due_range("worker") is None
 
 
 @pytest.mark.asyncio
@@ -237,25 +258,14 @@ async def test_reconcile_dirty_ranges_scan_enqueues_due_work(
 
     enqueued: list[str] = []
 
-    def _fake_enqueue(dirty_range_id: str):
-        enqueued.append(dirty_range_id)
-        return f"job-{dirty_range_id}"
+    def _fake_enqueue(request_id: str):
+        enqueued.append(request_id)
+        return f"job-{request_id}"
 
     monkeypatch.setattr(
         "advanced_omi_backend.controllers.queue_controller."
-        "enqueue_dirty_range_reconciliation",
+        "enqueue_explicit_timeline_reconciliation",
         _fake_enqueue,
-    )
-    recovery_calls = 0
-
-    async def _fake_dispatch_recovery():
-        nonlocal recovery_calls
-        recovery_calls += 1
-        return {"unlatched": 3, "dispatched": 1}
-
-    monkeypatch.setattr(
-        "advanced_omi_backend.services.timeline.dispatch.dispatch_ready_episodes",
-        _fake_dispatch_recovery,
     )
 
     outcome = await dirty_ranges.reconcile_dirty_ranges()
@@ -263,6 +273,7 @@ async def test_reconcile_dirty_ranges_scan_enqueues_due_work(
     assert outcome["reclaimed"] == 1
     assert outcome["due"] == 2
     assert outcome["enqueued"] == 2
-    assert outcome["dispatched"] == 1
-    assert recovery_calls == 1
-    assert set(enqueued) == {row.dirty_range_id, stale.dirty_range_id}
+    assert set(enqueued) == {
+        row.reconciliation_request_id,
+        stale.reconciliation_request_id,
+    }

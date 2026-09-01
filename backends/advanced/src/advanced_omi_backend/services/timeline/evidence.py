@@ -10,7 +10,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import DeviceInputItem
 from advanced_omi_backend.models.manual_memory import ManualMemory
-from advanced_omi_backend.models.timeline import AudioEvidenceSpan, TimelineEpisode
+from advanced_omi_backend.models.timeline import (
+    AudioEvidenceSpan,
+    ImmichEvidenceSummary,
+    ImmichEvidenceWindow,
+    TimelineEpisode,
+)
 from advanced_omi_backend.services.memory.visibility import (
     conversation_scope_filter,
     main_only_filter,
@@ -109,6 +114,11 @@ def _device_item(row: DeviceInputItem) -> TimelineEvidenceItem:
             "summary",
         )
     ]
+    if row.kind == "immich_memory":
+        # Visual enrichment is deliberately text-only at reconciliation time. Keep
+        # useful OCR beside the description, but bound it before the generic excerpt
+        # cap so one photographed document cannot crowd out the surrounding window.
+        text_parts.append(str(row.metadata.get("ocr_text") or "")[:2000])
     if row.samples:
         text_parts.extend(str(sample.get("text") or "") for sample in row.samples[-8:])
     excerpt = (
@@ -636,6 +646,40 @@ def _window_items(
             )
         cursor += step
     return windows
+
+
+def summarize_immich_evidence(
+    manifest: TimelineEvidenceManifest,
+) -> ImmichEvidenceSummary:
+    """Describe where useful Immich evidence actually entered this manifest."""
+
+    immich = {
+        item.evidence_id: item for item in manifest.evidence if item.kind == "immich"
+    }
+    helpful = {
+        evidence_id
+        for evidence_id, item in immich.items()
+        if item.metadata.get("timeline_relevance") in {"high", "medium"}
+    }
+    windows: list[ImmichEvidenceWindow] = []
+    for window in manifest.windows:
+        asset_ids = [item for item in window.evidence_ids if item in immich]
+        if not asset_ids:
+            continue
+        windows.append(
+            ImmichEvidenceWindow(
+                started_at=window.started_at,
+                ended_at=window.ended_at,
+                asset_count=len(asset_ids),
+                helpful_asset_count=sum(item in helpful for item in asset_ids),
+            )
+        )
+    return ImmichEvidenceSummary(
+        evidence_count=len(immich),
+        helpful_evidence_count=len(helpful),
+        window_count=len(windows),
+        windows=windows,
+    )
 
 
 def _parse_device_input_rows(rows: list[dict[str, Any]]) -> list[DeviceInputItem]:

@@ -12,7 +12,6 @@ from types import SimpleNamespace
 
 import pytest
 from beanie import init_beanie
-from fastapi import HTTPException
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from advanced_omi_backend.controllers import queue_controller
@@ -22,9 +21,7 @@ from advanced_omi_backend.models.timeline import (
     EpisodeDispatchLatch,
     TimelineAudioRange,
     TimelineEpisode,
-    utcnow,
 )
-from advanced_omi_backend.routers.modules import timeline_routes
 from advanced_omi_backend.services.timeline import dispatch as dispatch_module
 from advanced_omi_backend.services.timeline.dispatch import (
     dispatch_classified_episodes,
@@ -473,79 +470,3 @@ def test_day_close_path_is_unchanged(monkeypatch):
     assert [name for name, _ in queues["default"].enqueued] == [
         "dispatch_conversation_complete_event_job"
     ]
-
-
-# ── POST /api/timeline/reconcile ─────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_manual_reconcile_creates_a_pending_range(documents, monkeypatch):
-    monkeypatch.setattr(
-        timeline_routes,
-        "mark_evidence_dirty",
-        _capture_mark(),
-    )
-    user = SimpleNamespace(id=USER)
-
-    payload = await timeline_routes.request_range_reconciliation(
-        timeline_routes.ReconcileRequest(
-            started_at=START, ended_at=START + timedelta(minutes=30)
-        ),
-        user=user,
-    )
-
-    assert payload["state"] == "pending"
-    assert payload["not_before"] > datetime.now(timezone.utc)
-
-
-@pytest.mark.asyncio
-async def test_force_makes_the_range_immediately_due(documents, monkeypatch):
-    monkeypatch.setattr(timeline_routes, "mark_evidence_dirty", _capture_mark())
-    user = SimpleNamespace(id=USER)
-
-    payload = await timeline_routes.request_range_reconciliation(
-        timeline_routes.ReconcileRequest(
-            started_at=START, ended_at=START + timedelta(minutes=30), force=True
-        ),
-        user=user,
-    )
-
-    assert payload["not_before"] <= datetime.now(timezone.utc)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "started, ended",
-    [
-        (START, START),
-        (START + timedelta(hours=1), START),
-        (START, START + timedelta(hours=7)),
-    ],
-)
-async def test_manual_reconcile_rejects_impossible_ranges(monkeypatch, started, ended):
-    monkeypatch.setattr(timeline_routes, "mark_evidence_dirty", _capture_mark())
-
-    with pytest.raises(HTTPException) as error:
-        await timeline_routes.request_range_reconciliation(
-            timeline_routes.ReconcileRequest(started_at=started, ended_at=ended),
-            user=SimpleNamespace(id=USER),
-        )
-
-    assert error.value.status_code == 422
-
-
-def _capture_mark():
-    """A ``mark_evidence_dirty`` that records the row it would have written."""
-
-    async def mark(user_id, started_at, ended_at, source_revision, reason, **kwargs):
-        not_before = kwargs.get("not_before") or utcnow() + timedelta(minutes=5)
-        return SimpleNamespace(
-            dirty_range_id="range-one",
-            state="pending",
-            started_at=started_at,
-            ended_at=ended_at,
-            not_before=not_before,
-            force_after=utcnow() + timedelta(minutes=15),
-        )
-
-    return mark

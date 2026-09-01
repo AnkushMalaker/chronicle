@@ -12,9 +12,9 @@ from advanced_omi_backend.services.memory.scope import MemoryScope, MemoryScopeR
 from advanced_omi_backend.services.memory.vault_lock import vault_note_lock
 from advanced_omi_backend.services.memory.vault_media import write_manual_memory_note
 from advanced_omi_backend.services.vision import (
-    CodexVisionError,
-    CodexVisionUnavailable,
-    run_codex_vision,
+    VisionError,
+    VisionUnavailable,
+    run_structured_vision,
 )
 
 from .config import MAX_IMAGE_ANALYSIS_ATTEMPTS, manual_memory_settings
@@ -137,18 +137,18 @@ async def analyze_image(memory_id: str, attachment_id: str) -> dict[str, Any]:
     path = root / attachment.storage_path
     try:
         data = await asyncio.to_thread(path.read_bytes)
-        result = await run_codex_vision(
+        result = await run_structured_vision(
             f"{_PROMPT}\n\nContext:\n{json.dumps({'note': memory.note, 'source': memory.source})}",
             [(attachment.original_filename, data)],
             _SCHEMA,
-            settings.codex,
+            settings.vision,
         )
-    except CodexVisionUnavailable:
+    except VisionUnavailable:
         for capability in ("description", "extracted_text"):
             attachment.enrichments[capability].state = "pending"
         await memory.save()
         raise
-    except (CodexVisionError, OSError) as exc:
+    except (VisionError, OSError) as exc:
         for capability in ("description", "extracted_text"):
             state = attachment.enrichments[capability]
             state.state = "failed"
@@ -206,7 +206,7 @@ async def process_manual_memory_images() -> dict[str, int | str]:
         )
         try:
             outcome = await analyze_image(memory.memory_id, attachment.attachment_id)
-        except CodexVisionUnavailable:
+        except VisionUnavailable:
             return {**counts, "status": "unavailable"}
         counts[outcome["status"]] += 1
     return counts

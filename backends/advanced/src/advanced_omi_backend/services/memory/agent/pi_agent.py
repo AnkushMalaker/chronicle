@@ -82,10 +82,14 @@ DEFAULT_CONTEXT_WINDOW = 32768
 DEFAULT_MAX_TOKENS = 4096
 MIN_PROMPT_HEADROOM_TOKENS = 1024
 MAX_PI_WRITE_TOOL_CALLS = MAX_TOOL_ROUNDS * 4
+MAX_INSPECTION_CALLS_WITHOUT_MUTATION = 24
 _PI_TOOL_CALLS_PER_SEARCH_ROUND = 4
 _STDERR_TAIL_CHARS = 2000
 _MAX_GATEWAY_REQUEST_BYTES = 16 * 1024 * 1024
 _GATEWAY_DRAIN_TIMEOUT_SECONDS = 65.0
+_TERMINAL_SEARCH_EVIDENCE_RE = re.compile(
+    r"^Search result unchanged \[(?:grep|glob):([0-9a-f]{12})\]:"
+)
 _ALL_VAULT_TOOLS = frozenset(
     schema["function"]["name"] for schema in VAULT_TOOL_SCHEMAS
 )
@@ -195,6 +199,7 @@ class _PiRuntimeConfig:
     timeout_seconds: int
     reasoning: bool
     temperature: float
+    response_format: Optional[Dict[str, Any]] = None
     seed: Optional[int] = None
     input_modalities: List[str] = field(default_factory=lambda: ["text"])
     system_prompt_prefix: str = ""
@@ -209,6 +214,8 @@ class _PiEventResult:
     usage: Dict[str, int] = field(default_factory=dict)
     errors: List[str] = field(default_factory=list)
     fatal_errors: List[str] = field(default_factory=list)
+    stop_reason: str = ""
+    assistant_content: List[Any] = field(default_factory=list)
     truncated: bool = False
     agent_ended: bool = False
     terminated_after_tool: bool = False
@@ -451,6 +458,7 @@ def _resolve_pi_config(
         ),
         reasoning=bool(model_def.thinking),
         temperature=resolved.temperature,
+        response_format=resolved.response_format,
         seed=_optional_seed(settings.get("seed", model_params.get("seed"))),
         input_modalities=input_modalities,
         system_prompt_prefix=prefix.strip(),
@@ -526,6 +534,11 @@ class _VaultToolGateway:
         self._read_window_hashes: Dict[tuple[str, str], str] = {}
         self._previous_tool_signature: Optional[str] = None
         self._consecutive_identical_call_count = 0
+        self._terminal_search_evidence_ids: set[str] = set()
+        self._inspection_calls_since_mutation = 0
+        self._max_inspection_calls_without_mutation = (
+            MAX_INSPECTION_CALLS_WITHOUT_MUTATION if self.mutating_names else None
+        )
         self.call_count = 0
         self.max_tool_calls = max_tool_calls
         self.limit_error: Optional[str] = None
@@ -762,6 +775,22 @@ class _VaultToolGateway:
                         "Pi repeated an identical tool call consecutively more than "
                         f"{self.max_identical_tool_calls} times"
                     )
+                if (
+                    limit_error is None
+                    and self._max_inspection_calls_without_mutation is not None
+                    and name not in self.mutating_names
+                    and name != "verify_vault"
+                ):
+                    self._inspection_calls_since_mutation += 1
+                    if (
+                        self._inspection_calls_since_mutation
+                        > self._max_inspection_calls_without_mutation
+                    ):
+                        limit_error = (
+                            "Pi exceeded "
+                            f"{self._max_inspection_calls_without_mutation} inspection "
+                            "calls without a successful vault mutation"
+                        )
         if limit_error is not None:
             # This call passed the admission check above, so preserve its limit
             # outcome if shutdown starts between releasing the lock and recording it.
@@ -815,6 +844,33 @@ class _VaultToolGateway:
                     self.errors.append(error)
             logger.exception("Pi vault tool %s crashed", name)
             return f"Error: {type(exc).__name__}: {exc}"
+
+        if name in self.mutating_names:
+            # A successful mutation can make a prior search result stale. Failed and
+            # no-op mutations return from the exception paths above and do not reset
+            # the evidence breaker.
+            with self._state_lock:
+                if not self._state_frozen:
+                    self._terminal_search_evidence_ids.clear()
+                    self._inspection_calls_since_mutation = 0
+
+        terminal_match = _TERMINAL_SEARCH_EVIDENCE_RE.match(result)
+        if terminal_match:
+            evidence_id = terminal_match.group(1)
+            repeated_terminal_evidence = False
+            with self._state_lock:
+                if not self._state_frozen:
+                    repeated_terminal_evidence = (
+                        evidence_id in self._terminal_search_evidence_ids
+                    )
+                    self._terminal_search_evidence_ids.add(evidence_id)
+            if repeated_terminal_evidence:
+                limit_error = (
+                    "Pi repeated terminal search evidence "
+                    f"{name}:{evidence_id} after it was already declared unchanged"
+                )
+                self.set_limit(limit_error, admitted=True)
+                raise _PiLimitExceeded(limit_error)
 
         if name == "read_note":
             path = str(arguments.get("path", "?"))
@@ -871,6 +927,7 @@ def _extension_source(
     gateway_url: str,
     token: str,
     temperature: float = 0.2,
+    response_format: Optional[Dict[str, Any]] = None,
     seed: Optional[int] = None,
     max_tool_rounds: int = MAX_TOOL_ROUNDS,
     max_tool_calls: int = MAX_PI_WRITE_TOOL_CALLS,
@@ -883,6 +940,7 @@ const limitUrl = {json.dumps(gateway_url.removesuffix("/tool") + "/limit")};
 const bearerToken = {json.dumps(token)};
 const toolDefinitions = {json.dumps(tool_defs, separators=(",", ":"))};
 const temperature = {json.dumps(temperature)};
+const responseFormat = {json.dumps(response_format, separators=(",", ":"))};
 const seed = {json.dumps(seed)};
 const maxToolRounds = {max_tool_rounds};
 const maxToolCalls = {max_tool_calls};
@@ -896,6 +954,7 @@ export default function (pi) {{
   pi.on("before_provider_request", (event) => ({{
     ...event.payload,
     temperature,
+    ...(responseFormat === null ? {{}} : {{ response_format: responseFormat }}),
     ...(seed === null ? {{}} : {{ seed }}),
   }}));
 
@@ -1201,6 +1260,9 @@ def _parse_events(stdout: str, *, allow_terminal_tool: bool = False) -> _PiEvent
             if not isinstance(message, dict) or message.get("role") != "assistant":
                 continue
             assistant_messages.append(message)
+            content = message.get("content")
+            if isinstance(content, list):
+                parsed.assistant_content = list(content)
             parsed.rounds += 1
             for key, value in _usage(message).items():
                 parsed.usage[key] = parsed.usage.get(key, 0) + value
@@ -1264,7 +1326,8 @@ def _parse_events(stdout: str, *, allow_terminal_tool: bool = False) -> _PiEvent
         parsed.fatal_errors.append("Pi JSONL stream ended without agent_end")
     # A length-limited tool call can be rejected and retried successfully in a later
     # turn. Only the final assistant stop is evidence that the run ended incomplete.
-    parsed.truncated = last_assistant_stop_reason == "length"
+    parsed.stop_reason = last_assistant_stop_reason
+    parsed.truncated = parsed.stop_reason == "length"
     parsed.fatal_errors.extend(pending_retry_errors)
     if not parsed.summary and not parsed.truncated and not allow_terminal_tool:
         parsed.fatal_errors.append("Pi completed without a final assistant message")
@@ -1443,6 +1506,7 @@ async def _invoke_pi(
                     gateway_url=gateway.url,
                     token=gateway.token,
                     temperature=config.temperature,
+                    response_format=config.response_format,
                     seed=config.seed,
                     max_tool_rounds=max_tool_rounds,
                     max_tool_calls=max_tool_calls,
@@ -1639,6 +1703,15 @@ async def _invoke_pi(
         events.truncated = True
     elif events.truncated:
         events.errors.append("Pi response was truncated")
+    visible_output = (
+        {"completion": text_payload(events.summary)}
+        if events.summary
+        else {
+            "assistant_content": text_payload(
+                json.dumps(events.assistant_content, ensure_ascii=False, default=str)
+            )
+        }
+    )
     record_llm_usage_span(
         "pi_model_run",
         provider=config.provider,
@@ -1646,6 +1719,17 @@ async def _invoke_pi(
         usage=events.usage,
         start_time_ns=started_ns,
         end_time_ns=time.time_ns(),
+        input={
+            "system_prompt": text_payload(effective_system_prompt),
+            "prompt": text_payload(prompt),
+            "image_count": len(images or []),
+        },
+        output={
+            **visible_output,
+            "stop_reason": events.stop_reason,
+            "truncated": events.truncated,
+            "error_count": len(events.errors),
+        },
         attributes={
             "chronicle.memory.executor": "pi",
             "chronicle.memory.attempt": current_memory_attempt(),
@@ -1658,6 +1742,11 @@ async def _invoke_pi(
             "gen_ai.request.max_tokens": config.max_tokens,
             "chronicle.memory.pi.context_window": config.context_window,
             "chronicle.memory.pi.thinking": config.thinking,
+            **(
+                {"gen_ai.response.finish_reasons": [events.stop_reason]}
+                if events.stop_reason
+                else {}
+            ),
             "chronicle.memory.truncated": events.truncated,
             "chronicle.memory.error_count": len(events.errors),
             **(telemetry_attributes or {}),

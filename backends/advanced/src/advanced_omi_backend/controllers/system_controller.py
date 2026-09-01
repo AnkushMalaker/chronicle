@@ -50,6 +50,10 @@ from advanced_omi_backend.model_registry import (
     get_models_registry,
     load_models_config,
 )
+from advanced_omi_backend.model_routes import (
+    effective_model_routes,
+    effective_operation_routes,
+)
 from advanced_omi_backend.models.user import User
 from advanced_omi_backend.observability.otel_setup import is_langfuse_enabled
 from advanced_omi_backend.openai_factory import create_openai_client
@@ -1571,7 +1575,15 @@ async def get_llm_operations():
 
         # Serialize each LLMOperationConfig to dict
         operations = {}
-        effective_routing = {}
+        operation_routes = effective_operation_routes(registry)
+        effective_routing = {
+            route["operation"]: {
+                key: value
+                for key, value in route.items()
+                if key not in {"workload", "adapter", "operation"}
+            }
+            for route in operation_routes
+        }
         for op_name, op_config in registry.llm_operations.items():
             operations[op_name] = {
                 "model": op_config.model,
@@ -1580,7 +1592,6 @@ async def get_llm_operations():
                 "response_format": op_config.response_format,
                 "reasoning_effort": op_config.reasoning_effort,
             }
-            effective_routing[op_name] = registry.explain_llm_operation(op_name)
 
         # Collect available LLM models
         available_models = [
@@ -1595,6 +1606,19 @@ async def get_llm_operations():
             "available_models": available_models,
             "default_llm": default_llm,
             "effective_routing": effective_routing,
+            "operation_route_audit": {
+                "total": len(operation_routes),
+                "self_hosted": sum(
+                    route["location"] == "self-hosted" for route in operation_routes
+                ),
+                "external": sum(
+                    route["location"] == "external" for route in operation_routes
+                ),
+                "unknown": sum(
+                    route["location"] == "unknown" for route in operation_routes
+                ),
+            },
+            "runtime_routes": effective_model_routes(load_config(), registry),
             "status": "success",
         }
     except Exception as e:

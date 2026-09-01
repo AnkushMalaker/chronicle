@@ -125,9 +125,9 @@ def test_observation_io_serializes_sanitized_payload(monkeypatch):
     assert "langfuse.observation.output" in span.attributes
 
 
-def test_oversized_opt_in_observation_remains_valid_json(monkeypatch):
+def test_dense_opt_in_observation_retains_exact_sanitized_content(monkeypatch):
     monkeypatch.setenv("LANGFUSE_MEMORY_CAPTURE_CONTENT", "true")
-    monkeypatch.setenv("LANGFUSE_MEMORY_CONTENT_MAX_CHARS", "65536")
+    monkeypatch.setenv("LANGFUSE_MEMORY_CONTENT_MAX_CHARS", "200000")
     span = _Span()
 
     telemetry.set_observation_io(
@@ -139,12 +139,14 @@ def test_oversized_opt_in_observation_remains_valid_json(monkeypatch):
     )
 
     payload = json.loads(span.attributes["langfuse.observation.input"])
-    assert payload["truncated"] is True
-    assert payload["chars"] > 70000
-    assert len(payload["sha256"]) == 64
+    assert payload["first"]["content"] == "a" * 65536
+    assert payload["second"]["content"] == "b" * 65536
+    assert payload["first"]["content_truncated"] is False
+    assert payload["second"]["content_truncated"] is False
 
 
 def test_record_llm_usage_span_uses_child_generation_conventions(monkeypatch):
+    monkeypatch.delenv("LANGFUSE_MEMORY_CAPTURE_CONTENT", raising=False)
     tracer = _Tracer()
     monkeypatch.setattr(
         "advanced_omi_backend.observability.otel_setup.get_tracer",
@@ -158,6 +160,11 @@ def test_record_llm_usage_span_uses_child_generation_conventions(monkeypatch):
         usage={"input_tokens": 12, "output_tokens": 3, "ignored": "not numeric"},
         start_time_ns=100,
         end_time_ns=200,
+        input={"prompt": telemetry.text_payload("private prompt")},
+        output={
+            "completion": telemetry.text_payload("private completion"),
+            "stop_reason": "stop",
+        },
         attributes={"chronicle.memory.attempt": "primary"},
     )
 
@@ -167,6 +174,16 @@ def test_record_llm_usage_span_uses_child_generation_conventions(monkeypatch):
     assert kwargs["attributes"]["gen_ai.operation.name"] == "chat"
     assert kwargs["attributes"]["gen_ai.usage.input_tokens"] == 12
     assert "gen_ai.usage.ignored" not in kwargs["attributes"]
+    assert (
+        json.loads(span.attributes["langfuse.observation.input"])["prompt"]["chars"]
+        == 14
+    )
+    assert (
+        json.loads(span.attributes["langfuse.observation.output"])["stop_reason"]
+        == "stop"
+    )
+    assert "private prompt" not in json.dumps(span.attributes)
+    assert "private completion" not in json.dumps(span.attributes)
     assert span.end_time == 200
 
 

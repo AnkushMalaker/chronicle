@@ -15,7 +15,7 @@ import { EmptyDayHandoff, ReviewBacklogMenu } from '../components/timeline/Revie
 import { dateFromSearch, localDate, shiftDate } from '../components/timeline/timelineNavigation'
 import { useTimelineTimezone } from '../hooks/useTimelineTimezone'
 import {
-  ManualMemory, TimelineEpisodeUpdate, deviceInputApi,
+  ManualMemory, TimelineEpisodeUpdate, TimelineReconciliationRequest, deviceInputApi,
   manualMemoriesApi, timelineApi,
 } from '../services/api'
 import { Button } from '../components/ui'
@@ -27,6 +27,27 @@ function analysisMessage(state?: string, retryAfter?: string | null) {
   if (state === 'quota_deferred') return `Analysis is waiting for Codex capacity${retryAfter ? ` until ${new Date(retryAfter).toLocaleString()}` : ''}.`
   if (state === 'awaiting_evidence') return 'No usable evidence has arrived for this day yet.'
   return null
+}
+
+function readinessMessage(request?: TimelineReconciliationRequest) {
+  if (!request) return null
+  const { reason, target_asset_count: count, latest_eligible_asset_date: watermark } = request
+  if (reason === 'assets_on_day') return `${count} eligible Immich asset${count === 1 ? '' : 's'} found for this day.`
+  if (reason === 'later_asset_watermark') return `Immich contains an eligible asset captured on ${watermark}, after this day.`
+  if (reason === 'no_immich_evidence') return 'Immich has no eligible asset from this day or a later-day watermark yet. Open Immich, let backup run, then check again.'
+  if (reason === 'immich_unconfigured') return 'Immich is not configured for Chronicle, so reconciliation cannot start.'
+  return 'Chronicle could not reach Immich. Reconciliation did not start.'
+}
+
+function visualEvidenceMessage(request?: TimelineReconciliationRequest) {
+  const visual = request?.immich_visual
+  if (!visual || visual.state === 'not_needed') return null
+  if (visual.state === 'pending') return 'Selected photos will be visually described before Timeline starts.'
+  if (visual.state === 'running') return 'Chronicle is describing the selected Immich photos now.'
+  const useful = `${visual.helpful_count} useful for reconstructing the day`
+  if (visual.state === 'failed') return `None of the ${visual.candidate_count} selected photos could be understood.`
+  if (visual.state === 'partial') return `${visual.analyzed_count} photos described (${useful}); ${visual.failed_count} failed.`
+  return `${visual.analyzed_count} photos described; ${useful}.`
 }
 
 function reviewLabel(state?: string) {
@@ -113,6 +134,12 @@ export default function Timeline() {
   const [showManualMemories, setShowManualMemories] = useState(false)
   const [labeling, setLabeling] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [reconciliationRequestId, setReconciliationRequestId] = useState<string | null>(null)
+  const reconciliationStorageKey = `chronicle.timeline.reconciliation:${timezone}:${day}`
+
+  useEffect(() => {
+    setReconciliationRequestId(window.localStorage.getItem(reconciliationStorageKey))
+  }, [reconciliationStorageKey])
 
   const setDay = (nextDay: string) => {
     const next = new URLSearchParams(searchParams)
@@ -120,6 +147,7 @@ export default function Timeline() {
     setSearchParams(next)
     setSelected(new Set())
     setLabeling(false)
+    setReconciliationRequestId(null)
   }
 
   const timeline = useQuery({
@@ -149,13 +177,27 @@ export default function Timeline() {
     queryFn: async () => (await manualMemoriesApi.list()).data.items,
     enabled: showManualMemories,
   })
-  const analyze = useMutation({
-    mutationFn: (force: boolean) => timelineApi.analyze(day, timezone, force),
-    onSuccess: () => Promise.all([
+  const reconcile = useMutation({
+    mutationFn: async () => (await timelineApi.reconcileDay(day, timezone)).data,
+    onSuccess: request => {
+      window.localStorage.setItem(reconciliationStorageKey, request.request_id)
+      setReconciliationRequestId(request.request_id)
+    },
+  })
+  const reconciliation = useQuery({
+    queryKey: ['timeline-reconciliation', reconciliationRequestId],
+    queryFn: async () => (await timelineApi.getReconciliation(reconciliationRequestId!)).data,
+    enabled: Boolean(reconciliationRequestId),
+    refetchInterval: query => ['queued', 'running'].includes(query.state.data?.state || '') ? 5_000 : false,
+  })
+  const reconciliationStatus = reconciliation.data || reconcile.data
+  useEffect(() => {
+    if (reconciliationStatus?.state !== 'completed') return
+    void Promise.all([
       queryClient.invalidateQueries({ queryKey: ['semantic-timeline', day, timezone] }),
       queryClient.invalidateQueries({ queryKey: ['timeline-review-queue', timezone] }),
-    ]),
-  })
+    ])
+  }, [day, queryClient, reconciliationStatus?.state, timezone])
   const refreshDay = () => {
     setSelected(new Set())
     return queryClient.invalidateQueries({ queryKey: ['semantic-timeline', day, timezone] })
@@ -238,16 +280,45 @@ export default function Timeline() {
             <div className="absolute right-0 z-30 mt-1 w-48 space-y-1 rounded-lg border border-[var(--tape-line)] bg-[var(--tape-paper-raised)] p-1.5 shadow-lg">
               <button type="button" onClick={() => setShowManualMemories(value => !value)} className="flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-[var(--tape-chip)]"><Bookmark className="h-4 w-4" />{showManualMemories ? 'Hide' : 'Show'} manual memories</button>
               <button type="button" onClick={() => setShowRaw(value => !value)} className="flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-[var(--tape-chip)]"><ScanLineIcon />{showRaw ? 'Hide' : 'Show'} raw capture</button>
-              <button type="button" onClick={() => analyze.mutate(status?.state === 'failed')} disabled={analyze.isPending} className="flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-[var(--tape-chip)] disabled:opacity-40"><RefreshCw className="h-4 w-4" />{status?.state === 'failed' ? 'Retry analysis' : episodes.length ? 'Reanalyze day' : 'Analyze day'}</button>
+              <button type="button" onClick={() => reconcile.mutate()} disabled={reconcile.isPending || ['queued', 'running'].includes(reconciliationStatus?.state || '')} className="flex w-full items-center gap-2 rounded px-2 py-2 text-left hover:bg-[var(--tape-chip)] disabled:opacity-40"><RefreshCw className="h-4 w-4" />Reconcile day</button>
             </div>
           </details>
         </div>
       </section>
 
       {progressMessage && episodes.length > 0 && <div className="rounded-lg border border-[var(--tape-line)] bg-[var(--tape-paper)] px-3 py-2.5 text-sm text-gray-600 dark:text-gray-300">{progressMessage}</div>}
-      {status?.state === 'failed' && (
+      {reconciliationStatus && (
+        <div className={`rounded-lg border px-3 py-3 text-sm ${reconciliationStatus.state === 'blocked' || reconciliationStatus.state === 'failed' ? 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200' : 'border-[var(--tape-line)] bg-[var(--tape-paper)] text-gray-700 dark:text-gray-200'}`}>
+          <div className="flex flex-wrap items-center gap-2">
+            {(reconciliationStatus.state === 'queued' || reconciliationStatus.state === 'running') && <RefreshCw className="h-4 w-4 animate-spin" />}
+            {(reconciliationStatus.state === 'blocked' || reconciliationStatus.state === 'failed') && <AlertTriangle className="h-4 w-4" />}
+            <span className="font-semibold">Reconciliation {reconciliationStatus.state}</span>
+            <span className="text-xs opacity-70">Checked {new Date(reconciliationStatus.checked_at).toLocaleString()}</span>
+          </div>
+          <p className="mt-1.5">{readinessMessage(reconciliationStatus)}</p>
+          {visualEvidenceMessage(reconciliationStatus) && <p className="mt-1 text-xs opacity-80">{visualEvidenceMessage(reconciliationStatus)}</p>}
+          {reconciliationStatus.immich_evidence && reconciliationStatus.immich_evidence.evidence_count > 0 && (
+            <details className="mt-2 text-xs">
+              <summary className="cursor-pointer font-medium">
+                {reconciliationStatus.immich_evidence.evidence_count} Immich photos considered across {reconciliationStatus.immich_evidence.window_count} evidence windows
+              </summary>
+              <div className="mt-1 grid gap-1 opacity-80">
+                {reconciliationStatus.immich_evidence.windows.map(window => (
+                  <span key={`${window.started_at}-${window.ended_at}`}>
+                    {new Date(window.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}–{new Date(window.ended_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}: {window.asset_count} photo{window.asset_count === 1 ? '' : 's'}, {window.helpful_asset_count} useful
+                  </span>
+                ))}
+              </div>
+            </details>
+          )}
+          {reconciliationStatus.notification_id && <p className="mt-1 text-xs opacity-75">Backup reminder: {reconciliationStatus.notification_status || 'queued'}</p>}
+          {reconciliationStatus.last_error && <p className="mt-1 text-xs text-red-700 dark:text-red-300">{reconciliationStatus.last_error}</p>}
+          {(reconciliationStatus.state === 'blocked' || reconciliationStatus.state === 'failed') && <Button className="mt-2" size="sm" onClick={() => reconcile.mutate()} disabled={reconcile.isPending}>{reconciliationStatus.state === 'blocked' ? 'Check again' : 'Retry reconciliation'}</Button>}
+        </div>
+      )}
+      {status?.state === 'failed' && !reconciliationStatus && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2.5 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
-          <AlertTriangle className="h-4 w-4" /><span className="min-w-0 flex-1">Analysis failed. {status.error}</span><Button size="sm" variant="danger" onClick={() => analyze.mutate(true)}>Retry</Button>
+          <AlertTriangle className="h-4 w-4" /><span className="min-w-0 flex-1">The previous analysis failed. {status.error}</span><Button size="sm" variant="danger" onClick={() => reconcile.mutate()}>Reconcile day</Button>
         </div>
       )}
       {timeline.isError && (
@@ -337,9 +408,9 @@ export default function Timeline() {
                 ? 'Use Retry above for this day, or continue reviewing an earlier episode day.'
               : 'Start processing this day, or resume the oldest review action that needs you.'}
           canAnalyze={!status || status.state === 'complete'}
-          analyzing={analyze.isPending}
-          analyzeLabel={status?.state === 'complete' ? 'Reanalyze this day' : 'Analyze this day'}
-          onAnalyze={() => analyze.mutate(status?.state === 'complete')}
+          analyzing={reconcile.isPending || ['queued', 'running'].includes(reconciliationStatus?.state || '')}
+          analyzeLabel={reconciliationStatus?.state === 'blocked' ? 'Check Immich again' : 'Reconcile this day'}
+          onAnalyze={() => reconcile.mutate()}
         />
       ) : null}
 

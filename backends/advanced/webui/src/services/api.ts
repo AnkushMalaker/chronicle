@@ -690,11 +690,53 @@ export type TimelineEpisodeByKey =
   | ({ resolved: true } & TimelineEpisode)
   | { resolved: false; episode_key: string; successor_keys: string[] }
 
+export interface TimelineReconciliationRequest {
+  request_id: string
+  date: string
+  timezone: string
+  pipeline: 'day' | 'rolling'
+  state: 'blocked' | 'queued' | 'running' | 'completed' | 'failed'
+  reason: 'assets_on_day' | 'later_asset_watermark' | 'no_immich_evidence' | 'immich_unconfigured' | 'immich_unreachable'
+  target_asset_count: number
+  latest_eligible_asset_date: string | null
+  checked_at: string
+  notification_id: string | null
+  notification_status: string | null
+  job_id: string | null
+  dirty_range_id: string | null
+  run_id: string | null
+  immich_visual: {
+    state: 'pending' | 'running' | 'not_needed' | 'complete' | 'partial' | 'failed'
+    candidate_count: number
+    analyzed_count: number
+    newly_analyzed_count: number
+    helpful_count: number
+    unhelpful_count: number
+    failed_count: number
+  } | null
+  immich_evidence: {
+    evidence_count: number
+    helpful_evidence_count: number
+    window_count: number
+    windows: Array<{
+      started_at: string
+      ended_at: string
+      asset_count: number
+      helpful_asset_count: number
+    }>
+  } | null
+  last_error: string | null
+  created_at: string
+  updated_at: string
+}
+
 export const timelineApi = {
   getDay: (date: string, timezone: string) =>
     api.get<TimelineDay>('/api/timeline/day', { params: { date, timezone } }),
-  analyze: (date: string, timezone: string, force = false) =>
-    api.post<TimelineAnalysis>('/api/timeline/analyze', { date, timezone, force }),
+  reconcileDay: (date: string, timezone: string) =>
+    api.post<TimelineReconciliationRequest>(`/api/timeline/reconciliation/day/${date}`, { timezone }),
+  getReconciliation: (requestId: string) =>
+    api.get<TimelineReconciliationRequest>(`/api/timeline/reconciliation/${requestId}`),
   getAnalysis: (runId: string) =>
     api.get<TimelineAnalysis>(`/api/timeline/analysis/${runId}`),
   setTimezone: (timezone: string) =>

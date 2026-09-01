@@ -857,6 +857,14 @@ Schema:
         context_stats, condensation_usage = await self._prepare_context_workspace(
             workspace, manifest, config=config
         )
+        # Context condensation has its own ``events`` contract and must retain the
+        # response format resolved for ``pi_timeline_context``. Only final synthesis
+        # emits TimelineAgentResult, so apply the strict day schema after condensation.
+        # A plain ``json_object`` format constrains syntax but not this contract.
+        config = replace(
+            config,
+            response_format={"type": "json_object", "schema": OUTPUT_SCHEMA},
+        )
         system_prompt = build_prompt(
             None,
             evidence_guide=(
@@ -908,9 +916,10 @@ Schema:
                 )
             else:
                 retry_instruction = ""
+            attempt_prompt = retry_instruction + base_prompt
             events, gateway = await _invoke_pi(
                 workspace,
-                prompt=retry_instruction + base_prompt,
+                prompt=attempt_prompt,
                 system_prompt=system_prompt,
                 schemas=(),
                 config=config,
@@ -935,10 +944,18 @@ Schema:
                     request=request,
                     stdout=events.summary,
                     stderr=error,
-                    result=None,
+                    result={
+                        "raw_structured_output": events.summary,
+                        "raw_assistant_content": events.assistant_content,
+                    },
                     metadata={
                         "attempt": attempt,
                         "error": error or "Pi timeline run was truncated",
+                        "stop_reason": events.stop_reason,
+                        "model_input": {
+                            "system_prompt": system_prompt,
+                            "prompt": attempt_prompt,
+                        },
                     },
                     reusable=False,
                 )
@@ -967,10 +984,18 @@ Schema:
                     request=request,
                     stdout=events.summary,
                     stderr="; ".join(events.errors),
-                    result={"raw_structured_output": raw_result},
+                    result={
+                        "raw_structured_output": raw_result,
+                        "raw_assistant_content": events.assistant_content,
+                    },
                     metadata={
                         "attempt": attempt,
                         "error": f"{type(exc).__name__}: {exc}",
+                        "stop_reason": events.stop_reason,
+                        "model_input": {
+                            "system_prompt": system_prompt,
+                            "prompt": attempt_prompt,
+                        },
                     },
                     reusable=False,
                 )
@@ -1014,6 +1039,11 @@ Schema:
                     "rounds": events.rounds,
                     "tool_calls": max(events.tool_calls, gateway.call_count),
                     "model": config.model,
+                    "stop_reason": events.stop_reason,
+                    "model_input": {
+                        "system_prompt": system_prompt,
+                        "prompt": attempt_prompt,
+                    },
                     "syntax_repairs": syntax_repairs,
                 },
                 reusable=True,

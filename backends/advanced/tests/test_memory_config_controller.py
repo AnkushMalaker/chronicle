@@ -332,6 +332,27 @@ async def test_llm_operations_preserve_reasoning_effort_on_get_and_save(monkeypa
     saved = {}
     events = []
     monkeypatch.setattr(system_controller, "get_models_registry", lambda: registry)
+    monkeypatch.setattr(system_controller, "effective_model_routes", lambda *_args: [])
+    monkeypatch.setattr(
+        system_controller,
+        "effective_operation_routes",
+        lambda *_args: [
+            {
+                "workload": "operation.memory_write",
+                "adapter": "model",
+                "operation": "memory_write",
+                "model": "local-qwen",
+                "model_name": "upstream/local-qwen",
+                "provider": "llamacpp",
+                "endpoint": "http://llama-cpp-llm:8080/v1",
+                "location": "self-hosted",
+                "source": "llm_operations.memory_write.model",
+                "max_tokens": 4096,
+                "reasoning_effort": "off",
+                "response_format": "text",
+            }
+        ],
+    )
     monkeypatch.setattr(
         system_controller,
         "save_config_section",

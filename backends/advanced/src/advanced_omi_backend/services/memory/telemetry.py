@@ -24,8 +24,11 @@ logger = logging.getLogger("memory_service.telemetry")
 _CAPTURE_CONTENT_ENV = "LANGFUSE_MEMORY_CAPTURE_CONTENT"
 _CONTENT_LIMIT_ENV = "LANGFUSE_MEMORY_CONTENT_MAX_CHARS"
 _DEFAULT_CONTENT_LIMIT = 16_000
-_MAX_CONTENT_LIMIT = 65_536
-_MAX_ATTRIBUTE_CHARS = 70_000
+# Explicit content capture is an operator-controlled debugging mode. Keep enough
+# headroom for a complete dense Timeline prompt/response while retaining a hard guard
+# against accidentally attaching unbounded process data to one span.
+_MAX_CONTENT_LIMIT = 1_000_000
+_MAX_ATTRIBUTE_CHARS = 2_100_000
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 _attempt_var: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -97,9 +100,8 @@ def _json_attribute(value: Any) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     if len(encoded) <= _MAX_ATTRIBUTE_CHARS:
         return encoded
-    # Never slice JSON mid-token: Langfuse should always receive a parseable value,
-    # even when an operator raises the opt-in content limit and combines several
-    # personal-content fields in one observation.
+    # Never slice JSON mid-token. This guard is above two fully captured 1 MB text
+    # payloads and should only trigger for unexpected non-text expansion.
     return json.dumps(
         {
             "chars": len(encoded),
@@ -239,9 +241,11 @@ def record_llm_usage_span(
     usage: Mapping[str, Any],
     start_time_ns: int,
     end_time_ns: int,
+    input: Any = None,
+    output: Any = None,
     attributes: Optional[Mapping[str, Any]] = None,
 ) -> None:
-    """Emit aggregate subprocess tokens on a child LLM span for Langfuse rollups."""
+    """Emit aggregate subprocess tokens and sanitized IO on a child LLM span."""
 
     clean_usage = {
         str(key): int(value)
@@ -277,6 +281,7 @@ def record_llm_usage_span(
             },
             start_time=start_time_ns,
         )
+        set_observation_io(span, input=input, output=output)
         span.end(end_time=end_time_ns)
     except Exception:  # noqa: BLE001 - telemetry must never fail memory work
         logger.debug("failed to record memory LLM usage span", exc_info=True)

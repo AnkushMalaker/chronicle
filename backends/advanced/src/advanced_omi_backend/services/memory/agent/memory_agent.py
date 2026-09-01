@@ -192,6 +192,8 @@ plausibly recur and matters.
 # How to work
 1. SEARCH first: `glob` (e.g. `People/*.md`) to see what exists and `grep` (regex over
    contents) to find a person/topic/fact. Reuse exact existing note names so links resolve.
+   If a search returns `No matches found` or `Search result unchanged`, treat that as final
+   evidence. Do not repeat or slightly vary that search; continue with the evidence available.
 2. `write_note` the conversation note from the Conversation template; put every identified
    person in `people:` and every theme in `topics:` as [[wikilinks]].
 3. For each person/topic/thing: if its note exists, READ it and add only durable new

@@ -25,6 +25,7 @@ from .modules import (
     manual_memory_router,
     memory_router,
     memory_space_router,
+    notification_router,
     openai_compat_router,
     queue_router,
     sse_router,
@@ -59,6 +60,7 @@ router.include_router(finetuning_router)
 router.include_router(memory_router)
 router.include_router(memory_space_router)
 router.include_router(manual_memory_router)
+router.include_router(notification_router)
 router.include_router(openai_compat_router)
 router.include_router(sse_router)
 router.include_router(system_events_router)

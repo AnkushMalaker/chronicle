@@ -41,6 +41,7 @@ from advanced_omi_backend.services.timeline.pi_executor import (
 from advanced_omi_backend.services.timeline.pi_executor import (
     _workspace_fingerprint as _pi_workspace_fingerprint,
 )
+from advanced_omi_backend.services.timeline.prompt import OUTPUT_SCHEMA
 
 
 def _manifest() -> TimelineEvidenceManifest:
@@ -277,9 +278,21 @@ async def test_pi_timeline_executor_passes_compact_context_directly_and_uses_pi_
     async def fake_invoke(root, **kwargs):
         calls.append(kwargs)
         first_call = len(calls) == 1
+        truncated = first_call and failure_kind == "truncated"
         return (
             SimpleNamespace(
-                truncated=first_call and failure_kind == "truncated",
+                truncated=truncated,
+                stop_reason="length" if truncated else "stop",
+                assistant_content=[
+                    {
+                        "type": "text",
+                        "text": (
+                            '{"episodes":[}'
+                            if first_call
+                            else _result().model_dump_json()
+                        ),
+                    }
+                ],
                 fatal_errors=[],
                 errors=[],
                 summary=(
@@ -296,9 +309,16 @@ async def test_pi_timeline_executor_passes_compact_context_directly_and_uses_pi_
         "advanced_omi_backend.services.timeline.pi_executor._invoke_pi", fake_invoke
     )
 
-    result = await PiTimelineExecutor({"max_tokens": 24000}).analyze(
-        workspace, _manifest(), [], reasoning_effort="low"
-    )
+    executor = PiTimelineExecutor({"max_tokens": 24000})
+    prepared_configs = []
+    original_prepare = executor._prepare_context_workspace
+
+    async def capture_prepare(*args, **kwargs):
+        prepared_configs.append(kwargs["config"])
+        return await original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(executor, "_prepare_context_workspace", capture_prepare)
+    result = await executor.analyze(workspace, _manifest(), [], reasoning_effort="low")
 
     assert cache_lookups[0][0] == "pi_timeline"
     assert cache_lookups[0][1]["model"] == "muse-glimmer-30B-kquant-17gb.gguf"
@@ -307,13 +327,37 @@ async def test_pi_timeline_executor_passes_compact_context_directly_and_uses_pi_
     assert calls[0]["config"].max_tokens == 24000
     assert calls[0]["config"].thinking == "low"
     assert calls[0]["config"].system_prompt_prefix == "Reasoning strength: low"
+    assert calls[0]["config"].response_format == {
+        "type": "json_object",
+        "schema": OUTPUT_SCHEMA,
+    }
+    assert prepared_configs[0].response_format is None
     assert calls[0]["schemas"] == ()
     assert calls[0]["max_tool_rounds"] == 1
     assert "observation:one" in calls[0]["prompt"]
     assert "Return only" in calls[0]["system_prompt"]
     assert expected_retry_instruction in calls[1]["prompt"].lower()
     assert artifacts[0]["reusable"] is False
+    assert artifacts[0]["metadata"]["stop_reason"] in {"length", "stop"}
+    assert artifacts[0]["metadata"]["model_input"] == {
+        "system_prompt": calls[0]["system_prompt"],
+        "prompt": calls[0]["prompt"],
+    }
+    assert artifacts[0]["result"]["raw_assistant_content"] == calls[0].get(
+        "assistant_content",
+        [
+            {
+                "type": "text",
+                "text": '{"episodes":[}',
+            }
+        ],
+    )
     assert artifacts[-1]["reusable"] is True
+    assert artifacts[-1]["metadata"]["stop_reason"] == "stop"
+    assert artifacts[-1]["metadata"]["model_input"] == {
+        "system_prompt": calls[1]["system_prompt"],
+        "prompt": calls[1]["prompt"],
+    }
     assert result.usage == {
         "input_tokens": 20,
         "output_tokens": 40,

@@ -38,7 +38,7 @@ def test_prompt_version_is_pinned():
     the only thing a second copy can achieve.
     """
 
-    assert PROMPT_VERSION == "timeline-episodes-v17"
+    assert PROMPT_VERSION == "timeline-episodes-v18"
 
 
 def test_prompt_uses_local_day_bounds_instead_of_utc_calendar_date():
@@ -123,5 +123,5 @@ def test_shipped_config_pins_the_same_prompt_version():
     assert defaults["timeline"]["prompt_version"] == PROMPT_VERSION
     assert defaults["timeline"]["pi"]["max_tokens"] == 32000
     assert defaults["timeline"]["pi"]["max_attempts"] == 3
-    assert defaults["timeline"]["pi"]["condense_max_tokens"] == 12000
+    assert defaults["timeline"]["pi"]["condense_max_tokens"] == 24000
     assert defaults["timeline"]["pi"]["condense_max_attempts"] == 3

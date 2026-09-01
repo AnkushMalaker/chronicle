@@ -52,6 +52,7 @@ jobs:
           npm run test:wearable-activation
           npm run typecheck
           npm run test:durable-audio-spool
+          npm run test:push-notifications
           npm run check:theme
           npx --no-install expo-modules-autolinking verify --platform ios --verbose
 

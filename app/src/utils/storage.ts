@@ -14,6 +14,7 @@ const THEME_PREFERENCE_KEY = 'THEME_PREFERENCE_KEY';
 const AUTH_PASSWORD_KEY = 'AUTH_PASSWORD_KEY';
 const JWT_TOKEN_KEY = 'JWT_TOKEN_KEY';
 const SERVICE_MANAGER_TOKEN_KEY = 'SERVICE_MANAGER_TOKEN_KEY';
+const INSTALLATION_ID_KEY = 'CHRONICLE_INSTALLATION_ID';
 
 /**
  * Secret storage helpers. Secrets (password, JWT) live in the OS keychain via
@@ -43,6 +44,19 @@ const secureRemove = async (key: string): Promise<void> => {
   } else {
     await AsyncStorage.removeItem(key);
   }
+};
+
+/** Stable app-install identity, intentionally separate from BLE/wearable ids. */
+export const getOrCreateInstallationId = async (): Promise<string> => {
+  const existing = await secureGet(INSTALLATION_ID_KEY);
+  if (existing) return existing;
+  const random = Array.from({ length: 16 }, () => Math.floor(Math.random() * 256));
+  random[6] = (random[6] & 0x0f) | 0x40;
+  random[8] = (random[8] & 0x3f) | 0x80;
+  const hex = random.map(value => value.toString(16).padStart(2, '0')).join('');
+  const created = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  await secureSet(INSTALLATION_ID_KEY, created);
+  return created;
 };
 
 export const saveLastConnectedDeviceId = async (deviceId: string | null): Promise<void> => {

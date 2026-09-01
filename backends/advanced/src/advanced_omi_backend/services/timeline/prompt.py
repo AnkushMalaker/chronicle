@@ -2,7 +2,7 @@
 
 import json
 
-PROMPT_VERSION = "timeline-episodes-v17"
+PROMPT_VERSION = "timeline-episodes-v18"
 # Range mode (rolling reconciliation) is versioned separately from the day prompt so a
 # change to one never silently reinterprets the other's cached runs.
 RANGE_PROMPT_VERSION = "timeline-reconcile-v1"
@@ -14,6 +14,7 @@ OUTPUT_SCHEMA = {
     "properties": {
         "episodes": {
             "type": "array",
+            "maxItems": 24,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -158,6 +159,14 @@ Rules:
   positive-offset local day's early hours legitimately appear on the previous UTC date.
   Process every supplied event inside the declared local-day bounds.
 - Windows are coverage units, never mandatory episode boundaries. Merge across them.
+- Return at most 24 episodes for the whole day. This is a semantic day outline, not a
+  one-to-one transcription of condensed context events. Merge adjacent observations
+  that reflect one continuing activity or intent, while preserving genuinely distinct
+  people, applications, calls, and salient moments.
+- Keep each summary to at most 35 words, each episode to at most 3 assertions, 8
+  entities, and 4 attributes. Normally cite only the 6 strongest evidence IDs needed
+  to ground an episode. Complete temporal accounting does not require citing every
+  supplied evidence ID; use unassigned intervals for unsupported gaps.
 - A screen observation is a coarse application session, not a claim that exactly one
   semantic event occurred. Keep it whole when finer boundaries are unsupported; never
   manufacture periodic sub-events from its sparse samples.

@@ -27,12 +27,18 @@ from advanced_omi_backend.client_manager import (
     get_client_manager,
     initialize_redis_for_client_manager,
 )
+from advanced_omi_backend.config_loader import load_config
 from advanced_omi_backend.controllers.capture_lifecycle import cleanup_client_state
 from advanced_omi_backend.controllers.data_audit_controller import run_auto_clean_cron
 from advanced_omi_backend.controllers.queue_controller import redis_conn
 from advanced_omi_backend.cron_scheduler import get_scheduler, register_cron_job
 from advanced_omi_backend.llm_client import get_llm_client
 from advanced_omi_backend.middleware.app_middleware import setup_middleware
+from advanced_omi_backend.model_routes import (
+    effective_model_routes,
+    effective_operation_routes,
+    format_model_routes,
+)
 from advanced_omi_backend.models.annotation import Annotation
 from advanced_omi_backend.models.api_key import ApiKey
 from advanced_omi_backend.models.audio_capture import (
@@ -56,6 +62,11 @@ from advanced_omi_backend.models.memory_space import (
     MemorySpace,
     SpaceMergeProposal,
 )
+from advanced_omi_backend.models.notification import (
+    NotificationDelivery,
+    NotificationIntent,
+    PushDevice,
+)
 from advanced_omi_backend.models.system_event import SystemEvent
 from advanced_omi_backend.models.timeline import (
     AudioEvidenceSpan,
@@ -65,6 +76,7 @@ from advanced_omi_backend.models.timeline import (
     TimelineAnalysisRun,
     TimelineDay,
     TimelineEpisode,
+    TimelineReconciliationRequest,
 )
 from advanced_omi_backend.models.waveform import WaveformData
 from advanced_omi_backend.observability.otel_setup import init_otel
@@ -83,7 +95,6 @@ from advanced_omi_backend.services.audio_stream.reclaim import (
 )
 from advanced_omi_backend.services.device_audio_ingest import process_device_audio
 from advanced_omi_backend.services.device_context import purge_screen_context
-from advanced_omi_backend.services.immich_discovery import scan_immich_memories
 from advanced_omi_backend.services.manual_memories.image import (
     process_manual_memory_images,
 )
@@ -100,6 +111,10 @@ from advanced_omi_backend.services.memory.agent.operating_memory_optimizer impor
 )
 from advanced_omi_backend.services.memory.syncthing_audit import (
     start_syncthing_audit_listener,
+)
+from advanced_omi_backend.services.notifications import (
+    queue_due_notifications,
+    queue_receipt_check,
 )
 from advanced_omi_backend.services.observability import run_event_ingest_drain
 from advanced_omi_backend.services.observability.health_poller import run_health_poller
@@ -120,9 +135,6 @@ from advanced_omi_backend.services.timeline.consolidation import (
     prefetch_consolidation_horizon,
 )
 from advanced_omi_backend.services.timeline.dirty_ranges import reconcile_dirty_ranges
-from advanced_omi_backend.services.timeline.discovery import (
-    process_current_timeline_days,
-)
 from advanced_omi_backend.services.timeline.review import process_memory_review_queue
 from advanced_omi_backend.services.timeline.thumbnails import process_episode_thumbnails
 from advanced_omi_backend.task_manager import get_task_manager, init_task_manager
@@ -146,6 +158,33 @@ logger = logging.getLogger(__name__)
 application_logger = logging.getLogger("audio_processing")
 
 
+def register_application_cron_jobs() -> None:
+    """Register the production cron entrypoints in one directly testable seam."""
+
+    register_cron_job("speaker_finetuning", run_speaker_finetuning_job)
+    register_cron_job("asr_finetuning", run_asr_finetuning_job)
+    register_cron_job("asr_jargon_extraction", run_asr_jargon_extraction_job)
+    register_cron_job("prompt_optimization", run_prompt_optimization_job)
+    register_cron_job("annotation_suggestions", surface_error_suggestions)
+    register_cron_job("auto_clean", run_auto_clean_cron)
+    register_cron_job("person_photos", sync_person_photos)
+    register_cron_job("device_audio_ingest", process_device_audio)
+    register_cron_job("screen_context_retention", purge_screen_context)
+    register_cron_job("timeline_consolidation_prefetch", prefetch_consolidation_horizon)
+    register_cron_job("rolling_reconciliation_scan", reconcile_dirty_ranges)
+    register_cron_job("notification_dispatch", queue_due_notifications)
+    register_cron_job("notification_receipts", queue_receipt_check)
+    register_cron_job("episode_thumbnails", process_episode_thumbnails)
+    register_cron_job("manual_memory_image_enrichment", process_manual_memory_images)
+    register_cron_job("manual_memory_visual_index", process_manual_memory_visual_index)
+    register_cron_job("episode_memory_review", process_memory_review_queue)
+    register_cron_job("audio_stream_reclaim", reclaim_settled_audio_streams)
+    register_cron_job(
+        "pi_operating_memory_threshold", run_operating_memory_threshold_job
+    )
+    register_cron_job("pi_operating_memory_daily", run_operating_memory_daily_job)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan events."""
@@ -154,6 +193,34 @@ async def lifespan(app: FastAPI):
 
     # Startup
     application_logger.info("Starting application...")
+    # Model selection is intentionally granular. Print the selected high-level routes
+    # together so an accidental Codex/cloud island is visible without reading YAML.
+    selected_model_routes = effective_model_routes(load_config())
+    application_logger.info(
+        "Effective model routes:\n%s", format_model_routes(selected_model_routes)
+    )
+    external_selected_routes = [
+        route for route in selected_model_routes if route["location"] == "external"
+    ]
+    if external_selected_routes:
+        application_logger.warning(
+            "External selected high-level model routes:\n%s",
+            format_model_routes(external_selected_routes),
+        )
+    operation_routes = effective_operation_routes()
+    external_operations = [
+        route for route in operation_routes if route["location"] == "external"
+    ]
+    if external_operations:
+        application_logger.warning(
+            "External named LLM operations:\n%s",
+            format_model_routes(external_operations),
+        )
+    else:
+        application_logger.info(
+            "Named LLM operation audit: all %d routes are self-hosted",
+            len(operation_routes),
+        )
 
     # ── Phase 1 (sequential — dependencies) ──────────────────────────
     phase_start = time.monotonic()
@@ -187,9 +254,13 @@ async def lifespan(app: FastAPI):
                 TimelineAnalysisRun,
                 TimelineEpisode,
                 TimelineDay,
+                TimelineReconciliationRequest,
                 DirtyEvidenceRange,
                 EpisodeDispatchLatch,
                 MemoryReviewProposal,
+                PushDevice,
+                NotificationIntent,
+                NotificationDelivery,
             ],
         )
         application_logger.info("Beanie initialized for all document models")
@@ -351,39 +422,7 @@ async def lifespan(app: FastAPI):
 
     async def _init_cron_scheduler():
         try:
-
-            register_cron_job("speaker_finetuning", run_speaker_finetuning_job)
-            register_cron_job("asr_finetuning", run_asr_finetuning_job)
-            register_cron_job("asr_jargon_extraction", run_asr_jargon_extraction_job)
-            register_cron_job("prompt_optimization", run_prompt_optimization_job)
-            register_cron_job("annotation_suggestions", surface_error_suggestions)
-            register_cron_job("auto_clean", run_auto_clean_cron)
-            register_cron_job("immich_memories", scan_immich_memories)
-            register_cron_job("person_photos", sync_person_photos)
-            register_cron_job("device_audio_ingest", process_device_audio)
-            register_cron_job("screen_context_retention", purge_screen_context)
-            register_cron_job("timeline_analysis", process_current_timeline_days)
-            register_cron_job(
-                "timeline_consolidation_prefetch", prefetch_consolidation_horizon
-            )
-            register_cron_job("rolling_reconciliation_scan", reconcile_dirty_ranges)
-            register_cron_job("episode_thumbnails", process_episode_thumbnails)
-            register_cron_job(
-                "manual_memory_image_enrichment", process_manual_memory_images
-            )
-            register_cron_job(
-                "manual_memory_visual_index", process_manual_memory_visual_index
-            )
-            register_cron_job("episode_memory_review", process_memory_review_queue)
-            register_cron_job("audio_stream_reclaim", reclaim_settled_audio_streams)
-            register_cron_job(
-                "pi_operating_memory_threshold",
-                run_operating_memory_threshold_job,
-            )
-            register_cron_job(
-                "pi_operating_memory_daily",
-                run_operating_memory_daily_job,
-            )
+            register_application_cron_jobs()
 
             scheduler = get_scheduler()
             await scheduler.start()

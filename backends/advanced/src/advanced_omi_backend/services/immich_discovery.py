@@ -1,10 +1,12 @@
 """Bounded metadata-first discovery of potential Immich memories."""
 
 import hashlib
+import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from pymongo.errors import DuplicateKeyError
@@ -19,6 +21,7 @@ from advanced_omi_backend.users import User
 
 _DAILY_LIMIT = 12
 _BURST_GAP = timedelta(minutes=15)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,6 +32,16 @@ class _ConversationWindow:
     conversation_id: str
     created_at: datetime
     audio_total_duration: float | None = None
+
+
+@dataclass
+class ImmichDayReadiness:
+    ready: bool
+    reason: str
+    target_asset_count: int
+    latest_asset_local_date: date | None
+    checked_at: datetime
+    target_assets: list[dict[str, Any]]
 
 
 def _settings() -> tuple[str, str] | None:
@@ -51,11 +64,218 @@ async def resolve_immich_user_id() -> str | None:
 
 
 def _asset_time(asset: dict[str, Any]) -> datetime | None:
-    raw = asset.get("localDateTime") or asset.get("fileCreatedAt")
+    # Immich's ``localDateTime`` is a wall-clock capture value but is serialized
+    # with a trailing Z. Treating that as a UTC instant and then applying the
+    # Chronicle timezone shifts the asset a second time. ``fileCreatedAt`` is the
+    # real UTC capture instant and is therefore the authoritative timeline clock.
+    raw = asset.get("fileCreatedAt") or asset.get("localDateTime")
     if not raw:
         return None
     value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _file_created_at(asset: dict[str, Any]) -> datetime | None:
+    raw = asset.get("fileCreatedAt")
+    if not raw:
+        return None
+    value = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    return _as_utc(value)
+
+
+def _eligible_backup_asset(asset: dict[str, Any]) -> bool:
+    """Server-visible upload evidence, excluding trash and external libraries."""
+
+    return (
+        asset.get("type") in {None, "IMAGE"}
+        and not asset.get("isTrashed", False)
+        and asset.get("libraryId") in {None, ""}
+        and _file_created_at(asset) is not None
+    )
+
+
+async def _search_immich_assets(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    taken_after: datetime,
+    taken_before: datetime | None = None,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    page: int | None = 1
+    assets: list[dict[str, Any]] = []
+    while page is not None and len(assets) < limit:
+        payload: dict[str, Any] = {
+            "type": "IMAGE",
+            "takenAfter": _as_utc(taken_after).isoformat(),
+            "page": page,
+            "size": min(250, limit - len(assets)),
+            "order": "desc",
+        }
+        if taken_before is not None:
+            # Immich v3.0's flat search uses an inclusive <= comparison. Subtract a
+            # millisecond so the next local day's exact midnight is not counted here.
+            payload["takenBefore"] = (
+                _as_utc(taken_before) - timedelta(milliseconds=1)
+            ).isoformat()
+        response = await client.post(f"{url}/api/search/metadata", json=payload)
+        response.raise_for_status()
+        body = response.json().get("assets", {})
+        assets.extend(body.get("items", []))
+        next_page = body.get("nextPage")
+        page = int(next_page) if next_page is not None else None
+    return assets
+
+
+async def check_immich_day_readiness(
+    local_date: date, timezone_name: str
+) -> ImmichDayReadiness:
+    """Live, request-scoped readiness check; this function is never scheduled."""
+
+    checked_at = utcnow()
+    settings = _settings()
+    if settings is None:
+        return ImmichDayReadiness(False, "immich_unconfigured", 0, None, checked_at, [])
+    try:
+        zone = ZoneInfo(timezone_name)
+    except Exception as error:
+        raise ValueError(f"Invalid timezone: {timezone_name}") from error
+    start = datetime.combine(local_date, time.min, tzinfo=zone).astimezone(timezone.utc)
+    end = datetime.combine(
+        local_date + timedelta(days=1), time.min, tzinfo=zone
+    ).astimezone(timezone.utc)
+    url, key = settings
+    try:
+        async with httpx.AsyncClient(
+            timeout=30,
+            headers={"x-api-key": key, "Accept": "application/json"},
+        ) as client:
+            # Immich applies takenAfter/takenBefore to its localDateTime-shaped
+            # search field. Query a padded interval, then enforce the exact local
+            # day against fileCreatedAt below. The one-day pad covers every IANA
+            # offset and DST transition without making the final result fuzzy.
+            search_margin = timedelta(days=1)
+            target_assets = [
+                item
+                for item in await _search_immich_assets(
+                    client,
+                    url,
+                    taken_after=start - search_margin,
+                    taken_before=end + search_margin,
+                )
+                if _eligible_backup_asset(item)
+                and (captured := _asset_time(item)) is not None
+                and start <= captured < end
+            ]
+            later_assets = [
+                item
+                for item in await _search_immich_assets(
+                    client, url, taken_after=end - search_margin
+                )
+                if _eligible_backup_asset(item)
+                and (captured := _asset_time(item)) is not None
+                and captured >= end
+            ]
+    except (httpx.HTTPError, ValueError, TypeError, KeyError):
+        logger.warning("Immich readiness query failed", exc_info=True)
+        return ImmichDayReadiness(False, "immich_unreachable", 0, None, checked_at, [])
+
+    latest = max((_asset_time(item) for item in later_assets), default=None)
+    latest_local_date = latest.astimezone(zone).date() if latest else None
+    if target_assets:
+        reason = "assets_on_day"
+        ready = True
+    elif latest_local_date and latest_local_date > local_date:
+        reason = "later_asset_watermark"
+        ready = True
+    else:
+        reason = "no_immich_evidence"
+        ready = False
+    return ImmichDayReadiness(
+        ready,
+        reason,
+        len(target_assets),
+        latest_local_date,
+        checked_at,
+        target_assets,
+    )
+
+
+async def import_immich_day_candidates(
+    user_id: str, assets: list[dict[str, Any]]
+) -> int:
+    """Persist the existing bounded/sampled memory candidates for one ready day."""
+
+    source_id = "immich-default"
+    source = await CaptureSource.find_one(
+        CaptureSource.user_id == user_id, CaptureSource.source_id == source_id
+    )
+    if source is None:
+        source = CaptureSource(
+            user_id=user_id,
+            source_id=source_id,
+            name="Immich",
+            provider="immich",
+            platform="server",
+            token_hash=hashlib.sha256(f"immich:{user_id}".encode()).hexdigest(),
+            capabilities=["photos", "thumbnails"],
+            status="online",
+        )
+        await source.insert()
+    accepted = 0
+    for asset in select_candidates(assets):
+        if await _store_immich_candidate(user_id, source_id, asset):
+            accepted += 1
+    source.status = "online"
+    source.last_seen_at = utcnow()
+    source.health = {**source.health, "last_explicit_day_import": accepted}
+    await source.save()
+    return accepted
+
+
+async def _store_immich_candidate(
+    user_id: str, source_id: str, asset: dict[str, Any]
+) -> bool:
+    """Insert one candidate or repair its absolute capture metadata in place."""
+
+    captured = _asset_time(asset)
+    if captured is None:
+        return False
+    try:
+        await DeviceInputItem(
+            user_id=user_id,
+            source_id=source_id,
+            kind="immich_memory",
+            source_item_id=str(asset["id"]),
+            captured_at=captured,
+            metadata={
+                "asset_id": asset["id"],
+                "filename": asset.get("originalFileName"),
+                "review_state": "candidate",
+            },
+        ).insert()
+        return True
+    except DuplicateKeyError:
+        # Discovery is also a repair pass: an existing source item must move to
+        # its corrected absolute capture instant instead of remaining permanently
+        # stranded on the old local day. Preserve completed visual analysis.
+        await DeviceInputItem.get_pymongo_collection().update_one(
+            {
+                "user_id": user_id,
+                "source_id": source_id,
+                "kind": "immich_memory",
+                "source_item_id": str(asset["id"]),
+            },
+            {
+                "$set": {
+                    "captured_at": captured,
+                    "metadata.asset_id": asset["id"],
+                    "metadata.filename": asset.get("originalFileName"),
+                    "metadata.review_state": "candidate",
+                }
+            },
+        )
+        return False
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -148,25 +368,8 @@ async def scan_immich_memories() -> dict[str, Any]:
 
     accepted = 0
     for asset in select_candidates(assets):
-        captured = _asset_time(asset)
-        if captured is None:
-            continue
-        try:
-            await DeviceInputItem(
-                user_id=user_id,
-                source_id=source_id,
-                kind="immich_memory",
-                source_item_id=str(asset["id"]),
-                captured_at=captured,
-                metadata={
-                    "asset_id": asset["id"],
-                    "filename": asset.get("originalFileName"),
-                    "review_state": "candidate",
-                },
-            ).insert()
+        if await _store_immich_candidate(user_id, source_id, asset):
             accepted += 1
-        except DuplicateKeyError:
-            pass
     source.status = "online"
     source.last_seen_at = utcnow()
     source.health = {

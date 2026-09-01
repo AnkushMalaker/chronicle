@@ -41,6 +41,7 @@ FORCE_AFTER_MINUTES = 15
 COALESCE_GAP_MINUTES = 5
 LEASE_MINUTES = 30
 MAX_ATTEMPTS = 5
+RETRY_DELAY_SECONDS = 60
 # One scan enqueues at most this many ranges, so a large backlog cannot turn a cron
 # tick on the API event loop into a long Mongo/Redis burst.
 SCAN_BATCH = 50
@@ -83,6 +84,7 @@ async def mark_evidence_dirty(
     *,
     source_kind: str = "generic",
     not_before: Optional[datetime] = None,
+    coalesce: bool = True,
 ) -> DirtyEvidenceRange:
     """Record that ``[started_at, ended_at)`` needs reconciliation. Idempotent.
 
@@ -92,8 +94,10 @@ async def mark_evidence_dirty(
     ``force_after`` is preserved. A ``waiting`` row overlapped by a trigger wakes back
     to ``pending``.
 
-    ``not_before`` overrides the debounce — that is how ``force`` on a manual
-    reconcile request asks for the range to be looked at now.
+    ``not_before`` overrides the debounce — that is how an explicit reconcile
+    request asks for the range to be looked at now. ``coalesce=False`` preserves
+    that request's exact authorization boundary; ordinary evidence ingestion should
+    keep the default and merge adjacent dirty ranges.
     """
 
     started_at = _as_utc(started_at)
@@ -105,18 +109,20 @@ async def mark_evidence_dirty(
     revision = await _next_evidence_revision(user_id)
     gap = timedelta(minutes=COALESCE_GAP_MINUTES)
 
-    neighbours = (
-        await DirtyEvidenceRange.find(
-            {
-                "user_id": user_id,
-                "state": {"$in": list(_COALESCABLE_STATES)},
-                "started_at": {"$lte": ended_at + gap},
-                "ended_at": {"$gte": started_at - gap},
-            }
+    neighbours = []
+    if coalesce:
+        neighbours = (
+            await DirtyEvidenceRange.find(
+                {
+                    "user_id": user_id,
+                    "state": {"$in": list(_COALESCABLE_STATES)},
+                    "started_at": {"$lte": ended_at + gap},
+                    "ended_at": {"$gte": started_at - gap},
+                }
+            )
+            .sort("+created_at")
+            .to_list()
         )
-        .sort("+created_at")
-        .to_list()
-    )
 
     debounce = (
         _as_utc(not_before) if not_before else now + timedelta(minutes=DEBOUNCE_MINUTES)
@@ -188,6 +194,7 @@ async def mark_evidence_dirty(
 
 def _due_or_reclaimable(now: datetime) -> dict[str, Any]:
     return {
+        "dispatch_authorized_at": {"$ne": None},
         "$or": [
             {
                 "state": "pending",
@@ -199,7 +206,7 @@ def _due_or_reclaimable(now: datetime) -> dict[str, Any]:
                 "attempts": {"$lt": MAX_ATTEMPTS},
                 "lease_expires_at": {"$lt": now},
             },
-        ]
+        ],
     }
 
 
@@ -209,6 +216,7 @@ async def _fail_exhausted(now: datetime) -> int:
     result = await collection.update_many(
         {
             "state": {"$in": ["pending", "leased"]},
+            "dispatch_authorized_at": {"$ne": None},
             "attempts": {"$gte": MAX_ATTEMPTS},
         },
         {
@@ -277,6 +285,31 @@ async def complete_range(
     return dirty_range
 
 
+async def release_range_for_retry(
+    dirty_range: DirtyEvidenceRange, error: str
+) -> DirtyEvidenceRange:
+    """Release a failed authorized attempt without publishing terminal failure early.
+
+    RQ retries and the recovery cron are two parts of the same durable attempt chain.
+    Until the range has exhausted that chain, its request must remain queued; otherwise
+    a caller can advance to a later day while recovery silently restarts this one.
+    """
+
+    if dirty_range.attempts >= MAX_ATTEMPTS:
+        return await complete_range(dirty_range, error=error)
+
+    retry_at = utcnow() + timedelta(seconds=RETRY_DELAY_SECONDS)
+    dirty_range.state = "pending"
+    dirty_range.last_error = error
+    dirty_range.not_before = retry_at
+    dirty_range.force_after = retry_at
+    dirty_range.lease_owner = None
+    dirty_range.lease_expires_at = None
+    dirty_range.updated_at = utcnow()
+    await dirty_range.save()
+    return dirty_range
+
+
 async def park_waiting(
     dirty_range: DirtyEvidenceRange, reason: str
 ) -> DirtyEvidenceRange:
@@ -306,7 +339,11 @@ async def reap_expired_leases(now: Optional[datetime] = None) -> int:
     now = _as_utc(now) if now else utcnow()
     collection = DirtyEvidenceRange.get_pymongo_collection()
     result = await collection.update_many(
-        {"state": "leased", "lease_expires_at": {"$lt": now}},
+        {
+            "state": "leased",
+            "dispatch_authorized_at": {"$ne": None},
+            "lease_expires_at": {"$lt": now},
+        },
         {
             "$set": {
                 "state": "pending",
@@ -332,6 +369,7 @@ async def due_ranges(
         await DirtyEvidenceRange.find(
             {
                 "state": "pending",
+                "dispatch_authorized_at": {"$ne": None},
                 "attempts": {"$lt": MAX_ATTEMPTS},
                 "$or": [
                     {"not_before": {"$lte": now}},
@@ -346,18 +384,17 @@ async def due_ranges(
 
 
 async def reconcile_dirty_ranges() -> dict[str, int]:
-    """Cron entry point: enqueue dirty ranges and recover classified dispatches.
+    """Cron entry point: recover explicitly authorized reconciliation requests.
 
     Deliberately cheap — it runs on the API event loop, so it does Mongo queries and
-    RQ enqueues plus one bounded unlatched-Episode scan. All agent/model work
-    happens in ``reconcile_range_job``.
+    RQ enqueues. Ordinary producer ranges never match ``due_ranges``; all agent/model
+    work remains behind the durable explicit-request entrypoint.
     """
 
     # Imported here to avoid a circular import with the controllers package.
     from advanced_omi_backend.controllers.queue_controller import (
-        enqueue_dirty_range_reconciliation,
+        enqueue_explicit_timeline_reconciliation,
     )
-    from advanced_omi_backend.services.timeline.dispatch import dispatch_ready_episodes
 
     now = utcnow()
     reclaimed = await reap_expired_leases(now)
@@ -366,13 +403,18 @@ async def reconcile_dirty_ranges() -> dict[str, int]:
 
     enqueued = 0
     for dirty_range in ranges:
+        if not dirty_range.reconciliation_request_id:
+            logger.error(
+                "Authorized dirty range %s has no reconciliation request",
+                dirty_range.dirty_range_id,
+            )
+            continue
         job_id = await asyncio.to_thread(
-            enqueue_dirty_range_reconciliation, dirty_range.dirty_range_id
+            enqueue_explicit_timeline_reconciliation,
+            dirty_range.reconciliation_request_id,
         )
         if job_id:
             enqueued += 1
-
-    recovery = await dispatch_ready_episodes()
 
     if ranges or reclaimed:
         logger.info(
@@ -385,7 +427,6 @@ async def reconcile_dirty_ranges() -> dict[str, int]:
         "due": len(ranges),
         "enqueued": enqueued,
         "reclaimed": reclaimed,
-        "dispatched": recovery["dispatched"],
     }
 
 

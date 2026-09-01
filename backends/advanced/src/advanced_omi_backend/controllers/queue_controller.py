@@ -815,6 +815,111 @@ def enqueue_dirty_range_reconciliation(dirty_range_id: str) -> Optional[str]:
         return None
 
 
+def enqueue_notification_dispatch(notification_id: str) -> Optional[str]:
+    """Single-flight enqueue for one durable notification intent."""
+
+    # Lazy because worker modules import the shared job/bootstrap layer.
+    from advanced_omi_backend.workers.notification_jobs import dispatch_notification_job
+
+    job_id = f"notification-dispatch_{notification_id}"
+    try:
+        existing = Job.fetch(job_id, connection=redis_conn)
+        if existing.ended_at is None and get_job_status_from_rq(existing) in {
+            "queued",
+            "started",
+            "deferred",
+            "scheduled",
+        }:
+            return existing.id
+        existing.delete()
+    except NoSuchJobError:
+        pass
+    job = default_queue.enqueue(
+        dispatch_notification_job,
+        notification_id,
+        job_timeout=120,
+        result_ttl=JOB_RESULT_TTL,
+        failure_ttl=86400,
+        retry=Retry(max=5, interval=[10, 30, 120, 300, 900]),
+        job_id=job_id,
+        description="Sending push notification",
+        meta={"notification_id": notification_id},
+    )
+    return job.id
+
+
+def enqueue_notification_receipts() -> Optional[str]:
+    """Single-flight provider-receipt reconciliation job."""
+
+    # Lazy because worker modules import the shared job/bootstrap layer.
+    from advanced_omi_backend.workers.notification_jobs import (
+        check_notification_receipts_job,
+    )
+
+    job_id = "notification-receipts"
+    try:
+        existing = Job.fetch(job_id, connection=redis_conn)
+        if existing.ended_at is None and get_job_status_from_rq(existing) in {
+            "queued",
+            "started",
+            "deferred",
+            "scheduled",
+        }:
+            return existing.id
+        existing.delete()
+    except NoSuchJobError:
+        pass
+    job = default_queue.enqueue(
+        check_notification_receipts_job,
+        job_timeout=120,
+        result_ttl=JOB_RESULT_TTL,
+        failure_ttl=86400,
+        retry=Retry(max=5, interval=[30, 120, 300, 900, 1800]),
+        job_id=job_id,
+        description="Checking push provider receipts",
+    )
+    return job.id
+
+
+def enqueue_explicit_timeline_reconciliation(request_id: str) -> Optional[str]:
+    """Queue the sole authorized Timeline write entrypoint for one local day."""
+
+    # Lazy because worker modules import the shared job/bootstrap layer.
+    from advanced_omi_backend.workers.timeline_jobs import explicit_reconciliation_job
+
+    job_id = f"timeline-explicit_{request_id}"
+    try:
+        existing = Job.fetch(job_id, connection=redis_conn)
+        # RQ can leave an exhausted retry in the ScheduledJobRegistry with both an
+        # ``ended_at`` timestamp and status ``scheduled``. It is a tombstone, not
+        # live work; treating it as single-flight makes authorized recovery a no-op.
+        if existing.ended_at is None and get_job_status_from_rq(existing) in {
+            "queued",
+            "started",
+            "deferred",
+            "scheduled",
+        }:
+            return existing.id
+        existing.delete()
+    except NoSuchJobError:
+        pass
+    job = default_queue.enqueue(
+        explicit_reconciliation_job,
+        request_id,
+        # One bounded Immich vision pass (up to 10 minutes) now precedes the existing
+        # Timeline pass (up to 30 minutes). Keep one timeout around the authorized
+        # end-to-end request rather than spawning an untracked side job.
+        job_timeout=2700,
+        result_ttl=JOB_RESULT_TTL,
+        failure_ttl=86400,
+        retry=Retry(max=2, interval=[30, 300]),
+        job_id=job_id,
+        description="Explicit Immich-gated Timeline reconciliation",
+        meta={"reconciliation_request_id": request_id},
+    )
+    return job.id
+
+
 def start_streaming_jobs(
     session_id: str,
     user_id: str,

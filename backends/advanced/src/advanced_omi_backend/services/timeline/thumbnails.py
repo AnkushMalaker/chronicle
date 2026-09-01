@@ -17,21 +17,35 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from advanced_omi_backend.config_loader import load_config
 from advanced_omi_backend.models.device_input import DeviceInputJob
 from advanced_omi_backend.models.timeline import TimelineDay, TimelineEpisode, utcnow
-from advanced_omi_backend.services.vision import codex_vision_settings, run_codex_vision
+from advanced_omi_backend.services.vision import (
+    run_structured_vision,
+    structured_vision_settings,
+)
 
 from .executor import settings_dict
 
 logger = logging.getLogger(__name__)
 
 
-def thumbnail_codex_settings(settings: Any = None) -> dict[str, Any]:
-    """Validated Codex settings for the frame-picking vision pass."""
+def thumbnail_vision_settings(settings: Any = None) -> dict[str, Any]:
+    """Validated model/Codex route for the frame-picking vision pass."""
 
+    codex_settings: dict[str, Any] = {}
     if settings is None:
-        settings = (settings_dict().get("thumbnails") or {}).get("codex") or {}
-    return codex_vision_settings(settings, label="timeline.thumbnails.codex")
+        settings = settings_dict().get("thumbnails") or {}
+        config = load_config()
+        codex_settings = ((config.get("vision") or {}).get("backends") or {}).get(
+            "codex", {}
+        )
+    return structured_vision_settings(
+        settings,
+        label="timeline.thumbnails",
+        default_operation="timeline_thumbnail",
+        codex_settings=codex_settings,
+    )
 
 
 # One request covers a whole episode, so this is a per-episode cost, not per-frame.
@@ -91,7 +105,7 @@ async def _request_frames(episode: TimelineEpisode, source_id: str) -> None:
 async def choose_episode_frame(episode: TimelineEpisode) -> dict[str, Any]:
     """Run the vision pass over an episode's fetched frames."""
 
-    settings = thumbnail_codex_settings()
+    settings = thumbnail_vision_settings()
     context = {
         "title": episode.title,
         "summary": episode.summary,
@@ -108,7 +122,7 @@ async def choose_episode_frame(episode: TimelineEpisode) -> dict[str, Any]:
         for frame in episode.frame_shortlist
     ]
     prompt = f"{_PROMPT}\n\nEpisode:\n{json.dumps(context, ensure_ascii=False)}"
-    return await run_codex_vision(prompt, images, _CHOICE_SCHEMA, settings)
+    return await run_structured_vision(prompt, images, _CHOICE_SCHEMA, settings)
 
 
 def apply_frame_choice(episode: TimelineEpisode, choice: dict[str, Any]) -> bool:

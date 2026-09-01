@@ -427,6 +427,10 @@ class DirtyEvidenceRange(Document):
     lease_expires_at: Optional[datetime] = None
     attempts: int = Field(default=0, ge=0)
     last_error: Optional[str] = None
+    # Only an explicit, Immich-ready day request may set this. The recovery scan
+    # ignores ordinary producer-created ranges until a person authorizes them.
+    dispatch_authorized_at: Optional[datetime] = None
+    reconciliation_request_id: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
 
@@ -459,6 +463,87 @@ class DirtyEvidenceRange(Document):
             IndexModel(
                 [("state", ASCENDING), ("lease_expires_at", ASCENDING)],
                 name="dirty_range_lease_recovery",
+            ),
+            IndexModel(
+                [
+                    ("state", ASCENDING),
+                    ("dispatch_authorized_at", ASCENDING),
+                    ("not_before", ASCENDING),
+                ],
+                name="dirty_range_explicit_dispatch",
+            ),
+        ]
+
+
+class ImmichVisualPreparationStatus(BaseModel):
+    """What Chronicle could understand from the ready day's selected photos."""
+
+    state: Literal["pending", "running", "not_needed", "complete", "partial", "failed"]
+    candidate_count: int = Field(default=0, ge=0)
+    analyzed_count: int = Field(default=0, ge=0)
+    newly_analyzed_count: int = Field(default=0, ge=0)
+    helpful_count: int = Field(default=0, ge=0)
+    unhelpful_count: int = Field(default=0, ge=0)
+    failed_count: int = Field(default=0, ge=0)
+
+
+class ImmichEvidenceWindow(BaseModel):
+    started_at: datetime
+    ended_at: datetime
+    asset_count: int = Field(default=0, ge=0)
+    helpful_asset_count: int = Field(default=0, ge=0)
+
+
+class ImmichEvidenceSummary(BaseModel):
+    """Actual Immich evidence present in the manifest inspected by Timeline."""
+
+    evidence_count: int = Field(default=0, ge=0)
+    helpful_evidence_count: int = Field(default=0, ge=0)
+    window_count: int = Field(default=0, ge=0)
+    windows: list[ImmichEvidenceWindow] = Field(default_factory=list)
+
+
+class TimelineReconciliationRequest(Document):
+    """Durable status for one explicit local-day reconciliation request."""
+
+    request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    local_date: date
+    timezone: str
+    pipeline: Literal["day", "rolling"]
+    state: Literal["blocked", "queued", "running", "completed", "failed"]
+    reason: Literal[
+        "assets_on_day",
+        "later_asset_watermark",
+        "no_immich_evidence",
+        "immich_unconfigured",
+        "immich_unreachable",
+    ]
+    target_asset_count: int = Field(default=0, ge=0)
+    latest_asset_local_date: Optional[date] = None
+    checked_at: datetime = Field(default_factory=utcnow)
+    notification_id: Optional[str] = None
+    notification_status: Optional[str] = None
+    job_id: Optional[str] = None
+    dirty_range_id: Optional[str] = None
+    run_id: Optional[str] = None
+    immich_visual: Optional[ImmichVisualPreparationStatus] = None
+    immich_evidence: Optional[ImmichEvidenceSummary] = None
+    last_error: Optional[str] = None
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    class Settings:
+        name = "timeline_reconciliation_requests"
+        indexes = [
+            IndexModel([("request_id", ASCENDING)], unique=True),
+            IndexModel(
+                [
+                    ("user_id", ASCENDING),
+                    ("local_date", DESCENDING),
+                    ("created_at", DESCENDING),
+                ],
+                name="timeline_reconciliation_day_history",
             ),
         ]
 

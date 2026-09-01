@@ -13,12 +13,14 @@ from pydantic import BaseModel, Field, ValidationError
 from advanced_omi_backend.auth import current_active_user
 from advanced_omi_backend.models.audio_chunk import AudioChunkDocument
 from advanced_omi_backend.models.conversation import Conversation
+from advanced_omi_backend.models.notification import NotificationIntent
 from advanced_omi_backend.models.timeline import (
     DirtyEvidenceRange,
     MemoryReviewProposal,
     TimelineAnalysisRun,
     TimelineDay,
     TimelineEpisode,
+    TimelineReconciliationRequest,
     TimelineReviewDecision,
     TimelineSemanticGroup,
     clip_audio_ranges,
@@ -36,15 +38,14 @@ from advanced_omi_backend.services.timeline.consolidation import (
     resolve_day_consolidation,
     suggestions_match_active_episodes,
 )
-from advanced_omi_backend.services.timeline.dirty_ranges import mark_evidence_dirty
-from advanced_omi_backend.services.timeline.discovery import (
-    process_timeline_run,
-    request_timeline_analysis,
-)
 from advanced_omi_backend.services.timeline.evidence import load_reconciliation_evidence
 from advanced_omi_backend.services.timeline.evidence_relations import (
     EvidenceRelationPreview,
     infer_evidence_relations,
+)
+from advanced_omi_backend.services.timeline.explicit_reconciliation import (
+    reconciliation_request_payload,
+    request_explicit_reconciliation,
 )
 from advanced_omi_backend.services.timeline.merge_synthesis import (
     synthesize_merged_episode_account,
@@ -318,22 +319,20 @@ async def get_timeline_day(
     }
 
 
-class AnalyzeRequest(BaseModel):
-    date: date
+class ReconciliationDayRequest(BaseModel):
     timezone: str
-    force: bool = False
 
 
-@router.post("/analyze")
-async def analyze_timeline_day(
-    body: AnalyzeRequest,
-    background_tasks: BackgroundTasks,
+@router.post("/reconciliation/day/{local_date}", status_code=202)
+async def reconcile_timeline_day(
+    local_date: date,
+    body: ReconciliationDayRequest,
     user: User = Depends(current_active_user),
 ):
     timezone = _validate_timezone(body.timezone)
     existing_day = await TimelineDay.find_one(
         TimelineDay.user_id == str(user.id),
-        TimelineDay.local_date == body.date,
+        TimelineDay.local_date == local_date,
         TimelineDay.timezone == timezone,
     )
     if existing_day and existing_day.review_state in {
@@ -346,20 +345,37 @@ async def analyze_timeline_day(
             status_code=409,
             detail="Finish or reject this day's potential memory before reanalysis",
         )
-    run = await request_timeline_analysis(
-        str(user.id), body.date, timezone, force=body.force
+    try:
+        request, created = await request_explicit_reconciliation(
+            user=user,
+            local_date=local_date,
+            timezone_name=timezone,
+        )
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    return {**reconciliation_request_payload(request), "created": created}
+
+
+@router.get("/reconciliation/{request_id}")
+async def get_reconciliation_request(
+    request_id: str,
+    user: User = Depends(current_active_user),
+):
+    request = await TimelineReconciliationRequest.find_one(
+        TimelineReconciliationRequest.request_id == request_id,
+        TimelineReconciliationRequest.user_id == str(user.id),
     )
-    # Targeted at this run, not the shared oldest-first claim: a manual "Analyze day"
-    # must analyze the day that was asked for, not spend its work on a backlogged one.
-    # The compare-and-set claim still prevents the cron from owning it concurrently.
-    background_tasks.add_task(process_timeline_run, run.run_id)
-    return _run_payload(run)
-
-
-class ReconcileRequest(BaseModel):
-    started_at: datetime
-    ended_at: datetime
-    force: bool = False
+    if request is None:
+        raise HTTPException(status_code=404, detail="Reconciliation request not found")
+    payload = reconciliation_request_payload(request)
+    if request.notification_id:
+        intent = await NotificationIntent.find_one(
+            NotificationIntent.notification_id == request.notification_id,
+            NotificationIntent.user_id == str(user.id),
+        )
+        if intent is not None:
+            payload["notification_status"] = intent.state
+    return payload
 
 
 class ReviewDayRequest(BaseModel):
@@ -703,49 +719,6 @@ async def regenerate_timeline_memory_review(
         raise HTTPException(status_code=409, detail=str(error)) from error
     background_tasks.add_task(generate_memory_review, day)
     return _review_payload(day, proposal)
-
-
-@router.post("/reconcile")
-async def request_range_reconciliation(
-    body: ReconcileRequest,
-    user: User = Depends(current_active_user),
-):
-    """Ask for an absolute range to be reconciled — an ordinary dirty-range trigger.
-
-    ``force`` only sets ``not_before`` to now, collapsing the debounce; it never skips
-    leasing, fencing, or budgets. The range is capped so one request cannot enqueue an
-    unbounded reconciliation.
-    """
-
-    started_at, ended_at = _at(body.started_at), _at(body.ended_at)
-    if ended_at <= started_at:
-        raise HTTPException(status_code=422, detail="Range must have positive duration")
-    if ended_at - started_at > MANUAL_RECONCILE_MAX_RANGE:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Range must be at most "
-                f"{int(MANUAL_RECONCILE_MAX_RANGE.total_seconds() // 3600)} hours"
-            ),
-        )
-
-    dirty_range = await mark_evidence_dirty(
-        str(user.id),
-        started_at,
-        ended_at,
-        f"manual:{uuid.uuid4()}",
-        "manual",
-        source_kind="manual",
-        not_before=utcnow() if body.force else None,
-    )
-    return {
-        "dirty_range_id": dirty_range.dirty_range_id,
-        "state": dirty_range.state,
-        "started_at": _utc(dirty_range.started_at),
-        "ended_at": _utc(dirty_range.ended_at),
-        "not_before": _utc(dirty_range.not_before),
-        "force_after": _utc(dirty_range.force_after),
-    }
 
 
 @router.get("/evidence-preview")

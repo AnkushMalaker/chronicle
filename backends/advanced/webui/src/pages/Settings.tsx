@@ -725,13 +725,32 @@ const OPERATION_LABELS: Record<string, string> = {
   prompt_optimization: 'Prompt Optimization',
   plugin_assistant: 'Plugin Assistant',
   timeline_consolidation: 'Timeline Grouping Suggestions',
+  timeline_segmentation: 'Timeline Segmentation',
+  timeline_thumbnail: 'Timeline Thumbnail Selection',
+  immich_visual_evidence: 'Immich Visual Evidence',
+  manual_memory_image: 'Manual Memory Image',
 }
 
 interface LLMOpsData {
   operations: Record<string, { model: string | null; temperature: number | null; max_tokens: number | null; response_format: string | null }>
   available_models: Array<{ name: string; description: string; provider: string }>
   default_llm: string | null
-  effective_routing: Record<string, { model: string; model_name: string; provider: string; role: string | null; source: string }>
+  effective_routing: Record<string, { model: string; model_name: string; provider: string; endpoint: string; location: string; source: string }>
+  operation_route_audit: { total: number; self_hosted: number; external: number; unknown: number }
+  runtime_routes: Array<{
+    workload: string
+    adapter: string
+    operation: string
+    model: string
+    model_name: string
+    provider: string
+    endpoint: string
+    location: string
+    source: string
+    max_tokens: number | null
+    reasoning_effort: string | null
+    response_format: string
+  }>
 }
 
 function LLMOperationsCard({ data, onSaved }: { data: LLMOpsData; onSaved: () => void }) {
@@ -800,7 +819,53 @@ function LLMOperationsCard({ data, onSaved }: { data: LLMOpsData; onSaved: () =>
         AI Model Settings
       </h3>
 
+      {data.runtime_routes?.length > 0 && (
+        <div className="mb-6 overflow-x-auto rounded-md border border-gray-200 dark:border-gray-700">
+          <div className="border-b border-gray-200 bg-gray-50 px-3 py-2 text-xs font-medium text-gray-700 dark:border-gray-700 dark:bg-gray-900/30 dark:text-gray-300">
+            Selected runtime routes
+          </div>
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-gray-200 dark:border-gray-700">
+                <th className="px-3 py-2 text-left">Workload</th>
+                <th className="px-3 py-2 text-left">Adapter</th>
+                <th className="px-3 py-2 text-left">Effective model</th>
+                <th className="px-3 py-2 text-left">Location</th>
+                <th className="px-3 py-2 text-left">Endpoint</th>
+                <th className="px-3 py-2 text-left">Selected by</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.runtime_routes.map(route => (
+                <tr key={route.workload} className="border-b border-gray-100 last:border-0 dark:border-gray-700">
+                  <td className="whitespace-nowrap px-3 py-2 font-medium text-gray-900 dark:text-gray-100">{route.workload}</td>
+                  <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{route.adapter}</td>
+                  <td className="px-3 py-2">
+                    <div className="text-gray-900 dark:text-gray-100">{route.model}</div>
+                    <div className="text-[10px] text-gray-500 dark:text-gray-400">
+                      {route.provider} · {route.model_name}
+                      {route.max_tokens ? ` · ${route.max_tokens.toLocaleString()} tokens` : ''}
+                      {route.reasoning_effort ? ` · reasoning ${route.reasoning_effort}` : ''}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{route.location}</td>
+                  <td className="whitespace-nowrap px-3 py-2 font-mono text-[10px] text-gray-500 dark:text-gray-400">{route.endpoint}</td>
+                  <td className="whitespace-nowrap px-3 py-2 font-mono text-[10px] text-gray-500 dark:text-gray-400">{route.source}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       <div className="overflow-x-auto">
+        {data.operation_route_audit && (
+          <div className="mb-3 text-xs text-gray-600 dark:text-gray-300">
+            Named operation audit: {data.operation_route_audit.self_hosted}/{data.operation_route_audit.total} self-hosted
+            {data.operation_route_audit.external > 0 ? ` · ${data.operation_route_audit.external} external` : ''}
+            {data.operation_route_audit.unknown > 0 ? ` · ${data.operation_route_audit.unknown} unknown` : ''}
+          </div>
+        )}
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-gray-200 dark:border-gray-600">
@@ -835,6 +900,8 @@ function LLMOperationsCard({ data, onSaved }: { data: LLMOpsData; onSaved: () =>
                     {data.effective_routing?.[opName] && (
                       <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
                         Effective: {data.effective_routing[opName].model}
+                        {' · '}{data.effective_routing[opName].provider}
+                        {' · '}{data.effective_routing[opName].location}
                         {' · '}{data.effective_routing[opName].source}
                       </div>
                     )}

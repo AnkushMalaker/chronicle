@@ -5,16 +5,22 @@ from types import SimpleNamespace
 import pytest
 
 from advanced_omi_backend.services.timeline import evidence
-from advanced_omi_backend.services.timeline.contracts import TimelineEvidenceItem
+from advanced_omi_backend.services.timeline.contracts import (
+    TimelineCoverageWindow,
+    TimelineEvidenceItem,
+    TimelineEvidenceManifest,
+)
 from advanced_omi_backend.services.timeline.evidence import (
     _audio_item,
     _clip_evidence_to_range,
     _coalesce_application_evidence,
+    _device_item,
     _device_items,
     _transcript_item,
     _transcript_items,
     _window_items,
     day_bounds,
+    summarize_immich_evidence,
 )
 from advanced_omi_backend.services.transcript_time import AnchorMap, ChunkAnchor
 
@@ -394,6 +400,87 @@ def test_coverage_windows_skip_hours_with_no_evidence():
 
     assert len(windows) == 2
     assert all(window.evidence_ids == ["one-event"] for window in windows)
+
+
+def test_immich_visual_description_and_ocr_become_timeline_text():
+    captured = datetime(2026, 8, 6, 12, tzinfo=timezone.utc)
+    row = SimpleNamespace(
+        id="photo-row",
+        kind="immich_memory",
+        source_id="immich-default",
+        source_item_id="dog-photo",
+        captured_at=captured,
+        ended_at=None,
+        metadata={
+            "description": "A brown dog playing with a red ball in a garden.",
+            "ocr_text": "DOG PARK",
+            "timeline_relevance": "high",
+        },
+        samples=[],
+        content_hash="digest",
+        curation_revision=None,
+        media_data=None,
+        media_content_type=None,
+        frame_candidates=[],
+        curation=None,
+    )
+
+    item = _device_item(row)
+
+    assert item.kind == "immich"
+    assert "brown dog" in item.excerpt
+    assert "DOG PARK" in item.excerpt
+    assert item.metadata["timeline_relevance"] == "high"
+
+
+def test_immich_summary_reports_actual_helpful_windows():
+    start = datetime(2026, 8, 6, 12, tzinfo=timezone.utc)
+    items = [
+        TimelineEvidenceItem(
+            evidence_id="immich:dog",
+            kind="immich",
+            started_at=start + timedelta(minutes=4),
+            role="user_action",
+            metadata={"timeline_relevance": "high"},
+        ),
+        TimelineEvidenceItem(
+            evidence_id="immich:blur",
+            kind="immich",
+            started_at=start + timedelta(minutes=25),
+            role="user_action",
+            metadata={"timeline_relevance": "none"},
+        ),
+    ]
+    manifest = TimelineEvidenceManifest(
+        user_id="user",
+        local_date=date(2026, 8, 6),
+        timezone="UTC",
+        started_at=start,
+        ended_at=start + timedelta(hours=1),
+        evidence_revision="revision",
+        evidence=items,
+        windows=[
+            TimelineCoverageWindow(
+                window_id="one",
+                started_at=start,
+                ended_at=start + timedelta(minutes=20),
+                evidence_ids=["immich:dog"],
+            ),
+            TimelineCoverageWindow(
+                window_id="two",
+                started_at=start + timedelta(minutes=17),
+                ended_at=start + timedelta(minutes=37),
+                evidence_ids=["immich:blur"],
+            ),
+        ],
+    )
+
+    summary = summarize_immich_evidence(manifest)
+
+    assert summary.evidence_count == 2
+    assert summary.helpful_evidence_count == 1
+    assert summary.window_count == 2
+    assert [window.helpful_asset_count for window in summary.windows] == [1, 0]
 
 
 class _FakeAggregateCollection:

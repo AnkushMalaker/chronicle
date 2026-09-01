@@ -63,7 +63,7 @@ from .contracts import (
 from .dirty_ranges import LEASE_MINUTES, MAX_ATTEMPTS, complete_range, park_waiting
 from .dispatch import dispatch_classified_episodes
 from .episode_bounds import speech_profile_for_range
-from .evidence import load_reconciliation_evidence
+from .evidence import load_reconciliation_evidence, summarize_immich_evidence
 from .executor import (
     TimelineIncompleteSegmentation,
     build_range_executor,
@@ -785,12 +785,14 @@ async def reconcile_range(
                 evidence_revision=dirty_range.leased_evidence_revision or 0,
             )
             snapshot = await observed_revisions(bundle)
+            immich = summarize_immich_evidence(bundle.manifest)
             log.append(
                 {
                     "iteration": len(log),
                     "started_at": bounds[0].isoformat(),
                     "ended_at": bounds[1].isoformat(),
                     "evidence_count": len(bundle.manifest.evidence),
+                    "immich_evidence": immich.model_dump(mode="json"),
                 }
             )
 

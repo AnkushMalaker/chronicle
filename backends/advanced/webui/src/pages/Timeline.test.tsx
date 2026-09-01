@@ -129,7 +129,27 @@ function renderTimeline(analysis: TimelineDay['analysis'], dayData: TimelineDay 
     capture_gap_count: 0,
     proposal: null,
   }] } } as never)
-  const analyze = vi.spyOn(timelineApi, 'analyze').mockResolvedValue({ data: {} } as never)
+  const reconciliation = {
+    request_id: 'request-one',
+    date: TEST_DAY,
+    timezone: 'Asia/Calcutta',
+    pipeline: 'day',
+    state: 'blocked',
+    reason: 'no_immich_evidence',
+    target_asset_count: 0,
+    latest_eligible_asset_date: null,
+    checked_at: '2026-08-28T00:00:00.000Z',
+    notification_id: 'notice-one',
+    notification_status: 'queued',
+    job_id: null,
+    dirty_range_id: null,
+    run_id: null,
+    last_error: null,
+    created_at: '2026-08-28T00:00:00.000Z',
+    updated_at: '2026-08-28T00:00:00.000Z',
+  }
+  const reconcile = vi.spyOn(timelineApi, 'reconcileDay').mockResolvedValue({ data: reconciliation } as never)
+  vi.spyOn(timelineApi, 'getReconciliation').mockResolvedValue({ data: reconciliation } as never)
 
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -140,7 +160,7 @@ function renderTimeline(analysis: TimelineDay['analysis'], dayData: TimelineDay 
       </AuthProvider>
     </QueryClientProvider>,
   )
-  return analyze
+  return reconcile
 }
 
 afterEach(() => {
@@ -150,21 +170,35 @@ afterEach(() => {
 })
 
 describe('Timeline next action', () => {
-  it('turns an unprocessed empty day into an explicit review or analysis choice', async () => {
-    const analyze = renderTimeline(null)
+  it('turns an unprocessed empty day into an explicit review or reconciliation choice', async () => {
+    const reconcile = renderTimeline(null)
 
     expect(await screen.findByRole('heading', { name: 'Today has no processed episodes yet.' })).toBeVisible()
     expect(screen.getByRole('link', { name: /Continue review/i })).toHaveAttribute('href', '/timeline?date=2026-02-19')
     expect(screen.getByText('Next: Feb 19 · Review episodes')).toBeVisible()
     expect(screen.queryByText('Episodes await review')).not.toBeInTheDocument()
-    expect(analyze).not.toHaveBeenCalled()
+    expect(reconcile).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Analyze this day' }))
-    await waitFor(() => expect(analyze).toHaveBeenCalledWith(TEST_DAY, 'Asia/Calcutta', false))
+    fireEvent.click(screen.getByRole('button', { name: 'Reconcile this day' }))
+    await waitFor(() => expect(reconcile).toHaveBeenCalledWith(TEST_DAY, 'Asia/Calcutta'))
+  })
+
+  it('restores durable reconciliation status after a reload', async () => {
+    localStorage.setItem(
+      `chronicle.timeline.reconciliation:Asia/Calcutta:${TEST_DAY}`,
+      'request-one',
+    )
+    renderTimeline(null)
+
+    await waitFor(() => {
+      expect(timelineApi.getReconciliation).toHaveBeenCalledWith('request-one')
+    })
+    expect(await screen.findByText('Reconciliation blocked')).toBeVisible()
+    expect(screen.getByText('Backup reminder: queued')).toBeVisible()
   })
 
   it('keeps the Timeline review cursor actionable while today is processing', async () => {
-    const analyze = renderTimeline({
+    const reconcile = renderTimeline({
       run_id: 'run-1',
       state: 'pending',
       attempts: 0,
@@ -176,8 +210,8 @@ describe('Timeline next action', () => {
 
     expect(await screen.findByRole('heading', { name: 'Today’s episodes are still processing.' })).toBeVisible()
     expect(screen.getByRole('link', { name: /Continue review/i })).toHaveAttribute('href', '/timeline?date=2026-02-19')
-    expect(screen.queryByRole('button', { name: 'Analyze this day' })).not.toBeInTheDocument()
-    expect(analyze).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Reconcile this day' })).not.toBeInTheDocument()
+    expect(reconcile).not.toHaveBeenCalled()
   })
 
   it('finishes episode review on Timeline without jumping to Memory Ledger', async () => {

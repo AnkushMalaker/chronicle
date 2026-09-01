@@ -747,8 +747,9 @@ llm_operations:
     model: openrouter-qwen3.8-27b
     # Vault writes are durable state transitions, not creative generation. Exact-input
     # replays showed temperature 1.0 split one concept into duplicate Topics in 2/3
-    # runs; temperature 0 reduced that spread. Deterministic gates remain authoritative.
-    temperature: 0.0
+    # runs. Keep sampling at 0.1 for minimal path diversity; deterministic gates remain
+    # authoritative.
+    temperature: 0.1
     reasoning_effort: high
     max_tokens: 16000
   # Vault retrieval agent. This is separate so reads can use a cheaper/faster model
@@ -783,6 +784,28 @@ llm_operations:
     temperature: 0.0
     reasoning_effort: none
     max_tokens: 8192
+  # Semantic Timeline analysis through the Pi executor. The executor is an adapter;
+  # the named operation remains the authoritative model-selection seam.
+  timeline_segmentation:
+    temperature: 0.0
+    reasoning_effort: none
+    max_tokens: 32000
+    response_format: json
+  timeline_thumbnail:
+    temperature: 0.0
+    reasoning_effort: none
+    max_tokens: 2000
+    response_format: json
+  immich_visual_evidence:
+    temperature: 0.0
+    reasoning_effort: none
+    max_tokens: 8000
+    response_format: json
+  manual_memory_image:
+    temperature: 0.0
+    reasoning_effort: none
+    max_tokens: 4000
+    response_format: json
   detailed_summary:
     temperature: 0.3
     reasoning_effort: none
@@ -974,14 +997,20 @@ watchdog:
     socket_mount_fresh: true
     tls_cert: true
 
-manual_memories:
-  agents:
-    analyze_image:
-      backend: codex        # codex | pi (pi is a declared slot, not yet implemented)
+vision:
+  # Optional external adapter. Registry-backed `model` routes select their model in
+  # llm_operations; a route set to `codex` uses this one visible shared definition.
   backends:
     codex:
       model: "gpt-5.6-luna"
       reasoning_effort: low
+      timeout_seconds: 600
+
+manual_memories:
+  agents:
+    analyze_image:
+      backend: model         # model (llm_operations) | codex
+      operation: manual_memory_image
       timeout_seconds: 300
 
 cron_jobs:
@@ -1060,19 +1089,24 @@ cron_jobs:
     # when every consumer group proves zero pending and zero lag.
     schedule: "*/15 * * * *"
   rolling_reconciliation_scan:
-    description: "Enqueue dirty evidence ranges whose debounce or forced deadline passed"
+    description: "Recover only dirty evidence ranges authorized by an explicit reconciliation request"
     enabled: true
     # Scheduling only — the scan does Mongo queries and RQ enqueues, so it is safe on
     # the API event loop. Five minutes matches the debounce: a range that stops
     # changing is looked at shortly after, and forced progress is never delayed by
     # more than one tick.
     schedule: "*/5 * * * *"
-  timeline_analysis:
-    description: "Reconcile changed current-day capture evidence into semantic episodes"
+  notification_dispatch:
+    description: "Enqueue due durable push-notification intents"
     enabled: true
-    # Every run regenerates the whole day from scratch — there is no incremental merge —
-    # so a tight cadence re-does the same work and reshuffles episode ids each time.
-    # Analysis is also available on demand from the Timeline page.
+    schedule: "* * * * *"
+  notification_receipts:
+    description: "Resolve Expo tickets into provider-acceptance receipts"
+    enabled: true
+    schedule: "*/5 * * * *"
+  timeline_analysis:
+    description: "Disabled: Timeline reconciliation requires an explicit Immich-ready day request"
+    enabled: false
     schedule: "0 */4 * * *"
   timeline_consolidation_prefetch:
     description: "Keep grouping suggestions ready ahead of the Timeline review cursor"
@@ -1100,7 +1134,7 @@ timeline:
   executor: codex
   # Run identity. Must match services/timeline/prompt.py's PROMPT_VERSION; changing the
   # prompt text without bumping both leaves completed days cached on the old rules.
-  prompt_version: timeline-episodes-v17
+  prompt_version: timeline-episodes-v18
   codex:
     model: gpt-5.6-luna
     service_tier: ""              # set to priority for Codex Fast mode (higher usage)
@@ -1117,7 +1151,10 @@ timeline:
     retry_hours: 6
   pi:
     operation: timeline_segmentation
-    reasoning_effort: low
+    # Final synthesis must emit the bounded JSON directly. An exact-input replay with
+    # `low` spent all 32K output tokens in one hidden thinking block and returned no
+    # answer; `none` emitted the schema result directly.
+    reasoning_effort: none
     # A dense screen-heavy day used the complete 24K allowance and was cut off near
     # its final episodes. Keep final synthesis roomy; dense block condensation retains
     # its smaller cap and successful block summaries are cached independently.
@@ -1129,15 +1166,25 @@ timeline:
     context_block_max_items: 160
     condense_min_chars: 50000
     condense_min_items: 80
-    condense_max_tokens: 12000
+    # Qwen may spend a substantial part of the completion budget on internal
+    # reasoning before emitting the compact JSON. A live dense block exhausted 12K.
+    condense_max_tokens: 24000
     condense_max_attempts: 3
-    condense_thinking: low
+    # This stage is schema-bound compression, not open-ended reasoning. Hidden
+    # thinking consumed the full 12K live budget without producing the JSON payload.
+    condense_thinking: none
   thumbnails:
     # Vision pass that picks which sampled frame depicts an episode.
-    codex:
-      model: gpt-5.6-luna
-      reasoning_effort: low
-      timeout_seconds: 600
+    backend: model
+    operation: timeline_thumbnail
+    timeout_seconds: 600
+  immich_visual_evidence:
+    # Explicit reconciliation only: fetch small server thumbnails for the already
+    # selected day candidates, derive bounded text, then discard the pixels.
+    max_assets_per_day: 12
+    backend: model
+    operation: immich_visual_evidence
+    timeout_seconds: 600
   # Settled-day vault write. A day is the memory unit for capture evidence because
   # continuous audio is cut into bounded compute spans, so one meeting can span several
   # recordings while an episode already has the right bounds.

@@ -13,14 +13,29 @@ import logging
 from datetime import date
 
 from advanced_omi_backend.models.job import async_job
-from advanced_omi_backend.models.timeline import DirtyEvidenceRange, TimelineDay
+from advanced_omi_backend.models.timeline import (
+    DirtyEvidenceRange,
+    ImmichEvidenceSummary,
+    ImmichVisualPreparationStatus,
+    TimelineDay,
+    TimelineReconciliationRequest,
+    utcnow,
+)
 from advanced_omi_backend.services.timeline.consolidation import (
     generate_day_consolidation,
 )
-from advanced_omi_backend.services.timeline.dirty_ranges import complete_range
+from advanced_omi_backend.services.timeline.dirty_ranges import release_range_for_retry
 from advanced_omi_backend.services.timeline.discovery import (
     process_timeline_run,
     request_timeline_analysis,
+)
+from advanced_omi_backend.services.timeline.evidence import (
+    assemble_day_evidence,
+    summarize_immich_evidence,
+)
+from advanced_omi_backend.services.timeline.executor import settings_dict
+from advanced_omi_backend.services.timeline.immich_visual_evidence import (
+    prepare_immich_visual_evidence,
 )
 from advanced_omi_backend.services.timeline.memory import write_day_memory
 from advanced_omi_backend.services.timeline.reconciliation import (
@@ -30,6 +45,116 @@ from advanced_omi_backend.services.timeline.reconciliation import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _last_immich_evidence(accounting: list[dict]) -> ImmichEvidenceSummary:
+    for iteration in reversed(accounting):
+        if iteration.get("immich_evidence") is not None:
+            return ImmichEvidenceSummary.model_validate(iteration["immich_evidence"])
+    return ImmichEvidenceSummary()
+
+
+@async_job(redis=True, beanie=True)
+async def explicit_reconciliation_job(request_id: str, *, redis_client=None) -> dict:
+    """Real registered entrypoint for the sole explicit Timeline write path."""
+
+    request = await TimelineReconciliationRequest.find_one(
+        TimelineReconciliationRequest.request_id == request_id
+    )
+    if request is None:
+        return {"request_id": request_id, "state": "missing"}
+    request.state = "running"
+    request.last_error = None
+    request.updated_at = utcnow()
+    await request.save()
+    leased = None
+    try:
+        if request.target_asset_count > 0:
+            request.immich_visual = ImmichVisualPreparationStatus(state="running")
+            request.updated_at = utcnow()
+            await request.save()
+            visual = await prepare_immich_visual_evidence(
+                request.user_id, request.local_date, request.timezone
+            )
+            request.immich_visual = ImmichVisualPreparationStatus.model_validate(
+                visual.payload()
+            )
+            request.updated_at = utcnow()
+            await request.save()
+            if visual.state == "failed":
+                raise RuntimeError(
+                    "all selected Immich photos failed visual preparation"
+                )
+        elif request.immich_visual is None:
+            request.immich_visual = ImmichVisualPreparationStatus(state="not_needed")
+
+        if request.pipeline == "rolling":
+            if not request.dirty_range_id:
+                raise RuntimeError("explicit rolling request has no dirty range")
+            dirty_range = await DirtyEvidenceRange.find_one(
+                DirtyEvidenceRange.dirty_range_id == request.dirty_range_id
+            )
+            if dirty_range is None:
+                raise RuntimeError("authorized dirty range is missing")
+            owner = f"explicit_reconciliation:{request_id}"
+            leased = await lease_range_by_id(dirty_range.dirty_range_id, owner)
+            if leased is None:
+                raise RuntimeError("authorized dirty range could not be leased")
+            accounting: list[dict] = []
+            outcome = await reconcile_range(leased, accounting=accounting)
+            request.immich_evidence = _last_immich_evidence(accounting)
+            request.updated_at = utcnow()
+            await request.save()
+            range_state = await finish_range(leased, outcome)
+            if range_state != "completed":
+                raise RuntimeError(f"reconciliation ended in {range_state}")
+            result = {
+                "request_id": request_id,
+                "dirty_range_id": leased.dirty_range_id,
+                "published": list(outcome.episode_ids) if outcome else [],
+                "iterations": accounting,
+            }
+        else:
+            run = await request_timeline_analysis(
+                request.user_id,
+                request.local_date,
+                request.timezone,
+                force=True,
+            )
+            request.run_id = run.run_id
+            request.updated_at = utcnow()
+            await request.save()
+            outcome = await process_timeline_run(run.run_id)
+            if request.target_asset_count:
+                timeline_settings = settings_dict()
+                manifest, _images = await assemble_day_evidence(
+                    request.user_id,
+                    request.local_date,
+                    request.timezone,
+                    window_minutes=int(timeline_settings.get("window_minutes", 20)),
+                    overlap_minutes=int(timeline_settings.get("overlap_minutes", 3)),
+                )
+                request.immich_evidence = summarize_immich_evidence(manifest)
+            else:
+                request.immich_evidence = ImmichEvidenceSummary()
+            request.updated_at = utcnow()
+            await request.save()
+            result = {"request_id": request_id, "run_id": run.run_id, **outcome}
+    except Exception as error:
+        error_text = f"{type(error).__name__}: {error}"
+        if request.pipeline == "rolling" and leased is not None:
+            released = await release_range_for_retry(leased, error_text)
+            request.state = "failed" if released.state == "failed" else "queued"
+        else:
+            request.state = "failed"
+        request.last_error = error_text
+        request.updated_at = utcnow()
+        await request.save()
+        raise
+    request.state = "completed"
+    request.updated_at = utcnow()
+    await request.save()
+    return {**result, "state": "completed"}
 
 
 @async_job(redis=True, beanie=True)

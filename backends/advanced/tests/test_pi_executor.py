@@ -54,6 +54,7 @@ def _runtime_config(
     api_key="super-secret-key",
     base_url="http://kraken:8083/v1",
     temperature=0.2,
+    response_format=None,
     seed=None,
     timeout_seconds=30,
 ):
@@ -69,6 +70,7 @@ def _runtime_config(
         timeout_seconds=timeout_seconds,
         reasoning=True,
         temperature=temperature,
+        response_format=response_format,
         seed=seed,
     )
 
@@ -323,6 +325,7 @@ def test_config_uses_registry_operation_budget_without_backend_model_override(
         max_tokens=9000,
         reasoning_effort="medium",
         temperature=0.37,
+        response_format=None,
     )
     calls = []
     registry = SimpleNamespace(
@@ -401,6 +404,7 @@ def test_config_accepts_max_thinking_and_explicit_compat_overrides(monkeypatch):
         max_tokens=2048,
         reasoning_effort="high",
         temperature=0.41,
+        response_format=None,
     )
     registry = SimpleNamespace(
         memory={
@@ -578,6 +582,102 @@ def test_gateway_does_not_count_identical_calls_across_other_inspection(
     assert gateway.limit_error is None
 
 
+def test_gateway_breaks_repeated_terminal_search_evidence_across_alternating_calls(
+    tmp_path, unlocked
+):
+    root = tmp_path / "user"
+    note = root / "People" / "Alice.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("Alice prefers tea and coffee.", encoding="utf-8")
+    gateway = pi_agent._VaultToolGateway(
+        root,
+        vault_tools.VAULT_TOOL_SCHEMAS,
+        max_tool_calls=20,
+    )
+
+    for pattern in ("tea", "tea", "coffee", "coffee"):
+        assert gateway.dispatch("grep", {"pattern": pattern})
+    with pytest.raises(pi_agent._PiLimitExceeded, match="terminal search evidence"):
+        gateway.dispatch("grep", {"pattern": "tea"})
+
+    assert gateway.limit_error and "grep:" in gateway.limit_error
+
+
+def test_gateway_allows_terminal_search_evidence_after_a_successful_mutation(
+    tmp_path, unlocked
+):
+    root = tmp_path / "user"
+    note = root / "People" / "Alice.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("Alice prefers tea.", encoding="utf-8")
+    gateway = pi_agent._VaultToolGateway(
+        root,
+        vault_tools.VAULT_TOOL_SCHEMAS,
+        max_tool_calls=20,
+    )
+
+    assert gateway.dispatch("grep", {"pattern": "tea"})
+    assert gateway.dispatch("grep", {"pattern": "tea"}).startswith(
+        "Search result unchanged"
+    )
+    assert gateway.dispatch(
+        "edit_note",
+        {
+            "path": "People/Alice.md",
+            "edits": [{"old_text": "tea", "new_text": "coffee"}],
+        },
+    )
+    assert gateway.dispatch("grep", {"pattern": "coffee"})
+    assert gateway.dispatch("grep", {"pattern": "coffee"}).startswith(
+        "Search result unchanged"
+    )
+
+    assert gateway.limit_error is None
+
+
+def test_write_gateway_breaks_inspection_churn_without_a_mutation(tmp_path, unlocked):
+    root = tmp_path / "user"
+    root.mkdir(parents=True)
+    gateway = pi_agent._VaultToolGateway(
+        root,
+        vault_tools.VAULT_TOOL_SCHEMAS,
+        max_tool_calls=100,
+    )
+
+    for index in range(pi_agent.MAX_INSPECTION_CALLS_WITHOUT_MUTATION):
+        assert gateway.dispatch("glob", {"pattern": f"Topics/{index}-*.md"})
+    with pytest.raises(pi_agent._PiLimitExceeded, match="inspection calls without"):
+        gateway.dispatch("glob", {"pattern": "Topics/over-limit-*.md"})
+
+
+def test_successful_mutation_resets_write_gateway_inspection_progress(
+    tmp_path, unlocked
+):
+    root = tmp_path / "user"
+    note = root / "People" / "Alice.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("Alice prefers tea.", encoding="utf-8")
+    gateway = pi_agent._VaultToolGateway(
+        root,
+        vault_tools.VAULT_TOOL_SCHEMAS,
+        max_tool_calls=100,
+    )
+
+    for index in range(pi_agent.MAX_INSPECTION_CALLS_WITHOUT_MUTATION):
+        assert gateway.dispatch("glob", {"pattern": f"Topics/{index}-*.md"})
+    assert gateway.dispatch(
+        "edit_note",
+        {
+            "path": "People/Alice.md",
+            "edits": [{"old_text": "tea", "new_text": "coffee"}],
+        },
+    )
+    for index in range(pi_agent.MAX_INSPECTION_CALLS_WITHOUT_MUTATION):
+        assert gateway.dispatch("glob", {"pattern": f"Categories/{index}-*.md"})
+
+    assert gateway.limit_error is None
+
+
 def test_gateway_can_terminate_only_after_verified_required_note_exists(
     tmp_path, unlocked
 ):
@@ -695,6 +795,10 @@ def test_later_successful_turn_recovers_an_earlier_length_limited_tool_call():
     )
 
     assert events.truncated is False
+    assert events.stop_reason == "stop"
+    assert events.assistant_content == [
+        {"type": "text", "text": "Recovered and verified."}
+    ]
     assert events.summary == "Recovered and verified."
 
 
@@ -1395,6 +1499,9 @@ async def test_no_tool_pi_invocation_loads_temperature_runtime_extension(
     root.mkdir()
     captured = {}
 
+    def record_usage_span(*_args, **kwargs):
+        captured["usage_span"] = kwargs
+
     async def spawn(*command, **kwargs):
         captured["command"] = list(command)
         captured["agent_dir"] = Path(kwargs["env"]["PI_CODING_AGENT_DIR"])
@@ -1432,6 +1539,7 @@ async def test_no_tool_pi_invocation_loads_temperature_runtime_extension(
         return Process()
 
     monkeypatch.setattr(pi_agent.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(pi_agent, "record_llm_usage_span", record_usage_span)
 
     events, gateway = await pi_agent._invoke_pi(
         root,
@@ -1445,6 +1553,7 @@ async def test_no_tool_pi_invocation_loads_temperature_runtime_extension(
 
     assert events.summary == "final answer"
     assert events.truncated is False
+    assert events.stop_reason == "stop"
     assert gateway.call_count == 0
     assert "-e" in captured["command"]
     assert "--tools" not in captured["command"]
@@ -1455,6 +1564,138 @@ async def test_no_tool_pi_invocation_loads_temperature_runtime_extension(
     assert "pi.registerTool" in captured["extension"]
     assert captured["extension_mode"] == 0o600
     assert captured["stdin"] == "final prompt"
+    assert captured["usage_span"]["input"]["system_prompt"]["chars"] == len(
+        "final system"
+    )
+    assert captured["usage_span"]["input"]["prompt"]["chars"] == len("final prompt")
+    assert captured["usage_span"]["output"]["completion"]["chars"] == len(
+        "final answer"
+    )
+    assert captured["usage_span"]["output"]["stop_reason"] == "stop"
+    assert captured["usage_span"]["attributes"]["gen_ai.response.finish_reasons"] == [
+        "stop"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_length_limited_thinking_only_output_is_visible_in_usage_span(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "user"
+    root.mkdir()
+    captured = {}
+
+    async def spawn(*_command, **_kwargs):
+        class Process:
+            returncode = 0
+
+            async def communicate(self, _input_bytes=None):
+                return (
+                    _jsonl(
+                        {"type": "agent_start"},
+                        {
+                            "type": "message_end",
+                            "message": {
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "thinking", "thinking": "unfinished"}
+                                ],
+                                "stopReason": "length",
+                            },
+                        },
+                        {"type": "agent_end", "messages": []},
+                    ),
+                    b"",
+                )
+
+            def kill(self):
+                self.returncode = -9
+
+            async def wait(self):
+                return self.returncode
+
+        return Process()
+
+    monkeypatch.setattr(pi_agent.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(
+        pi_agent,
+        "record_llm_usage_span",
+        lambda *_args, **kwargs: captured.update(kwargs),
+    )
+
+    events, _gateway = await pi_agent._invoke_pi(
+        root,
+        prompt="final prompt",
+        system_prompt="final system",
+        schemas=(),
+        config=_runtime_config(),
+        max_tool_rounds=1,
+        max_tool_calls=1,
+    )
+
+    assert events.summary == ""
+    assert events.stop_reason == "length"
+    assert events.assistant_content == [{"type": "thinking", "thinking": "unfinished"}]
+    assert captured["output"]["assistant_content"]["chars"] > len("unfinished")
+
+
+@pytest.mark.asyncio
+async def test_no_tool_pi_invocation_forwards_json_response_format(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "user"
+    root.mkdir()
+    captured = {}
+
+    async def spawn(*command, **_kwargs):
+        extension_path = Path(command[command.index("-e") + 1])
+        captured["extension"] = extension_path.read_text(encoding="utf-8")
+
+        class Process:
+            returncode = 0
+
+            async def communicate(self, _input_bytes=None):
+                return (
+                    _jsonl(
+                        {"type": "agent_start"},
+                        {
+                            "type": "message_end",
+                            "message": {
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "{}"}],
+                                "stopReason": "stop",
+                            },
+                        },
+                        {"type": "agent_end", "messages": []},
+                    ),
+                    b"",
+                )
+
+            def kill(self):
+                self.returncode = -9
+
+            async def wait(self):
+                return self.returncode
+
+        return Process()
+
+    monkeypatch.setattr(pi_agent.asyncio, "create_subprocess_exec", spawn)
+
+    await pi_agent._invoke_pi(
+        root,
+        prompt="return json",
+        system_prompt="return json",
+        schemas=(),
+        config=_runtime_config(response_format={"type": "json_object"}),
+        max_tool_rounds=1,
+        max_tool_calls=1,
+    )
+
+    assert 'const responseFormat = {"type":"json_object"};' in captured["extension"]
+    assert (
+        "...(responseFormat === null ? {} : { response_format: responseFormat }),"
+        in captured["extension"]
+    )
 
 
 def test_parse_events_preserves_tool_and_protocol_errors():
@@ -1571,6 +1812,7 @@ def test_generated_extension_aborts_on_first_tool_beyond_round_limit(tmp_path):
             gateway_url="http://127.0.0.1:1/tool",
             token="test-token",
             temperature=0.37,
+            response_format={"type": "json_object"},
             max_tool_rounds=2,
             max_tool_calls=8,
         ),
@@ -1596,6 +1838,9 @@ const providerPayload = await handlers.before_provider_request(
 );
 if (providerPayload.temperature !== 0.37) {{
   throw new Error(`expected temperature 0.37, got ${{providerPayload.temperature}}`);
+}}
+if (providerPayload.response_format?.type !== "json_object") {{
+  throw new Error("expected JSON response format on provider payload");
 }}
 if (providerPayload.model !== "qwen" || providerPayload.messages !== originalPayload.messages) {{
   throw new Error("provider hook did not preserve the original payload");

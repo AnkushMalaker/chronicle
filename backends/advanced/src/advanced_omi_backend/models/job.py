@@ -67,6 +67,11 @@ async def _ensure_beanie_initialized():
                 MemorySpace,
                 SpaceMergeProposal,
             )
+            from advanced_omi_backend.models.notification import (
+                NotificationDelivery,
+                NotificationIntent,
+                PushDevice,
+            )
             from advanced_omi_backend.models.timeline import (
                 AudioEvidenceSpan,
                 DirtyEvidenceRange,
@@ -75,6 +80,7 @@ async def _ensure_beanie_initialized():
                 TimelineAnalysisRun,
                 TimelineDay,
                 TimelineEpisode,
+                TimelineReconciliationRequest,
             )
             from advanced_omi_backend.models.user import User
             from advanced_omi_backend.models.waveform import WaveformData
@@ -120,9 +126,13 @@ async def _ensure_beanie_initialized():
                     TimelineAnalysisRun,
                     TimelineEpisode,
                     TimelineDay,
+                    TimelineReconciliationRequest,
                     DirtyEvidenceRange,
                     EpisodeDispatchLatch,
                     MemoryReviewProposal,
+                    PushDevice,
+                    NotificationIntent,
+                    NotificationDelivery,
                 ],
             )
 

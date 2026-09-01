@@ -163,6 +163,13 @@ def test_memory_prompt_preserves_property_time_and_dates_contingent_claims():
     assert "Date and attribute claims whose truth may change over time" in normalized
 
 
+def test_memory_prompt_forbids_repeating_empty_or_unchanged_searches():
+    normalized = " ".join(DEFAULT_AGENT_SYSTEM_PROMPT.split())
+
+    assert "`No matches found` or `Search result unchanged`" in normalized
+    assert "Do not repeat or slightly vary that search" in normalized
+
+
 def test_day_task_says_chronicle_owns_the_concise_episode_index():
     task = build_write_task(
         "Local day with one episode.",
