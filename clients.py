@@ -41,7 +41,6 @@ _SPEC_DIR = (
     / "clients"
 )
 _SCREENPIPE_PORT = 3030
-_SCREENPIPE_SETTINGS = Path.home() / ".screenpipe" / "store.bin"
 
 # A component is either a *project* component (a uv project in this repo, run as
 # `uv run --project <path> <command>`) or a *spec* component, whose argv and
@@ -467,18 +466,6 @@ def _screenpipe_vision_capture(health: dict) -> dict | None:
     }
 
 
-def _desktop_meeting_detection_disabled() -> bool | None:
-    try:
-        settings = json.loads(_SCREENPIPE_SETTINGS.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    app_settings = settings.get("settings", settings)
-    if not isinstance(app_settings, dict):
-        return None
-    value = app_settings.get("disableMeetingDetector")
-    return value if isinstance(value, bool) else None
-
-
 def screenpipe_runtime_status(chronicle_active: bool | None = None) -> dict:
     """Describe which local process owns ScreenPipe recording and port 3030."""
     desktop_processes = _screenpipe_desktop_processes()
@@ -487,27 +474,6 @@ def screenpipe_runtime_status(chronicle_active: bool | None = None) -> dict:
         chronicle_active = component_active("screenpipe")
     port_open = _screenpipe_port_open()
 
-    if desktop_active:
-        meeting_disabled = _desktop_meeting_detection_disabled()
-        if chronicle_active:
-            detail = "desktop app and Chronicle recorder are both running"
-            conflict = True
-        elif port_open:
-            detail = "desktop app owns recording"
-            conflict = False
-        else:
-            detail = "desktop app is open but recorder API is unavailable"
-            conflict = True
-        if meeting_disabled is True:
-            detail += " — meeting detection disabled"
-        return {
-            "runtime_owner": "desktop_app",
-            "recording_active": port_open,
-            "conflict": conflict,
-            "detail": detail,
-            "desktop_pids": [process["pid"] for process in desktop_processes],
-        }
-
     if chronicle_active:
         health = _screenpipe_health() if port_open else None
         return {
@@ -515,11 +481,19 @@ def screenpipe_runtime_status(chronicle_active: bool | None = None) -> dict:
             "recording_active": port_open,
             "conflict": False,
             "detail": (
-                "Chronicle recorder active"
+                (
+                    "Chronicle recorder active — desktop viewer open"
+                    if desktop_active
+                    else "Chronicle recorder active"
+                )
                 if port_open
-                else "Chronicle recorder starting; API not ready"
+                else (
+                    "Chronicle recorder starting; API not ready — desktop viewer waiting"
+                    if desktop_active
+                    else "Chronicle recorder starting; API not ready"
+                )
             ),
-            "desktop_pids": [],
+            "desktop_pids": [process["pid"] for process in desktop_processes],
             "vision_capture": _screenpipe_vision_capture(health) if health else None,
         }
 
@@ -528,16 +502,24 @@ def screenpipe_runtime_status(chronicle_active: bool | None = None) -> dict:
             "runtime_owner": "unknown",
             "recording_active": True,
             "conflict": True,
-            "detail": "port 3030 is owned by an unrecognized process",
-            "desktop_pids": [],
+            "detail": (
+                "port 3030 is owned by an unrecognized process — desktop viewer open"
+                if desktop_active
+                else "port 3030 is owned by an unrecognized process"
+            ),
+            "desktop_pids": [process["pid"] for process in desktop_processes],
         }
 
     return {
         "runtime_owner": "none",
         "recording_active": False,
         "conflict": False,
-        "detail": "recorder inactive",
-        "desktop_pids": [],
+        "detail": (
+            "recorder inactive — desktop viewer waiting"
+            if desktop_active
+            else "recorder inactive"
+        ),
+        "desktop_pids": [process["pid"] for process in desktop_processes],
     }
 
 
@@ -570,12 +552,6 @@ def install_component(name: str, extras=()) -> None:
     if name == "screenpipe":
         for message in disable_screenpipe_app_autostart():
             print(message)
-        desktop_processes = _screenpipe_desktop_processes()
-        if desktop_processes:
-            raise RuntimeError(
-                "Cannot install/start Chronicle recorder while the ScreenPipe "
-                "desktop app is running. Quit the app and retry."
-            )
     if name == "tray":
         conflicts = _TRAY_CONFLICTS_MACOS if IS_MACOS else _TRAY_CONFLICTS_LINUX
         if "pendant" in extras and IS_MACOS:
@@ -605,10 +581,10 @@ def component_action(name: str, action: str) -> bool:
     cfg = CLIENT_COMPONENTS[name]
     if name == "screenpipe" and action in {"start", "restart"}:
         runtime = screenpipe_runtime_status()
-        if runtime["runtime_owner"] in {"desktop_app", "unknown"}:
+        if runtime["runtime_owner"] == "unknown":
             raise RuntimeError(
                 f"Cannot {action} Chronicle recorder: {runtime['detail']}. "
-                "Quit the ScreenPipe desktop app or release port 3030 first."
+                "Release port 3030 first."
             )
     if IS_MACOS:
         domain = f"gui/{os.getuid()}"
@@ -692,23 +668,6 @@ def disable_screenpipe_app_autostart() -> list[str]:
             "the app remains manually launchable"
         )
     return messages
-
-
-def reconcile_screenpipe_ownership() -> bool:
-    """Stop Chronicle's job when a manually launched desktop app takes ownership."""
-    if not _screenpipe_desktop_processes() or not component_installed("screenpipe"):
-        return False
-    cfg = CLIENT_COMPONENTS["screenpipe"]
-    if IS_MACOS:
-        loaded = (
-            _launchctl("print", f"gui/{os.getuid()}/{cfg['label']}").returncode == 0
-        )
-        return component_action("screenpipe", "stop") if loaded else False
-
-    state = _systemctl("is-active", cfg["unit"])
-    if state.stdout.strip() not in {"active", "activating", "reloading"}:
-        return False
-    return component_action("screenpipe", "stop")
 
 
 # ── legacy units (pre-unified-tray installs) ─────────────────────────────────

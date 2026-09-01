@@ -418,15 +418,6 @@ class ScreenPipeSection(Section):
 
     def refresh(self) -> None:
         clients = _clients()
-        try:
-            if clients.reconcile_screenpipe_ownership():
-                logger.warning(
-                    "Stopped Chronicle recorder because the ScreenPipe desktop app "
-                    "owns recording"
-                )
-        except (OSError, RuntimeError):
-            logger.exception("Could not reconcile ScreenPipe recorder ownership")
-
         recorder_status = clients.component_status(RECORDER)
         runtime_owner = recorder_status.get("runtime_owner", "none")
         external_owner = runtime_owner in {"desktop_app", "unknown"}

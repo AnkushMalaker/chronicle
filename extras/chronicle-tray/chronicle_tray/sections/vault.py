@@ -8,6 +8,7 @@ import importlib.util
 import logging
 import re
 import shutil
+import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from urllib.parse import quote
 import httpx
 from chronicle_client import load_client_env
 from chronicle_tray.macos import activate_for_dialog
+from chronicle_tray.obsidian import register_obsidian_vault
 from chronicle_tray.sections import Section
 from chronicle_vault_sync import (
     SyncthingManager,
@@ -28,7 +30,7 @@ from chronicle_vault_sync import (
     persisted_vault_dir,
     save_vault_dir,
 )
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMenu
 
@@ -138,11 +140,37 @@ class VaultSyncManager:
                 info["server_device_id"],
                 self.syncthing.device_id(),
             )
+            sync_health = None
+            if memory_space_id is not None:
+                try:
+                    sync_health = broker_space_action(
+                        cfg.backend_url,
+                        cfg.api_key,
+                        memory_space_id,
+                        "rescan",
+                    )
+                except (OSError, httpx.HTTPError, RuntimeError):
+                    # Local pairing succeeded. Keep the folder retryable and let
+                    # the next refresh/manual rescan surface a server-side issue.
+                    logger.warning(
+                        "Paired memory-space vault but could not acknowledge server rescan",
+                        exc_info=True,
+                    )
             key = memory_space_id or "main"
             folders = dict(self.state.snapshot().get("folders") or {})
             folders[key] = {
                 **target,
                 **info,
+                **(
+                    {
+                        "sync_state": (
+                            "healthy" if sync_health.get("healthy") else "error"
+                        ),
+                        "sync_error": sync_health.get("error"),
+                    }
+                    if sync_health is not None
+                    else {}
+                ),
                 "local_dir": local_dir,
                 "paired": True,
                 "completion": None,
@@ -177,23 +205,36 @@ class VaultSyncManager:
     def _load_folders(self) -> None:
         if not self._inventory_lock.acquire(blocking=False):
             return
+        reconcile_space_ids: list[str] = []
         try:
             inventory = self._folder_inventory()
             existing = self.state.snapshot().get("folders") or {}
             folders = {}
             for item in inventory:
                 key = item.get("memory_space_id") or "main"
-                folders[key] = {
+                folder = {
                     **item,
                     **existing.get(key, {}),
                     "local_dir": existing.get(key, {}).get("local_dir")
                     or self._local_dir(item),
                 }
+                folders[key] = folder
+                if (
+                    item.get("memory_space_id")
+                    and item.get("state") == "active"
+                    and not folder.get("paired")
+                ):
+                    reconcile_space_ids.append(item["memory_space_id"])
             self.state.update(folders=folders)
         except (OSError, httpx.HTTPError, RuntimeError) as error:
             self.state.update(error=str(error))
         finally:
             self._inventory_lock.release()
+        # The server inventory is the device's authorization boundary. Reconcile
+        # every newly discovered active space after releasing the inventory lock;
+        # pairing is idempotent, and a busy pair lock will be retried on refresh.
+        for space_id in reconcile_space_ids:
+            self._pair(space_id)
 
     def space_action_async(self, memory_space_id: str, action: str) -> None:
         threading.Thread(
@@ -389,7 +430,30 @@ class VaultSection(Section):
         if not vault:
             return
         Path(vault).mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl(f"obsidian://open?path={quote(vault)}"))
+        registration = register_obsidian_vault(vault)
+        if registration is None:
+            QDesktopServices.openUrl(
+                QUrl(f"obsidian://open?path={quote(vault, safe='')}")
+            )
+            return
+
+        uri = QUrl(f"obsidian://open?vault={quote(registration.vault_id, safe='')}")
+        if registration.added and shutil.which("obsidian"):
+            # The running app caches its known-vault registry. This is an explicit
+            # Open action, so restart through Obsidian's supported CLI before
+            # targeting the newly registered vault.
+            try:
+                subprocess.Popen(
+                    ["obsidian", "restart"],
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                QTimer.singleShot(1500, lambda: QDesktopServices.openUrl(uri))
+                return
+            except OSError:
+                pass
+        QDesktopServices.openUrl(uri)
 
     def _choose_folder(self) -> None:
         current = self.state.snapshot()["vault_dir"]

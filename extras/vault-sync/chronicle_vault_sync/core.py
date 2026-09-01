@@ -120,6 +120,7 @@ def broker_space_action(
 
     endpoints = {
         "freeze": f"/api/spaces/{memory_space_id}/sync/freeze",
+        "rescan": f"/api/spaces/{memory_space_id}/sync/rescan",
         "resume": f"/api/spaces/{memory_space_id}/sync/resume",
         "reopen": f"/api/spaces/{memory_space_id}/reopen",
     }

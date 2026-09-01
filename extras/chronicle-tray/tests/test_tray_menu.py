@@ -220,7 +220,7 @@ def test_screenpipe_controls_only_use_real_client_components(monkeypatch):
     ), f"unknown component(s): {set(used) - set(clients.CLIENT_COMPONENTS)}"
 
 
-def test_screenpipe_menu_surfaces_external_owner_and_disables_controls(
+def test_screenpipe_menu_surfaces_unknown_port_owner_and_disables_controls(
     monkeypatch, caplog
 ):
     QtWidgets = pytest.importorskip("PySide6.QtWidgets")
@@ -230,18 +230,14 @@ def test_screenpipe_menu_surfaces_external_owner_and_disables_controls(
 
     class FakeClients:
         @staticmethod
-        def reconcile_screenpipe_ownership():
-            return False
-
-        @staticmethod
         def component_status(name):
             if name == section_module.RECORDER:
                 return {
                     "installed": True,
                     "active": False,
-                    "runtime_owner": "desktop_app",
+                    "runtime_owner": "unknown",
                     "recording_active": True,
-                    "detail": "desktop app owns recording — meeting detection disabled",
+                    "detail": "port 3030 is owned by an unrecognized process",
                 }
             return {"installed": True, "active": True}
 
@@ -260,7 +256,7 @@ def test_screenpipe_menu_surfaces_external_owner_and_disables_controls(
         section.refresh()
 
         assert section.engine_status.text() == (
-            "ScreenPipe: desktop app owns recording — meeting detection disabled"
+            "ScreenPipe: port 3030 is owned by an unrecognized process"
         )
         assert not section.unit_actions[section_module.RECORDER]["start"].isEnabled()
         assert not section.unit_actions[section_module.RECORDER]["stop"].isEnabled()
@@ -272,10 +268,10 @@ def test_screenpipe_menu_surfaces_external_owner_and_disables_controls(
         reason = section.control_reason_items[section_module.RECORDER]
         assert reason.isVisible()
         assert reason.text() == (
-            "Unavailable: desktop app owns recording — meeting detection disabled"
+            "Unavailable: port 3030 is owned by an unrecognized process"
         )
         assert not section.pause_menu.isEnabled()
-        assert "desktop app owns recording" in section.tooltip()
+        assert "unrecognized process" in section.tooltip()
 
         section.refresh()
         unavailable_logs = [
@@ -284,7 +280,49 @@ def test_screenpipe_menu_surfaces_external_owner_and_disables_controls(
             if record.message.startswith("ScreenPipe controls unavailable:")
         ]
         assert len(unavailable_logs) == 1
-        assert "desktop app owns recording" in unavailable_logs[0].message
+        assert "unrecognized process" in unavailable_logs[0].message
+    finally:
+        section.shutdown()
+        del menu
+
+
+def test_screenpipe_menu_keeps_recorder_controls_enabled_with_viewer_open(monkeypatch):
+    QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+    # Import only after the optional Qt dependency has been admitted by the test.
+    from chronicle_tray.sections import screenpipe as section_module
+
+    class FakeClients:
+        @staticmethod
+        def component_status(name):
+            if name == section_module.RECORDER:
+                return {
+                    "installed": True,
+                    "active": True,
+                    "runtime_owner": "chronicle",
+                    "recording_active": True,
+                    "detail": "Chronicle recorder active — desktop viewer open",
+                }
+            return {"installed": True, "active": True}
+
+    monkeypatch.setattr(section_module, "_clients", lambda: FakeClients)
+    monkeypatch.setattr(section_module, "_stats", lambda: "1 frame")
+
+    QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    section = section_module.ScreenPipeSection()
+    menu = QtWidgets.QMenu()
+    section.build(menu)
+    monkeypatch.setattr(section, "_refresh_capture_settings", lambda: None)
+    monkeypatch.setattr(section, "_refresh_screen_health", lambda _status: None)
+    monkeypatch.setattr(section, "_refresh_update_actions", lambda: None)
+    try:
+        section.refresh()
+
+        actions = section.unit_actions[section_module.RECORDER]
+        assert not actions["start"].isEnabled()
+        assert actions["stop"].isEnabled()
+        assert actions["restart"].isEnabled()
+        assert section.pause_menu.isEnabled()
+        assert not section.control_reason_items[section_module.RECORDER].isVisible()
     finally:
         section.shutdown()
         del menu
@@ -296,10 +334,6 @@ def test_screenpipe_menu_explains_uninstalled_recorder(monkeypatch, caplog):
     from chronicle_tray.sections import screenpipe as section_module
 
     class FakeClients:
-        @staticmethod
-        def reconcile_screenpipe_ownership():
-            return False
-
         @staticmethod
         def component_status(name):
             if name == section_module.RECORDER:

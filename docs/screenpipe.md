@@ -47,15 +47,13 @@ them have "screenpipe" in the name and neither is the one Chronicle ships:
 Chronicle enforces that ownership rule when its recorder component is installed. It
 disables the ScreenPipe desktop app's login autostart (without uninstalling the app),
 then starts `screenpipe record` as the single login recorder. The desktop app remains
-manually launchable. If it is opened later, the Chronicle tray yields recording to the
-app by stopping Chronicle's recorder job; it does not silently restart Chronicle when
-the app exits, because that could override an intentional pause.
+manually launchable as an external-server viewer. Opening it does not stop or replace
+Chronicle's recorder: its Timeline reads the recorder API on port 3030.
 
-Recorder status distinguishes `Chronicle recorder active`, `desktop app owns
-recording`, and `port 3030 is owned by an unrecognized process`. Start/restart actions
-are rejected with that detail while another owner is active. On macOS the status also
-warns when the desktop app's readable settings have meeting detection disabled; the
-third-party preference is never rewritten automatically.
+Recorder status distinguishes `Chronicle recorder active`, an optional open desktop
+viewer, and `port 3030 is owned by an unrecognized process`. Start/restart actions are
+rejected only for the unrecognized-port conflict. The viewer process is never treated
+as evidence that it owns capture.
 
 On Wayland, accepting or declining the desktop portal does not change the recorder
 process state: its API can remain healthy without a selected screen. ScreenPipe owns the
@@ -443,18 +441,9 @@ the locally installed build, but its desktop autostart entry should remain disab
 Open that UI manually only when the full local ScreenPipe timeline is needed; the
 recorder and Chronicle collector remain independently managed background services.
 
-Installing Chronicle's recorder selects Chronicle as the login owner. To deliberately
-restore the ScreenPipe desktop app as the login owner after removing/stopping the
-Chronicle recorder, reverse the platform override:
-
-```bash
-# macOS — use the Label from the app's plist
-launchctl enable "gui/$(id -u)/screenpipe - Development"
-
-# Linux — use the exact generated unit shown by list-unit-files
-systemctl --user list-unit-files 'app-screenpipe*@autostart.service'
-systemctl --user unmask 'app-screenpipe\x20\x2d\x20Development@autostart.service'
-```
+Installing Chronicle's recorder selects it as the login capture service. Removing or
+stopping that service leaves capture stopped; the desktop viewer is not a replacement
+recorder and should not be re-enabled as the login owner.
 
 ## Implementation map
 

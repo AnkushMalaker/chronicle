@@ -15,9 +15,9 @@ of vanishing.
 
 The ScreenPipe line also reports the active recorder owner. Chronicle disables the
 ScreenPipe desktop app's login autostart when installing its recorder, while leaving
-the app manually launchable. If the app is opened manually, the tray stops Chronicle's
-recorder retry loop, displays `desktop app owns recording`, and disables controls that
-cannot affect the external owner. An unknown process on port 3030 is reported as a
+the app manually launchable as an external-server viewer. Opening the viewer leaves
+Chronicle's recorder and its controls running because the viewer reads Timeline data
+from that recorder on port 3030. An unknown process on port 3030 is reported as a
 conflict instead of appearing as an inactive recorder.
 
 ## Run / install

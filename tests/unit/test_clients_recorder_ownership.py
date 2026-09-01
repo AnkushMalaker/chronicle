@@ -1,4 +1,3 @@
-import json
 import subprocess
 
 import pytest
@@ -48,25 +47,43 @@ def test_desktop_process_match_excludes_cli_collector_and_mcp(monkeypatch):
     ]
 
 
-def test_runtime_reports_desktop_owner_and_meeting_warning(monkeypatch):
+def test_runtime_reports_chronicle_owner_with_desktop_viewer(monkeypatch):
+    monkeypatch.setattr(
+        clients,
+        "_screenpipe_desktop_processes",
+        lambda: [{"pid": 17, "command": "screenpipe-app"}],
+    )
+    monkeypatch.setattr(clients, "component_active", lambda name: True)
+    monkeypatch.setattr(clients, "_screenpipe_port_open", lambda: True)
+    monkeypatch.setattr(clients, "_screenpipe_health", lambda: {"status": "healthy"})
+
+    status = clients.screenpipe_runtime_status()
+
+    assert status == {
+        "runtime_owner": "chronicle",
+        "recording_active": True,
+        "conflict": False,
+        "detail": "Chronicle recorder active — desktop viewer open",
+        "desktop_pids": [17],
+        "vision_capture": None,
+    }
+
+
+def test_runtime_reports_viewer_waiting_when_recorder_is_inactive(monkeypatch):
     monkeypatch.setattr(
         clients,
         "_screenpipe_desktop_processes",
         lambda: [{"pid": 17, "command": "screenpipe-app"}],
     )
     monkeypatch.setattr(clients, "component_active", lambda name: False)
-    monkeypatch.setattr(clients, "_screenpipe_port_open", lambda: True)
-    monkeypatch.setattr(clients, "_desktop_meeting_detection_disabled", lambda: True)
+    monkeypatch.setattr(clients, "_screenpipe_port_open", lambda: False)
 
     status = clients.screenpipe_runtime_status()
 
-    assert status == {
-        "runtime_owner": "desktop_app",
-        "recording_active": True,
-        "conflict": False,
-        "detail": "desktop app owns recording — meeting detection disabled",
-        "desktop_pids": [17],
-    }
+    assert status["runtime_owner"] == "none"
+    assert status["recording_active"] is False
+    assert status["conflict"] is False
+    assert status["detail"] == "recorder inactive — desktop viewer waiting"
 
 
 def test_runtime_reports_unknown_port_owner(monkeypatch):
@@ -142,19 +159,6 @@ def test_runtime_does_not_warn_during_vision_startup(monkeypatch):
     assert status["vision_capture"] is None
 
 
-def test_desktop_meeting_setting_is_read_without_rewriting(tmp_path, monkeypatch):
-    settings = tmp_path / "store.bin"
-    settings.write_text(
-        json.dumps({"settings": {"disableMeetingDetector": True, "other": 1}})
-    )
-    monkeypatch.setattr(clients, "_SCREENPIPE_SETTINGS", settings)
-
-    assert clients._desktop_meeting_detection_disabled() is True
-    assert json.loads(settings.read_text()) == {
-        "settings": {"disableMeetingDetector": True, "other": 1},
-    }
-
-
 def test_macos_app_autostart_is_booted_out_and_disabled(tmp_path, monkeypatch):
     app_plist = tmp_path / "screenpipe.plist"
     calls = []
@@ -195,7 +199,8 @@ def test_linux_app_autostart_unit_is_masked(monkeypatch):
     assert calls == [("mask", "--now", unit)]
 
 
-def test_recorder_install_refuses_a_manually_running_desktop_app(monkeypatch):
+def test_recorder_install_allows_open_desktop_viewer(monkeypatch):
+    installs = []
     monkeypatch.setattr(clients, "disable_screenpipe_app_autostart", lambda: [])
     monkeypatch.setattr(
         clients,
@@ -203,58 +208,26 @@ def test_recorder_install_refuses_a_manually_running_desktop_app(monkeypatch):
         lambda: [{"pid": 17, "command": "screenpipe-app"}],
     )
 
-    with pytest.raises(RuntimeError, match="desktop app is running"):
-        clients.install_component("screenpipe")
+    monkeypatch.setattr(clients, "IS_MACOS", False)
+    monkeypatch.setattr(
+        clients, "_install_linux", lambda name, extras: installs.append((name, extras))
+    )
+
+    clients.install_component("screenpipe")
+
+    assert installs == [("screenpipe", ())]
 
 
 @pytest.mark.parametrize("action", ["start", "restart"])
-def test_recorder_action_refuses_external_owner(monkeypatch, action):
+def test_recorder_action_refuses_unknown_port_owner(monkeypatch, action):
     monkeypatch.setattr(
         clients,
         "screenpipe_runtime_status",
         lambda: {
-            "runtime_owner": "desktop_app",
-            "detail": "desktop app owns recording",
+            "runtime_owner": "unknown",
+            "detail": "port 3030 is owned by an unrecognized process",
         },
     )
 
-    with pytest.raises(RuntimeError, match="desktop app owns recording"):
+    with pytest.raises(RuntimeError, match="unrecognized process"):
         clients.component_action("screenpipe", action)
-
-
-def test_reconcile_boots_out_retrying_macos_recorder(monkeypatch):
-    actions = []
-    monkeypatch.setattr(clients, "IS_MACOS", True)
-    monkeypatch.setattr(
-        clients,
-        "_screenpipe_desktop_processes",
-        lambda: [{"pid": 17, "command": "screenpipe-app"}],
-    )
-    monkeypatch.setattr(clients, "component_installed", lambda name: True)
-    monkeypatch.setattr(clients, "_launchctl", lambda *args: completed())
-    monkeypatch.setattr(
-        clients,
-        "component_action",
-        lambda name, action: actions.append((name, action)) or True,
-    )
-
-    assert clients.reconcile_screenpipe_ownership() is True
-    assert actions == [("screenpipe", "stop")]
-
-
-def test_reconcile_never_stops_desktop_app_when_chronicle_is_unloaded(monkeypatch):
-    monkeypatch.setattr(clients, "IS_MACOS", True)
-    monkeypatch.setattr(
-        clients,
-        "_screenpipe_desktop_processes",
-        lambda: [{"pid": 17, "command": "screenpipe-app"}],
-    )
-    monkeypatch.setattr(clients, "component_installed", lambda name: True)
-    monkeypatch.setattr(clients, "_launchctl", lambda *args: completed(returncode=1))
-    monkeypatch.setattr(
-        clients,
-        "component_action",
-        lambda *args: (_ for _ in ()).throw(AssertionError("must not stop app")),
-    )
-
-    assert clients.reconcile_screenpipe_ownership() is False
