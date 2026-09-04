@@ -744,20 +744,20 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
         except Exception as e:
             logger.debug(f"Failed to fetch asr.hot_words for streaming: {e}")
 
-        # Streaming keyword boosting is only wired for Deepgram (keyterm). A
-        # context_prompt streaming provider would get nothing here — and the
-        # gemma4 /stream endpoint does not accept context at all, so there is no
-        # LLM-echo leak on the streaming path.
-        _, merged_hot_words = _resolve_asr_hint(
+        # Providers declare where their streaming protocol accepts recognition
+        # hints: Deepgram uses the ``keyterm`` query parameter, while local
+        # bridges can name a field on their JSON start message. Keeping this in
+        # the registry operation prevents provider-specific client branches.
+        _, streaming_hint = _resolve_asr_hint(
             self.model, self._capabilities, None, prompt_hot_words
         )
 
         if (
             CAP_KEYWORD_BOOSTING in self._capabilities
             and self.model.model_provider == "deepgram"
-            and merged_hot_words
+            and streaming_hint
         ):
-            keyterm = _parse_hot_words_to_keyterm(merged_hot_words)
+            keyterm = _parse_hot_words_to_keyterm(streaming_hint)
             if keyterm:
                 query_dict["keyterm"] = keyterm
 
@@ -792,6 +792,9 @@ class RegistryStreamingTranscriptionProvider(StreamingTranscriptionProvider):
             # Inject session_id if placeholder present
             start_msg = json.loads(json.dumps(start_msg))  # deep copy
             start_msg.setdefault("session_id", stream_id)
+            context_field = (ops.get("start", {}) or {}).get("context_field")
+            if context_field and streaming_hint:
+                start_msg[context_field] = streaming_hint
             # Apply sample rate and diarization if present
             if "config" in start_msg and isinstance(start_msg["config"], dict):
                 start_msg["config"].setdefault("sample_rate", sample_rate)

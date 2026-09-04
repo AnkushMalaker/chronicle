@@ -536,6 +536,36 @@ models:
           words: words
           segments: segments
 
+  - name: stt-vibevoice-streaming-1.5b
+    description: Microsoft VibeVoice ASR Streaming 1.5B with speaker attribution
+    model_type: stt_stream
+    model_provider: vibevoice-streaming
+    api_family: websocket
+    model_url: ws://${oc.env:VIBEVOICE_STREAMING_ASR_URL,host.docker.internal:8773}/stream
+    api_key: ''
+    capabilities:
+      - diarization
+      - context_prompt
+      - multilingual
+    operations:
+      query: {}
+      start:
+        message:
+          type: start
+          sample_rate: 16000
+        # Generic registry adapter writes only explicit ASR context into this field.
+        context_field: context_info
+      end:
+        message:
+          type: CloseStream
+      expect:
+        interim_type: interim
+        final_type: final
+        extract:
+          text: text
+          words: words
+          segments: segments
+
   - name: stt-gemma4-stream
     description: Google Gemma 4 E2B-it (streaming-ish, bounded rolling window + MTP)
     model_type: stt_stream
