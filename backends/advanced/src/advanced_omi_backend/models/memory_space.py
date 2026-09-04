@@ -55,6 +55,7 @@ class MemorySpace(Document):
     )
     sync_error: Optional[str] = None
     merge_checkpoint: Optional[str] = None
+    active_merge_proposal_id: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
     archived_at: Optional[datetime] = None
@@ -77,6 +78,7 @@ class SpaceMergeProposal(Document):
         "pending",
         "applying",
         "applied",
+        "cancelled",
         "stale",
         "failed",
     ] = "generating"

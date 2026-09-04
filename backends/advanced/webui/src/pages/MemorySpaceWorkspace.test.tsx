@@ -87,6 +87,37 @@ describe('MemorySpaceWorkspace scope', () => {
     expect(screen.getByText(/Archived spaces are read-only/i)).toBeVisible()
   })
 
+  it('loads authenticated audio on demand for a space recording', async () => {
+    const conversationId = 'conversation-audio'
+    vi.spyOn(memorySpacesApi, 'get').mockResolvedValue({
+      data: {
+        space_id: SPACE_ID,
+        name: 'Playback notebook',
+        state: 'active',
+        seed_notes: [],
+        sync_state: 'healthy',
+        sync_error: null,
+        merge_checkpoint: null,
+        created_at: '2026-08-30T05:00:00Z',
+        updated_at: '2026-08-30T05:00:00Z',
+        archived_at: null,
+      },
+    } as never)
+    vi.spyOn(memorySpacesApi, 'recordings').mockResolvedValue({
+      data: { conversations: [{ conversation_id: conversationId, title: 'Cat interruption', processing_status: 'completed', memory_review_state: 'automatic' }] },
+    } as never)
+    const recordingAudio = vi.spyOn(memorySpacesApi, 'recordingAudio').mockResolvedValue({
+      data: new Blob(['audio'], { type: 'audio/ogg' }),
+    } as never)
+    vi.stubGlobal('URL', { ...URL, createObjectURL: vi.fn(() => 'blob:recording'), revokeObjectURL: vi.fn() })
+
+    renderWorkspace()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load recording' }))
+    expect(await screen.findByLabelText('Playback for Cat interruption')).toHaveAttribute('src', 'blob:recording')
+    expect(recordingAudio).toHaveBeenCalledWith(conversationId)
+  })
+
   it('sends only checked ScreenPipe frames into explicit note extraction', async () => {
     const conversationId = 'conversation-1'
     vi.spyOn(memorySpacesApi, 'get').mockResolvedValue({
@@ -150,5 +181,91 @@ describe('MemorySpaceWorkspace scope', () => {
       expect(memorySpacesApi.noteReview).toHaveBeenCalledTimes(2)
       expect(memorySpacesApi.recordings).toHaveBeenCalledTimes(2)
     })
+  })
+
+  it('recovers a persisted proposal while the prepare request is still pending', async () => {
+    vi.spyOn(memorySpacesApi, 'get').mockResolvedValue({
+      data: {
+        space_id: SPACE_ID,
+        name: 'Slow review',
+        state: 'active',
+        seed_notes: [],
+        sync_state: 'healthy',
+        sync_error: null,
+        merge_checkpoint: null,
+        created_at: '2026-08-30T16:45:00Z',
+        updated_at: '2026-08-30T16:45:00Z',
+        archived_at: null,
+      },
+    } as never)
+    vi.spyOn(memorySpacesApi, 'prepareMerge').mockReturnValue(new Promise(() => {}))
+    const latest = vi.spyOn(memorySpacesApi, 'latestMergeProposal').mockResolvedValue({
+      data: {
+        proposal_id: 'proposal-1',
+        space_id: SPACE_ID,
+        state: 'pending',
+        changes: [{
+          change_id: 'change-1',
+          note_path: 'Topics/Slow review.md',
+          operation: 'create',
+          before_hash: null,
+          before_text: null,
+          after_text: '# Slow review',
+          conflict: null,
+          source_refs: [],
+          validation_findings: [],
+        }],
+        accepted_change_ids: [],
+        rejected_change_ids: [],
+        deferred_event_count: 0,
+        error: null,
+      },
+    } as never)
+
+    renderWorkspace(`/spaces/${SPACE_ID}/merge`)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Prepare merge' }))
+
+    expect(await screen.findByText('Topics/Slow review.md')).toBeVisible()
+    expect(latest).toHaveBeenCalledWith(SPACE_ID)
+  })
+
+  it('returns a pending proposal to editing without publishing it', async () => {
+    vi.spyOn(memorySpacesApi, 'get').mockResolvedValue({
+      data: {
+        space_id: SPACE_ID,
+        name: 'Sync before review',
+        state: 'merging',
+        seed_notes: [],
+        sync_state: 'unpaired',
+        sync_error: null,
+        merge_checkpoint: null,
+        created_at: '2026-08-30T17:00:00Z',
+        updated_at: '2026-08-30T17:00:00Z',
+        archived_at: null,
+      },
+    } as never)
+    const pending = {
+      proposal_id: 'proposal-cancel',
+      space_id: SPACE_ID,
+      state: 'pending',
+      changes: [],
+      accepted_change_ids: [],
+      rejected_change_ids: [],
+      deferred_event_count: 0,
+      error: null,
+    }
+    vi.spyOn(memorySpacesApi, 'latestMergeProposal').mockResolvedValue({ data: pending } as never)
+    const cancel = vi.spyOn(memorySpacesApi, 'cancelMerge').mockResolvedValue({
+      data: { ...pending, state: 'cancelled' },
+    } as never)
+    const resolve = vi.spyOn(memorySpacesApi, 'resolveMerge')
+
+    renderWorkspace(`/spaces/${SPACE_ID}/merge`)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Return to editing' }))
+
+    await waitFor(() => expect(cancel).toHaveBeenCalledWith('proposal-cancel'))
+    expect(resolve).not.toHaveBeenCalled()
   })
 })

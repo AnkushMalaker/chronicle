@@ -9,7 +9,7 @@ from typing import Any, Iterable
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import CaptureSource, DeviceInputJob
 from advanced_omi_backend.services.manual_memories.config import manual_memory_settings
-from advanced_omi_backend.services.vision import run_codex_vision
+from advanced_omi_backend.services.vision import run_structured_vision
 
 FRAMES_PER_REVIEW = 6
 FRAME_WIDTH = 960
@@ -197,11 +197,11 @@ async def describe_selected_frames(conversation: Conversation) -> str:
             for frame in frames
         ],
     }
-    result = await run_codex_vision(
+    result = await run_structured_vision(
         f"{_VISION_PROMPT}\n\nRecording:\n{json.dumps(context, ensure_ascii=False)}",
         [(f"frame-{frame.frame_id}.jpg", frame.data) for frame in frames],
         _VISION_SCHEMA,
-        manual_memory_settings().codex,
+        manual_memory_settings().vision,
     )
     lines = [str(result["screen_context"]).strip()]
     visible = [

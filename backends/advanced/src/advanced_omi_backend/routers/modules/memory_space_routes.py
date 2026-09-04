@@ -10,10 +10,7 @@ from advanced_omi_backend.chat_service import get_chat_service
 from advanced_omi_backend.controllers.conversation_controller import get_conversations
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.device_input import DeviceInputJob
-from advanced_omi_backend.models.memory_space import (
-    DeferredSpaceEvent,
-    SpaceMergeProposal,
-)
+from advanced_omi_backend.models.memory_space import DeferredSpaceEvent
 from advanced_omi_backend.models.vault_sync import PairRequest
 from advanced_omi_backend.services.memory import get_memory_service
 from advanced_omi_backend.services.memory.audit import record_vault_change
@@ -694,19 +691,11 @@ async def prepare_merge(
 async def latest_merge_proposal(
     space_id: str, user: User = Depends(current_active_user)
 ):
-    user_id = _user_id(user)
     try:
-        await memory_space_service.get(user_id, space_id)
-        proposals = (
-            await SpaceMergeProposal.find(
-                SpaceMergeProposal.user_id == user_id,
-                SpaceMergeProposal.space_id == space_id,
-            )
-            .sort([("created_at", -1)])
-            .limit(1)
-            .to_list()
+        proposal = await memory_space_service.latest_merge_proposal(
+            _user_id(user), space_id
         )
-        return _proposal_payload(proposals[0]) if proposals else None
+        return _proposal_payload(proposal) if proposal else None
     except MemoryScopeError as error:
         raise _http_error(error) from error
 
@@ -722,6 +711,19 @@ async def resolve_merge(
             await memory_space_service.resolve_merge(
                 _user_id(user), proposal_id, request.accepted_change_ids
             )
+        )
+    except (MemoryScopeError, MemorySpaceConflict) as error:
+        raise _http_error(error) from error
+
+
+@router.post("/merge-proposals/{proposal_id}/cancel")
+async def cancel_merge(
+    proposal_id: str,
+    user: User = Depends(current_active_user),
+):
+    try:
+        return _proposal_payload(
+            await memory_space_service.cancel_merge(_user_id(user), proposal_id)
         )
     except (MemoryScopeError, MemorySpaceConflict) as error:
         raise _http_error(error) from error

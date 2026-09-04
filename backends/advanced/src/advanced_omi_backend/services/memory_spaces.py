@@ -13,6 +13,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping, Optional
 
+from beanie.operators import In
+from pymongo import ReturnDocument
+
 from advanced_omi_backend.models.audio_capture import AudioCaptureSession
 from advanced_omi_backend.models.conversation import Conversation
 from advanced_omi_backend.models.memory_audit import MemoryAuditEntry
@@ -69,6 +72,18 @@ def _snapshot(root: Path) -> dict[str, str]:
         path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
         for path in sorted(root.rglob("*.md"))
         if path.is_file() and not is_scaffold_note(path, root)
+    }
+
+
+def _validation_snapshot(root: Path) -> dict[str, str]:
+    """Snapshot every Markdown file that will be present in staged Main."""
+
+    if not root.exists():
+        return {}
+    return {
+        path.relative_to(root).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted(root.rglob("*.md"))
+        if path.is_file()
     }
 
 
@@ -349,6 +364,7 @@ class MemorySpaceService:
             self.resolver.baseline_root(scope),
         )
         space.state = "active"
+        space.active_merge_proposal_id = None
         space.archived_at = None
         space.sync_state = next_sync_state
         space.updated_at = _utcnow()
@@ -497,10 +513,27 @@ class MemorySpaceService:
         space = await self.get(user_id, space_id)
         if space.state != "active":
             raise MemoryScopeError("Only an active space can prepare a merge")
-        space.state = "merging"
-        space.updated_at = _utcnow()
-        await space.save()
         proposal = SpaceMergeProposal(user_id=user_id, space_id=space_id)
+        now = _utcnow()
+        claimed = await MemorySpace.get_pymongo_collection().update_one(
+            {
+                "user_id": user_id,
+                "space_id": space_id,
+                "state": "active",
+            },
+            {
+                "$set": {
+                    "state": "merging",
+                    "active_merge_proposal_id": proposal.proposal_id,
+                    "updated_at": now,
+                }
+            },
+        )
+        if claimed.modified_count != 1:
+            raise MemorySpaceConflict("Memory space is already preparing a merge")
+        space.state = "merging"
+        space.active_merge_proposal_id = proposal.proposal_id
+        space.updated_at = now
         scope = MemoryScope(user_id, space_id)
         try:
             if space.sync_state != "unpaired":
@@ -579,10 +612,11 @@ class MemorySpaceService:
                 else:
                     stage.mkdir(parents=True)
                     seed_vault_scaffold(stage)
+                validation_before = await asyncio.to_thread(_validation_snapshot, stage)
                 for change in changes:
                     if change.conflict is None:
                         _write_note(stage, change.note_path, change.after_text)
-                findings = verify_vault_changes(stage, main_before)
+                findings = verify_vault_changes(stage, validation_before)
                 if findings:
                     rendered = "; ".join(
                         f"{finding.path} [{finding.rule}] {finding.detail}"
@@ -601,7 +635,7 @@ class MemorySpaceService:
                     review = await review_vault_write(
                         stage,
                         source=review_source,
-                        before=main_before,
+                        before=validation_before,
                         touched=[
                             change.note_path
                             for change in changes
@@ -635,9 +669,19 @@ class MemorySpaceService:
             proposal.generated_at = _utcnow()
             await proposal.insert()
             return proposal
-        except Exception as exc:
-            space.state = "active"
-            await space.save()
+        except Exception:
+            await MemorySpace.get_pymongo_collection().update_one(
+                {
+                    "user_id": user_id,
+                    "space_id": space_id,
+                    "state": "merging",
+                    "active_merge_proposal_id": proposal.proposal_id,
+                },
+                {
+                    "$set": {"state": "active", "updated_at": _utcnow()},
+                    "$unset": {"active_merge_proposal_id": ""},
+                },
+            )
             raise
 
     async def resolve_merge(
@@ -658,8 +702,27 @@ class MemorySpaceService:
         ]
         if any(change.conflict for change in selected):
             raise MemorySpaceConflict("Conflicted changes cannot be applied")
+        claimed = await SpaceMergeProposal.get_pymongo_collection().update_one(
+            {
+                "proposal_id": proposal_id,
+                "user_id": user_id,
+                "state": "pending",
+            },
+            {"$set": {"state": "applying", "error": None}},
+        )
+        if claimed.modified_count != 1:
+            raise MemorySpaceConflict("Merge proposal is already being resolved")
         proposal.state = "applying"
-        await proposal.save()
+        proposal.error = None
+        space = await self.get(user_id, proposal.space_id)
+        if (
+            space.state != "merging"
+            or space.active_merge_proposal_id != proposal.proposal_id
+        ):
+            proposal.state = "stale"
+            proposal.error = "Memory space changed before the proposal was resolved"
+            await proposal.save()
+            raise MemorySpaceConflict(proposal.error)
         main_root = self.resolver.main_root(user_id)
         main_root.mkdir(parents=True, exist_ok=True)
         applied: list[tuple[SpaceMergeChange, Optional[str]]] = []
@@ -736,7 +799,6 @@ class MemorySpaceService:
         proposal.state = "applied"
         proposal.resolved_at = now
         await proposal.save()
-        space = await self.get(user_id, proposal.space_id)
         scope = MemoryScope(user_id, proposal.space_id)
         had_sync_folder = space.sync_state != "unpaired"
         await asyncio.to_thread(
@@ -745,6 +807,7 @@ class MemorySpaceService:
             self.resolver.baseline_root(scope),
         )
         space.state = "archived"
+        space.active_merge_proposal_id = None
         if had_sync_folder:
             try:
                 await vault_sync_broker.set_frozen(scope, True, space_name=space.name)
@@ -763,6 +826,86 @@ class MemorySpaceService:
         await space.save()
         return proposal
 
+    async def latest_merge_proposal(
+        self, user_id: str, space_id: str
+    ) -> Optional[SpaceMergeProposal]:
+        """Return only the proposal associated with the space's current cycle."""
+
+        space = await self.get(user_id, space_id)
+        if space.state == "active":
+            return None
+        filters = [
+            SpaceMergeProposal.user_id == user_id,
+            SpaceMergeProposal.space_id == space_id,
+        ]
+        if space.state == "merging":
+            if not space.active_merge_proposal_id:
+                return None
+            filters.append(
+                SpaceMergeProposal.proposal_id == space.active_merge_proposal_id
+            )
+        else:
+            filters.append(SpaceMergeProposal.state == "applied")
+        proposals = (
+            await SpaceMergeProposal.find(*filters)
+            .sort([("created_at", -1)])
+            .limit(1)
+            .to_list()
+        )
+        return proposals[0] if proposals else None
+
+    async def cancel_merge(self, user_id: str, proposal_id: str) -> SpaceMergeProposal:
+        """Discard a proposal and reopen its workspace without publishing Main."""
+        now = _utcnow()
+        document = (
+            await SpaceMergeProposal.get_pymongo_collection().find_one_and_update(
+                {
+                    "proposal_id": proposal_id,
+                    "user_id": user_id,
+                    "state": {"$in": ["pending", "stale", "failed"]},
+                },
+                {
+                    "$set": {
+                        "state": "cancelled",
+                        "error": "Returned to editing before publication",
+                        "resolved_at": now,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+        )
+        if document is None:
+            proposal = await SpaceMergeProposal.find_one(
+                SpaceMergeProposal.proposal_id == proposal_id,
+                SpaceMergeProposal.user_id == user_id,
+            )
+            if proposal is None or proposal.state != "cancelled":
+                raise MemorySpaceConflict("Merge proposal cannot return to editing")
+        else:
+            proposal = SpaceMergeProposal.model_validate(document)
+        space = await self.get(user_id, proposal.space_id)
+        if space.state == "merging":
+            result = await MemorySpace.get_pymongo_collection().update_one(
+                {
+                    "user_id": user_id,
+                    "space_id": proposal.space_id,
+                    "state": "merging",
+                    "active_merge_proposal_id": proposal.proposal_id,
+                },
+                {
+                    "$set": {"state": "active", "updated_at": now},
+                    "$unset": {"active_merge_proposal_id": ""},
+                },
+            )
+            if result.modified_count == 1:
+                return proposal
+            space = await self.get(user_id, proposal.space_id)
+        if space.state != "active" or space.active_merge_proposal_id is not None:
+            raise MemorySpaceConflict("Memory space is not waiting for merge review")
+        # A retry repairs the only cross-document partial outcome: a cancelled
+        # proposal whose workspace update was not observed by the first caller.
+        return proposal
+
     async def _dispatch_deferred(
         self, proposal: SpaceMergeProposal, source_refs: set[tuple[str, str]]
     ) -> None:
@@ -773,8 +916,8 @@ class MemorySpaceService:
             await DeferredSpaceEvent.find(
                 DeferredSpaceEvent.user_id == proposal.user_id,
                 DeferredSpaceEvent.space_id == proposal.space_id,
-                DeferredSpaceEvent.source_id.in_(sorted(source_ids)),
-                DeferredSpaceEvent.state.in_(["pending", "failed", "dispatching"]),
+                In(DeferredSpaceEvent.source_id, sorted(source_ids)),
+                In(DeferredSpaceEvent.state, ["pending", "failed", "dispatching"]),
             )
             .sort([("causal_order", 1), ("created_at", 1)])
             .to_list()

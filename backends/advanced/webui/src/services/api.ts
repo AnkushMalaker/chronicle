@@ -135,7 +135,7 @@ export interface SpaceMergeChange {
 export interface SpaceMergeProposal {
   proposal_id: string
   space_id: string
-  state: 'generating' | 'pending' | 'applying' | 'applied' | 'stale' | 'failed'
+  state: 'generating' | 'pending' | 'applying' | 'applied' | 'cancelled' | 'stale' | 'failed'
   changes: SpaceMergeChange[]
   accepted_change_ids: string[]
   rejected_change_ids: string[]
@@ -216,6 +216,10 @@ export const memorySpacesApi = {
   ),
   search: (spaceId: string, query: string) => api.get(`/api/spaces/${spaceId}/search`, { params: { query } }),
   recordings: (spaceId: string) => api.get(`/api/spaces/${spaceId}/recordings`),
+  recordingAudio: (conversationId: string) => api.get<Blob>(
+    `/api/audio/get_audio/${conversationId}`,
+    { params: { format: 'opus' }, responseType: 'blob' },
+  ),
   noteReview: (spaceId: string, conversationId: string) => api.get<SpaceNoteReview>(
     `/api/spaces/${spaceId}/recordings/${conversationId}/note-review`,
   ),
@@ -239,6 +243,7 @@ export const memorySpacesApi = {
   prepareMerge: (spaceId: string, acknowledgeSyncWarnings = false) => api.post<SpaceMergeProposal>(
     `/api/spaces/${spaceId}/merge-proposals`,
     { acknowledge_sync_warnings: acknowledgeSyncWarnings },
+    { timeout: 300_000 },
   ),
   latestMergeProposal: (spaceId: string) => api.get<SpaceMergeProposal | null>(
     `/api/spaces/${spaceId}/merge-proposals/latest`,
@@ -246,6 +251,9 @@ export const memorySpacesApi = {
   resolveMerge: (proposalId: string, acceptedChangeIds: string[]) => api.post<SpaceMergeProposal>(
     `/api/spaces/merge-proposals/${proposalId}/resolve`,
     { accepted_change_ids: acceptedChangeIds },
+  ),
+  cancelMerge: (proposalId: string) => api.post<SpaceMergeProposal>(
+    `/api/spaces/merge-proposals/${proposalId}/cancel`,
   ),
   sync: (spaceId: string) => api.get(`/api/spaces/${spaceId}/sync`),
   rescanSync: (spaceId: string) => api.post(`/api/spaces/${spaceId}/sync/rescan`),

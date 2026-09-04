@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Archive, BookOpen, Check, CircleDot, Eye, FileDiff, Image, Loader2, LockKeyhole, MessageCircle, Mic, MonitorUp, Plus, RefreshCw, Save, Search, Send, Wifi } from 'lucide-react'
+import { AlertTriangle, Archive, AudioLines, BookOpen, Check, CircleDot, Eye, FileDiff, Image, Loader2, LockKeyhole, MessageCircle, Mic, MonitorUp, Play, Plus, RefreshCw, Save, Search, Send, Wifi } from 'lucide-react'
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom'
 
 import LiveRecord from './LiveRecord'
@@ -31,6 +31,40 @@ function ScopeStrip({ name, state, syncState }: { name: string; state: string; s
         <span className="flex items-center gap-1.5"><CircleDot className="h-3.5 w-3.5 text-red-700 dark:text-red-400" />Recordings land here</span>
         <span className="ml-auto uppercase tracking-[0.15em] text-stone-500">{state}</span>
       </div>
+    </div>
+  )
+}
+
+function SpaceRecordingAudio({ conversationId, title }: { conversationId: string; title: string }) {
+  const [requested, setRequested] = useState(false)
+  const [audioUrl, setAudioUrl] = useState<string>()
+  const audio = useQuery({
+    queryKey: ['memory-space-recording-audio', conversationId],
+    queryFn: () => memorySpacesApi.recordingAudio(conversationId).then(response => response.data),
+    enabled: requested,
+    staleTime: Infinity,
+  })
+
+  useEffect(() => {
+    if (!audio.data) return
+    const next = URL.createObjectURL(audio.data)
+    setAudioUrl(next)
+    return () => URL.revokeObjectURL(next)
+  }, [audio.data])
+
+  return (
+    <div className="flex min-h-10 flex-wrap items-center gap-3 border-l border-stone-300 pl-3 dark:border-stone-700">
+      <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-500">
+        <AudioLines className="h-3.5 w-3.5" />Captured audio
+      </span>
+      {!requested && (
+        <Button size="sm" variant="secondary" icon={<Play className="h-3.5 w-3.5" />} onClick={() => setRequested(true)}>
+          Load recording
+        </Button>
+      )}
+      {requested && audio.isLoading && <span className="flex items-center gap-1.5 text-xs text-stone-500"><Loader2 className="h-3.5 w-3.5 animate-spin" />Preparing playback…</span>}
+      {audioUrl && <audio controls preload="metadata" src={audioUrl} aria-label={`Playback for ${title}`} className="h-9 min-w-0 flex-1" />}
+      {audio.isError && <p className="text-xs text-red-700 dark:text-red-300">Could not load this recording. {errorDetail(audio.error)}</p>}
     </div>
   )
 }
@@ -272,14 +306,17 @@ function MergeTab({ spaceId, spaceState }: { spaceId: string; spaceState: string
   const archived = spaceState === 'archived'
   const [proposal, setProposal] = useState<SpaceMergeProposal | null>(null)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [recoveringProposal, setRecoveringProposal] = useState(false)
   const latestProposal = useQuery({
     queryKey: ['memory-space-latest-merge', spaceId],
     queryFn: () => memorySpacesApi.latestMergeProposal(spaceId).then(response => response.data),
-    enabled: spaceState === 'merging' || archived,
+    enabled: spaceState === 'merging' || archived || recoveringProposal,
+    refetchInterval: query => recoveringProposal && !query.state.data ? 2_000 : false,
   })
   useEffect(() => {
     if (!proposal && latestProposal.data) {
       setProposal(latestProposal.data)
+      setRecoveringProposal(false)
       if (latestProposal.data.state === 'pending') {
         setSelected(new Set(latestProposal.data.changes.filter(change => !change.conflict).map(change => change.change_id)))
       }
@@ -298,9 +335,20 @@ function MergeTab({ spaceId, spaceState }: { spaceId: string; spaceState: string
   })
   const prepare = useMutation({
     mutationFn: (acknowledge: boolean) => memorySpacesApi.prepareMerge(spaceId, acknowledge),
+    onMutate: () => {
+      setRecoveringProposal(true)
+    },
     onSuccess: response => {
+      setRecoveringProposal(false)
       setProposal(response.data)
       setSelected(new Set(response.data.changes.filter(change => !change.conflict).map(change => change.change_id)))
+    },
+    onError: (error: unknown) => {
+      const response = (error as { response?: unknown })?.response
+      if (response) setRecoveringProposal(false)
+    },
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['memory-space', spaceId] })
     },
   })
   const resolve = useMutation({
@@ -316,6 +364,19 @@ function MergeTab({ spaceId, spaceState }: { spaceId: string; spaceState: string
       ])
     },
   })
+  const cancel = useMutation({
+    mutationFn: () => memorySpacesApi.cancelMerge(proposal!.proposal_id),
+    onSuccess: async () => {
+      queryClient.setQueryData(['memory-space-latest-merge', spaceId], null)
+      setProposal(null)
+      setSelected(new Set())
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['memory-space', spaceId] }),
+        queryClient.invalidateQueries({ queryKey: ['memory-spaces'] }),
+      ])
+      queryClient.removeQueries({ queryKey: ['memory-space-latest-merge', spaceId] })
+    },
+  })
   if (latestProposal.isLoading && !proposal) {
     return <p className="flex items-center justify-center gap-2 py-12 text-sm text-stone-500"><Loader2 className="h-4 w-4 animate-spin" />Loading publication ledger…</p>
   }
@@ -329,8 +390,9 @@ function MergeTab({ spaceId, spaceState }: { spaceId: string; spaceState: string
       <div className="mx-auto max-w-2xl py-10">
         <h2 className="text-xl font-semibold text-stone-900 dark:text-stone-100">Publication ledger</h2>
         <p className="mt-3 text-sm leading-6 text-stone-600 dark:text-stone-400">Freeze this notebook, compare its edits with current Main, validate the staged vault, then choose exactly what crosses the seal.</p>
-        <Button className="mt-6" icon={prepare.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileDiff className="h-4 w-4" />} disabled={prepare.isPending} onClick={() => prepare.mutate(false)}>Prepare merge</Button>
-        {prepare.isError && (
+        <Button className="mt-6" icon={recoveringProposal ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileDiff className="h-4 w-4" />} disabled={prepare.isPending || recoveringProposal} onClick={() => prepare.mutate(false)}>Prepare merge</Button>
+        {recoveringProposal && <p className="mt-3 text-xs text-stone-500">Reviewing the staged vault… This can take a few minutes; the ledger will appear automatically.</p>}
+        {prepare.isError && !recoveringProposal && (
           <div className="mt-4 border-l-2 border-amber-600 pl-4 text-sm text-amber-800 dark:text-amber-300">
             <p>{detail}</p>
             {needsAck && <Button className="mt-3" size="sm" variant="secondary" onClick={() => prepare.mutate(true)}>Acknowledge and continue</Button>}
@@ -365,6 +427,16 @@ function MergeTab({ spaceId, spaceState }: { spaceId: string; spaceState: string
       </div>
     )
   }
+  if (proposal.state !== 'pending') {
+    return (
+      <div className="mx-auto max-w-2xl py-10">
+        <h2 className="text-xl font-semibold">Publication ledger</h2>
+        <p className="mt-3 text-sm text-stone-500">This proposal is {proposal.state}. Return to editing to sync or revise the notebook, then prepare a fresh ledger.</p>
+        <Button className="mt-6" variant="secondary" disabled={cancel.isPending} icon={cancel.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} onClick={() => cancel.mutate()}>Return to editing</Button>
+        {cancel.isError && <p className="mt-3 text-sm text-red-700 dark:text-red-300">{errorDetail(cancel.error)}</p>}
+      </div>
+    )
+  }
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3 border-b border-stone-300 pb-4 dark:border-stone-700">
@@ -396,8 +468,9 @@ function MergeTab({ spaceId, spaceState }: { spaceId: string; spaceState: string
         )
       })}
       {!proposal.changes.length && <p className="py-8 text-center text-sm text-stone-500">No workspace edits differ from the checkpoint. Publishing will archive the cycle without changing Main.</p>}
-      <div className="flex flex-wrap gap-2"><Button disabled={resolve.isPending} onClick={() => resolve.mutate(undefined)}>Finish merge</Button><Button variant="secondary" disabled={resolve.isPending} onClick={() => resolve.mutate([])}>Reject all and archive</Button></div>
+      <div className="flex flex-wrap gap-2"><Button disabled={resolve.isPending || cancel.isPending} onClick={() => resolve.mutate(undefined)}>Finish merge</Button><Button variant="secondary" disabled={resolve.isPending || cancel.isPending} onClick={() => resolve.mutate([])}>Reject all and archive</Button><Button variant="secondary" disabled={resolve.isPending || cancel.isPending} onClick={() => cancel.mutate()}>Return to editing</Button></div>
       {resolve.isError && <p className="text-sm text-red-700 dark:text-red-300">{errorDetail(resolve.error)} The selected batch was not applied; regenerate against current Main.</p>}
+      {cancel.isError && <p className="text-sm text-red-700 dark:text-red-300">{errorDetail(cancel.error)}</p>}
     </div>
   )
 }
@@ -460,6 +533,7 @@ export default function MemorySpaceWorkspace() {
                 {recordingRows.map(recording => (
                   <div key={recording.conversation_id} className="space-y-4 py-4">
                     <div className="flex items-center justify-between gap-3"><span><span className="block text-sm font-medium">{recording.title || 'Processing recording'}</span><span className="text-xs text-stone-500">{recording.created_at ? new Date(recording.created_at).toLocaleString() : ''}</span></span><span className="text-xs text-stone-500">{recording.processing_status}</span></div>
+                    <SpaceRecordingAudio conversationId={recording.conversation_id} title={recording.title || 'recording'} />
                     {recording.memory_review_state && recording.memory_review_state !== 'automatic' && <NoteExtractionReview spaceId={spaceId} conversationId={recording.conversation_id} archived={archived} />}
                   </div>
                 ))}
