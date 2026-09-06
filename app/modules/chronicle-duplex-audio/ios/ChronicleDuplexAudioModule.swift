@@ -6,10 +6,15 @@ public final class ChronicleDuplexAudioModule: Module {
   private let player = AVAudioPlayerNode()
   private let controlQueue = DispatchQueue(label: "chronicle.duplex.audio")
   private let captureDiagnosticLock = NSLock()
+  private let captureMetricsLock = NSLock()
   private var converter: AVAudioConverter?
   private var opusEncoder: ChronicleOpusPacketEncoder?
+  private var pcmPacketizer: ChroniclePcm16Packetizer?
   private var emittedCaptureDiagnosticStages = Set<String>()
   private var captureEpoch = 0
+  private var tapFrameCount = 0
+  private var captureWatchdogGeneration = 0
+  private var voiceProcessingFallbackForced = false
   private var voiceProcessingEnabled = false
   private var captureSuppressed = false
   private var currentResponse: (id: String, generation: Int)?
@@ -75,7 +80,9 @@ public final class ChronicleDuplexAudioModule: Module {
 
     AsyncFunction("stopVoiceSession") { () async -> [String: Any?] in
       let restored = await self.onControlQueueValue {
-        self.tearDownEngine(deactivateSession: true)
+        let restored = self.tearDownEngine(deactivateSession: true)
+        self.voiceProcessingFallbackForced = false
+        return restored
       }
       return [
         "restorationSucceeded": restored,
@@ -150,14 +157,22 @@ public final class ChronicleDuplexAudioModule: Module {
     engine.connect(player, to: engine.mainMixerNode, format: outputFormat)
 
     let input = engine.inputNode
-    do {
-      try input.setVoiceProcessingEnabled(true)
-      voiceProcessingEnabled = input.isVoiceProcessingEnabled
-    } catch {
+    if voiceProcessingFallbackForced {
+      try? input.setVoiceProcessingEnabled(false)
       voiceProcessingEnabled = false
+    } else {
+      do {
+        try input.setVoiceProcessingEnabled(true)
+        voiceProcessingEnabled = input.isVoiceProcessingEnabled
+      } catch {
+        voiceProcessingEnabled = false
+      }
     }
 
-    let inputFormat = input.outputFormat(forBus: 0)
+    // iOS input taps must be installed with the hardware input format. After
+    // VoiceProcessingIO is enabled, outputFormat can produce a running engine
+    // whose input tap never receives a buffer.
+    let inputFormat = input.inputFormat(forBus: 0)
     let opusEncoder: ChronicleOpusPacketEncoder
     do {
       opusEncoder = try ChronicleOpusPacketEncoder()
@@ -169,8 +184,11 @@ public final class ChronicleDuplexAudioModule: Module {
     }
     self.converter = converter
     self.opusEncoder = opusEncoder
+    self.pcmPacketizer = ChroniclePcm16Packetizer()
+    resetCaptureMetrics()
     let inputFrameCount = AVAudioFrameCount(round(inputFormat.sampleRate * 0.02))
     input.installTap(onBus: 0, bufferSize: inputFrameCount, format: inputFormat) { [weak self] buffer, _ in
+      self?.observeTapFrame()
       self?.emitCaptureDiagnostic(stage: "tap_received")
       self?.emitOpus(buffer)
     }
@@ -178,13 +196,15 @@ public final class ChronicleDuplexAudioModule: Module {
     engine.prepare()
     try engine.start()
     sessionRunning = true
+    scheduleCaptureWatchdog()
   }
 
   private func emitOpus(_ input: AVAudioPCMBuffer) {
     guard !captureSuppressed,
           engine.isRunning,
           let converter,
-          let opusEncoder else { return }
+          let opusEncoder,
+          let pcmPacketizer else { return }
     let capacity = ChronicleDuplexResampler.outputCapacity(
       inputFrames: input.frameLength,
       inputRate: input.format.sampleRate
@@ -215,32 +235,97 @@ public final class ChronicleDuplexAudioModule: Module {
       return
     }
     emitCaptureDiagnostic(stage: "pcm_converted", frameCount: Int(output.frameLength))
-    guard output.frameLength == ChronicleOpusPacketEncoder.framesPerPacket else {
-      emitCaptureDiagnostic(stage: "pcm_wrong_frame_count", frameCount: Int(output.frameLength))
+    guard let samples = output.int16ChannelData?[0] else {
+      emitCaptureDiagnostic(stage: "pcm_conversion_failed", detail: "16 kHz PCM samples unavailable")
       return
     }
-    let data: Data
-    do {
-      data = try opusEncoder.encode(output)
-    } catch {
-      emitCaptureDiagnostic(stage: "opus_encode_failed", detail: String(describing: error))
-      return
+    let packets = pcmPacketizer.append(samples: samples, count: Int(output.frameLength))
+    let durationMs = 20.0
+    let batchEndWallMs = Date().timeIntervalSince1970 * 1_000
+    let batchEndMonotonicMs = ProcessInfo.processInfo.systemUptime * 1_000
+    for (index, packet) in packets.enumerated() {
+      let data: Data
+      do {
+        data = try opusEncoder.encode(samples: packet)
+      } catch {
+        emitCaptureDiagnostic(stage: "opus_encode_failed", detail: String(describing: error))
+        return
+      }
+      emitCaptureDiagnostic(stage: "opus_encoded", frameCount: packet.count, byteCount: data.count)
+      let packetOffsetMs = Double(packets.count - index) * durationMs
+      let audioLevel = packet.withUnsafeBufferPointer {
+        ChronicleAudioMeter.level(samples: $0.baseAddress!, count: $0.count)
+      }
+      sendEvent("onOpusFrame", [
+        "captureEpoch": captureEpoch,
+        "capturedAtMs": batchEndWallMs - packetOffsetMs,
+        "monotonicTimestampMs": batchEndMonotonicMs - packetOffsetMs,
+        "sampleRate": 16_000,
+        "channels": 1,
+        "frameDurationMs": durationMs,
+        "audioLevel": audioLevel,
+        "opusBase64": data.base64EncodedString(),
+      ])
     }
-    emitCaptureDiagnostic(stage: "opus_encoded", frameCount: Int(output.frameLength), byteCount: data.count)
-    let durationMs = Double(output.frameLength) / 16_000 * 1_000
-    let audioLevel = output.int16ChannelData.map {
-      ChronicleAudioMeter.level(samples: $0[0], count: Int(output.frameLength))
-    } ?? 0
-    sendEvent("onOpusFrame", [
-      "captureEpoch": captureEpoch,
-      "capturedAtMs": Date().timeIntervalSince1970 * 1_000 - durationMs,
-      "monotonicTimestampMs": ProcessInfo.processInfo.systemUptime * 1_000 - durationMs,
-      "sampleRate": 16_000,
-      "channels": 1,
-      "frameDurationMs": durationMs,
-      "audioLevel": audioLevel,
-      "opusBase64": data.base64EncodedString(),
-    ])
+  }
+
+  private func resetCaptureMetrics() {
+    captureMetricsLock.lock()
+    tapFrameCount = 0
+    captureMetricsLock.unlock()
+  }
+
+  private func observeTapFrame() {
+    captureMetricsLock.lock()
+    tapFrameCount += 1
+    captureMetricsLock.unlock()
+  }
+
+  private func capturedTapFrameCount() -> Int {
+    captureMetricsLock.lock()
+    let count = tapFrameCount
+    captureMetricsLock.unlock()
+    return count
+  }
+
+  private func scheduleCaptureWatchdog() {
+    captureWatchdogGeneration += 1
+    let generation = captureWatchdogGeneration
+    let epoch = captureEpoch
+    controlQueue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+      guard let self,
+            self.sessionRunning,
+            self.captureEpoch == epoch,
+            self.captureWatchdogGeneration == generation else { return }
+      let tapCount = self.capturedTapFrameCount()
+      switch DuplexCaptureWatchdog.recoveryAction(
+        tapFrameCount: tapCount,
+        voiceProcessingEnabled: self.voiceProcessingEnabled
+      ) {
+      case .none:
+        return
+      case .disableVoiceProcessing:
+        self.voiceProcessingFallbackForced = true
+        self.emitCaptureDiagnostic(
+          stage: "voice_processing_fallback",
+          detail: "no input tap after 1500ms taps=\(tapCount)"
+        )
+        self.tearDownEngine(deactivateSession: false)
+        let payload: [String: Any] = [
+          "captureEpoch": epoch,
+          "reason": "effect_failed",
+          "capabilities": self.capabilities(),
+        ]
+        DispatchQueue.main.async { [weak self] in
+          self?.sendEvent("onRouteChange", payload)
+        }
+      case .reportFailure:
+        self.emitCaptureDiagnostic(
+          stage: "capture_failed",
+          detail: "no input tap after voice-processing fallback taps=\(tapCount)"
+        )
+      }
+    }
   }
 
   private func emitCaptureDiagnostic(
@@ -261,7 +346,9 @@ public final class ChronicleDuplexAudioModule: Module {
     if let frameCount { payload["frameCount"] = frameCount }
     if let byteCount { payload["byteCount"] = byteCount }
     if let detail { payload["detail"] = String(detail.prefix(240)) }
-    sendEvent("onCaptureDiagnostic", payload)
+    DispatchQueue.main.async { [weak self] in
+      self?.sendEvent("onCaptureDiagnostic", payload)
+    }
   }
 
   private func schedule(response: [String: Any]) throws {
@@ -436,6 +523,7 @@ public final class ChronicleDuplexAudioModule: Module {
   @discardableResult
   private func tearDownEngine(deactivateSession: Bool) -> Bool {
     var restored = true
+    captureWatchdogGeneration += 1
     cancelCurrent(errorCode: nil)
     sessionRunning = false
     if tapInstalled {
@@ -447,6 +535,7 @@ public final class ChronicleDuplexAudioModule: Module {
     if player.engine != nil { engine.detach(player) }
     converter = nil
     opusEncoder = nil
+    pcmPacketizer = nil
     voiceProcessingEnabled = false
     captureSuppressed = false
     if deactivateSession {

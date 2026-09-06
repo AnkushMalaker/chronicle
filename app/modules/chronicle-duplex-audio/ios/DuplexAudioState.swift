@@ -90,6 +90,42 @@ enum ChronicleAudioMeter {
   }
 }
 
+enum DuplexCaptureRecoveryAction: Equatable {
+  case none
+  case disableVoiceProcessing
+  case reportFailure
+}
+
+enum DuplexCaptureWatchdog {
+  static func recoveryAction(
+    tapFrameCount: Int,
+    voiceProcessingEnabled: Bool
+  ) -> DuplexCaptureRecoveryAction {
+    guard tapFrameCount == 0 else { return .none }
+    return voiceProcessingEnabled ? .disableVoiceProcessing : .reportFailure
+  }
+}
+
+final class ChroniclePcm16Packetizer {
+  private(set) var pendingSampleCount = 0
+  private var pending: [Int16] = []
+
+  func append(samples: UnsafePointer<Int16>, count: Int) -> [[Int16]] {
+    guard count > 0 else { return [] }
+    pending.append(contentsOf: UnsafeBufferPointer(start: samples, count: count))
+    var packets: [[Int16]] = []
+    let packetSize = Int(ChronicleOpusPacketEncoder.framesPerPacket)
+    let packetCount = pending.count / packetSize
+    for packetIndex in 0..<packetCount {
+      let start = packetIndex * packetSize
+      packets.append(Array(pending[start..<(start + packetSize)]))
+    }
+    pending.removeFirst(packetCount * packetSize)
+    pendingSampleCount = pending.count
+    return packets
+  }
+}
+
 final class ChronicleOpusPacketEncoder {
   static let sampleRate = 16_000.0
   static let framesPerPacket: AVAudioFrameCount = 320
@@ -160,5 +196,21 @@ final class ChronicleOpusPacketEncoder {
       throw ChronicleOpusEncoderError.packetUnavailable
     }
     return Data(bytes: compressed.data, count: Int(compressed.byteLength))
+  }
+
+  func encode(samples: [Int16]) throws -> Data {
+    guard samples.count == Int(Self.framesPerPacket),
+          let input = AVAudioPCMBuffer(
+            pcmFormat: inputFormat,
+            frameCapacity: Self.framesPerPacket
+          ),
+          let target = input.int16ChannelData?[0] else {
+      throw ChronicleOpusEncoderError.formatUnavailable
+    }
+    input.frameLength = Self.framesPerPacket
+    samples.withUnsafeBufferPointer { source in
+      target.update(from: source.baseAddress!, count: source.count)
+    }
+    return try encode(input)
   }
 }

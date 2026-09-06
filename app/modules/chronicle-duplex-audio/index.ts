@@ -29,9 +29,10 @@ export interface NativeCaptureDiagnostic {
     | 'pcm_converted'
     | 'pcm_conversion_failed'
     | 'pcm_empty'
-    | 'pcm_wrong_frame_count'
     | 'opus_encoded'
-    | 'opus_encode_failed';
+    | 'opus_encode_failed'
+    | 'voice_processing_fallback'
+    | 'capture_failed';
   monotonicTimestampMs: number;
   frameCount?: number;
   byteCount?: number;

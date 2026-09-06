@@ -121,6 +121,26 @@ assert.doesNotMatch(
 assert.match(integrationSources.orchestrator, /beginAttempt\(\)/, 'the phone button must open a diagnostic attempt');
 assert.match(integrationSources.ios, /"audioLevel": audioLevel/, 'iOS must emit PCM audio levels');
 assert.match(integrationSources.ios, /"onCaptureDiagnostic"/, 'iOS must expose the native capture stages');
+assert.match(
+  integrationSources.ios,
+  /let inputFormat = input\.inputFormat\(forBus: 0\)/,
+  'the iOS tap must use the hardware input format after voice processing is configured',
+);
+assert.doesNotMatch(
+  integrationSources.ios,
+  /let inputFormat = input\.outputFormat\(forBus: 0\)/,
+  'the voice-processed output format can create a running iOS engine whose input tap stays silent',
+);
+assert.match(
+  integrationSources.ios,
+  /scheduleCaptureWatchdog\(\)/,
+  'a running iOS engine must recover if its input tap never delivers a frame',
+);
+assert.match(
+  integrationSources.ios,
+  /ChroniclePcm16Packetizer/,
+  'iOS must split hardware-sized PCM buffers into fixed 20 ms Opus packets',
+);
 assert.match(integrationSources.android, /"audioLevel" to DuplexAudioPolicy\.audioLevel/, 'Android must emit PCM audio levels');
 
 console.log('phone audio diagnostics tests passed');

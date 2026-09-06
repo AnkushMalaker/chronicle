@@ -87,6 +87,69 @@ final class DuplexAudioStateTests: XCTestCase {
     }
   }
 
+  func testCaptureWatchdogFallsBackWhenVoiceProcessingTapIsSilent() {
+    XCTAssertEqual(
+      DuplexCaptureWatchdog.recoveryAction(
+        tapFrameCount: 0,
+        voiceProcessingEnabled: true
+      ),
+      .disableVoiceProcessing
+    )
+  }
+
+  func testCaptureWatchdogLeavesDeliveringTapAlone() {
+    XCTAssertEqual(
+      DuplexCaptureWatchdog.recoveryAction(
+        tapFrameCount: 1,
+        voiceProcessingEnabled: true
+      ),
+      .none
+    )
+  }
+
+  func testCaptureWatchdogReportsFailureAfterFallbackTapIsSilent() {
+    XCTAssertEqual(
+      DuplexCaptureWatchdog.recoveryAction(
+        tapFrameCount: 0,
+        voiceProcessingEnabled: false
+      ),
+      .reportFailure
+    )
+  }
+
+  func testPacketizerSplitsLargePcmBuffersIntoTwentyMillisecondPackets() {
+    let packetizer = ChroniclePcm16Packetizer()
+    let samples = Array(0..<1_600).map(Int16.init)
+    let packets = samples.withUnsafeBufferPointer {
+      packetizer.append(samples: $0.baseAddress!, count: $0.count)
+    }
+
+    XCTAssertEqual(packets.count, 5)
+    XCTAssertTrue(packets.allSatisfy { $0.count == 320 })
+    XCTAssertEqual(packets[0].first, 0)
+    XCTAssertEqual(packets[4].last, 1_599)
+    XCTAssertEqual(packetizer.pendingSampleCount, 0)
+  }
+
+  func testPacketizerCarriesPartialPcmAcrossTapCallbacks() {
+    let packetizer = ChroniclePcm16Packetizer()
+    let first = [Int16](repeating: 1, count: 100)
+    let second = [Int16](repeating: 2, count: 220)
+
+    let initialPackets = first.withUnsafeBufferPointer {
+      packetizer.append(samples: $0.baseAddress!, count: $0.count)
+    }
+    let completedPackets = second.withUnsafeBufferPointer {
+      packetizer.append(samples: $0.baseAddress!, count: $0.count)
+    }
+
+    XCTAssertTrue(initialPackets.isEmpty)
+    XCTAssertEqual(completedPackets.count, 1)
+    XCTAssertEqual(Array(completedPackets[0].prefix(100)), [Int16](repeating: 1, count: 100))
+    XCTAssertEqual(Array(completedPackets[0].suffix(220)), [Int16](repeating: 2, count: 220))
+    XCTAssertEqual(packetizer.pendingSampleCount, 0)
+  }
+
   func testOpusEncoderProducesOnePacketForTwentyMillisecondsOfPcm() throws {
     let encoder = try ChronicleOpusPacketEncoder()
     let buffer = try XCTUnwrap(
@@ -102,6 +165,18 @@ final class DuplexAudioStateTests: XCTestCase {
     }
 
     let packet = try encoder.encode(buffer)
+
+    XCTAssertFalse(packet.isEmpty)
+    XCTAssertLessThanOrEqual(packet.count, 1_275)
+  }
+
+  func testOpusEncoderAcceptsOnePacketOfRawSamples() throws {
+    let encoder = try ChronicleOpusPacketEncoder()
+    let samples = (0..<Int(ChronicleOpusPacketEncoder.framesPerPacket)).map {
+      Int16(Double(Int16.max) * 0.2 * sin(Double($0) * 0.15))
+    }
+
+    let packet = try encoder.encode(samples: samples)
 
     XCTAssertFalse(packet.isEmpty)
     XCTAssertLessThanOrEqual(packet.count, 1_275)

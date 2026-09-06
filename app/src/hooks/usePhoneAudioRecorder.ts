@@ -88,6 +88,10 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
   }, [markCaptureStopped]);
 
   const startNativeCapture = useCallback(async (): Promise<PhoneCaptureSession> => {
+    if (firstFrameTimeoutRef.current) clearTimeout(firstFrameTimeoutRef.current);
+    firstFrameTimeoutRef.current = null;
+    if (audioLevelTimeoutRef.current) clearTimeout(audioLevelTimeoutRef.current);
+    audioLevelTimeoutRef.current = null;
     const captureEpoch = captureEpochRef.current + 1;
     captureEpochRef.current = captureEpoch;
     const capabilities = await startVoiceSession({ captureEpoch });
