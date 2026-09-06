@@ -134,6 +134,45 @@ final class DuplexAudioStateTests: XCTestCase {
     XCTAssertTrue(DuplexDiagnosticProfile.systemTapFormatHold.usesSystemTapFormat)
   }
 
+  func testProductionKeepsCapturingThroughInitialRouteSettlement() {
+    XCTAssertTrue(
+      DuplexSystemChangePolicy.shouldHoldEngine(
+        reason: "route_changed",
+        sessionRunning: true,
+        diagnosticProfile: .production
+      )
+    )
+  }
+
+  func testProductionStillRestartsForEngineResetAndInterruption() {
+    for reason in ["engine_reset", "interruption"] {
+      XCTAssertFalse(
+        DuplexSystemChangePolicy.shouldHoldEngine(
+          reason: reason,
+          sessionRunning: true,
+          diagnosticProfile: .production
+        )
+      )
+    }
+  }
+
+  func testDiagnosticHoldProfilesCanObserveEverySystemChange() {
+    XCTAssertTrue(
+      DuplexSystemChangePolicy.shouldHoldEngine(
+        reason: "engine_reset",
+        sessionRunning: true,
+        diagnosticProfile: .voiceProcessingHold
+      )
+    )
+    XCTAssertFalse(
+      DuplexSystemChangePolicy.shouldHoldEngine(
+        reason: "route_changed",
+        sessionRunning: false,
+        diagnosticProfile: .voiceProcessingHold
+      )
+    )
+  }
+
   func testPacketizerSplitsLargePcmBuffersIntoTwentyMillisecondPackets() {
     let packetizer = ChroniclePcm16Packetizer()
     let samples = Array(0..<1_600).map(Int16.init)

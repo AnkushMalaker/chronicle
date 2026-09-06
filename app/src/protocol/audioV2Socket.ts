@@ -86,8 +86,32 @@ export interface AudioV2SocketOptions {
 
 type AwaitedEvent = 'hello' | 'captureStarted' | 'captureStopped';
 
+interface RuntimeCrypto {
+  randomUUID?: () => string;
+}
+
+let fallbackEventIdSequence = 0;
+
+function fallbackEventId(): string {
+  fallbackEventIdSequence = (fallbackEventIdSequence + 1) % 0x1_0000;
+  const random = Array.from(
+    { length: 19 },
+    () => Math.floor(Math.random() * 16).toString(16),
+  ).join('');
+  const sequence = fallbackEventIdSequence.toString(16).padStart(4, '0');
+  const timestamp = Date.now().toString(16).padStart(12, '0').slice(-12);
+  const variant = (8 + Math.floor(Math.random() * 4)).toString(16);
+  return `${random.slice(0, 8)}-${sequence}-4${random.slice(8, 11)}-${variant}${random.slice(11, 14)}-${timestamp}`;
+}
+
+export function createClientEventIdValue(
+  runtimeCrypto: RuntimeCrypto | null | undefined = (globalThis as { crypto?: RuntimeCrypto }).crypto,
+): string {
+  return runtimeCrypto?.randomUUID ? runtimeCrypto.randomUUID() : fallbackEventId();
+}
+
 function eventId() {
-  return create(EventIdSchema, { value: crypto.randomUUID() });
+  return create(EventIdSchema, { value: createClientEventIdValue() });
 }
 
 function uplinkSpec() {

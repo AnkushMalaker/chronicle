@@ -106,6 +106,24 @@ enum DuplexCaptureWatchdog {
   }
 }
 
+enum DuplexSystemChangePolicy {
+  static func shouldHoldEngine(
+    reason: String,
+    sessionRunning: Bool,
+    diagnosticProfile: DuplexDiagnosticProfile
+  ) -> Bool {
+    guard sessionRunning else { return false }
+    if diagnosticProfile.holdsEngineOnSystemChange { return true }
+
+    // AVAudioSession emits route-change notifications while the initial
+    // play-and-record route is settling. Tearing down here leaves the engine
+    // looking successfully started but prevents its input tap from ever
+    // delivering a frame. A later, real route change is still forwarded to JS,
+    // whose bound capture lifecycle performs the restart.
+    return reason == "route_changed"
+  }
+}
+
 enum DuplexDiagnosticProfile: String, CaseIterable {
   case production
   case voiceProcessingHold = "voice_processing_hold"

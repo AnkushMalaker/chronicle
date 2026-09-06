@@ -723,7 +723,11 @@ public final class ChronicleDuplexAudioModule: Module {
     controlQueue.async { [weak self] in
       guard let self else { return }
       self.observeSystemChange(reason)
-      let held = self.diagnosticProfile.holdsEngineOnSystemChange && self.sessionRunning
+      let held = DuplexSystemChangePolicy.shouldHoldEngine(
+        reason: reason,
+        sessionRunning: self.sessionRunning,
+        diagnosticProfile: self.diagnosticProfile
+      )
       self.emitCaptureDiagnostic(
         stage: "system_change",
         detail: "reason=\(reason) session_running=\(self.sessionRunning) held=\(held) engine_running=\(self.engine.isRunning)"

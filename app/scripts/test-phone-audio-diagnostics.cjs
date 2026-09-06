@@ -25,6 +25,22 @@ function loadTypeScript(sourcePath, mocks) {
 }
 
 const writes = [];
+const socketSourcePath = path.join(__dirname, '../src/protocol/audioV2Socket.ts');
+const { createClientEventIdValue } = loadTypeScript(socketSourcePath, {
+  '@bufbuild/protobuf': { create: (_schema, value) => value },
+  '@bufbuild/protobuf/wkt': {},
+  './audioV2': { EventIdSchema: {}, ProcessingProfile: { SOURCE_NATIVE: 2 } },
+});
+const fallbackEventId = createClientEventIdValue(null);
+const nextFallbackEventId = createClientEventIdValue(null);
+assert.match(fallbackEventId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+assert.notEqual(fallbackEventId, nextFallbackEventId, 'fallback event IDs must remain unique');
+assert.equal(
+  createClientEventIdValue({ randomUUID: () => 'native-random-uuid' }),
+  'native-random-uuid',
+  'native randomUUID should be used when the runtime provides it',
+);
+
 const sourcePath = path.join(__dirname, '../src/services/phoneAudioDiagnostics.ts');
 const { PhoneAudioDiagnostics } = loadTypeScript(sourcePath, {
   '@/utils/logger': {
@@ -149,6 +165,11 @@ assert.match(
   integrationSources.ios,
   /scheduleCaptureWatchdog\(\)/,
   'a running iOS engine must recover if its input tap never delivers a frame',
+);
+assert.match(
+  integrationSources.ios,
+  /DuplexSystemChangePolicy\.shouldHoldEngine/,
+  'iOS must survive the initial route-settlement notification that precedes mic frames',
 );
 assert.match(
   integrationSources.ios,
