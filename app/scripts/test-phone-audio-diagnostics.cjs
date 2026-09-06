@@ -43,6 +43,9 @@ diagnostics.engineStarted(1, {
   output_route: 'speakerphone',
   native_sample_rate: 48_000,
 });
+diagnostics.nativeStage({ captureEpoch: 1, stage: 'tap_received', monotonicTimestampMs: 100 });
+diagnostics.nativeStage({ captureEpoch: 1, stage: 'pcm_converted', monotonicTimestampMs: 101, frameCount: 320 });
+diagnostics.nativeStage({ captureEpoch: 1, stage: 'opus_encoded', monotonicTimestampMs: 102, frameCount: 320, byteCount: 42 });
 diagnostics.nativeFrame({ captureEpoch: 1, opusBytes: 42, audioLevel: 0.25 });
 diagnostics.nativeFrame({ captureEpoch: 1, opusBytes: 43, audioLevel: 0.5 });
 diagnostics.audioLevelActive(0.5);
@@ -64,6 +67,9 @@ assert.deepEqual(
     ['info', 'PhoneAudio'],
     ['info', 'PhoneAudio'],
     ['info', 'PhoneAudio'],
+    ['info', 'PhoneAudio'],
+    ['info', 'PhoneAudio'],
+    ['info', 'PhoneAudio'],
     ['warn', 'PhoneAudio'],
     ['info', 'PhoneAudio'],
     ['info', 'PhoneAudio'],
@@ -78,6 +84,9 @@ assert.deepEqual(
 const text = writes.map(({ message }) => message).join('\n');
 assert.match(text, /button_pressed attempt=1/);
 assert.match(text, /native_first_frame.*opus_bytes=42.*audio_level=0\.250/);
+assert.match(text, /native_tap_received.*capture_epoch=1/);
+assert.match(text, /native_pcm_converted.*frames=320/);
+assert.match(text, /native_opus_encoded.*bytes=42/);
 assert.match(text, /audio_level_active.*audio_level=0\.500/);
 assert.match(text, /frame_dropped_socket_not_open.*ready_state=0/);
 assert.match(text, /first_frame_enqueued.*opus_bytes=44/);
@@ -99,8 +108,19 @@ const integrationSources = {
 assert.match(integrationSources.recorder, /setAudioLevel\(/, 'native levels must drive the UI meter');
 assert.match(integrationSources.recorder, /native_frame_timeout/, 'a silent native engine must surface a diagnostic');
 assert.match(integrationSources.streamer, /packetAccepted\(sequence\)/, 'backend acknowledgements must be logged');
+assert.match(
+  integrationSources.streamer,
+  /const optionsRef = useRef\(options\)/,
+  'rerenders must not replace the WebSocket lifecycle callback through a fresh options object',
+);
+assert.doesNotMatch(
+  integrationSources.streamer,
+  /\}, \[drainRecovery, encodeBase64, options, packetAccepted\]\);/,
+  'startStreaming must not close an active socket merely because its options object was recreated',
+);
 assert.match(integrationSources.orchestrator, /beginAttempt\(\)/, 'the phone button must open a diagnostic attempt');
 assert.match(integrationSources.ios, /"audioLevel": audioLevel/, 'iOS must emit PCM audio levels');
+assert.match(integrationSources.ios, /"onCaptureDiagnostic"/, 'iOS must expose the native capture stages');
 assert.match(integrationSources.android, /"audioLevel" to DuplexAudioPolicy\.audioLevel/, 'Android must emit PCM audio levels');
 
 console.log('phone audio diagnostics tests passed');

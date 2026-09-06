@@ -22,6 +22,22 @@ export interface NativeOpusFrame {
   opusBase64: string;
 }
 
+export interface NativeCaptureDiagnostic {
+  captureEpoch: number;
+  stage:
+    | 'tap_received'
+    | 'pcm_converted'
+    | 'pcm_conversion_failed'
+    | 'pcm_empty'
+    | 'pcm_wrong_frame_count'
+    | 'opus_encoded'
+    | 'opus_encode_failed';
+  monotonicTimestampMs: number;
+  frameCount?: number;
+  byteCount?: number;
+  detail?: string;
+}
+
 export interface NativeResponse {
   responseId: string;
   generation: number;
@@ -59,6 +75,10 @@ type ChronicleDuplexAudioNative = NativeModule & {
     listener: (event: NativeOpusFrame) => void
   ): EventSubscription;
   addListener(
+    eventName: 'onCaptureDiagnostic',
+    listener: (event: NativeCaptureDiagnostic) => void
+  ): EventSubscription;
+  addListener(
     eventName: 'onPlaybackState',
     listener: (event: NativePlaybackState) => void
   ): EventSubscription;
@@ -93,6 +113,12 @@ export function addOpusFrameListener(
   listener: (event: NativeOpusFrame) => void
 ): EventSubscription {
   return requireNative().addListener('onOpusFrame', listener);
+}
+
+export function addCaptureDiagnosticListener(
+  listener: (event: NativeCaptureDiagnostic) => void
+): EventSubscription {
+  return requireNative().addListener('onCaptureDiagnostic', listener);
 }
 
 export function addPlaybackStateListener(

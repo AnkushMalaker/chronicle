@@ -128,6 +128,8 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   const [error, setError] = useState<string | null>(null);
   const [phonePlaybackState, setPhonePlaybackState] = useState<UseAudioStreamer['phonePlaybackState']>(null);
   const socketRef = useRef<AudioV2Socket | null>(null);
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
   const configRef = useRef<StreamStartConfig | undefined>(undefined);
   const urlRef = useRef('');
   const stoppedRef = useRef(false);
@@ -259,7 +261,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
       if (!parsed.bearerToken) {
         const token = await refreshToken();
         if (!token) throw new Error('Audio authentication expired');
-        options?.onTokenRefreshed?.(token);
+        optionsRef.current?.onTokenRefreshed?.(token);
         const refreshed = new URL(url);
         refreshed.searchParams.set('token', token);
         urlRef.current = refreshed.toString();
@@ -321,7 +323,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           setIsStreaming(false);
           if (
             !stoppedRef.current &&
-            (options?.autoReconnectEnabled ?? true) &&
+            (optionsRef.current?.autoReconnectEnabled ?? true) &&
             !reconnectRef.current
           ) {
             const delay = Math.min(
@@ -426,7 +428,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     } finally {
       connectingRef.current = null;
     }
-  }, [drainRecovery, encodeBase64, options, packetAccepted]);
+  }, [drainRecovery, encodeBase64, packetAccepted]);
 
   const enqueueLive = useCallback((opus: Uint8Array, capturedAtMs: number) => {
     if (!opus.length) return;

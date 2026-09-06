@@ -1,4 +1,5 @@
 import type { VoiceCapabilities } from '../protocol/audioCapabilities';
+import type { NativeCaptureDiagnostic } from '../../modules/chronicle-duplex-audio';
 import { logError, logInfo, logWarn } from '@/utils/logger';
 
 type DiagnosticLevel = 'info' | 'warn' | 'error';
@@ -86,6 +87,21 @@ export class PhoneAudioDiagnostics {
       'info',
       'native_first_frame',
       `capture_epoch=${frame.captureEpoch} opus_bytes=${frame.opusBytes} audio_level=${this.lastAudioLevel.toFixed(3)}`,
+    );
+  }
+
+  nativeStage(event: NativeCaptureDiagnostic): void {
+    if (!this.active) return;
+    const detail = redactSecrets(event.detail ?? '').slice(0, 240);
+    this.once(
+      event.stage.endsWith('_failed') ? 'error' : 'info',
+      `native_${event.stage}`,
+      [
+        `capture_epoch=${event.captureEpoch}`,
+        event.frameCount === undefined ? '' : `frames=${event.frameCount}`,
+        event.byteCount === undefined ? '' : `bytes=${event.byteCount}`,
+        detail ? `detail=${detail}` : '',
+      ].filter(Boolean).join(' '),
     );
   }
 

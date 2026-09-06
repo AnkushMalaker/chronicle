@@ -5,8 +5,10 @@ public final class ChronicleDuplexAudioModule: Module {
   private let engine = AVAudioEngine()
   private let player = AVAudioPlayerNode()
   private let controlQueue = DispatchQueue(label: "chronicle.duplex.audio")
+  private let captureDiagnosticLock = NSLock()
   private var converter: AVAudioConverter?
-  private var opusConverter: AVAudioConverter?
+  private var opusEncoder: ChronicleOpusPacketEncoder?
+  private var emittedCaptureDiagnosticStages = Set<String>()
   private var captureEpoch = 0
   private var voiceProcessingEnabled = false
   private var captureSuppressed = false
@@ -21,7 +23,7 @@ public final class ChronicleDuplexAudioModule: Module {
 
   public func definition() -> ModuleDefinition {
     Name("ChronicleDuplexAudio")
-    Events("onOpusFrame", "onPlaybackState", "onRouteChange")
+    Events("onOpusFrame", "onCaptureDiagnostic", "onPlaybackState", "onRouteChange")
 
     OnCreate { [weak self] in
       self?.installObservers()
@@ -124,6 +126,9 @@ public final class ChronicleDuplexAudioModule: Module {
   private func startEngine(captureEpoch: Int) throws {
     tearDownEngine(deactivateSession: false)
     self.captureEpoch = captureEpoch
+    captureDiagnosticLock.lock()
+    emittedCaptureDiagnosticStages.removeAll()
+    captureDiagnosticLock.unlock()
 
     let session = AVAudioSession.sharedInstance()
     if !sessionConfigured {
@@ -153,27 +158,20 @@ public final class ChronicleDuplexAudioModule: Module {
     }
 
     let inputFormat = input.outputFormat(forBus: 0)
-    guard let targetFormat = AVAudioFormat(
-      commonFormat: .pcmFormatInt16,
-      sampleRate: 16_000,
-      channels: 1,
-      interleaved: true
-    ), let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+    let opusEncoder: ChronicleOpusPacketEncoder
+    do {
+      opusEncoder = try ChronicleOpusPacketEncoder()
+    } catch {
+      throw Exception(name: "engine_unavailable", description: "Cannot create the raw Opus encoder: \(error)")
+    }
+    guard let converter = AVAudioConverter(from: inputFormat, to: opusEncoder.inputFormat) else {
       throw Exception(name: "engine_unavailable", description: "Cannot create the 16 kHz PCM converter")
     }
-    guard let opusFormat = AVAudioFormat(settings: [
-      AVFormatIDKey: kAudioFormatOpus,
-      AVSampleRateKey: 16_000,
-      AVNumberOfChannelsKey: 1,
-      AVEncoderBitRateKey: 24_000,
-    ]), let opusConverter = AVAudioConverter(from: targetFormat, to: opusFormat) else {
-      throw Exception(name: "engine_unavailable", description: "Cannot create the raw Opus encoder")
-    }
-    opusConverter.bitRate = 24_000
     self.converter = converter
-    self.opusConverter = opusConverter
+    self.opusEncoder = opusEncoder
     let inputFrameCount = AVAudioFrameCount(round(inputFormat.sampleRate * 0.02))
     input.installTap(onBus: 0, bufferSize: inputFrameCount, format: inputFormat) { [weak self] buffer, _ in
+      self?.emitCaptureDiagnostic(stage: "tap_received")
       self?.emitOpus(buffer)
     }
     tapInstalled = true
@@ -186,7 +184,7 @@ public final class ChronicleDuplexAudioModule: Module {
     guard !captureSuppressed,
           engine.isRunning,
           let converter,
-          let opusConverter else { return }
+          let opusEncoder else { return }
     let capacity = ChronicleDuplexResampler.outputCapacity(
       inputFrames: input.frameLength,
       inputRate: input.format.sampleRate
@@ -205,30 +203,30 @@ public final class ChronicleDuplexAudioModule: Module {
       state.pointee = .haveData
       return input
     }
-    guard status != .error,
-          conversionError == nil,
-          output.frameLength > 0 else { return }
-    let compressed = AVAudioCompressedBuffer(
-      format: opusConverter.outputFormat,
-      packetCapacity: 1,
-      maximumPacketSize: 1_275
-    )
-    var opusSupplied = false
-    var opusError: NSError?
-    let opusStatus = opusConverter.convert(to: compressed, error: &opusError) { _, state in
-      if opusSupplied {
-        state.pointee = .noDataNow
-        return nil
-      }
-      opusSupplied = true
-      state.pointee = .haveData
-      return output
+    guard status != .error, conversionError == nil else {
+      emitCaptureDiagnostic(
+        stage: "pcm_conversion_failed",
+        detail: conversionError?.localizedDescription ?? "converter_status_error"
+      )
+      return
     }
-    guard opusStatus != .error,
-          opusError == nil,
-          compressed.packetCount == 1,
-          compressed.byteLength > 0 else { return }
-    let data = Data(bytes: compressed.data, count: Int(compressed.byteLength))
+    guard output.frameLength > 0 else {
+      emitCaptureDiagnostic(stage: "pcm_empty")
+      return
+    }
+    emitCaptureDiagnostic(stage: "pcm_converted", frameCount: Int(output.frameLength))
+    guard output.frameLength == ChronicleOpusPacketEncoder.framesPerPacket else {
+      emitCaptureDiagnostic(stage: "pcm_wrong_frame_count", frameCount: Int(output.frameLength))
+      return
+    }
+    let data: Data
+    do {
+      data = try opusEncoder.encode(output)
+    } catch {
+      emitCaptureDiagnostic(stage: "opus_encode_failed", detail: String(describing: error))
+      return
+    }
+    emitCaptureDiagnostic(stage: "opus_encoded", frameCount: Int(output.frameLength), byteCount: data.count)
     let durationMs = Double(output.frameLength) / 16_000 * 1_000
     let audioLevel = output.int16ChannelData.map {
       ChronicleAudioMeter.level(samples: $0[0], count: Int(output.frameLength))
@@ -243,6 +241,27 @@ public final class ChronicleDuplexAudioModule: Module {
       "audioLevel": audioLevel,
       "opusBase64": data.base64EncodedString(),
     ])
+  }
+
+  private func emitCaptureDiagnostic(
+    stage: String,
+    frameCount: Int? = nil,
+    byteCount: Int? = nil,
+    detail: String? = nil
+  ) {
+    captureDiagnosticLock.lock()
+    let inserted = emittedCaptureDiagnosticStages.insert(stage).inserted
+    captureDiagnosticLock.unlock()
+    guard inserted else { return }
+    var payload: [String: Any] = [
+      "captureEpoch": captureEpoch,
+      "stage": stage,
+      "monotonicTimestampMs": ProcessInfo.processInfo.systemUptime * 1_000,
+    ]
+    if let frameCount { payload["frameCount"] = frameCount }
+    if let byteCount { payload["byteCount"] = byteCount }
+    if let detail { payload["detail"] = String(detail.prefix(240)) }
+    sendEvent("onCaptureDiagnostic", payload)
   }
 
   private func schedule(response: [String: Any]) throws {
@@ -427,7 +446,7 @@ public final class ChronicleDuplexAudioModule: Module {
     engine.stop()
     if player.engine != nil { engine.detach(player) }
     converter = nil
-    opusConverter = nil
+    opusEncoder = nil
     voiceProcessingEnabled = false
     captureSuppressed = false
     if deactivateSession {

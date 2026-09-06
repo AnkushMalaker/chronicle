@@ -4,6 +4,7 @@ import { PermissionsAndroid, Platform } from 'react-native';
 import base64 from 'react-native-base64';
 
 import {
+  addCaptureDiagnosticListener,
   addOpusFrameListener,
   startVoiceSession,
   stopVoiceSession,
@@ -54,6 +55,7 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
   const mountedRef = useRef(true);
   const captureEpochRef = useRef(0);
   const frameSubscriptionRef = useRef<{ remove: () => void } | null>(null);
+  const diagnosticSubscriptionRef = useRef<{ remove: () => void } | null>(null);
   const onAudioDataRef = useRef<((frame: CapturedOpusFrame) => void) | null>(null);
   const firstFrameSeenRef = useRef(false);
   const firstFrameTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -67,6 +69,8 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
     audioLevelTimeoutRef.current = null;
     frameSubscriptionRef.current?.remove();
     frameSubscriptionRef.current = null;
+    diagnosticSubscriptionRef.current?.remove();
+    diagnosticSubscriptionRef.current = null;
     onAudioDataRef.current = null;
     if (mountedRef.current) {
       setIsRecording(false);
@@ -131,6 +135,10 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
       audioLevelActiveRef.current = false;
       onAudioDataRef.current = onAudioData;
       phoneAudioDiagnostics.listenerInstalled(captureEpochRef.current + 1);
+      diagnosticSubscriptionRef.current = addCaptureDiagnosticListener((event) => {
+        if (!mountedRef.current || event.captureEpoch !== captureEpochRef.current) return;
+        phoneAudioDiagnostics.nativeStage(event);
+      });
       frameSubscriptionRef.current = addOpusFrameListener((frame) => {
         if (!mountedRef.current || frame.captureEpoch !== captureEpochRef.current) return;
         let captured: CapturedOpusFrame;
@@ -173,6 +181,8 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
       phoneAudioDiagnostics.failure('native_capture_start', cause);
       frameSubscriptionRef.current?.remove();
       frameSubscriptionRef.current = null;
+      diagnosticSubscriptionRef.current?.remove();
+      diagnosticSubscriptionRef.current = null;
       const message = cause instanceof Error ? cause.message : 'Failed to start duplex audio';
       if (mountedRef.current) {
         setError(message);
@@ -187,6 +197,8 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
     mountedRef.current = false;
     frameSubscriptionRef.current?.remove();
     frameSubscriptionRef.current = null;
+    diagnosticSubscriptionRef.current?.remove();
+    diagnosticSubscriptionRef.current = null;
     if (firstFrameTimeoutRef.current) clearTimeout(firstFrameTimeoutRef.current);
     if (audioLevelTimeoutRef.current) clearTimeout(audioLevelTimeoutRef.current);
     stopVoiceSession().catch(() => undefined);

@@ -87,6 +87,26 @@ final class DuplexAudioStateTests: XCTestCase {
     }
   }
 
+  func testOpusEncoderProducesOnePacketForTwentyMillisecondsOfPcm() throws {
+    let encoder = try ChronicleOpusPacketEncoder()
+    let buffer = try XCTUnwrap(
+      AVAudioPCMBuffer(
+        pcmFormat: encoder.inputFormat,
+        frameCapacity: ChronicleOpusPacketEncoder.framesPerPacket
+      )
+    )
+    buffer.frameLength = ChronicleOpusPacketEncoder.framesPerPacket
+    let samples = try XCTUnwrap(buffer.int16ChannelData)[0]
+    for index in 0..<Int(buffer.frameLength) {
+      samples[index] = Int16(Double(Int16.max) * 0.2 * sin(Double(index) * 0.15))
+    }
+
+    let packet = try encoder.encode(buffer)
+
+    XCTAssertFalse(packet.isEmpty)
+    XCTAssertLessThanOrEqual(packet.count, 1_275)
+  }
+
   func testStopRestoresInactiveEngineState() {
     let state = DuplexAudioState()
     state.start(captureEpoch: 4)
