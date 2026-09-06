@@ -52,6 +52,9 @@ diagnostics.audioLevelActive(0.5);
 diagnostics.socketUnavailable(0);
 diagnostics.socketUnavailable(0);
 diagnostics.socketConnecting();
+diagnostics.socketStage('transport_open');
+diagnostics.socketStage('client_hello_sent');
+diagnostics.socketStage('transport_error', 'wss://chronicle/ws/audio?token=secret-value');
 diagnostics.socketOpen();
 diagnostics.captureStarted('capture-secret-id');
 diagnostics.frameEnqueued(44);
@@ -74,6 +77,9 @@ assert.deepEqual(
     ['info', 'PhoneAudio'],
     ['info', 'PhoneAudio'],
     ['info', 'PhoneAudio'],
+    ['warn', 'PhoneAudio'],
+    ['info', 'PhoneAudio'],
+    ['info', 'PhoneAudio'],
     ['info', 'PhoneAudio'],
     ['info', 'PhoneAudio'],
     ['warn', 'PhoneAudio'],
@@ -89,6 +95,9 @@ assert.match(text, /native_pcm_converted.*frames=320/);
 assert.match(text, /native_opus_encoded.*bytes=42/);
 assert.match(text, /audio_level_active.*audio_level=0\.500/);
 assert.match(text, /frame_dropped_socket_not_open.*ready_state=0/);
+assert.match(text, /websocket_transport_open/);
+assert.match(text, /websocket_client_hello_sent/);
+assert.match(text, /websocket_transport_error.*token=<REDACTED>/);
 assert.match(text, /first_frame_enqueued.*opus_bytes=44/);
 assert.match(text, /first_packet_accepted.*sequence=0/);
 assert.match(
@@ -112,6 +121,11 @@ assert.match(
   integrationSources.streamer,
   /const optionsRef = useRef\(options\)/,
   'rerenders must not replace the WebSocket lifecycle callback through a fresh options object',
+);
+assert.match(
+  integrationSources.streamer,
+  /onDiagnostic: event =>/,
+  'production phone streaming must log each WebSocket handshake phase',
 );
 assert.doesNotMatch(
   integrationSources.streamer,

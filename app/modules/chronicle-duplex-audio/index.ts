@@ -9,6 +9,11 @@ import type { VoiceCapabilities } from '../../src/protocol/audioCapabilities';
 
 export interface StartVoiceSessionOptions {
   captureEpoch: number;
+  diagnosticProfile?:
+    | 'production'
+    | 'voice_processing_hold'
+    | 'plain_capture_hold'
+    | 'system_tap_format_hold';
 }
 
 export interface NativeOpusFrame {
@@ -32,7 +37,9 @@ export interface NativeCaptureDiagnostic {
     | 'opus_encoded'
     | 'opus_encode_failed'
     | 'voice_processing_fallback'
-    | 'capture_failed';
+    | 'capture_failed'
+    | 'system_change'
+    | 'watchdog_evaluated';
   monotonicTimestampMs: number;
   frameCount?: number;
   byteCount?: number;
@@ -66,8 +73,32 @@ export interface NativeStopResult {
   failureCode: 'far_field_restore_failed' | 'permission_denied' | 'engine_unavailable' | null;
 }
 
+export interface NativeVoiceSessionDiagnostics {
+  diagnosticProfile: NonNullable<StartVoiceSessionOptions['diagnosticProfile']>;
+  captureEpoch: number;
+  engineRunning: boolean;
+  sessionRunning: boolean;
+  tapInstalled: boolean;
+  tapFrameCount: number;
+  convertedFrameCount: number;
+  opusPacketCount: number;
+  opusByteCount: number;
+  peakAudioLevel: number;
+  systemChangeCount: number;
+  lastSystemChangeReason: string;
+  watchdogEvaluationCount: number;
+  voiceProcessingEnabled: boolean;
+  audioSessionCategory: string;
+  audioSessionMode: string;
+  audioSessionSampleRate: number;
+  audioSessionIOBufferDurationMs: number;
+  inputFormat: string;
+  outputFormat: string;
+}
+
 type ChronicleDuplexAudioNative = NativeModule & {
   startVoiceSession(options: StartVoiceSessionOptions): Promise<VoiceCapabilities>;
+  getVoiceSessionDiagnostics(): Promise<NativeVoiceSessionDiagnostics>;
   scheduleResponse(response: NativeResponse): Promise<void>;
   cancelResponse(responseId: string, generation: number): Promise<void>;
   stopVoiceSession(): Promise<NativeStopResult>;
@@ -114,6 +145,10 @@ export function addOpusFrameListener(
   listener: (event: NativeOpusFrame) => void
 ): EventSubscription {
   return requireNative().addListener('onOpusFrame', listener);
+}
+
+export function getVoiceSessionDiagnostics(): Promise<NativeVoiceSessionDiagnostics> {
+  return requireNative().getVoiceSessionDiagnostics();
 }
 
 export function addCaptureDiagnosticListener(

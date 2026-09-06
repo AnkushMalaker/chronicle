@@ -127,6 +127,16 @@ export class PhoneAudioDiagnostics {
     this.once('info', 'websocket_connecting');
   }
 
+  socketStage(stage: string, detail?: string): void {
+    if (!this.active) return;
+    const safeDetail = redactSecrets(detail ?? '').replace(/[\r\n]+/g, ' ').slice(0, 180);
+    this.once(
+      stage.endsWith('error') || stage.endsWith('failed') ? 'warn' : 'info',
+      `websocket_${stage}`,
+      safeDetail ? `detail=${safeDetail}` : '',
+    );
+  }
+
   socketOpen(): void {
     this.once('info', 'websocket_open');
   }

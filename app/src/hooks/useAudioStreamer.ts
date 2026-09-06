@@ -338,6 +338,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
             }, delay);
           }
         },
+        onDiagnostic: event => {
+          if (phoneVoice) phoneAudioDiagnostics.socketStage(event.stage, event.detail);
+        },
       });
       socketRef.current = socket;
       if (phoneVoice) phoneAudioDiagnostics.socketConnecting();

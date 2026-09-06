@@ -106,6 +106,29 @@ enum DuplexCaptureWatchdog {
   }
 }
 
+enum DuplexDiagnosticProfile: String, CaseIterable {
+  case production
+  case voiceProcessingHold = "voice_processing_hold"
+  case plainCaptureHold = "plain_capture_hold"
+  case systemTapFormatHold = "system_tap_format_hold"
+
+  var forcedVoiceProcessing: Bool? {
+    switch self {
+    case .production: return nil
+    case .voiceProcessingHold, .systemTapFormatHold: return true
+    case .plainCaptureHold: return false
+    }
+  }
+
+  var usesSystemTapFormat: Bool {
+    self == .systemTapFormatHold
+  }
+
+  var holdsEngineOnSystemChange: Bool {
+    self != .production
+  }
+}
+
 final class ChroniclePcm16Packetizer {
   private(set) var pendingSampleCount = 0
   private var pending: [Int16] = []

@@ -53,7 +53,24 @@ export interface StartCaptureOptions {
   capabilities?: CaptureCapabilities;
 }
 
-interface AudioV2SocketOptions {
+export interface AudioV2SocketDiagnostic {
+  stage:
+    | 'socket_created'
+    | 'transport_open'
+    | 'client_hello_sent'
+    | 'server_hello_received'
+    | 'capture_start_sent'
+    | 'capture_started_received'
+    | 'capture_stop_sent'
+    | 'capture_stopped_received'
+    | 'server_error'
+    | 'transport_error'
+    | 'transport_closed'
+    | 'control_decode_failed';
+  detail?: string;
+}
+
+export interface AudioV2SocketOptions {
   url: string;
   bearerToken: string;
   sourceId: string;
@@ -63,6 +80,7 @@ interface AudioV2SocketOptions {
   onPlaybackPacket?: (packet: PlaybackMediaPacket) => void;
   onControl?: (control: ServerControl) => void;
   onClosed?: () => void;
+  onDiagnostic?: (event: AudioV2SocketDiagnostic) => void;
   webSocketFactory?: (url: string, protocols: string | string[]) => WebSocket;
 }
 
@@ -99,6 +117,7 @@ export class AudioV2Socket {
   private waiters = new Map<AwaitedEvent, {
     resolve: (control: ServerControl) => void;
     reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
   }>();
 
   constructor(options: AudioV2SocketOptions) {
@@ -117,26 +136,40 @@ export class AudioV2Socket {
     if (this.socket) throw new Error('audio-v2 socket already exists');
     const factory = this.options.webSocketFactory ?? ((url, protocols) => new WebSocket(url, protocols));
     const socket = factory(this.options.url, AUDIO_V2_SUBPROTOCOL);
+    this.diagnostic('socket_created');
     socket.binaryType = 'arraybuffer';
     this.socket = socket;
     const hello = this.waitFor('hello');
     await new Promise<void>((resolve, reject) => {
       socket.onopen = () => {
-        this.sendControl({
-          case: 'hello',
-          value: create(ClientHelloSchema, {
-            bearerToken: this.options.bearerToken,
-            sourceId: create(CaptureSourceIdSchema, { value: this.options.sourceId }),
-            deviceKind: this.options.deviceKind,
-            displayName: this.options.displayName,
-            supportedUplink: [uplinkSpec()],
-            supportedDownlink: [downlinkSpec()],
-          }),
-        });
-        resolve();
+        this.diagnostic('transport_open');
+        try {
+          this.sendControl({
+            case: 'hello',
+            value: create(ClientHelloSchema, {
+              bearerToken: this.options.bearerToken,
+              sourceId: create(CaptureSourceIdSchema, { value: this.options.sourceId }),
+              deviceKind: this.options.deviceKind,
+              displayName: this.options.displayName,
+              supportedUplink: [uplinkSpec()],
+              supportedDownlink: [downlinkSpec()],
+            }),
+          });
+          this.diagnostic('client_hello_sent');
+          resolve();
+        } catch (error) {
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
       };
-      socket.onerror = () => reject(new Error('audio-v2 WebSocket failed'));
-      socket.onclose = () => {
+      socket.onerror = () => {
+        this.diagnostic('transport_error');
+        reject(new Error('audio-v2 WebSocket failed'));
+      };
+      socket.onclose = event => {
+        this.diagnostic(
+          'transport_closed',
+          `code=${event.code} clean=${event.wasClean} reason=${event.reason.slice(0, 160)}`,
+        );
         this.rejectWaiters(new Error('audio-v2 WebSocket closed'));
         this.options.onClosed?.();
       };
@@ -160,6 +193,7 @@ export class AudioV2Socket {
         recoveryBatchId: options.recoveryBatchId ?? '',
       }),
     });
+    this.diagnostic('capture_start_sent');
     const control = await started;
     if (control.event.case !== 'captureStarted') {
       throw new Error('expected capture_started');
@@ -167,6 +201,7 @@ export class AudioV2Socket {
     const binding = control.event.value.binding;
     if (!binding?.captureSessionId?.value) throw new Error('capture start has no binding');
     this.binding = binding;
+    this.diagnostic('capture_started_received');
     return binding;
   }
 
@@ -208,7 +243,9 @@ export class AudioV2Socket {
       case: 'stopCapture',
       value: create(StopCaptureSchema, { binding, reason }),
     });
+    this.diagnostic('capture_stop_sent');
     await stopped;
+    this.diagnostic('capture_stopped_received');
     this.binding = null;
     this.currentDeliveryClass = DeliveryClass.UNSPECIFIED;
   }
@@ -272,12 +309,24 @@ export class AudioV2Socket {
 
   private receive(payload: string | ArrayBuffer | Blob): void {
     if (typeof payload === 'string') {
-      const control = decodeServerControl(payload);
+      let control: ServerControl;
+      try {
+        control = decodeServerControl(payload);
+      } catch (error) {
+        this.diagnostic(
+          'control_decode_failed',
+          error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160),
+        );
+        this.rejectWaiters(new Error('audio-v2 server control could not be decoded'));
+        return;
+      }
       const event = control.event.case;
       if (event === 'error') {
+        this.diagnostic('server_error', control.event.value.detail.slice(0, 160));
         this.rejectWaiters(new Error(control.event.value.detail));
         return;
       }
+      if (event === 'hello') this.diagnostic('server_hello_received');
       if (event === 'captureStarted') this.binding = control.event.value.binding ?? null;
       if (event === 'capturePacketAccepted') {
         this.options.onPacketAccepted?.(Number(control.event.value.sequence));
@@ -285,6 +334,7 @@ export class AudioV2Socket {
       const waiter = event ? this.waiters.get(event as AwaitedEvent) : undefined;
       if (waiter) {
         this.waiters.delete(event as AwaitedEvent);
+        clearTimeout(waiter.timeout);
         waiter.resolve(control);
       }
       this.options.onControl?.(control);
@@ -302,12 +352,25 @@ export class AudioV2Socket {
 
   private waitFor(event: AwaitedEvent): Promise<ServerControl> {
     if (this.waiters.has(event)) throw new Error(`already waiting for ${event}`);
-    return new Promise((resolve, reject) => this.waiters.set(event, { resolve, reject }));
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.waiters.delete(event);
+        reject(new Error(`audio-v2 timed out waiting for ${event}`));
+      }, 10_000);
+      this.waiters.set(event, { resolve, reject, timeout });
+    });
   }
 
   private rejectWaiters(error: Error): void {
-    this.waiters.forEach(waiter => waiter.reject(error));
+    this.waiters.forEach(waiter => {
+      clearTimeout(waiter.timeout);
+      waiter.reject(error);
+    });
     this.waiters.clear();
+  }
+
+  private diagnostic(stage: AudioV2SocketDiagnostic['stage'], detail?: string): void {
+    this.options.onDiagnostic?.({ stage, detail });
   }
 
   private requireOpen(): WebSocket {

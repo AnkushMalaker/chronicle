@@ -13,7 +13,15 @@ public final class ChronicleDuplexAudioModule: Module {
   private var emittedCaptureDiagnosticStages = Set<String>()
   private var captureEpoch = 0
   private var tapFrameCount = 0
+  private var convertedFrameCount = 0
+  private var opusPacketCount = 0
+  private var opusByteCount = 0
+  private var peakAudioLevel = 0.0
+  private var systemChangeCount = 0
+  private var lastSystemChangeReason = "none"
+  private var watchdogEvaluationCount = 0
   private var captureWatchdogGeneration = 0
+  private var diagnosticProfile = DuplexDiagnosticProfile.production
   private var voiceProcessingFallbackForced = false
   private var voiceProcessingEnabled = false
   private var captureSuppressed = false
@@ -45,12 +53,22 @@ public final class ChronicleDuplexAudioModule: Module {
       guard let epoch = options["captureEpoch"] as? Int, epoch >= 0 else {
         throw Exception(name: "invalid_capture_epoch", description: "captureEpoch must be non-negative")
       }
+      let profileName = options["diagnosticProfile"] as? String ?? DuplexDiagnosticProfile.production.rawValue
+      guard let profile = DuplexDiagnosticProfile(rawValue: profileName) else {
+        throw Exception(name: "invalid_diagnostic_profile", description: "Unknown diagnosticProfile")
+      }
       guard await self.requestRecordPermission() else {
         throw Exception(name: "permission_denied", description: "Microphone permission denied")
       }
       return try await self.onControlQueue {
-        try self.startEngine(captureEpoch: epoch)
+        try self.startEngine(captureEpoch: epoch, diagnosticProfile: profile)
         return self.capabilities()
+      }
+    }
+
+    AsyncFunction("getVoiceSessionDiagnostics") { () async -> [String: Any] in
+      await self.onControlQueueValue {
+        self.voiceSessionDiagnostics()
       }
     }
 
@@ -130,9 +148,13 @@ public final class ChronicleDuplexAudioModule: Module {
     }
   }
 
-  private func startEngine(captureEpoch: Int) throws {
+  private func startEngine(
+    captureEpoch: Int,
+    diagnosticProfile: DuplexDiagnosticProfile
+  ) throws {
     tearDownEngine(deactivateSession: false)
     self.captureEpoch = captureEpoch
+    self.diagnosticProfile = diagnosticProfile
     captureDiagnosticLock.lock()
     emittedCaptureDiagnosticStages.removeAll()
     captureDiagnosticLock.unlock()
@@ -157,7 +179,23 @@ public final class ChronicleDuplexAudioModule: Module {
     engine.connect(player, to: engine.mainMixerNode, format: outputFormat)
 
     let input = engine.inputNode
-    if voiceProcessingFallbackForced {
+    if let forcedVoiceProcessing = diagnosticProfile.forcedVoiceProcessing {
+      if forcedVoiceProcessing {
+        do {
+          try input.setVoiceProcessingEnabled(true)
+          voiceProcessingEnabled = input.isVoiceProcessingEnabled
+        } catch {
+          voiceProcessingEnabled = false
+          emitCaptureDiagnostic(
+            stage: "capture_failed",
+            detail: "voice processing could not be enabled: \(error)"
+          )
+        }
+      } else {
+        try? input.setVoiceProcessingEnabled(false)
+        voiceProcessingEnabled = false
+      }
+    } else if voiceProcessingFallbackForced {
       try? input.setVoiceProcessingEnabled(false)
       voiceProcessingEnabled = false
     } else {
@@ -187,7 +225,8 @@ public final class ChronicleDuplexAudioModule: Module {
     self.pcmPacketizer = ChroniclePcm16Packetizer()
     resetCaptureMetrics()
     let inputFrameCount = AVAudioFrameCount(round(inputFormat.sampleRate * 0.02))
-    input.installTap(onBus: 0, bufferSize: inputFrameCount, format: inputFormat) { [weak self] buffer, _ in
+    let tapFormat: AVAudioFormat? = diagnosticProfile.usesSystemTapFormat ? nil : inputFormat
+    input.installTap(onBus: 0, bufferSize: inputFrameCount, format: tapFormat) { [weak self] buffer, _ in
       self?.observeTapFrame()
       self?.emitCaptureDiagnostic(stage: "tap_received")
       self?.emitOpus(buffer)
@@ -235,6 +274,7 @@ public final class ChronicleDuplexAudioModule: Module {
       return
     }
     emitCaptureDiagnostic(stage: "pcm_converted", frameCount: Int(output.frameLength))
+    observeConvertedFrames(Int(output.frameLength))
     guard let samples = output.int16ChannelData?[0] else {
       emitCaptureDiagnostic(stage: "pcm_conversion_failed", detail: "16 kHz PCM samples unavailable")
       return
@@ -256,6 +296,7 @@ public final class ChronicleDuplexAudioModule: Module {
       let audioLevel = packet.withUnsafeBufferPointer {
         ChronicleAudioMeter.level(samples: $0.baseAddress!, count: $0.count)
       }
+      observeEncodedPacket(byteCount: data.count, audioLevel: audioLevel)
       sendEvent("onOpusFrame", [
         "captureEpoch": captureEpoch,
         "capturedAtMs": batchEndWallMs - packetOffsetMs,
@@ -272,6 +313,13 @@ public final class ChronicleDuplexAudioModule: Module {
   private func resetCaptureMetrics() {
     captureMetricsLock.lock()
     tapFrameCount = 0
+    convertedFrameCount = 0
+    opusPacketCount = 0
+    opusByteCount = 0
+    peakAudioLevel = 0
+    systemChangeCount = 0
+    lastSystemChangeReason = "none"
+    watchdogEvaluationCount = 0
     captureMetricsLock.unlock()
   }
 
@@ -288,6 +336,33 @@ public final class ChronicleDuplexAudioModule: Module {
     return count
   }
 
+  private func observeConvertedFrames(_ count: Int) {
+    captureMetricsLock.lock()
+    convertedFrameCount += count
+    captureMetricsLock.unlock()
+  }
+
+  private func observeEncodedPacket(byteCount: Int, audioLevel: Double) {
+    captureMetricsLock.lock()
+    opusPacketCount += 1
+    opusByteCount += byteCount
+    peakAudioLevel = max(peakAudioLevel, audioLevel)
+    captureMetricsLock.unlock()
+  }
+
+  private func observeSystemChange(_ reason: String) {
+    captureMetricsLock.lock()
+    systemChangeCount += 1
+    lastSystemChangeReason = reason
+    captureMetricsLock.unlock()
+  }
+
+  private func observeWatchdogEvaluation() {
+    captureMetricsLock.lock()
+    watchdogEvaluationCount += 1
+    captureMetricsLock.unlock()
+  }
+
   private func scheduleCaptureWatchdog() {
     captureWatchdogGeneration += 1
     let generation = captureWatchdogGeneration
@@ -298,10 +373,25 @@ public final class ChronicleDuplexAudioModule: Module {
             self.captureEpoch == epoch,
             self.captureWatchdogGeneration == generation else { return }
       let tapCount = self.capturedTapFrameCount()
-      switch DuplexCaptureWatchdog.recoveryAction(
+      self.observeWatchdogEvaluation()
+      let action = DuplexCaptureWatchdog.recoveryAction(
         tapFrameCount: tapCount,
         voiceProcessingEnabled: self.voiceProcessingEnabled
-      ) {
+      )
+      self.emitCaptureDiagnostic(
+        stage: "watchdog_evaluated",
+        detail: "profile=\(self.diagnosticProfile.rawValue) taps=\(tapCount) action=\(String(describing: action))"
+      )
+      if self.diagnosticProfile != .production {
+        if tapCount == 0 {
+          self.emitCaptureDiagnostic(
+            stage: "capture_failed",
+            detail: "diagnostic profile produced no input tap after 1500ms"
+          )
+        }
+        return
+      }
+      switch action {
       case .none:
         return
       case .disableVoiceProcessing:
@@ -495,6 +585,52 @@ public final class ChronicleDuplexAudioModule: Module {
     ]
   }
 
+  private func voiceSessionDiagnostics() -> [String: Any] {
+    captureMetricsLock.lock()
+    let metrics: [String: Any] = [
+      "tapFrameCount": tapFrameCount,
+      "convertedFrameCount": convertedFrameCount,
+      "opusPacketCount": opusPacketCount,
+      "opusByteCount": opusByteCount,
+      "peakAudioLevel": peakAudioLevel,
+      "systemChangeCount": systemChangeCount,
+      "lastSystemChangeReason": lastSystemChangeReason,
+      "watchdogEvaluationCount": watchdogEvaluationCount,
+    ]
+    captureMetricsLock.unlock()
+
+    let session = AVAudioSession.sharedInstance()
+    let inputFormat = engine.inputNode.inputFormat(forBus: 0)
+    let outputFormat = engine.outputNode.outputFormat(forBus: 0)
+    return metrics.merging([
+      "diagnosticProfile": diagnosticProfile.rawValue,
+      "captureEpoch": captureEpoch,
+      "engineRunning": engine.isRunning,
+      "sessionRunning": sessionRunning,
+      "tapInstalled": tapInstalled,
+      "voiceProcessingEnabled": voiceProcessingEnabled,
+      "audioSessionCategory": session.category.rawValue,
+      "audioSessionMode": session.mode.rawValue,
+      "audioSessionSampleRate": session.sampleRate,
+      "audioSessionIOBufferDurationMs": session.ioBufferDuration * 1_000,
+      "inputFormat": formatSummary(inputFormat),
+      "outputFormat": formatSummary(outputFormat),
+    ]) { _, newest in newest }
+  }
+
+  private func formatSummary(_ format: AVAudioFormat) -> String {
+    let commonFormat: String
+    switch format.commonFormat {
+    case .pcmFormatFloat32: commonFormat = "float32"
+    case .pcmFormatFloat64: commonFormat = "float64"
+    case .pcmFormatInt16: commonFormat = "int16"
+    case .pcmFormatInt32: commonFormat = "int32"
+    case .otherFormat: commonFormat = "other"
+    @unknown default: commonFormat = "unknown"
+    }
+    return "\(Int(format.sampleRate))Hz/\(format.channelCount)ch/\(commonFormat)/\(format.isInterleaved ? "interleaved" : "noninterleaved")"
+  }
+
   private func effect(requested: Bool, available: Bool, enabled: Bool) -> [String: Bool] {
     ["requested": requested, "available": available, "enabled": enabled]
   }
@@ -585,8 +721,23 @@ public final class ChronicleDuplexAudioModule: Module {
 
   private func handleSystemChange(reason: String, errorCode: String) {
     controlQueue.async { [weak self] in
-      guard let self, self.sessionRunning else { return }
+      guard let self else { return }
+      self.observeSystemChange(reason)
+      let held = self.diagnosticProfile.holdsEngineOnSystemChange && self.sessionRunning
+      self.emitCaptureDiagnostic(
+        stage: "system_change",
+        detail: "reason=\(reason) session_running=\(self.sessionRunning) held=\(held) engine_running=\(self.engine.isRunning)"
+      )
+      guard self.sessionRunning else { return }
       let changedCapabilities = self.capabilities()
+      if held {
+        self.sendEvent("onRouteChange", [
+          "captureEpoch": self.captureEpoch,
+          "reason": reason,
+          "capabilities": changedCapabilities,
+        ])
+        return
+      }
       self.cancelCurrent(errorCode: errorCode)
       self.tearDownEngine(deactivateSession: false)
       self.sendEvent("onRouteChange", [
