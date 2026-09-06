@@ -230,6 +230,9 @@ public final class ChronicleDuplexAudioModule: Module {
           compressed.byteLength > 0 else { return }
     let data = Data(bytes: compressed.data, count: Int(compressed.byteLength))
     let durationMs = Double(output.frameLength) / 16_000 * 1_000
+    let audioLevel = output.int16ChannelData.map {
+      ChronicleAudioMeter.level(samples: $0[0], count: Int(output.frameLength))
+    } ?? 0
     sendEvent("onOpusFrame", [
       "captureEpoch": captureEpoch,
       "capturedAtMs": Date().timeIntervalSince1970 * 1_000 - durationMs,
@@ -237,6 +240,7 @@ public final class ChronicleDuplexAudioModule: Module {
       "sampleRate": 16_000,
       "channels": 1,
       "frameDurationMs": durationMs,
+      "audioLevel": audioLevel,
       "opusBase64": data.base64EncodedString(),
     ])
   }

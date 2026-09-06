@@ -72,6 +72,21 @@ final class DuplexAudioStateTests: XCTestCase {
     )
   }
 
+  func testAudioMeterReportsSilenceAndNormalizedPeak() {
+    let silence = [Int16](repeating: 0, count: 320)
+    let halfScale = [Int16](repeating: 16_384, count: 320)
+    silence.withUnsafeBufferPointer { samples in
+      XCTAssertEqual(ChronicleAudioMeter.level(samples: samples.baseAddress!, count: samples.count), 0)
+    }
+    halfScale.withUnsafeBufferPointer { samples in
+      XCTAssertEqual(
+        ChronicleAudioMeter.level(samples: samples.baseAddress!, count: samples.count),
+        0.5,
+        accuracy: 0.001
+      )
+    }
+  }
+
   func testStopRestoresInactiveEngineState() {
     let state = DuplexAudioState()
     state.start(captureEpoch: 4)

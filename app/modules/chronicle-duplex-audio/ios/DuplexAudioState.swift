@@ -70,3 +70,15 @@ enum ChronicleDuplexResampler {
     AVAudioFrameCount(max(1, ceil(Double(inputFrames) * outputRate / inputRate)))
   }
 }
+
+enum ChronicleAudioMeter {
+  static func level(samples: UnsafePointer<Int16>, count: Int) -> Double {
+    guard count > 0 else { return 0 }
+    var sumOfSquares = 0.0
+    for index in 0..<count {
+      let normalized = Double(samples[index]) / 32_768.0
+      sumOfSquares += normalized * normalized
+    }
+    return min(1, sqrt(sumOfSquares / Double(count)))
+  }
+}

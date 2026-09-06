@@ -18,6 +18,7 @@ export interface NativeOpusFrame {
   sampleRate: 16000;
   channels: 1;
   frameDurationMs: number;
+  audioLevel: number;
   opusBase64: string;
 }
 

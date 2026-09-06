@@ -13,6 +13,11 @@ import {
   capturedOpusFrameFromNative,
   type CapturedOpusFrame,
 } from '../protocol/capturedOpusFrame';
+import { phoneAudioDiagnostics } from '../services/phoneAudioDiagnostics';
+
+const FIRST_FRAME_TIMEOUT_MS = 3_000;
+const AUDIO_LEVEL_TIMEOUT_MS = 5_000;
+const ACTIVE_AUDIO_LEVEL = 0.01;
 
 export interface PhoneCaptureSession {
   captureEpoch: number;
@@ -50,8 +55,16 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
   const captureEpochRef = useRef(0);
   const frameSubscriptionRef = useRef<{ remove: () => void } | null>(null);
   const onAudioDataRef = useRef<((frame: CapturedOpusFrame) => void) | null>(null);
+  const firstFrameSeenRef = useRef(false);
+  const firstFrameTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const audioLevelActiveRef = useRef(false);
+  const audioLevelTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const markCaptureStopped = useCallback(() => {
+    if (firstFrameTimeoutRef.current) clearTimeout(firstFrameTimeoutRef.current);
+    firstFrameTimeoutRef.current = null;
+    if (audioLevelTimeoutRef.current) clearTimeout(audioLevelTimeoutRef.current);
+    audioLevelTimeoutRef.current = null;
     frameSubscriptionRef.current?.remove();
     frameSubscriptionRef.current = null;
     onAudioDataRef.current = null;
@@ -74,6 +87,20 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
     const captureEpoch = captureEpochRef.current + 1;
     captureEpochRef.current = captureEpoch;
     const capabilities = await startVoiceSession({ captureEpoch });
+    phoneAudioDiagnostics.engineStarted(captureEpoch, capabilities);
+    if (!firstFrameSeenRef.current) {
+      firstFrameTimeoutRef.current = setTimeout(() => {
+        phoneAudioDiagnostics.timeout('native_frame_timeout');
+        if (mountedRef.current) {
+          setError('Microphone started, but Chronicle received no audio frames.');
+        }
+      }, FIRST_FRAME_TIMEOUT_MS);
+    }
+    if (!audioLevelActiveRef.current) {
+      audioLevelTimeoutRef.current = setTimeout(() => {
+        phoneAudioDiagnostics.timeout('audio_level_stalled');
+      }, AUDIO_LEVEL_TIMEOUT_MS);
+    }
     return {
       captureEpoch,
       capabilities,
@@ -100,11 +127,40 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
     }
 
     try {
+      firstFrameSeenRef.current = false;
+      audioLevelActiveRef.current = false;
       onAudioDataRef.current = onAudioData;
+      phoneAudioDiagnostics.listenerInstalled(captureEpochRef.current + 1);
       frameSubscriptionRef.current = addOpusFrameListener((frame) => {
         if (!mountedRef.current || frame.captureEpoch !== captureEpochRef.current) return;
-        const captured = capturedOpusFrameFromNative(frame, decodeBase64);
-        if (!captured.opus.length) return;
+        let captured: CapturedOpusFrame;
+        try {
+          captured = capturedOpusFrameFromNative(frame, decodeBase64);
+        } catch (cause) {
+          phoneAudioDiagnostics.invalidNativeFrame(
+            cause instanceof Error ? cause.message : 'invalid_native_frame',
+          );
+          return;
+        }
+        const level = Math.min(1, Math.max(0, frame.audioLevel || 0));
+        phoneAudioDiagnostics.nativeFrame({
+          captureEpoch: frame.captureEpoch,
+          opusBytes: captured.opus.length,
+          audioLevel: level,
+        });
+        if (!firstFrameSeenRef.current) {
+          firstFrameSeenRef.current = true;
+          if (firstFrameTimeoutRef.current) clearTimeout(firstFrameTimeoutRef.current);
+          firstFrameTimeoutRef.current = null;
+          setError(null);
+        }
+        if (!audioLevelActiveRef.current && level >= ACTIVE_AUDIO_LEVEL) {
+          audioLevelActiveRef.current = true;
+          if (audioLevelTimeoutRef.current) clearTimeout(audioLevelTimeoutRef.current);
+          audioLevelTimeoutRef.current = null;
+          phoneAudioDiagnostics.audioLevelActive(level);
+        }
+        setAudioLevel(previous => previous === 0 ? level : (previous * 0.65) + (level * 0.35));
         onAudioDataRef.current?.(captured);
       });
       const capture = await startNativeCapture();
@@ -114,6 +170,7 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
       }
       return capture;
     } catch (cause) {
+      phoneAudioDiagnostics.failure('native_capture_start', cause);
       frameSubscriptionRef.current?.remove();
       frameSubscriptionRef.current = null;
       const message = cause instanceof Error ? cause.message : 'Failed to start duplex audio';
@@ -130,6 +187,8 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
     mountedRef.current = false;
     frameSubscriptionRef.current?.remove();
     frameSubscriptionRef.current = null;
+    if (firstFrameTimeoutRef.current) clearTimeout(firstFrameTimeoutRef.current);
+    if (audioLevelTimeoutRef.current) clearTimeout(audioLevelTimeoutRef.current);
     stopVoiceSession().catch(() => undefined);
   }, []);
 

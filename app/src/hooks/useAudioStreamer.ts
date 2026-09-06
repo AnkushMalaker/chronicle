@@ -29,6 +29,7 @@ import type { CapturedOpusFrame } from '../protocol/capturedOpusFrame';
 import type { VoiceCapabilities } from '../protocol/audioCapabilities';
 import { refreshToken } from '../services/auth';
 import { durableAudioSpool, type SpoolPacket } from '../services/durableAudioSpool';
+import { phoneAudioDiagnostics } from '../services/phoneAudioDiagnostics';
 
 interface UseAudioStreamerOptions {
   onTokenRefreshed?: (token: string) => void;
@@ -157,6 +158,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   }, []);
 
   const packetAccepted = useCallback((sequence: number) => {
+    phoneAudioDiagnostics.packetAccepted(sequence);
     const packet = acceptedRef.current.get(sequence);
     if (packet) {
       acceptedRef.current.delete(sequence);
@@ -315,6 +317,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           }
         },
         onClosed: () => {
+          if (phoneVoice) phoneAudioDiagnostics.socketClosed(stoppedRef.current);
           setIsStreaming(false);
           if (
             !stoppedRef.current &&
@@ -335,7 +338,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
         },
       });
       socketRef.current = socket;
+      if (phoneVoice) phoneAudioDiagnostics.socketConnecting();
       await socket.connect();
+      if (phoneVoice) phoneAudioDiagnostics.socketOpen();
       deliveryModeRef.current = 'recovering';
       await drainRecovery(socket, phoneVoice?.captureEpoch ?? 0);
       liveStartedAtRef.current = Date.now();
@@ -343,7 +348,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
       const capabilities = phoneVoice
         ? typedCapabilities(phoneVoice.capabilities)
         : undefined;
-      await socket.beginCapture({
+      const binding = await socket.beginCapture({
         captureEpoch: phoneVoice?.captureEpoch ?? 0,
         processingProfile: phoneVoice
           ? processingProfile(phoneVoice.capabilities)
@@ -352,6 +357,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
         deliveryClass: DeliveryClass.LIVE,
         capabilities,
       });
+      if (phoneVoice) {
+        phoneAudioDiagnostics.captureStarted(binding.captureSessionId?.value ?? '');
+      }
       deliveryModeRef.current = 'live';
       if (capabilities) socket.voiceReady(capabilities);
       if (phoneVoice) {
@@ -402,6 +410,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     try {
       await operation;
     } catch (cause) {
+      if (configRef.current?.phoneVoice) phoneAudioDiagnostics.failure('websocket_start', cause);
       setIsConnecting(false);
       setIsStreaming(false);
       const message = cause instanceof Error ? cause.message : 'Audio V2 connection failed';
@@ -432,6 +441,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   }, [enqueueLive]);
 
   const sendInteractiveFrame = useCallback((frame: CapturedOpusFrame) => {
+    phoneAudioDiagnostics.frameEnqueued(frame.opus.length);
     enqueueLive(frame.opus, frame.capturedAtMs);
   }, [enqueueLive]);
 

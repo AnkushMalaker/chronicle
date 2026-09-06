@@ -5,6 +5,7 @@ import { AppSettings } from './useAppSettings';
 import type { StreamStartConfig } from './useAudioStreamer';
 import type { PhoneCaptureSession } from './usePhoneAudioRecorder';
 import type { CapturedOpusFrame } from '../protocol/capturedOpusFrame';
+import { phoneAudioDiagnostics } from '../services/phoneAudioDiagnostics';
 
 interface OrchestratorParams {
   omiConnection: OmiConnection;
@@ -82,13 +83,13 @@ export const useAudioStreamingOrchestrator = ({
     if (isAdvanced) {
       const params = new URLSearchParams();
       params.append('token', settings.jwtToken!);
-      const deviceName = settings.userId?.trim() || 'phone-mic';
+      const deviceName = 'phone-mic';
       params.append('device_name', deviceName);
       const separator = url.includes('?') ? '&' : '?';
       url = `${url}${separator}${params.toString()}`;
     }
     return url;
-  }, [settings.jwtToken, settings.isAuthenticated, settings.userId]);
+  }, [settings.jwtToken, settings.isAuthenticated]);
 
   const handleStartAudioListeningAndStreaming = useCallback(async () => {
     if (!settings.webSocketUrl?.trim()) {
@@ -135,11 +136,14 @@ export const useAudioStreamingOrchestrator = ({
         const wsReady = audioStreamer.getWebSocketReadyState();
         if (wsReady === WebSocket.OPEN && frame.opus.length > 0) {
           audioStreamer.sendInteractiveFrame(frame);
+        } else {
+          phoneAudioDiagnostics.socketUnavailable(wsReady);
         }
       });
       await audioStreamer.startStreaming(finalUrl, { phoneVoice: capture });
       setIsPhoneAudioMode(true);
     } catch (error) {
+      phoneAudioDiagnostics.failure('orchestrator_start', error);
       Alert.alert('Error', 'Could not start phone audio streaming.');
       if (audioStreamer.isStreaming) audioStreamer.stopStreaming();
       if (phoneAudioRecorder.isRecording) await phoneAudioRecorder.stopRecording();
@@ -151,12 +155,14 @@ export const useAudioStreamingOrchestrator = ({
     await audioStreamer.stopStreaming();
     await phoneAudioRecorder.stopRecording();
     setIsPhoneAudioMode(false);
+    phoneAudioDiagnostics.stopped();
   }, [phoneAudioRecorder, audioStreamer]);
 
   const handleTogglePhoneAudio = useCallback(async () => {
     if (isPhoneAudioMode || phoneAudioRecorder.isRecording) {
       await handleStopPhoneAudioStreaming();
     } else {
+      phoneAudioDiagnostics.beginAttempt();
       await handleStartPhoneAudioStreaming();
     }
   }, [isPhoneAudioMode, phoneAudioRecorder.isRecording, handleStartPhoneAudioStreaming, handleStopPhoneAudioStreaming]);
