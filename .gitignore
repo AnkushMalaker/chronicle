@@ -171,7 +171,7 @@ extras/asr-services/providers/*/finetune/
 
 
 # k8s config
-backends/charts/advanced-backend/env-configmap.yaml
+backends/charts/backend/env-configmap.yaml
 
 extras/openmemory-mcp/data/*
 .env.backup.*
