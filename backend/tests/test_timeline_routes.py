@@ -1484,6 +1484,8 @@ async def test_not_activity_preserves_remaining_accepted_group(route_db, monkeyp
     assert groups[0].started_at.replace(tzinfo=timezone.utc) == members[1].started_at
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached_proposal", [True, False])
 async def test_media_and_empty_input_stay_reference_without_blocking_review(
     route_db, cached_proposal
 ):
