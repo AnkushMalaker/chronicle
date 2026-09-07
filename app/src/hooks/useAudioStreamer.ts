@@ -6,7 +6,6 @@ import base64 from 'react-native-base64';
 
 import {
   addPlaybackStateListener,
-  addRouteChangeListener,
   cancelResponse,
   scheduleResponse,
 } from '../../modules/chronicle-duplex-audio';
@@ -28,11 +27,6 @@ import type { CapturedOpusFrame } from '../protocol/capturedOpusFrame';
 import type { VoiceCapabilities } from '../protocol/audioCapabilities';
 import type { PhoneCaptureSession } from './usePhoneAudioRecorder';
 import { getValidToken } from '../services/auth';
-import {
-  durableAudioSpool,
-  type AudioSpoolSource,
-  type SpoolPacket,
-} from '../services/durableAudioSpool';
 import { phoneAudioDiagnostics } from '../services/phoneAudioDiagnostics';
 
 export type AudioStreamSource =
@@ -49,14 +43,10 @@ interface UseAudioStreamer {
   phonePlaybackState: 'started' | 'done' | 'cancelled' | 'failed' | null;
   startStreaming: (url: string, source: AudioStreamSource) => Promise<void>;
   stopStreaming: () => Promise<void>;
-  sendFrame: (source: AudioSpoolSource, frame: CapturedOpusFrame) => void;
+  sendFrame: (source: AudioStreamSource['kind'], frame: CapturedOpusFrame) => void;
 }
 
 const HEARTBEAT_MS = 25_000;
-
-function recoveryBatchId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
-}
 
 function socketSource(source: AudioStreamSource) {
   if (source.kind === 'wearable') {
@@ -122,14 +112,10 @@ export const useAudioStreamer = (): UseAudioStreamer => {
   const [phonePlaybackState, setPhonePlaybackState] = useState<UseAudioStreamer['phonePlaybackState']>(null);
   const socketRef = useRef<AudioV2Socket | null>(null);
   const sourceRef = useRef<AudioStreamSource | null>(null);
-  const urlRef = useRef('');
   const stoppedRef = useRef(false);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const liveSequenceRef = useRef(0);
   const liveStartedAtRef = useRef(0);
-  const acceptedRef = useRef(new Map<number, SpoolPacket>());
-  const acceptedWaitersRef = useRef(new Map<number, () => void>());
-  const deliveryModeRef = useRef<'idle' | 'recovering' | 'live'>('idle');
   const playbackRef = useRef<{
     responseId: string;
     generation: number;
@@ -137,7 +123,6 @@ export const useAudioStreamer = (): UseAudioStreamer => {
     nextSequence: number;
   } | null>(null);
   const playbackSubscriptionRef = useRef<{ remove: () => void } | null>(null);
-  const routeSubscriptionRef = useRef<{ remove: () => void } | null>(null);
 
   const encodeBase64 = useCallback((bytes: Uint8Array) => {
     let binary = '';
@@ -149,88 +134,25 @@ export const useAudioStreamer = (): UseAudioStreamer => {
 
   const packetAccepted = useCallback((sequence: number) => {
     phoneAudioDiagnostics.packetAccepted(sequence);
-    const packet = acceptedRef.current.get(sequence);
-    if (packet) {
-      acceptedRef.current.delete(sequence);
-      durableAudioSpool.acknowledge(packet).catch(cause => {
-        setError(cause instanceof Error ? cause.message : 'Could not retire audio spool packet');
-      });
-    }
-    acceptedWaitersRef.current.get(sequence)?.();
-    acceptedWaitersRef.current.delete(sequence);
-  }, []);
-
-  const sendSpoolPacket = useCallback((packet: SpoolPacket, sequence: number) => {
-    const socket = socketRef.current;
-    if (!socket?.activeBinding) return false;
-    acceptedRef.current.set(sequence, packet);
-    socket.sendPacket({
-      sequence,
-      capturedAtMs: packet.capturedAtMs,
-      monotonicOffsetUs: Math.max(
-        0,
-        Math.round((packet.capturedAtMs - liveStartedAtRef.current) * 1000)
-      ),
-      opus: packet.payload,
-    });
-    return true;
-  }, []);
-
-  const drainRecovery = useCallback(async (
-    socket: AudioV2Socket,
-    source: AudioSpoolSource,
-  ) => {
-    let recoverySequence = 0;
-    while (true) {
-      const packets = await durableAudioSpool.pendingPackets(source);
-      if (!packets.length) return;
-      await socket.beginCapture({
-        // Recovery is a source-native capture, whose protocol epoch is always zero.
-        // The native phone epoch belongs only to the subsequent live voice session.
-        captureEpoch: 0,
-        processingProfile: ProcessingProfile.SOURCE_NATIVE,
-        dataPurpose: DataPurpose.NORMAL_CAPTURE,
-        deliveryClass: DeliveryClass.RECOVERED,
-        recoveryBatchId: recoveryBatchId(),
-      });
-      const acknowledgements = packets.map(packet => {
-        const sequence = recoverySequence++;
-        return new Promise<void>(resolve => {
-          acceptedWaitersRef.current.set(sequence, resolve);
-          acceptedRef.current.set(sequence, packet);
-          socket.sendPacket({
-            sequence,
-            capturedAtMs: packet.capturedAtMs,
-            monotonicOffsetUs: 0,
-            opus: packet.payload,
-          });
-        });
-      });
-      await Promise.all(acknowledgements);
-      await socket.stopCapture();
-    }
   }, []);
 
   const stopStreaming = useCallback(async () => {
     stoppedRef.current = true;
-    deliveryModeRef.current = 'idle';
     if (heartbeatRef.current) clearInterval(heartbeatRef.current);
     heartbeatRef.current = null;
+    const socket = socketRef.current;
     try {
-      await socketRef.current?.stopCapture();
+      await socket?.stopCapture();
     } finally {
-      socketRef.current?.close();
+      socket?.close();
       socketRef.current = null;
       playbackSubscriptionRef.current?.remove();
       playbackSubscriptionRef.current = null;
-      routeSubscriptionRef.current?.remove();
-      routeSubscriptionRef.current = null;
       playbackRef.current = null;
       if (sourceRef.current?.kind === 'phone') {
         await sourceRef.current.stopCapture();
       }
       sourceRef.current = null;
-      durableAudioSpool.close();
       setIsStreaming(false);
       setIsConnecting(false);
     }
@@ -241,7 +163,6 @@ export const useAudioStreamer = (): UseAudioStreamer => {
     source: AudioStreamSource,
   ): Promise<void> => {
     stoppedRef.current = false;
-    urlRef.current = url;
     sourceRef.current = source;
     setIsConnecting(true);
     setError(null);
@@ -304,7 +225,6 @@ export const useAudioStreamer = (): UseAudioStreamer => {
         },
         onClosed: () => {
           if (phoneVoice) phoneAudioDiagnostics.socketClosed(stoppedRef.current);
-          deliveryModeRef.current = 'idle';
           setIsStreaming(false);
           if (!stoppedRef.current) setError('Audio connection closed');
         },
@@ -316,9 +236,7 @@ export const useAudioStreamer = (): UseAudioStreamer => {
       if (phoneVoice) phoneAudioDiagnostics.socketConnecting();
       await socket.connect();
       if (phoneVoice) phoneAudioDiagnostics.socketOpen();
-      deliveryModeRef.current = 'recovering';
-      await drainRecovery(socket, source.kind);
-      liveStartedAtRef.current = Date.now();
+      liveStartedAtRef.current = performance.now();
       liveSequenceRef.current = 0;
       const capabilities = phoneVoice
         ? typedCapabilities(phoneVoice.capabilities)
@@ -335,7 +253,6 @@ export const useAudioStreamer = (): UseAudioStreamer => {
       if (phoneVoice) {
         phoneAudioDiagnostics.captureStarted(binding.captureSessionId?.value ?? '');
       }
-      deliveryModeRef.current = 'live';
       if (capabilities) socket.voiceReady(capabilities);
       if (phoneVoice) {
         playbackSubscriptionRef.current?.remove();
@@ -355,22 +272,6 @@ export const useAudioStreamer = (): UseAudioStreamer => {
             event.monotonicTimestampMs,
           );
         });
-        routeSubscriptionRef.current?.remove();
-        routeSubscriptionRef.current = addRouteChangeListener(event => {
-          if (event.captureEpoch !== phoneVoice.captureEpoch) return;
-          stoppedRef.current = true;
-          if (heartbeatRef.current) clearInterval(heartbeatRef.current);
-          heartbeatRef.current = null;
-          socket.stopCapture()
-            .then(() => {
-              socket.close();
-              return phoneVoice.restartCapture();
-            })
-            .then(restarted => startStreaming(urlRef.current, { kind: 'phone', ...restarted }))
-            .catch(cause => {
-              setError(cause instanceof Error ? cause.message : 'Audio route restart failed');
-            });
-        });
       }
       heartbeatRef.current = setInterval(
         () => socket.heartbeat(performance.now()),
@@ -388,24 +289,32 @@ export const useAudioStreamer = (): UseAudioStreamer => {
       socketRef.current = null;
       playbackSubscriptionRef.current?.remove();
       playbackSubscriptionRef.current = null;
-      routeSubscriptionRef.current?.remove();
-      routeSubscriptionRef.current = null;
-      deliveryModeRef.current = 'idle';
       throw cause;
     }
-  }, [drainRecovery, encodeBase64, packetAccepted]);
+  }, [encodeBase64, packetAccepted]);
 
   const sendFrame = useCallback((
-    source: AudioSpoolSource,
+    source: AudioStreamSource['kind'],
     frame: CapturedOpusFrame,
   ) => {
     if (!frame.opus.length) return;
-    if (source === 'phone') phoneAudioDiagnostics.frameEnqueued(frame.opus.length);
-    const packet = durableAudioSpool.append(source, frame.opus, frame.capturedAtMs);
-    if (deliveryModeRef.current === 'live' && sourceRef.current?.kind === source) {
-      sendSpoolPacket(packet, liveSequenceRef.current++);
+    const activeSource = sourceRef.current;
+    const socket = socketRef.current;
+    if (!socket?.activeBinding || activeSource?.kind !== source) return;
+    if (source === 'phone') {
+      if (activeSource.kind !== 'phone' || frame.captureEpoch !== activeSource.captureEpoch) return;
+      phoneAudioDiagnostics.frameSent(frame.opus.length);
     }
-  }, [sendSpoolPacket]);
+    socket.sendPacket({
+      sequence: liveSequenceRef.current++,
+      capturedAtMs: frame.capturedAtMs,
+      monotonicOffsetUs: Math.max(
+        0,
+        Math.round((frame.monotonicTimestampMs - liveStartedAtRef.current) * 1000),
+      ),
+      opus: frame.opus,
+    });
+  }, []);
 
   return {
     isStreaming,

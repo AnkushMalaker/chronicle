@@ -32,10 +32,12 @@ const ProcessingProfile = {
 };
 const DeliveryClass = { LIVE: 1, RECOVERED: 2 };
 const beginCaptureCalls = [];
+const sentPackets = [];
 const socketBearerTokens = [];
 const socketFrameDurations = [];
-const pendingSources = [];
-let pendingReads = 0;
+const diagnostics = [];
+let backendStops = 0;
+let socketCloses = 0;
 
 class MockAudioV2Socket {
   constructor(options) {
@@ -51,42 +53,48 @@ class MockAudioV2Socket {
     beginCaptureCalls.push(options);
     this.activeBinding = {
       captureSessionId: { value: `capture-${beginCaptureCalls.length}` },
-      voiceSessionId: { value: beginCaptureCalls.length === 2 ? 'voice-live' : '' },
+      voiceSessionId: { value: options.deliveryClass === DeliveryClass.LIVE ? 'voice-live' : '' },
       captureEpoch: options.captureEpoch,
     };
     return this.activeBinding;
   }
 
   sendPacket(packet) {
+    sentPackets.push(packet);
     this.options.onPacketAccepted(packet.sequence);
   }
 
   async stopCapture() {
+    backendStops += 1;
     this.activeBinding = null;
   }
 
   voiceReady() {}
   heartbeat() {}
-  close() {}
   acknowledgePlayback() {}
+  close() {
+    socketCloses += 1;
+    this.activeBinding = null;
+  }
 }
 
-const noDiagnostics = new Proxy({}, { get: () => () => {} });
+const noDiagnostics = new Proxy({
+  frameSent: bytes => diagnostics.push(['sent', bytes]),
+  packetAccepted: sequence => diagnostics.push(['accepted', sequence]),
+}, { get: (target, property) => target[property] ?? (() => {}) });
+
 const sourcePath = path.join(__dirname, '../src/hooks/useAudioStreamer.ts');
 const { useAudioStreamer } = loadTypeScript(sourcePath, {
   '@bufbuild/protobuf': { create: (_schema, value) => value },
-  '@react-native-community/netinfo': { addEventListener: () => () => {} },
   react: {
-    useCallback: (callback) => callback,
-    useEffect: () => {},
-    useRef: (value) => ({ current: value }),
-    useState: (value) => [value, () => {}],
+    useCallback: callback => callback,
+    useRef: value => ({ current: value }),
+    useState: value => [value, () => {}],
   },
   'react-native': { Platform: { OS: 'ios' } },
-  'react-native-base64': { encode: (value) => value },
+  'react-native-base64': { encode: value => value },
   '../../modules/chronicle-duplex-audio': {
     addPlaybackStateListener: () => ({ remove() {} }),
-    addRouteChangeListener: () => ({ remove() {} }),
     cancelResponse: async () => {},
     scheduleResponse: async () => {},
   },
@@ -103,38 +111,14 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
     ProcessingProfile,
   },
   '../protocol/audioV2Socket': { AudioV2Socket: MockAudioV2Socket },
-  '../services/auth': {
-    getValidToken: async () => 'fresh-token',
-  },
-  '../services/durableAudioSpool': {
-    durableAudioSpool: {
-      async pendingPackets(source) {
-        pendingSources.push(source);
-        pendingReads += 1;
-        return pendingReads === 1
-          ? [{
-            fileName: 'old.spool',
-            segmentId: 'old',
-            sequence: 7,
-            capturedAtMs: 1_780_000_000_000,
-            payload: new Uint8Array([1, 2, 3]),
-          }]
-          : [];
-      },
-      async acknowledge() {},
-      close() {},
-      append() {
-        throw new Error('not used by this test');
-      },
-    },
-  },
+  '../services/auth': { getValidToken: async () => 'fresh-token' },
   '../services/phoneAudioDiagnostics': { phoneAudioDiagnostics: noDiagnostics },
 });
 
 (async () => {
-  const streamer = useAudioStreamer();
+  let nativeStops = 0;
   const phoneVoice = {
-    captureEpoch: 1,
+    captureEpoch: 7,
     capabilities: {
       mode: 'duplex_full',
       input_route: 'built_in_mic',
@@ -143,9 +127,9 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
       aec: { requested: true, available: true, enabled: true },
       noise_suppression: { requested: true, available: true, enabled: true },
     },
-    restartCapture: async () => phoneVoice,
-    stopCapture: async () => {},
+    stopCapture: async () => { nativeStops += 1; },
   };
+  const streamer = useAudioStreamer();
 
   await streamer.startStreaming(
     'wss://chronicle.invalid/ws/audio',
@@ -154,36 +138,37 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
 
   assert.deepEqual(socketBearerTokens, ['fresh-token'], 'audio must use the managed token source');
   assert.deepEqual(socketFrameDurations, [20], 'phone capture must declare 20 ms Opus');
-  assert.deepEqual(pendingSources, ['phone', 'phone'], 'recovery must read only the active source queue');
-  assert.equal(beginCaptureCalls.length, 2, 'queued audio must recover before live capture starts');
-  assert.deepEqual(
-    {
-      captureEpoch: beginCaptureCalls[0].captureEpoch,
-      processingProfile: beginCaptureCalls[0].processingProfile,
-      deliveryClass: beginCaptureCalls[0].deliveryClass,
-    },
-    {
-      captureEpoch: 0,
-      processingProfile: ProcessingProfile.SOURCE_NATIVE,
-      deliveryClass: DeliveryClass.RECOVERED,
-    },
-    'recovered source-native audio must use epoch zero',
-  );
-  assert.deepEqual(
-    {
-      captureEpoch: beginCaptureCalls[1].captureEpoch,
-      processingProfile: beginCaptureCalls[1].processingProfile,
-      deliveryClass: beginCaptureCalls[1].deliveryClass,
-    },
-    {
-      captureEpoch: 1,
-      processingProfile: ProcessingProfile.DUPLEX_AEC,
-      deliveryClass: DeliveryClass.LIVE,
-    },
-    'the following live duplex capture must retain the native phone epoch',
-  );
+  assert.equal(beginCaptureCalls.length, 1, 'one button press must create exactly one backend capture');
+  assert.equal(beginCaptureCalls[0].deliveryClass, DeliveryClass.LIVE);
+  assert.equal(beginCaptureCalls[0].captureEpoch, 7);
+  assert.equal(beginCaptureCalls[0].processingProfile, ProcessingProfile.DUPLEX_AEC);
+  assert.equal(beginCaptureCalls[0].recoveryBatchId, undefined, 'the clean path has no recovery capture');
+
+  const now = performance.now();
+  streamer.sendFrame('phone', {
+    captureEpoch: 6,
+    capturedAtMs: 1_780_000_000_000,
+    monotonicTimestampMs: now,
+    frameDurationMs: 20,
+    opus: new Uint8Array([9]),
+  });
+  streamer.sendFrame('phone', {
+    captureEpoch: 7,
+    capturedAtMs: 1_780_000_000_020,
+    monotonicTimestampMs: now + 20,
+    frameDurationMs: 20,
+    opus: new Uint8Array([1, 2, 3]),
+  });
+  assert.equal(sentPackets.length, 1, 'only the active native epoch may send');
+  assert.equal(sentPackets[0].sequence, 0);
+  assert.equal(sentPackets[0].capturedAtMs, 1_780_000_000_020);
+  assert.deepEqual(Array.from(sentPackets[0].opus), [1, 2, 3]);
+  assert.deepEqual(diagnostics, [['sent', 3], ['accepted', 0]]);
 
   await streamer.stopStreaming();
+  assert.equal(backendStops, 1, 'the capture has one stop owner');
+  assert.equal(nativeStops, 1, 'stopping the stream also stops the native phone session');
+  assert.equal(socketCloses, 1);
 
   const wearableStreamer = useAudioStreamer();
   await wearableStreamer.startStreaming(
@@ -191,9 +176,12 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
     { kind: 'wearable', sourceId: 'neo-1' },
   );
   assert.deepEqual(socketFrameDurations, [20, 60], 'wearable capture must declare 60 ms Opus');
+  assert.equal(beginCaptureCalls.length, 2, 'wearable also uses one live capture');
+  assert.equal(beginCaptureCalls[1].deliveryClass, DeliveryClass.LIVE);
   await wearableStreamer.stopStreaming();
-  console.log('phone audio recovery tests passed');
-})().catch((error) => {
+
+  console.log('phone audio streaming tests passed');
+})().catch(error => {
   console.error(error);
   process.exitCode = 1;
 });

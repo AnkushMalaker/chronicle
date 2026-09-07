@@ -156,15 +156,13 @@ diagnostics.nativeStage({ captureEpoch: 1, stage: 'opus_encoded', monotonicTimes
 diagnostics.nativeFrame({ captureEpoch: 1, opusBytes: 42, audioLevel: 0.25 });
 diagnostics.nativeFrame({ captureEpoch: 1, opusBytes: 43, audioLevel: 0.5 });
 diagnostics.audioLevelActive(0.5);
-diagnostics.socketUnavailable(0);
-diagnostics.socketUnavailable(0);
 diagnostics.socketConnecting();
 diagnostics.socketStage('transport_open');
 diagnostics.socketStage('client_hello_sent');
 diagnostics.socketStage('transport_error', 'wss://chronicle/ws/audio?token=secret-value');
 diagnostics.socketOpen();
 diagnostics.captureStarted('capture-secret-id');
-diagnostics.frameEnqueued(44);
+diagnostics.frameSent(44);
 diagnostics.packetAccepted(0);
 diagnostics.timeout('meter_stalled');
 diagnostics.failure('connect', 'wss://chronicle/ws/audio?token=secret-value');
@@ -180,7 +178,6 @@ assert.deepEqual(
     ['info', 'PhoneAudio'],
     ['info', 'PhoneAudio'],
     ['info', 'PhoneAudio'],
-    ['warn', 'PhoneAudio'],
     ['info', 'PhoneAudio'],
     ['info', 'PhoneAudio'],
     ['info', 'PhoneAudio'],
@@ -192,7 +189,7 @@ assert.deepEqual(
     ['warn', 'PhoneAudio'],
     ['error', 'PhoneAudio'],
   ],
-  'each lifecycle boundary must be exported once while repeated frames/drops become counters',
+  'each lifecycle boundary must be exported once while repeated frames become counters',
 );
 const text = writes.map(({ message }) => message).join('\n');
 assert.match(text, /button_pressed attempt=1/);
@@ -201,15 +198,14 @@ assert.match(text, /native_tap_received.*capture_epoch=1/);
 assert.match(text, /native_pcm_converted.*frames=320/);
 assert.match(text, /native_opus_encoded.*bytes=42/);
 assert.match(text, /audio_level_active.*audio_level=0\.500/);
-assert.match(text, /frame_buffered_socket_not_open.*ready_state=0/);
 assert.match(text, /websocket_transport_open/);
 assert.match(text, /websocket_client_hello_sent/);
 assert.match(text, /websocket_transport_error.*token=<REDACTED>/);
-assert.match(text, /first_frame_enqueued.*opus_bytes=44/);
+assert.match(text, /first_frame_sent.*opus_bytes=44/);
 assert.match(text, /first_packet_accepted.*sequence=0/);
 assert.match(
   text,
-  /meter_stalled.*native_frames=2.*buffered_while_disconnected=2.*enqueued_frames=1.*acked_packets=1.*last_audio_level=0\.500/,
+  /meter_stalled.*native_frames=2.*sent_frames=1.*acked_packets=1.*last_audio_level=0\.500/,
 );
 assert.doesNotMatch(text, /capture-secret-id/, 'server-issued identifiers must be abbreviated');
 assert.doesNotMatch(text, /secret-value/, 'credentials must be redacted from exported diagnostics');
@@ -305,7 +301,6 @@ const { useAudioStreamingOrchestrator } = loadTypeScript(orchestratorPath, {
             aec: { requested: true, available: true, enabled: true },
             noise_suppression: { requested: true, available: true, enabled: true },
           },
-          restartCapture: async () => {},
           stopCapture: async () => {},
         };
       },

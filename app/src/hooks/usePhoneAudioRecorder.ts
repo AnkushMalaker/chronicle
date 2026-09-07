@@ -23,7 +23,6 @@ const ACTIVE_AUDIO_LEVEL = 0.01;
 export interface PhoneCaptureSession {
   captureEpoch: number;
   capabilities: VoiceCapabilities;
-  restartCapture: () => Promise<PhoneCaptureSession>;
   stopCapture: () => Promise<void>;
 }
 
@@ -112,7 +111,6 @@ export const usePhoneAudioRecorder = (): UsePhoneAudioRecorder => {
     return {
       captureEpoch,
       capabilities,
-      restartCapture: startNativeCapture,
       stopCapture: stopRecording,
     };
   }, [stopRecording]);

@@ -28,8 +28,7 @@ export class PhoneAudioDiagnostics {
   private startedAtMs = 0;
   private milestones = new Set<string>();
   private nativeFrames = 0;
-  private bufferedWhileDisconnected = 0;
-  private enqueuedFrames = 0;
+  private sentFrames = 0;
   private ackedPackets = 0;
   private lastAudioLevel = 0;
 
@@ -54,8 +53,7 @@ export class PhoneAudioDiagnostics {
     this.startedAtMs = this.now();
     this.milestones.clear();
     this.nativeFrames = 0;
-    this.bufferedWhileDisconnected = 0;
-    this.enqueuedFrames = 0;
+    this.sentFrames = 0;
     this.ackedPackets = 0;
     this.lastAudioLevel = 0;
     this.write('info', 'button_pressed');
@@ -113,16 +111,6 @@ export class PhoneAudioDiagnostics {
     this.once('warn', 'native_frame_rejected', `reason=${reason}`);
   }
 
-  socketUnavailable(readyState: number | undefined): void {
-    if (!this.active) return;
-    this.bufferedWhileDisconnected += 1;
-    this.once(
-      'warn',
-      'frame_buffered_socket_not_open',
-      `ready_state=${readyState ?? 'undefined'}`,
-    );
-  }
-
   socketConnecting(): void {
     this.once('info', 'websocket_connecting');
   }
@@ -150,10 +138,10 @@ export class PhoneAudioDiagnostics {
     this.once('info', 'backend_capture_started', `capture_id=${shortId(captureSessionId)}`);
   }
 
-  frameEnqueued(opusBytes: number): void {
+  frameSent(opusBytes: number): void {
     if (!this.active) return;
-    this.enqueuedFrames += 1;
-    this.once('info', 'first_frame_enqueued', `opus_bytes=${opusBytes}`);
+    this.sentFrames += 1;
+    this.once('info', 'first_frame_sent', `opus_bytes=${opusBytes}`);
   }
 
   packetAccepted(sequence: number): void {
@@ -182,8 +170,7 @@ export class PhoneAudioDiagnostics {
     return [
       `elapsed_ms=${Math.max(0, this.now() - this.startedAtMs)}`,
       `native_frames=${this.nativeFrames}`,
-      `buffered_while_disconnected=${this.bufferedWhileDisconnected}`,
-      `enqueued_frames=${this.enqueuedFrames}`,
+      `sent_frames=${this.sentFrames}`,
       `acked_packets=${this.ackedPackets}`,
       `last_audio_level=${this.lastAudioLevel.toFixed(3)}`,
     ].join(' ');
