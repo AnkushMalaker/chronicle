@@ -1482,3 +1482,131 @@ async def test_not_activity_preserves_remaining_accepted_group(route_db, monkeyp
     assert groups[0].episode_ids == [e.episode_id for e in members[1:]]
     assert groups[0].revision == 2
     assert groups[0].started_at.replace(tzinfo=timezone.utc) == members[1].started_at
+
+
+async def test_media_and_empty_input_stay_reference_without_blocking_review(
+    route_db, cached_proposal
+):
+    user = await _route_user()
+    media = _ref("tv:dialogue", 0, 10)
+    media.kind = "transcript"
+    media.role = "media_content"
+    media.excerpt = "Dialogue from the television."
+    microphone = _ref("mic:empty", 1, 1)
+    microphone.kind = "transcript"
+    microphone.role = "uncertain"
+    microphone.excerpt = None
+    episode = await _stored_episode(
+        user,
+        start_minute=0,
+        end_minute=10,
+        status="provisional",
+        title="Media playback and audio input",
+        kind="work_session",
+        evidence_refs=[media, microphone],
+    )
+    other = await _stored_episode(
+        user,
+        start_minute=1,
+        end_minute=10,
+        status="provisional",
+        evidence_refs=[microphone],
+    )
+    day = await _published_day(user)
+    day.consolidation_state = "ready"
+    day.consolidation_snapshot_id = day.current_snapshot_id
+    day.consolidation_suggestions = (
+        [
+            {
+                "suggestion_id": "old-media-group",
+                "episode_ids": [episode.episode_id, other.episode_id],
+                "member_revisions": [
+                    {"episode_key": e.episode_key, "revision": e.revision}
+                    for e in [episode, other]
+                ],
+                "source_snapshot_id": day.current_snapshot_id,
+                "title": "Watching TV",
+                "reason": "The same show",
+                "confidence": 0.95,
+            }
+        ]
+        if cached_proposal
+        else []
+    )
+    await day.save()
+    payload = await timeline_routes.get_timeline_day(day.local_date, day.timezone, user)
+    reference = payload["episodes"][0]
+    assert reference["episode_id"] == episode.episode_id
+    assert reference["requires_activity_review"] is False
+    assert reference["memory_eligible"] is False
+    assert payload["review_projection"]["groups"][0]["lane"] == "background"
+    assert payload["consolidation"]["suggestions"] == []
+    assert payload["consolidation"]["state"] == ("" if cached_proposal else "ready")
+    with pytest.raises(HTTPException) as cached:
+        await timeline_routes.resolve_timeline_day_consolidation(
+            day.local_date,
+            timeline_routes.ResolveConsolidationRequest(
+                timezone=day.timezone,
+                snapshot_id=day.current_snapshot_id,
+                accepted_suggestion_ids=["old-media-group"],
+                finalize=False,
+            ),
+            user,
+        )
+    assert cached.value.status_code == 409
+    with pytest.raises(HTTPException) as exc:
+        await timeline_routes.confirm_timeline_episode_structure(
+            day.local_date,
+            episode.episode_key,
+            episode.revision,
+            timeline_routes.ReviewDayRequest(
+                timezone=day.timezone,
+                snapshot_id=day.current_snapshot_id,
+            ),
+            user,
+        )
+    assert exc.value.status_code == 422
+    assert (await TimelineEpisode.get(episode.id)).revision == episode.revision
+    await timeline_routes.finalize_timeline_episode_review(
+        local_date=day.local_date,
+        body=timeline_routes.ReviewDayRequest(
+            timezone=day.timezone,
+            snapshot_id=day.current_snapshot_id,
+        ),
+        background_tasks=BackgroundTasks(),
+        user=user,
+    )
+    assert (
+        await TimelineDay.get(day.id)
+    ).reviewed_snapshot_id == day.current_snapshot_id
+
+
+async def test_grouping_acceptance_returns_actionable_prepublication_failure(
+    monkeypatch,
+):
+    day = SimpleNamespace(current_snapshot_id="a" * 64)
+    model = SimpleNamespace(
+        user_id="user_id",
+        local_date="date",
+        timezone="timezone",
+        find_one=AsyncMock(return_value=day),
+    )
+    monkeypatch.setattr(timeline_routes, "TimelineDay", model)
+    message = "Could not prepare the grouping summaries. No groupings were saved."
+    monkeypatch.setattr(
+        timeline_routes,
+        "resolve_day_consolidation",
+        AsyncMock(side_effect=timeline_routes.ConsolidationSynthesisError(message)),
+    )
+    with pytest.raises(HTTPException) as error:
+        await timeline_routes.resolve_timeline_day_consolidation(
+            date(2026, 9, 4),
+            timeline_routes.ResolveConsolidationRequest(
+                timezone="Asia/Kolkata",
+                snapshot_id="a" * 64,
+                accepted_suggestion_ids=[f"group:{i}" for i in range(8)],
+            ),
+            SimpleNamespace(id="owner"),
+        )
+    assert error.value.status_code == 503
+    assert error.value.detail == message

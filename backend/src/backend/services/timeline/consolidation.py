@@ -52,8 +52,28 @@ class ConsolidationSuggestion(BaseModel):
     confidence: float = Field(ge=0, le=1)
 
 
+class ConsolidationSynthesisError(RuntimeError):
+    """Account preparation failed before any grouping was published."""
+
+
 class ConsolidationResolutionError(RuntimeError):
     """The grouping proposal changed before the person's decision landed."""
+
+
+def activity_review_suggestions(
+    suggestions: list[dict], episodes: list[Any]
+) -> list[dict]:
+    """Invalidate whole proposals containing reference-only or unavailable members.
+
+    Never silently trim a proposal: its title and explanation were generated for
+    the original membership. New generation uses only eligible activities.
+    """
+    eligible = {
+        episode.episode_id
+        for episode in episodes
+        if activity_policy.episode_requires_activity_review(episode)
+    }
+    return [item for item in suggestions if set(item["episode_ids"]) <= eligible]
 
 
 def active_semantic_groups(day: TimelineDay) -> list[TimelineSemanticGroupRevision]:
@@ -263,9 +283,10 @@ async def resolve_day_consolidation(
         raise ConsolidationResolutionError(
             "This grouping proposal is no longer awaiting review"
         )
+    episodes = await snapshot_episodes(day)
     suggestions = [
         ConsolidationSuggestion.model_validate(item)
-        for item in day.consolidation_suggestions
+        for item in activity_review_suggestions(day.consolidation_suggestions, episodes)
     ]
     known = {item.suggestion_id for item in suggestions}
     accepted_ids = set(accepted_suggestion_ids)
@@ -274,7 +295,6 @@ async def resolve_day_consolidation(
             "The decision includes a grouping outside this proposal"
         )
 
-    episodes = await snapshot_episodes(day)
     episode_map = {episode.episode_id: episode for episode in episodes}
     if not suggestions_match_snapshot(day.consolidation_suggestions, day):
         raise ConsolidationResolutionError(
@@ -291,14 +311,26 @@ async def resolve_day_consolidation(
         raise ConsolidationResolutionError(
             "Remove the existing semantic group before accepting this proposal"
         )
-    accounts = await asyncio.gather(
-        *(
-            synthesize_merged_episode_account(
-                [episode_map[episode_id] for episode_id in item.episode_ids]
-            )
-            for item in accepted
-        )
-    )
+    try:
+        # Bound the HTTP preparation phase; cancel sibling work on failure. All
+        # account validation still completes before publication can begin.
+        async with asyncio.timeout(90):
+            async with asyncio.TaskGroup() as preparation:
+                tasks = [
+                    preparation.create_task(
+                        synthesize_merged_episode_account(
+                            [episode_map[episode_id] for episode_id in item.episode_ids]
+                        )
+                    )
+                    for item in accepted
+                ]
+        accounts = [task.result() for task in tasks]
+    except Exception as error:
+        logger.exception("Grouping account preparation failed before publication")
+        raise ConsolidationSynthesisError(
+            "Could not prepare the grouping summaries. No groupings were saved. "
+            "Your proposals are still available; retry the selected groupings."
+        ) from error
     now = utcnow()
     groups: list[TimelineSemanticGroupRevision] = []
     for item, account in zip(accepted, accounts):
@@ -862,7 +894,7 @@ async def generate_day_consolidation(
             item
             for item in await snapshot_episodes(day)
             if item.episode_id not in grouped_ids
-            and not activity_policy.episode_is_recording_only(item)
+            and activity_policy.episode_requires_activity_review(item)
         ]
         conversation_ids = list(
             dict.fromkeys(

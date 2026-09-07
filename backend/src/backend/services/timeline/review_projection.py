@@ -16,6 +16,8 @@ from zoneinfo import ZoneInfo
 
 from backend.models.timeline import TimelineSemanticGroupRevision
 
+from .activity_policy import episode_requires_activity_review
+
 PROJECTION_VERSION = "day-review-v3-conversation-boundaries"
 SESSION_GAP = timedelta(minutes=15)
 MAX_SESSION_SPAN = timedelta(hours=2)
@@ -31,6 +33,8 @@ def _utc(value: datetime) -> datetime:
 
 
 def _lane(episode: Any) -> str:
+    if not episode_requires_activity_review(episode):
+        return "background"
     if episode.conversational:
         return "conversation"
     if episode.activity_mode in {"background", "ambient", "idle"}:

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from backend.services.device_audio_ingest import _coverage_profile
 from backend.services.timeline.activity_policy import (
     episode_is_recording_only,
+    episode_requires_activity_review,
     recording_only_evidence,
     rejected_activity,
     rejection_basis,
@@ -11,6 +12,7 @@ from backend.services.timeline.activity_policy import (
 from backend.services.timeline.context import compact_evidence
 from backend.services.timeline.contracts import TimelineEvidenceItem
 from backend.services.timeline.evidence import build_evidence_anchors
+from backend.services.timeline.memory import episode_semantic_memory_enabled
 
 START = datetime(2026, 9, 4, 5, tzinfo=timezone.utc)
 
@@ -116,3 +118,75 @@ def test_gap_count_does_not_invent_exact_gap_boundaries():
     )
     assert build_evidence_anchors([gap]) == []
     assert gap.anchor_ids == []
+
+
+def test_playback_and_empty_input_is_reference_even_if_model_calls_it_work():
+    episode = SimpleNamespace(
+        kind="work_session",
+        confidence=0.99,
+        memory_policy="auto",
+        confirmed_fields=[],
+        evidence_refs=[
+            SimpleNamespace(
+                kind="transcript",
+                role="media_content",
+                excerpt="Dialogue from a television series.",
+                metadata={},
+            ),
+            SimpleNamespace(
+                kind="transcript",
+                role="uncertain",
+                excerpt=None,
+                metadata={"direction": "input"},
+            ),
+        ],
+    )
+    assert not episode_requires_activity_review(episode)
+    assert not episode_semantic_memory_enabled(episode)
+    # Real activity on another device must survive alongside output media.
+    episode.evidence_refs.append(
+        SimpleNamespace(
+            kind="observation",
+            role="application_state",
+            excerpt="Editing a notebook in Cursor",
+            metadata={},
+        )
+    )
+    assert episode_requires_activity_review(episode)
+    assert episode_semantic_memory_enabled(episode)
+
+
+def test_reference_gate_preserves_speech_photo_and_explicit_user_intent():
+    episode = SimpleNamespace(
+        memory_policy="auto",
+        confirmed_fields=[],
+        evidence_refs=[
+            SimpleNamespace(
+                kind="audio_span", role="uncertain", metadata={"state": "transcribed"}
+            )
+        ],
+    )
+    assert not episode_requires_activity_review(episode)
+    episode.evidence_refs.append(
+        SimpleNamespace(
+            kind="transcript",
+            role="uncertain",
+            excerpt="Let's discuss the deployment.",
+            metadata={},
+        )
+    )
+    assert episode_requires_activity_review(episode)
+    episode.evidence_refs = [
+        SimpleNamespace(kind="immich", role="uncertain", excerpt=None, metadata={})
+    ]
+    assert episode_requires_activity_review(episode)
+    episode.evidence_refs = [
+        SimpleNamespace(
+            kind="transcript", role="media_content", excerpt="TV dialogue", metadata={}
+        )
+    ]
+    episode.memory_policy = "remember"
+    assert episode_requires_activity_review(episode)
+    episode.memory_policy = "auto"
+    episode.confirmed_fields = ["title"]
+    assert episode_requires_activity_review(episode)

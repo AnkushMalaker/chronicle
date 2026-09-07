@@ -39,11 +39,14 @@ from backend.services.job_progress import read_job_progress
 from backend.services.redis_lock import distributed_lock
 from backend.services.timeline.activity_policy import (
     episode_is_recording_only,
+    episode_requires_activity_review,
     rejection_basis,
 )
 from backend.services.timeline.consolidation import (
     ConsolidationResolutionError,
+    ConsolidationSynthesisError,
     active_semantic_groups,
+    activity_review_suggestions,
     create_manual_semantic_group,
     queue_day_consolidation,
     remove_semantic_group,
@@ -74,6 +77,7 @@ from backend.services.timeline.manual_publication import (
     day_for_exact_episode,
     publish_manual_episode_change,
 )
+from backend.services.timeline.memory import episode_semantic_memory_enabled
 from backend.services.timeline.merge_synthesis import synthesize_merged_episode_account
 from backend.services.timeline.projection import active_day_episodes
 from backend.services.timeline.review import (
@@ -153,6 +157,8 @@ def _episode_payload(episode: TimelineEpisode) -> dict:
         "confirmed_at": _utc(episode.confirmed_at),
         "confirmed_fields": episode.confirmed_fields,
         "memory_policy": episode.memory_policy,
+        "requires_activity_review": episode_requires_activity_review(episode),
+        "memory_eligible": episode_semantic_memory_enabled(episode),
         "salience": episode.salience,
         "confidence": episode.confidence,
         "activity_mode": episode.activity_mode,
@@ -223,13 +229,20 @@ async def _day_proposal(day: TimelineDay | None) -> MemoryReviewProposal | None:
     return None  # Memory selections are listed independently of day structural review.
 
 
-def _consolidation_payload(day: TimelineDay) -> dict[str, Any]:
+def _consolidation_payload(
+    day: TimelineDay, episodes: list[TimelineEpisode]
+) -> dict[str, Any]:
     """Return only proposals derived from the day membership being displayed."""
 
-    suggestions = day.consolidation_suggestions
-    stale = not suggestions_match_snapshot(suggestions, day)
+    suggestions = activity_review_suggestions(day.consolidation_suggestions, episodes)
+    stale = not suggestions_match_snapshot(day.consolidation_suggestions, day)
+    filtered_all = (
+        day.consolidation_state == "ready"
+        and bool(day.consolidation_suggestions)
+        and not suggestions
+    )
     return {
-        "state": "" if stale else day.consolidation_state,
+        "state": "" if stale or filtered_all else day.consolidation_state,
         "snapshot_id": day.consolidation_snapshot_id,
         "model": day.consolidation_model,
         "suggestions": [] if stale else suggestions,
@@ -393,7 +406,7 @@ async def get_timeline_day(
         },
         "analysis": _run_payload(latest),
         "review": _review_payload(day, proposal),
-        "consolidation": (_consolidation_payload(day) if day else None),
+        "consolidation": (_consolidation_payload(day, episodes) if day else None),
         "semantic_groups": [
             _semantic_group_payload(group) for group in semantic_groups
         ],
@@ -558,6 +571,8 @@ async def resolve_timeline_day_consolidation(
         )
     except ConsolidationResolutionError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except ConsolidationSynthesisError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     return {"groups": [_semantic_group_payload(group) for group in groups]}
 
 
@@ -862,16 +877,20 @@ async def finalize_timeline_episode_review(
             status_code=409,
             detail=f"Day is already in review state {day.review_state}",
         )
-    if day.consolidation_state in {"queued", "generating", "ready"}:
+    episodes = await snapshot_episodes(day)
+    consolidation = _consolidation_payload(day, episodes)
+    if consolidation["state"] in {"queued", "generating"} or (
+        consolidation["state"] == "ready" and consolidation["suggestions"]
+    ):
         raise HTTPException(
             status_code=409,
             detail="Resolve or dismiss every grouping proposal before finalizing",
         )
-    episodes = await snapshot_episodes(day)
     unstable = [
         item.episode_key
         for item in episodes
-        if not episode_is_recording_only(item) and not episode_structure_is_stable(item)
+        if episode_requires_activity_review(item)
+        and not episode_structure_is_stable(item)
     ]
     if unstable:
         raise HTTPException(
@@ -996,10 +1015,10 @@ async def _confirm_episode_structures(local_date, refs, body, user):
                 status_code=409,
                 detail=f"Episode structure cannot be confirmed in state {episode.status}",
             )
-        if episode_is_recording_only(episode):
+        if not episode_requires_activity_review(episode):
             raise HTTPException(
                 status_code=422,
-                detail="Recording coverage is not an activity to confirm",
+                detail="Recording coverage or media content alone is not an activity to confirm",
             )
         if episode_structure_is_stable(episode):
             raise HTTPException(

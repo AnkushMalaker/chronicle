@@ -45,6 +45,35 @@ def episode_is_recording_only(episode) -> bool:
     return recording_only_evidence(episode.evidence_refs)
 
 
+def reference_only_evidence(evidence) -> bool:
+    """Recorder state and media dialogue do not establish a personal activity.
+
+    Keep screen/photo evidence and any meaningful non-media transcript eligible,
+    including activity captured on a different device. Missing transcript text is
+    not evidence of speech content that a person can meaningfully confirm.
+    """
+    if not evidence:
+        return False
+    for item in evidence:
+        if item.kind in COVERAGE_KINDS:
+            continue
+        if item.kind == "transcript" and (
+            item.role == "media_content"
+            or (item.role == "uncertain" and not (item.excerpt or "").strip())
+        ):
+            continue
+        return False
+    return True
+
+
+def episode_requires_activity_review(episode) -> bool:
+    if episode.memory_policy == "remember" or {"title", "kind"} & set(
+        episode.confirmed_fields
+    ):
+        return True
+    return not reference_only_evidence(episode.evidence_refs)
+
+
 def _utc(value):
     if isinstance(value, str):
         value = datetime.fromisoformat(value.replace("Z", "+00:00"))

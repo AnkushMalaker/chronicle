@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from backend.models.timeline import TimelineEpisode, TimelineSemanticGroupRevision
 
-from . import activity_policy
+from .activity_policy import episode_is_recording_only, episode_requires_activity_review
 from .executor import settings_dict
 from .recording_refs import episode_conversation_ids
 from .timezone import canonical_timezone
@@ -65,14 +65,16 @@ def episode_semantic_memory_enabled(episode: TimelineEpisode) -> bool:
     It reaches the semantic memory agent only after an explicit ``remember`` opt-in.
     """
 
-    if activity_policy.episode_is_recording_only(episode):
+    if episode_is_recording_only(episode):
         return False
     policy = episode.memory_policy
     if policy == "remember":
         return True
     if policy == "reference":
         return False
-    return not _is_media_kind(episode.kind)
+    return episode_requires_activity_review(episode) and not _is_media_kind(
+        episode.kind
+    )
 
 
 _MEDIA_ACTIVITY_PREFIX = re.compile(

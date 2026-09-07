@@ -50,7 +50,8 @@ from backend.services.memory.vault_manager import ConvDocVaultManager
 from backend.services.memory.vault_scaffold import is_scaffold_note
 from backend.services.redis_lock import LockUnavailable, distributed_lock
 
-from . import activity_policy, vault_day_index
+from . import vault_day_index
+from .activity_policy import episode_requires_activity_review
 from .consolidation import active_semantic_groups
 from .episode_summary import (
     episode_revision_is_published,
@@ -285,8 +286,10 @@ async def _selection(user_id: str, refs: list[EpisodeRevisionRef], timezone_name
             raise SelectionNotReady(
                 "Evidence overlapping this selected episode still needs reconciliation"
             )
-        if activity_policy.episode_is_recording_only(episode):
-            raise SelectionNotReady("Recording coverage is not an activity for memory")
+        if not episode_requires_activity_review(episode):
+            raise SelectionNotReady(
+                "Recording coverage or media content alone is reference-only"
+            )
         if not episode_structure_is_stable(episode):
             raise SelectionNotReady("Confirm the selected episode structure first")
         if not episode_semantic_memory_enabled(episode):

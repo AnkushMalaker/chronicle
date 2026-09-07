@@ -27,6 +27,9 @@ def episode(index: int, minute: int):
         started_at=BASE + timedelta(minutes=minute),
         ended_at=BASE + timedelta(minutes=minute + 10),
         activity_mode="foreground",
+        memory_policy="auto",
+        confirmed_fields=[],
+        evidence_refs=[],
         conversational=False,
         title=f"Episode {index}",
     )
@@ -155,10 +158,12 @@ async def test_grouping_accepts_json_from_a_markdown_fence(monkeypatch):
     assert create.await_count == 1
 
 
+@pytest.mark.parametrize("synthesis_fails", [True, False])
 @pytest.mark.parametrize("finalize", [True, False])
 async def test_resolution_persists_groups_and_accept_reject_training_decisions(
     monkeypatch,
     finalize,
+    synthesis_fails,
 ):
     episodes = [episode(1, 10), episode(2, 40), episode(3, 70), episode(4, 100)]
     recorded = {}
@@ -188,6 +193,8 @@ async def test_resolution_persists_groups_and_accept_reject_training_decisions(
             return Collection()
 
     async def synthesize(_members):
+        if synthesis_fails:
+            raise RuntimeError("LLM returned empty content (finish_reason=length)")
         return SimpleNamespace(title="Combined task", summary="One coherent task.")
 
     monkeypatch.setattr(consolidation_module, "TimelineEpisode", EpisodeModel)
@@ -240,6 +247,20 @@ async def test_resolution_persists_groups_and_accept_reject_training_decisions(
         ],
         semantic_group_history=[],
     )
+
+    if synthesis_fails:
+        with pytest.raises(
+            consolidation_module.ConsolidationSynthesisError,
+            match="No groupings were saved",
+        ):
+            await resolve_day_consolidation(
+                day, ["group:first", "group:second"], finalize=finalize
+            )
+        consolidation_module._publish_group_revisions.assert_not_awaited()
+        assert recorded == {}
+        assert day.consolidation_state == "ready"
+        assert len(day.consolidation_suggestions) == 2
+        return
 
     groups = await resolve_day_consolidation(day, ["group:first"], finalize=finalize)
 
@@ -376,7 +397,7 @@ async def test_prefetch_job_keeps_configured_oldest_days_ready(monkeypatch):
 async def test_generation_excludes_accepted_members_and_capture_only_ambient(
     monkeypatch,
 ):
-    items = [episode(i, i * 10) for i in range(1, 5)]
+    items = [episode(i, i * 10) for i in range(1, 7)]
     for item in items:
         item.related_conversation_ids = []
         item.evidence_refs = []
@@ -388,7 +409,16 @@ async def test_generation_excludes_accepted_members_and_capture_only_ambient(
         SimpleNamespace(kind="capture_gap"),
     ]
     items[2].activity_mode = "background"
-    items[2].evidence_refs = [SimpleNamespace(kind="transcript")]
+    items[2].evidence_refs = [
+        SimpleNamespace(kind="transcript", role="uncertain", excerpt="Real speech")
+    ]
+    # Generated work labels must not promote television dialogue or empty input.
+    items[4].evidence_refs = [
+        SimpleNamespace(kind="transcript", role="media_content", excerpt="TV dialogue")
+    ]
+    items[5].evidence_refs = [
+        SimpleNamespace(kind="transcript", role="uncertain", excerpt=None)
+    ]
     collection = SimpleNamespace(
         update_one=AsyncMock(return_value=SimpleNamespace(modified_count=1))
     )
@@ -414,4 +444,4 @@ async def test_generation_excludes_accepted_members_and_capture_only_ambient(
         "user-1", date(2026, 2, 15), "Asia/Kolkata", "snapshot"
     )
     assert result["state"] == "ready"
-    assert suggest.call_args.args[0] == items[2:]
+    assert suggest.call_args.args[0] == items[2:4]
