@@ -28,7 +28,7 @@ export class PhoneAudioDiagnostics {
   private startedAtMs = 0;
   private milestones = new Set<string>();
   private nativeFrames = 0;
-  private socketDrops = 0;
+  private bufferedWhileDisconnected = 0;
   private enqueuedFrames = 0;
   private ackedPackets = 0;
   private lastAudioLevel = 0;
@@ -54,7 +54,7 @@ export class PhoneAudioDiagnostics {
     this.startedAtMs = this.now();
     this.milestones.clear();
     this.nativeFrames = 0;
-    this.socketDrops = 0;
+    this.bufferedWhileDisconnected = 0;
     this.enqueuedFrames = 0;
     this.ackedPackets = 0;
     this.lastAudioLevel = 0;
@@ -115,10 +115,10 @@ export class PhoneAudioDiagnostics {
 
   socketUnavailable(readyState: number | undefined): void {
     if (!this.active) return;
-    this.socketDrops += 1;
+    this.bufferedWhileDisconnected += 1;
     this.once(
       'warn',
-      'frame_dropped_socket_not_open',
+      'frame_buffered_socket_not_open',
       `ready_state=${readyState ?? 'undefined'}`,
     );
   }
@@ -182,7 +182,7 @@ export class PhoneAudioDiagnostics {
     return [
       `elapsed_ms=${Math.max(0, this.now() - this.startedAtMs)}`,
       `native_frames=${this.nativeFrames}`,
-      `socket_drops=${this.socketDrops}`,
+      `buffered_while_disconnected=${this.bufferedWhileDisconnected}`,
       `enqueued_frames=${this.enqueuedFrames}`,
       `acked_packets=${this.ackedPackets}`,
       `last_audio_level=${this.lastAudioLevel.toFixed(3)}`,

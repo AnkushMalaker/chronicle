@@ -32,12 +32,14 @@ const ProcessingProfile = {
 };
 const DeliveryClass = { LIVE: 1, RECOVERED: 2 };
 const beginCaptureCalls = [];
+const socketBearerTokens = [];
 let pendingReads = 0;
 
 class MockAudioV2Socket {
   constructor(options) {
     this.options = options;
     this.activeBinding = null;
+    socketBearerTokens.push(options.bearerToken);
   }
 
   async connect() {}
@@ -98,7 +100,10 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
     ProcessingProfile,
   },
   '../protocol/audioV2Socket': { AudioV2Socket: MockAudioV2Socket },
-  '../services/auth': { refreshToken: async () => 'refreshed-token' },
+  '../services/auth': {
+    getValidToken: async () => 'fresh-token',
+    isTokenExpired: (token) => token === 'expired-token',
+  },
   '../services/durableAudioSpool': {
     durableAudioSpool: {
       async pendingPackets() {
@@ -124,7 +129,11 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
 });
 
 (async () => {
-  const streamer = useAudioStreamer({ autoReconnectEnabled: false });
+  const refreshedTokens = [];
+  const streamer = useAudioStreamer({
+    autoReconnectEnabled: false,
+    onTokenRefreshed: (token) => refreshedTokens.push(token),
+  });
   const phoneVoice = {
     captureEpoch: 1,
     capabilities: {
@@ -140,10 +149,12 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
   };
 
   await streamer.startStreaming(
-    'https://chronicle.invalid/ws/audio?token=test-token&device_name=phone-mic',
+    'https://chronicle.invalid/ws/audio?token=expired-token&device_name=phone-mic',
     { phoneVoice },
   );
 
+  assert.deepEqual(socketBearerTokens, ['fresh-token'], 'audio must replace an expired URL token before opening the socket');
+  assert.deepEqual(refreshedTokens, ['fresh-token'], 'the refreshed token must propagate to app settings');
   assert.equal(beginCaptureCalls.length, 2, 'queued audio must recover before live capture starts');
   assert.deepEqual(
     {

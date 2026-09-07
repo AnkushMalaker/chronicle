@@ -27,7 +27,7 @@ import {
 import { AudioV2Socket } from '../protocol/audioV2Socket';
 import type { CapturedOpusFrame } from '../protocol/capturedOpusFrame';
 import type { VoiceCapabilities } from '../protocol/audioCapabilities';
-import { refreshToken } from '../services/auth';
+import { getValidToken, isTokenExpired } from '../services/auth';
 import { durableAudioSpool, type SpoolPacket } from '../services/durableAudioSpool';
 import { phoneAudioDiagnostics } from '../services/phoneAudioDiagnostics';
 
@@ -257,9 +257,14 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
       setError(null);
       const phoneVoice = configRef.current?.phoneVoice;
       let parsed = socketOptions(url, Boolean(phoneVoice));
-      if (!parsed.bearerToken) {
-        const token = await refreshToken();
-        if (!token) throw new Error('Audio authentication expired');
+      const managedToken = await getValidToken();
+      const token = managedToken ?? (
+        parsed.bearerToken && !isTokenExpired(parsed.bearerToken)
+          ? parsed.bearerToken
+          : null
+      );
+      if (!token) throw new Error('Audio authentication expired');
+      if (token !== parsed.bearerToken) {
         optionsRef.current?.onTokenRefreshed?.(token);
         const refreshed = new URL(url);
         refreshed.searchParams.set('token', token);

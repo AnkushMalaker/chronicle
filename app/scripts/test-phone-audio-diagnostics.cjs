@@ -110,7 +110,7 @@ assert.match(text, /native_tap_received.*capture_epoch=1/);
 assert.match(text, /native_pcm_converted.*frames=320/);
 assert.match(text, /native_opus_encoded.*bytes=42/);
 assert.match(text, /audio_level_active.*audio_level=0\.500/);
-assert.match(text, /frame_dropped_socket_not_open.*ready_state=0/);
+assert.match(text, /frame_buffered_socket_not_open.*ready_state=0/);
 assert.match(text, /websocket_transport_open/);
 assert.match(text, /websocket_client_hello_sent/);
 assert.match(text, /websocket_transport_error.*token=<REDACTED>/);
@@ -118,7 +118,7 @@ assert.match(text, /first_frame_enqueued.*opus_bytes=44/);
 assert.match(text, /first_packet_accepted.*sequence=0/);
 assert.match(
   text,
-  /meter_stalled.*native_frames=2.*socket_drops=2.*enqueued_frames=1.*acked_packets=1.*last_audio_level=0\.500/,
+  /meter_stalled.*native_frames=2.*buffered_while_disconnected=2.*enqueued_frames=1.*acked_packets=1.*last_audio_level=0\.500/,
 );
 assert.doesNotMatch(text, /capture-secret-id/, 'server-issued identifiers must be abbreviated');
 assert.doesNotMatch(text, /secret-value/, 'credentials must be redacted from exported diagnostics');
@@ -178,4 +178,66 @@ assert.match(
 );
 assert.match(integrationSources.android, /"audioLevel" to DuplexAudioPolicy\.audioLevel/, 'Android must emit PCM audio levels');
 
-console.log('phone audio diagnostics tests passed');
+const orchestratorPath = path.join(__dirname, '../src/hooks/useAudioStreamingOrchestrator.ts');
+const noDiagnostics = new Proxy({}, { get: () => () => {} });
+global.WebSocket = { OPEN: 1 };
+const { useAudioStreamingOrchestrator } = loadTypeScript(orchestratorPath, {
+  react: {
+    useCallback: (callback) => callback,
+    useState: (value) => [value, () => {}],
+  },
+  'react-native': { Alert: { alert: () => {} } },
+  'friend-lite-react-native': {},
+  '../services/phoneAudioDiagnostics': { phoneAudioDiagnostics: noDiagnostics },
+});
+
+(async () => {
+  const queuedFrames = [];
+  const frame = { captureEpoch: 1, capturedAtMs: 1_780_000_000_000, opus: new Uint8Array([1, 2, 3]) };
+  const orchestrator = useAudioStreamingOrchestrator({
+    omiConnection: { isConnected: () => false },
+    deviceConnection: { connectedDeviceId: null },
+    audioStreamer: {
+      isStreaming: false,
+      startStreaming: async () => {},
+      stopStreaming: async () => {},
+      sendDurableAudio: () => {},
+      sendInteractiveFrame: (value) => queuedFrames.push(value),
+      getWebSocketReadyState: () => 0,
+    },
+    phoneAudioRecorder: {
+      isRecording: false,
+      startRecording: async (onData) => {
+        await onData(frame);
+        return {
+          captureEpoch: 1,
+          capabilities: {
+            mode: 'duplex_full',
+            input_route: 'built_in_mic',
+            output_route: 'speakerphone',
+            native_sample_rate: 48_000,
+            aec: { requested: true, available: true, enabled: true },
+            noise_suppression: { requested: true, available: true, enabled: true },
+          },
+          restartCapture: async () => {},
+          stopCapture: async () => {},
+        };
+      },
+      stopRecording: async () => {},
+    },
+    originalStartAudioListener: async () => {},
+    originalStopAudioListener: async () => {},
+    settings: {
+      webSocketUrl: 'https://chronicle.invalid',
+      jwtToken: 'token',
+      isAuthenticated: true,
+    },
+  });
+
+  await orchestrator.handleTogglePhoneAudio();
+  assert.deepEqual(queuedFrames, [frame], 'phone frames must enter the durable spool while the socket reconnects');
+  console.log('phone audio diagnostics tests passed');
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

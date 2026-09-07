@@ -133,12 +133,14 @@ export const useAudioStreamingOrchestrator = ({
     try {
       const finalUrl = buildPhoneWebSocketUrl(settings.webSocketUrl);
       const capture = await phoneAudioRecorder.startRecording(async (frame) => {
+        if (frame.opus.length === 0) return;
         const wsReady = audioStreamer.getWebSocketReadyState();
-        if (wsReady === WebSocket.OPEN && frame.opus.length > 0) {
-          audioStreamer.sendInteractiveFrame(frame);
-        } else {
+        if (wsReady !== WebSocket.OPEN) {
           phoneAudioDiagnostics.socketUnavailable(wsReady);
         }
+        // Native capture owns durability. Queue every frame first; the streamer
+        // sends immediately while live and replays the spool after reconnecting.
+        audioStreamer.sendInteractiveFrame(frame);
       });
       await audioStreamer.startStreaming(finalUrl, { phoneVoice: capture });
       setIsPhoneAudioMode(true);
