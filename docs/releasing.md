@@ -4,7 +4,7 @@ A Chronicle release is a published, non-prerelease GitHub release with a semanti
 version tag such as `v0.3.1`. Publishing it has two user-visible effects:
 
 - `install.sh` resolves GitHub's latest release and clones that exact tag.
-- `advanced-docker-compose-build.yml` builds the tagged backend, ASR, and speaker
+- `backend-docker-compose-build.yml` builds the tagged backend, ASR, and speaker
   images, pushes both the version tag and `latest`, and appends the image names to
   the release notes.
 
@@ -147,7 +147,7 @@ gh run list --repo "${REPOSITORY}" --branch "${RELEASE_VERSION}" --limit 10
 | `full-tests-with-api.yml` | Full Robot integration evidence |
 | `speaker-recognition-tests.yml` | Speaker-service integration evidence |
 | `ios-testflight.yml` | Production iPhone build and TestFlight submission |
-| `advanced-docker-compose-build.yml` | Versioned and `latest` GHCR images after publication |
+| `backend-docker-compose-build.yml` | Versioned and `latest` GHCR images after publication |
 | `ios-ipa-build.yml` | Internal IPA experiment; not a release gate |
 | `android-apk-build.yml` | Standalone APK build; not integrated with semantic-version releases |
 | `build-all-platforms.yml` | Legacy timestamped mobile prerelease path |

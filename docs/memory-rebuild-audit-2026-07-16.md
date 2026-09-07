@@ -5,9 +5,9 @@
 Read-only audit of the live Chronicle database and generated vault after rebuild
 `b5982bbd1fb4`.
 
-- Vault: `backends/advanced/data/conversation_docs/69b80e5894aa9ec334a421c9`
+- Vault: `backend/data/conversation_docs/69b80e5894aa9ec334a421c9`
 - Source: live MongoDB `chronicle` database
-- Archive: `backends/advanced/data/backups/chronicle_20260715_203124.chronicle`
+- Archive: `backend/data/backups/chronicle_20260715_203124.chronicle`
 - Eligible source conversations: 169
 - Generated conversation paths: 169
 

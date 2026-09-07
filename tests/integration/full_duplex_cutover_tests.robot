@@ -39,14 +39,14 @@ Audio V2 Enforces Bound Capture Playback And Connection Fences
     ...                exact connection leases, durable packet ACKs, playback, and
     ...                stale-binding rejection.
     Run Backend Contract Tests
-    ...    /workspace/backends/advanced/tests/test_audio_protocol_v2.py
-    ...    /workspace/backends/advanced/tests/test_audio_v2_ingress.py
-    ...    /workspace/backends/advanced/tests/test_audio_v2_downlink.py
-    ...    /workspace/backends/advanced/tests/test_client_connection_lease.py
-    ...    /workspace/backends/advanced/tests/test_audio_durability.py
-    ...    /workspace/backends/advanced/tests/test_response_coordinator.py
-    ...    /workspace/backends/advanced/tests/test_voice_session_coordinator.py
-    ...    /workspace/backends/advanced/tests/test_voice_properties.py
+    ...    /workspace/backend/tests/test_audio_protocol_v2.py
+    ...    /workspace/backend/tests/test_audio_v2_ingress.py
+    ...    /workspace/backend/tests/test_audio_v2_downlink.py
+    ...    /workspace/backend/tests/test_client_connection_lease.py
+    ...    /workspace/backend/tests/test_audio_durability.py
+    ...    /workspace/backend/tests/test_response_coordinator.py
+    ...    /workspace/backend/tests/test_voice_session_coordinator.py
+    ...    /workspace/backend/tests/test_voice_properties.py
 
 Wake Consumer Contract And Post Stop Conversation Materialization Stay Wired
     [Documentation]    Guards the two deployed multi-service failures found by the
@@ -54,22 +54,22 @@ Wake Consumer Contract And Post Stop Conversation Materialization Stay Wired
     ...                the retired Redis contract, and speech detected after stop_capture
     ...                must still materialize a Conversation from the terminal capture.
     Run Backend Contract Tests
-    ...    /workspace/backends/advanced/tests/test_wakeword_health_contract.py
-    ...    /workspace/backends/advanced/tests/test_conversation_lifecycle.py
+    ...    /workspace/backend/tests/test_wakeword_health_contract.py
+    ...    /workspace/backend/tests/test_conversation_lifecycle.py
 
 Committed Turn Consumers Recover Without Duplicate Routes Or Effects
     [Documentation]    Exercises the real committed-turn router and pending-stream
     ...                recovery paths, including worker replacement and the irreversible
     ...                effect fence that suppresses stale speech without replaying writes.
     Run Backend Contract Tests
-    ...    /workspace/backends/advanced/tests/test_committed_turn_routing.py
-    ...    /workspace/backends/advanced/tests/test_stream_consumer_recovery.py
-    ...    /workspace/backends/advanced/tests/test_interaction_modes.py::test_worker_recovers_an_input_stranded_in_another_consumer
-    ...    /workspace/backends/advanced/tests/test_interaction_modes.py::test_effect_fence_finishes_mutation_but_suppresses_stale_speech
+    ...    /workspace/backend/tests/test_committed_turn_routing.py
+    ...    /workspace/backend/tests/test_stream_consumer_recovery.py
+    ...    /workspace/backend/tests/test_interaction_modes.py::test_worker_recovers_an_input_stranded_in_another_consumer
+    ...    /workspace/backend/tests/test_interaction_modes.py::test_effect_fence_finishes_mutation_but_suppresses_stale_speech
 
 Fake Swiggy Completes Multi Item UPI QR Flow Without Payment
     [Documentation]    Covers bounded multi-item collection, explicit ordinals, ambiguous
     ...                number phrases, interruption during search/cart/checkout, Redis
     ...                redelivery, deterministic confirm order, and fake UPI QR creation.
     Run Backend Contract Tests
-    ...    /workspace/backends/advanced/tests/test_swiggy_instamart_mode.py
+    ...    /workspace/backend/tests/test_swiggy_instamart_mode.py

@@ -7,8 +7,8 @@ This document explains how Chronicle stores and retrieves memories.
 Chronicle has **one** memory provider: `chronicle`. It is an **agentic Markdown vault** — a directory of Obsidian-style notes that is the single source of truth for memories. There is no separate vector database, no embeddings, and no hybrid search index. Memories are plain Markdown files; writing and reading each have an independently selectable agent backend.
 
 **Code References**:
-- **Provider**: `src/advanced_omi_backend/services/memory/providers/chronicle.py`
-- **Memory agents**: `src/advanced_omi_backend/services/memory/agent/` (write agent + read/retrieval agent)
+- **Provider**: `src/backend/services/memory/providers/chronicle.py`
+- **Memory agents**: `src/backend/services/memory/agent/` (write agent + read/retrieval agent)
 - **Memory extraction job**: runs in the post-conversation RQ chain (`memory_extraction_job`), calls `memory_service.add_memory()`
 - **Configuration**: `config/config.yml` (memory + LLM sections) + `src/model_registry.py`
 

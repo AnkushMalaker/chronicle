@@ -43,7 +43,7 @@ original dirty checkout were not modified.
 
 | Command | Result |
 | --- | --- |
-| `uv run --group test --with ../../extras/chronicle-setup pytest -q --disable-warnings` from `backends/advanced` | PASS, 1,489 collected, exit 0 |
+| `uv run --group test --with ../../extras/chronicle-setup pytest -q --disable-warnings` from `backend` | PASS, 1,489 collected, exit 0 |
 | Configured wakeword service pytest suite | PASS, 11 tests |
 | Focused duplex property, recovery, response-fence, and Swiggy tests | PASS, 26 tests |
 | `python3 scripts/check_import_placement.py` | PASS |

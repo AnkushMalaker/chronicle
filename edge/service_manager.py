@@ -17,7 +17,7 @@ It also exposes node identity (/node) and a live cluster view (/cluster).
 
 Launched by services.py (any ./start.sh) with:
   SERVICE_MANAGER_TOKEN  — shared secret, required (auto-generated into
-                           backends/advanced/.env on first start)
+                           backend/.env on first start)
   SERVICE_MANAGER_PORT   — default 8775
   SERVICE_MANAGER_HOST   — default 0.0.0.0 (token-authed; must be reachable
                            from the backend container via host.docker.internal)

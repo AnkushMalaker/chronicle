@@ -16,8 +16,8 @@ fails loudly instead of silently doing nothing.
 import logging
 from typing import Any, Dict, List, Optional
 
-from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
-from advanced_omi_backend.plugins.events import (
+from backend.plugins.base import BasePlugin, PluginContext, PluginResult
+from backend.plugins.events import (
     ButtonActionType,
     ConversationCloseReason,
     PluginEvent,

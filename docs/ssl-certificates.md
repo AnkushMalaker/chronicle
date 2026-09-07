@@ -19,8 +19,8 @@ Both services front their containers with Caddy:
 
 | Service | Config | HTTP → HTTPS ports |
 |---------|--------|--------------------|
-| Advanced Backend | `backends/advanced/Caddyfile` | `80` → `443` |
-| Langfuse | `backends/advanced/Caddyfile` | direct `3002`; HTTPS `3443` |
+| Chronicle Backend | `backend/Caddyfile` | `80` → `443` |
+| Langfuse | `backend/Caddyfile` | direct `3002`; HTTPS `3443` |
 | Speaker Recognition | `extras/speaker-recognition/Caddyfile` | `8081` → `8444` |
 
 With a Tailscale host such as `node.example.ts.net`, the browser UIs are therefore

@@ -41,7 +41,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://localhost:5173")
     parser.add_argument("--backend-url")
-    parser.add_argument("--env-file", default="backends/advanced/.env")
+    parser.add_argument("--env-file", default="backend/.env")
     parser.add_argument("--authenticate", action="store_true")
     parser.add_argument(
         "--ignore-https-errors",

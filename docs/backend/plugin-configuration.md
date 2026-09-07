@@ -33,7 +33,7 @@ plugins:
         - hey vivi
 ```
 
-### 2. `backends/advanced/src/advanced_omi_backend/plugins/{plugin_id}/config.yml` - Plugin Settings
+### 2. `backend/src/backend/plugins/{plugin_id}/config.yml` - Plugin Settings
 
 **Purpose**: Plugin-specific non-secret configuration
 
@@ -57,7 +57,7 @@ smtp_username: ${SMTP_USERNAME}
 smtp_password: ${SMTP_PASSWORD}
 ```
 
-### 3. `backends/advanced/.env` - Secrets Only
+### 3. `backend/.env` - Secrets Only
 
 **Purpose**: All secret values (API keys, passwords, tokens)
 
@@ -157,7 +157,7 @@ To add a new plugin with proper configuration:
 ### 1. Create plugin directory structure
 
 ```bash
-backends/advanced/src/advanced_omi_backend/plugins/my_plugin/
+backend/src/backend/plugins/my_plugin/
 ├── __init__.py           # Export plugin class
 ├── plugin.py             # Plugin implementation
 └── config.yml            # Plugin-specific config
@@ -181,7 +181,7 @@ api_key: ${MY_PLUGIN_API_KEY}
 
 ### 3. Add secrets to `.env.template`
 
-**`backends/advanced/.env.template`**:
+**`backend/.env.template`**:
 ```bash
 # My Plugin
 MY_PLUGIN_API_URL=https://api.example.com
@@ -251,7 +251,7 @@ class MyPlugin(BasePlugin):
 **Verify**:
 ```bash
 # Check plugin directory exists
-ls backends/advanced/src/advanced_omi_backend/plugins/my_plugin/
+ls backend/src/backend/plugins/my_plugin/
 
 # Validate config.yml syntax
 python -c "import yaml; yaml.safe_load(open('plugins/my_plugin/config.yml'))"
@@ -265,7 +265,7 @@ grep MY_PLUGIN .env
 **Problem**: `${SMTP_HOST}` stays as literal text
 
 **Solution**:
-- Ensure `.env` file exists in `backends/advanced/.env`
+- Ensure `.env` file exists in `backend/.env`
 - Check variable name matches exactly (case-sensitive)
 - Restart backend after .env changes
 - Check logs for "Environment variable 'X' not found" warnings
@@ -359,7 +359,7 @@ port = prompt_value("SMTP Port", default="587")
 
 ### Complete Plugin Setup Example
 
-See `backends/advanced/src/advanced_omi_backend/plugins/email_summarizer/setup.py` for a complete working example showing:
+See `backend/src/backend/plugins/email_summarizer/setup.py` for a complete working example showing:
 - Masked password/token prompts with existing value reuse
 - Saving credentials to backend .env
 - Clean user-facing instructions
@@ -370,7 +370,7 @@ See `backends/advanced/src/advanced_omi_backend/plugins/email_summarizer/setup.p
 1. **Always show masked values for secrets** - Use `is_password=True`
 2. **Auto-read from .env** - Provide `env_file_path` and `env_key` parameters
 3. **Use placeholders** - Define common placeholder values to detect "not configured"
-4. **Save to backend .env** - All plugin secrets go in `backends/advanced/.env`
+4. **Save to backend .env** - All plugin secrets go in `backend/.env`
 5. **Clear instructions** - Tell users what to do next (enable in plugins.yml, restart)
 
 ### Convenience Functions

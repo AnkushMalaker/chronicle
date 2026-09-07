@@ -45,7 +45,7 @@ def main():
 
     # Define output files
     outputs = {
-        "advanced-backend": "backends/advanced/.env",
+        "backend": "backend/.env",
         "speaker-recognition": "extras/speaker-recognition/.env",
         "openmemory-mcp": "extras/openmemory-mcp/.env",
         "asr-services": "extras/asr-services/.env",

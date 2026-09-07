@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 # Find repository root (tests/setup/test_env.py -> go up 2 levels)
 REPO_ROOT = Path(__file__).parent.parent.parent
-backend_dir = REPO_ROOT / "backends" / "advanced"
+backend_dir = REPO_ROOT / "backend"
 tests_dir = REPO_ROOT / "tests"
 
 # Export absolute paths for Robot Framework keywords

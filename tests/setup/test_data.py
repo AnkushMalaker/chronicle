@@ -44,7 +44,7 @@ EXPECTED_TRANSCRIPT_PHRASES = ["glass", "class", "pumpkin"]
 EXPECTED_TRANSCRIPT = "glass"
 
 # Expected memories for DIY Glass Blowing audio (from Python integration test)
-# Source: backends/advanced/tests/assets/expected_memories.json
+# Source: backend/tests/assets/expected_memories.json
 EXPECTED_MEMORIES = [
     "Nick assists significantly in the glass blowing process",
     "Excitement and nervousness expressed during the process",

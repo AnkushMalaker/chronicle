@@ -7,7 +7,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TESTS_DIR="$SCRIPT_DIR/.."
-BACKEND_DIR="$SCRIPT_DIR/../../backends/advanced"
+BACKEND_DIR="$SCRIPT_DIR/../../backend"
 
 cd "$BACKEND_DIR"
 

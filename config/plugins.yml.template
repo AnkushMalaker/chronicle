@@ -4,7 +4,7 @@
 # Secrets should NEVER be hardcoded here - always use ${ENV_VAR} references.
 #
 # Configuration Architecture:
-# - Secrets:      backends/advanced/.env (gitignored)
+# - Secrets:      backend/.env (gitignored)
 # - Orchestration: config/plugins.yml (this file - safe to commit with env var refs)
 # - Settings:     plugins/{plugin_id}/config.yml (committed defaults)
 #
@@ -36,14 +36,14 @@ plugins:
     # 1. Go to Home Assistant → Profile → Security tab
     # 2. Scroll to "Long-lived access tokens"
     # 3. Click "Create Token"
-    # 4. Copy the token and add to backends/advanced/.env:
+    # 4. Copy the token and add to backend/.env:
     #    HA_TOKEN=your-long-lived-token-here
 
   # ========================================
   # Swiggy Instamart Voice Order Mode
   # ========================================
   # Requires one linked Chronicle user and private OAuth artifacts configured
-  # through plugins/swiggy_instamart/config.yml and backends/advanced/.env.
+  # through plugins/swiggy_instamart/config.yml and backend/.env.
   swiggy_instamart:
     enabled: false
     modes:

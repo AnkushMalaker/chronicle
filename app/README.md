@@ -110,7 +110,7 @@ Reference in `AndroidManifest.xml`:
 
 ### Supported Backend
 
-The app connects to Chronicle's advanced backend using audio protocol v2 at
+The app connects to Chronicle's backend using audio protocol v2 at
 `/ws/audio` with the `chronicle.audio.v2` WebSocket subprotocol. Capture and
 playback media are atomic raw-Opus envelopes generated from the shared contract.
 
@@ -171,7 +171,7 @@ epoch, and response generation.
 - **iOS**: A native development or release build with microphone permission
 - **Android**: Android API 31+ native build with microphone permission
 - **Network**: Stable connection to Chronicle backend
-- **Backend**: Advanced backend with audio protocol v2 at `/ws/audio`
+- **Backend**: Chronicle backend with audio protocol v2 at `/ws/audio`
 
 #### Switching Audio Sources
 - **Mutual Exclusion**: Cannot use Bluetooth and phone audio simultaneously
@@ -370,5 +370,5 @@ BluetoothService.onAudioData = (audioBuffer) => {
 
 - **[Backend Setup](../backends/)**: Choose and configure backend services
 - **[Quick Start Guide](../quickstart.md)**: Complete system setup
-- **[Advanced Backend](../backends/advanced/)**: Full-featured backend option
+- **[Chronicle Backend](../backend/)**: Full-featured backend option
 - **[Simple Backend](../backends/simple/)**: Basic backend for testing

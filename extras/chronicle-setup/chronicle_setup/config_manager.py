@@ -13,7 +13,7 @@ Usage:
     from chronicle_setup import ConfigManager
 
     # Scoped to a service, so .env writes land in that service's directory
-    config = ConfigManager(service_path="backends/advanced")
+    config = ConfigManager(service_path="backend")
     provider = config.get_memory_provider()
     config.set_memory_provider("chronicle")
 
@@ -50,7 +50,7 @@ class ConfigManager:
 
         Args:
             service_path: Path to service directory, relative to the repository root
-                         (e.g. "backends/advanced"). None means config.yml only —
+                         (e.g. "backend"). None means config.yml only —
                          no service .env is read or written.
             repo_root: Path to repository root. If None, it is located by marker files.
         """

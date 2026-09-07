@@ -133,7 +133,7 @@ def main():
         print(f"      python train.py --train_manifest {args.output}")
         print("   3. Run anomaly scan (MongoDB flagging):")
         print(
-            "      cd .. && uv run python src/advanced_omi_backend/scripts/run_anomaly_detection.py"
+            "      cd .. && uv run python src/backend/scripts/run_anomaly_detection.py"
         )
     else:
         print("❌ Export failed")

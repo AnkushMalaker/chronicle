@@ -10,9 +10,9 @@ does it compare with the existing direct tool-calling/API-agent vault?
 - Replayed the same eight high-worthiness conversations used by the 2026-07-16 deep
   fidelity audit: four long technical/work conversations and four personal
   Hindi-English conversations.
-- Source: `backends/advanced/data/transcript_categorization/transcripts.jsonl`.
+- Source: `backend/data/transcript_categorization/transcripts.jsonl`.
 - Baseline: the existing direct-agent vault at
-  `backends/advanced/data/conversation_docs/69b80e5894aa9ec334a421c9`.
+  `backend/data/conversation_docs/69b80e5894aa9ec334a421c9`.
 - Candidate: an empty scaffolded vault at
   `artifacts/memory-executor-eval/codex-audited-8`.
 - Executor: Codex CLI authenticated through the ChatGPT subscription.
@@ -108,7 +108,7 @@ point for demanding ambiguous multi-step agent work:
 
 ## Reproduction
 
-From `backends/advanced`:
+From `backend`:
 
 ```bash
 uv run python scripts/evaluate_memory_executor.py \

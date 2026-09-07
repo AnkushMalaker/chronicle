@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from advanced_omi_backend.plugins.base import (
+from backend.plugins.base import (
     BasePlugin,
     PluginConnectivityError,
     PluginContext,

@@ -144,7 +144,7 @@ test and a deployed trace both exist.
   install as soon as it appears in the TestFlight app.
 - **22:49 IST:** diagnosed a live WebUI packaging regression after the Audio V2
   cutover. The running image predated `@chronicle/audio-contracts`; its build context
-  was limited to `backends/advanced/webui`, and Compose still mounted the deleted
+  was limited to `backend/webui`, and Compose still mounted the deleted
   voice-protocol-v1 contract. Changed the WebUI image to build from the repository
   root, copy/install the generated Audio V2 file dependency, and mount that same
   contract at runtime. Added a Compose regression gate covering both the build context
@@ -186,7 +186,7 @@ test and a deployed trace both exist.
   events. The final deployed Chromium acceptance returned **625/625 packet ACKs,
   10 real transcript updates, one clean capture stop, zero console errors, and zero
   page errors**. The reusable gate is
-  `backends/advanced/webui/scripts/live_audio_v2_e2e.py`; it requires an explicitly
+  `backend/webui/scripts/live_audio_v2_e2e.py`; it requires an explicitly
   supplied non-sensitive 16 kHz mono WAV and asserts transport, transcript rendering,
   and stop lifecycle together.
 - **30 Aug, 00:36 IST:** traced the latest apparently healthy WebUI captures beyond

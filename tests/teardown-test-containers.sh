@@ -17,7 +17,7 @@ print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 
 # Navigate to backend directory
 SCRIPT_DIR="$(dirname "$0")"
-cd "$SCRIPT_DIR/../backends/advanced" || exit 1
+cd "$SCRIPT_DIR/../backend" || exit 1
 
 # Load .env.test if available for other environment variables
 if [ -f "$SCRIPT_DIR/setup/.env.test" ]; then

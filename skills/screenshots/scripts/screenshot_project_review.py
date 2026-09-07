@@ -228,8 +228,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="https://localhost")
     parser.add_argument("--backend-url", default="http://localhost:8000")
-    parser.add_argument("--app-file", default="backends/advanced/webui/src/App.tsx")
-    parser.add_argument("--env-file", default="backends/advanced/.env")
+    parser.add_argument("--app-file", default="backend/webui/src/App.tsx")
+    parser.add_argument("--env-file", default="backend/.env")
     parser.add_argument("--output-dir")
     parser.add_argument(
         "--only-route",

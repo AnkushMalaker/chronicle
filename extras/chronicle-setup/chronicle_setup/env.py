@@ -63,7 +63,7 @@ def resolve_ingest_config(
         default_port: Backend HTTP port to use when ``BACKEND_PUBLIC_PORT`` is absent.
 
     Example:
-        >>> url, token = resolve_ingest_config(["../../backends/advanced/.env", "../../.env"])
+        >>> url, token = resolve_ingest_config(["../../backend/.env", "../../.env"])
     """
     for path in search_paths:
         token = read_env_value(path, "SYSTEM_EVENT_INGEST_TOKEN") or read_env_value(

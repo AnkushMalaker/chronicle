@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Script to manage audio files in the advanced-backend container
+# Script to manage audio files in the backend container
 # This script helps list, move, and organize audio files
 
 set -e
@@ -20,9 +20,9 @@ NC='\033[0m' # No Color
 
 # Function to get the current pod name
 get_pod_name() {
-    POD_NAME=$(kubectl get pods -n $NAMESPACE -l app.kubernetes.io/name=advanced-backend -o jsonpath='{.items[0].metadata.name}')
+    POD_NAME=$(kubectl get pods -n $NAMESPACE -l app.kubernetes.io/name=backend -o jsonpath='{.items[0].metadata.name}')
     if [ -z "$POD_NAME" ]; then
-        echo -e "${RED}Error: No advanced-backend pod found in namespace $NAMESPACE${NC}"
+        echo -e "${RED}Error: No backend pod found in namespace $NAMESPACE${NC}"
         exit 1
     fi
     echo -e "${BLUE}Using pod: $POD_NAME${NC}"

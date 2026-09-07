@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import mimetypes
+import re
 import sqlite3
 import time
 import wave
@@ -16,12 +17,13 @@ from typing import Any, Iterator
 import httpx
 
 from .meeting import MeetingTracker, RecorderMeetingLog, pipewire_capture_apps
-from .observations import ObservationTracker
+from .observations import ObservationTracker, display_track_id, timestamp_seconds
 
 logger = logging.getLogger(__name__)
 
 # SQLite's default compiled limit on host parameters in one statement is 999.
 _SQLITE_PARAMETER_LIMIT = 500
+_OBSERVATION_STATE_SCHEMA = 2
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,21 @@ def infer_audio_direction(path: str) -> str:
     if "(output)" in value or "output" in Path(value).name:
         return "output"
     return "unknown"
+
+
+def infer_audio_track_id(path: str) -> str:
+    """Return ScreenPipe's stable, provider-local audio device identity.
+
+    Audio chunk filenames append a per-chunk suffix to the device name. The
+    parenthesized input/output marker terminates the stable device portion, so it
+    can distinguish two microphones without turning every chunk into a new lane.
+    """
+
+    stem = Path(path).stem
+    match = re.match(r"^(.+?\((?:input|output)\))(?:[_-].*)?$", stem, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return re.sub(r"_(?:\d+|\d{4}-\d{2}-\d{2}.*)$", "", stem) or stem
 
 
 def iso_timestamp(value: Any) -> str:
@@ -238,6 +255,7 @@ class Collector:
                 "captured_at": captured_at,
                 "duration_seconds": str(duration),
                 "device_name": path.stem,
+                "track_id": infer_audio_track_id(str(path)),
                 "direction": direction,
                 "content_hash": digest,
             }
@@ -270,6 +288,16 @@ class Collector:
                         )
                         + "\n"
                     )
+                # A 4xx can mean the collector and backend disagree about their
+                # ingestion contract (for example, a newly required locator field).
+                # Advancing here silently loses every rejected row because ScreenPipe
+                # remains authoritative but this cursor will never visit it again.
+                # Keep the checkpoint in place and surface an error heartbeat; an
+                # operator can repair or explicitly quarantine a genuine poison row.
+                raise RuntimeError(
+                    f"audio chunk {row['id']} rejected with HTTP "
+                    f"{response.status_code}; checkpoint retained"
+                )
             self.checkpoints.set("audio", row["id"])
             sent += 1
         return sent
@@ -279,8 +307,12 @@ class Collector:
         if self.meetings_path.exists():
             state = json.loads(self.meetings_path.read_text(encoding="utf-8"))
         return (
-            MeetingTracker(state.get("tracker")),
-            RecorderMeetingLog(state.get("recorder")),
+            MeetingTracker(
+                state.get("tracker"), capture_source_id=self.config.source_id
+            ),
+            RecorderMeetingLog(
+                state.get("recorder"), capture_source_id=self.config.source_id
+            ),
         )
 
     def _save_meeting_state(
@@ -298,11 +330,20 @@ class Collector:
 
     def _current_context(self) -> dict[str, Any] | None:
         """The freshest observed context, for attributing a browser's mic."""
-        tracker = self._load_observation_tracker()
-        for observation in (tracker.candidate, tracker.active):
-            if observation is not None:
-                return observation
-        return None
+        observations = [
+            observation
+            for tracker in self._load_observation_trackers().values()
+            for observation in (tracker.candidate, tracker.active)
+            if observation is not None
+        ]
+        if not observations:
+            return None
+        return max(
+            observations,
+            key=lambda observation: timestamp_seconds(
+                observation.get("ended_at") or observation["captured_at"]
+            ),
+        )
 
     def _meeting_for(self, start: str, end: str) -> str | None:
         """Recorder-written meetings take precedence over the live tracker."""
@@ -356,22 +397,53 @@ class Collector:
         self._recorder_meetings = recorder
         return sent
 
-    def _load_observation_tracker(self) -> ObservationTracker:
-        state = None
+    def _load_observation_trackers(self) -> dict[str, ObservationTracker]:
+        state: dict[str, Any] = {
+            "schema": _OBSERVATION_STATE_SCHEMA,
+            "tracks": {},
+        }
         if self.observations_path.exists():
             state = json.loads(self.observations_path.read_text(encoding="utf-8"))
+        if state.get("schema") != _OBSERVATION_STATE_SCHEMA:
+            raise ValueError("unsupported display-local observation state schema")
+        return {
+            track_id: ObservationTracker(
+                track_state,
+                stability_seconds=self.config.activity_debounce_seconds,
+                sample_cooldown_seconds=self.config.sample_cooldown_seconds,
+                liveness_seconds=self.config.liveness_seconds,
+                capture_source_id=self.config.source_id,
+                track_id=track_id,
+            )
+            for track_id, track_state in state.get("tracks", {}).items()
+        }
+
+    def _new_observation_tracker(self, track_id: str) -> ObservationTracker:
         return ObservationTracker(
-            state,
             stability_seconds=self.config.activity_debounce_seconds,
             sample_cooldown_seconds=self.config.sample_cooldown_seconds,
             liveness_seconds=self.config.liveness_seconds,
+            capture_source_id=self.config.source_id,
+            track_id=track_id,
         )
 
-    def _save_observation_tracker(self, tracker: ObservationTracker) -> None:
+    def _save_observation_trackers(
+        self, trackers: dict[str, ObservationTracker]
+    ) -> None:
         self.observations_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.observations_path.with_suffix(".tmp")
         temporary.write_text(
-            json.dumps(tracker.state, sort_keys=True), encoding="utf-8"
+            json.dumps(
+                {
+                    "schema": _OBSERVATION_STATE_SCHEMA,
+                    "tracks": {
+                        track_id: tracker.state
+                        for track_id, tracker in sorted(trackers.items())
+                    },
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
         )
         temporary.replace(self.observations_path)
 
@@ -405,24 +477,36 @@ class Collector:
         cursor = self.checkpoints.get("frames")
         rows = connection.execute(
             f"SELECT id, timestamp, app_name, window_name, {optional('browser_url')}, "
-            f"{optional('capture_trigger')}, {optional('full_text')}, {optional('text_source')} "
+            f"{optional('capture_trigger')}, {optional('full_text')}, {optional('text_source')}, "
+            f"{optional('device_name')} "
             "FROM frames WHERE id > ? ORDER BY id LIMIT 1000",
             (cursor,),
         ).fetchall()
-        tracker = self._load_observation_tracker()
+        trackers = self._load_observation_trackers()
         now = datetime.now(timezone.utc).isoformat()
-        events = tracker.process_rows(rows, now)
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            track_id = display_track_id(row)
+            tracker = trackers.setdefault(
+                track_id, self._new_observation_tracker(track_id)
+            )
+            events.extend(tracker.process_rows([row], iso_timestamp(row["timestamp"])))
+        for tracker in trackers.values():
+            events.extend(tracker.process_rows([], now))
         sent = self._send_observation_events(events)
-        self._save_observation_tracker(tracker)
+        self._save_observation_trackers(trackers)
         if rows:
             self.checkpoints.set("frames", rows[-1]["id"])
         return sent
 
     def close_observation(self) -> int:
-        tracker = self._load_observation_tracker()
-        events = tracker.close(datetime.now(timezone.utc).isoformat())
+        trackers = self._load_observation_trackers()
+        now = datetime.now(timezone.utc).isoformat()
+        events = [
+            event for tracker in trackers.values() for event in tracker.close(now)
+        ]
         sent = self._send_observation_events(events)
-        self._save_observation_tracker(tracker)
+        self._save_observation_trackers(trackers)
         return sent
 
     def _attach_capture_triggers(self, items: list[dict[str, Any]]) -> None:
@@ -655,14 +739,32 @@ class Collector:
                     job["id"],
                 )
             items = []
+            requested_locator = job.get("payload", {}).get("locator")
             for raw in raw_items:
                 content = raw.get("content", raw)
                 frame_id = content.get("frame_id")
                 if frame_id is None:
                     continue
+                track_id = (
+                    (requested_locator or {}).get("track_id")
+                    or content.get("device_name")
+                    or content.get("display_id")
+                )
+                if not track_id:
+                    logger.warning(
+                        "screenpipe frame %s has no display track; omitting it from job %s",
+                        frame_id,
+                        job["id"],
+                    )
+                    continue
                 items.append(
                     {
                         "source_item_id": f"frame:{frame_id}",
+                        "locator": {
+                            "capture_source_id": self.config.source_id,
+                            "modality": "screen",
+                            "track_id": str(track_id),
+                        },
                         "captured_at": content.get("timestamp"),
                         "metadata": {
                             "frame_id": frame_id,

@@ -12,16 +12,16 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from advanced_omi_backend.llm_client import get_llm_client
-from advanced_omi_backend.openai_factory import model_supports_temperature
-from advanced_omi_backend.plugins.base import (
+from backend.llm_client import get_llm_client
+from backend.openai_factory import model_supports_temperature
+from backend.plugins.base import (
     BasePlugin,
     PluginConnectivityError,
     PluginContext,
     PluginResult,
 )
-from advanced_omi_backend.plugins.events import PluginEvent
-from advanced_omi_backend.prompt_registry import get_prompt_registry
+from backend.plugins.events import PluginEvent
+from backend.prompt_registry import get_prompt_registry
 
 from .command_parser import COMMAND_PARSER_SYSTEM_PROMPT, ParsedCommand
 from .entity_cache import EntityCache

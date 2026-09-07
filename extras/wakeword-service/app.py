@@ -466,7 +466,7 @@ async def models():
 # --------------------------------------------------------------------------- #
 # Data-collection API (the training flywheel): prime positive capture, review
 # captured clips, label them true/false positive — all scoped per wake word.
-# Consumed by the backend proxy at /api/wakeword/* — see backends/advanced
+# Consumed by the backend proxy at /api/wakeword/* — see backend
 # .../routers/modules/wakeword_routes.py
 # --------------------------------------------------------------------------- #
 

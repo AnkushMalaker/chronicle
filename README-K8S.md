@@ -275,7 +275,7 @@ chronicle/
 
    # Verify template files are present
    ls -la skaffold.env.template
-   ls -la backends/advanced/.env.template
+   ls -la backend/.env.template
    ```
 
    > **Note:** The `--recursive` flag downloads the optional Mycelia submodule (an alternative memory backend with timeline visualization). Most deployments use the default Chronicle memory system and don't need Mycelia.
@@ -310,7 +310,7 @@ chronicle/
 1. **Create Environment File**
    ```bash
    # Copy template (if it exists)
-   # cp backends/advanced/.env.template backends/advanced/.env
+   # cp backend/.env.template backend/.env
 
    # Note: Most environment variables are automatically set by Skaffold during deployment
    # including MONGODB_URI and other Kubernetes-specific values
@@ -370,7 +370,7 @@ chronicle/
    # ./scripts/generate-helm-configmap.sh
 
    # Option 2: Add them directly to the Helm chart values
-   # Edit backends/charts/advanced-backend/values.yaml
+   # Edit backends/charts/backend/values.yaml
    ```
 
 ## Available Scripts
@@ -427,7 +427,7 @@ The following scripts are available in the `scripts/` folder to simplify common 
 ./scripts/generate-configmap.sh
 
 # This creates a Helm template that can be included in charts
-# Output: backends/charts/advanced-backend/templates/env-data.yaml
+# Output: backends/charts/backend/templates/env-data.yaml
 ```
 
 **Note**: All scripts automatically read configuration from `skaffold.env` and provide helpful error messages if configuration is missing.
@@ -477,10 +477,10 @@ This directory contains standalone Kubernetes manifests that are not managed by 
    kubectl get pods -n root
 
    # Deploy main application
-   skaffold run --profile=advanced-backend --default-repo=192.168.1.42:32000
+   skaffold run --profile=backend --default-repo=192.168.1.42:32000
 
    # Monitor deployment
-   skaffold run --profile=advanced-backend --default-repo=192.168.1.42:32000 --tail
+   skaffold run --profile=backend --default-repo=192.168.1.42:32000 --tail
    ```
 
 3. **Verify Deployment**
@@ -687,7 +687,7 @@ spec:
    ```bash
    # Clean and rebuild (run on build machine)
    skaffold clean
-   skaffold run --profile=advanced-backend --default-repo=k8s_control_plane:32000
+   skaffold run --profile=backend --default-repo=k8s_control_plane:32000
    ```
 
 5. **GPU Issues**
@@ -733,11 +733,11 @@ spec:
 
 ```bash
 # View logs (run on build machine)
-kubectl logs -n chronicle deployment/advanced-backend
+kubectl logs -n chronicle deployment/backend
 kubectl logs -n chronicle deployment/webui
 
 # Port forward for debugging (run on build machine)
-kubectl port-forward -n chronicle svc/advanced-backend 8000:8000
+kubectl port-forward -n chronicle svc/backend 8000:8000
 kubectl port-forward -n chronicle svc/webui 8080:80
 
 # Check resource usage (run on build machine)
@@ -745,7 +745,7 @@ kubectl top pods -n chronicle
 kubectl top nodes
 
 # Restart deployments (run on build machine)
-kubectl rollout restart deployment/advanced-backend -n chronicle
+kubectl rollout restart deployment/backend -n chronicle
 kubectl rollout restart deployment/webui -n chronicle
 ```
 
@@ -756,7 +756,7 @@ kubectl rollout restart deployment/webui -n chronicle
 1. **Regular Updates**
    ```bash
    # Update Docker images
-   skaffold run --profile=advanced-backend --default-repo=k8s_control_plane:32000
+   skaffold run --profile=backend --default-repo=k8s_control_plane:32000
    ```
 
 **Run on: Kubernetes Node (k8s_control_plane)**
@@ -773,7 +773,7 @@ kubectl rollout restart deployment/webui -n chronicle
 2. **Backup Configuration**
    ```bash
    # Backup environment files (run on build machine)
-   cp backends/advanced/.env backends/advanced/.env.backup
+   cp backend/.env backend/.env.backup
    cp skaffold.env skaffold.env.backup
 
    # Backup Kubernetes manifests (run on build machine)

@@ -29,6 +29,7 @@ _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 # reading them all stays cheap; wide enough that a long session is not represented
 # by one moment. The agent picks "good enough", so more candidates buy little.
 MAX_FRAME_CANDIDATES = 6
+UNKNOWN_DISPLAY_TRACK = "unknown-display"
 
 
 def iso_timestamp(value: Any) -> str:
@@ -79,6 +80,12 @@ def context_key(row: Mapping[str, Any]) -> list[str]:
         str(row["window_name"] or ""),
         str(_row_value(row, "browser_url") or ""),
     ]
+
+
+def display_track_id(row: Mapping[str, Any]) -> str:
+    """Return ScreenPipe's provider-local display identity for one frame."""
+
+    return str(_row_value(row, "device_name") or "").strip() or UNKNOWN_DISPLAY_TRACK
 
 
 def text_source(row: Mapping[str, Any]) -> str:
@@ -188,7 +195,9 @@ def stratify_candidates(
     return sorted(best.values(), key=lambda candidate: candidate["frame_id"])
 
 
-def new_observation(row: Mapping[str, Any]) -> dict[str, Any]:
+def new_observation(
+    row: Mapping[str, Any], *, capture_source_id: str = "screenpipe"
+) -> dict[str, Any]:
     captured_at = iso_timestamp(row["timestamp"])
     text = normalize_text(_row_value(row, "full_text"))
     source = text_source(row)
@@ -202,6 +211,12 @@ def new_observation(row: Mapping[str, Any]) -> dict[str, Any]:
         "last_frame_id": int(row["id"]),
         "representative_frame_id": int(row["id"]),
         "frame_count": 1,
+        "device_name": display_track_id(row),
+        "locator": {
+            "capture_source_id": capture_source_id,
+            "modality": "screen",
+            "track_id": display_track_id(row),
+        },
         "app_name": context_key(row)[0],
         "window_name": context_key(row)[1],
         "browser_url": context_key(row)[2],
@@ -249,7 +264,7 @@ def update_observation(observation: dict[str, Any], row: Mapping[str, Any]) -> N
 
 
 def _metadata(observation: dict[str, Any]) -> dict[str, Any]:
-    return {
+    metadata = {
         key: observation.get(key)
         for key in (
             "app_name",
@@ -262,8 +277,11 @@ def _metadata(observation: dict[str, Any]) -> dict[str, Any]:
             "capture_trigger",
             "inactive",
             "text_source",
+            "device_name",
         )
     }
+    metadata["locator"] = observation["locator"]
+    return metadata
 
 
 def _event(
@@ -278,6 +296,7 @@ def _event(
         "source_item_id": observation["source_item_id"],
         "captured_at": observation["captured_at"],
         "ended_at": ended_at,
+        "locator": observation["locator"],
         "metadata": _metadata(observation),
         "frame_candidates": observation.get("frame_candidates", []),
         "sample": sample,
@@ -297,6 +316,8 @@ class ObservationTracker:
         sample_cooldown_seconds: float = 120,
         liveness_seconds: float = 900,
         max_continuity_gap_seconds: float = 1200,
+        capture_source_id: str = "screenpipe",
+        track_id: str | None = None,
     ):
         state = state or {"schema": self.SCHEMA, "active": None, "candidate": None}
         if state.get("schema") != self.SCHEMA:
@@ -306,6 +327,8 @@ class ObservationTracker:
         self.sample_cooldown_seconds = sample_cooldown_seconds
         self.liveness_seconds = liveness_seconds
         self.max_continuity_gap_seconds = max_continuity_gap_seconds
+        self.capture_source_id = capture_source_id
+        self.track_id = track_id
 
     @property
     def active(self) -> dict[str, Any] | None:
@@ -428,6 +451,14 @@ class ObservationTracker:
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         for row in rows:
+            row_track_id = display_track_id(row)
+            if self.track_id is None:
+                self.track_id = row_track_id
+            elif row_track_id != self.track_id:
+                raise ValueError(
+                    f"frame from display track {row_track_id!r} sent to "
+                    f"tracker for {self.track_id!r}"
+                )
             captured_at = iso_timestamp(row["timestamp"])
             events.extend(self._close_stale_state(captured_at))
             key = self._effective_context_key(row)
@@ -444,7 +475,9 @@ class ObservationTracker:
                     if self.candidate["meaningful"]:
                         events.extend(self._open_candidate())
                         events.extend(self._close_active(captured_at))
-                        self.candidate = new_observation(row)
+                        self.candidate = new_observation(
+                            row, capture_source_id=self.capture_source_id
+                        )
                     else:
                         self.candidate = None
                         update_observation(self.active, row)
@@ -454,11 +487,15 @@ class ObservationTracker:
                 if self.candidate["meaningful"]:
                     events.extend(self._open_candidate())
                     events.extend(self._close_active(captured_at))
-                self.candidate = new_observation(row)
+                self.candidate = new_observation(
+                    row, capture_source_id=self.capture_source_id
+                )
                 continue
 
             if self.active is None:
-                self.candidate = new_observation(row)
+                self.candidate = new_observation(
+                    row, capture_source_id=self.capture_source_id
+                )
                 if self.candidate["meaningful"]:
                     events.extend(self._open_candidate())
                 continue
@@ -468,7 +505,9 @@ class ObservationTracker:
                 continue
             if self.active.get("opened_early"):
                 events.extend(self._close_active(captured_at))
-            self.candidate = new_observation(row)
+            self.candidate = new_observation(
+                row, capture_source_id=self.capture_source_id
+            )
 
         if self._candidate_is_stable(now):
             events.extend(self._open_candidate())

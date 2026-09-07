@@ -2,7 +2,7 @@
 
 Chronicle has one backend audio transport: contract version 2 at `/ws/audio`, with
 the WebSocket subprotocol `chronicle.audio.v2`. The source of truth is
-`contracts/audio/v2/proto/advanced_omi_backend/audio_contract/v2/audio.proto`;
+`contracts/audio/v2/proto/backend/audio_contract/v2/audio.proto`;
 Python and TypeScript consumers use generated bindings.
 
 ## Connection and control

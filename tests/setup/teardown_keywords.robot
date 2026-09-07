@@ -69,7 +69,7 @@ Prod Mode Teardown
 #     [Documentation]    DEPRECATED: Dev mode teardown keeps containers running
 #     Log To Console    \n=== Partial Cleanup (Legacy) ===
 #     Log To Console    Stopping containers (preserving volumes)...
-#     Run Process    docker    compose    -f    backends/advanced/docker-compose-ci.yml    stop    shell=True
+#     Run Process    docker    compose    -f    backend/docker-compose-ci.yml    stop    shell=True
 #     Delete All Sessions
 #     Log To Console    Containers stopped, volumes preserved for next run
 
@@ -114,11 +114,11 @@ Prod Mode Teardown
 #     Log To Console    \n=== Emergency Cleanup ===
 
 #     # Force remove containers
-#     Run Process    docker    compose    -f    backends/advanced/docker-compose-ci.yml    kill    shell=True
-#     Run Process    docker    compose    -f    backends/advanced/docker-compose-ci.yml    rm    -f    -v    shell=True
+#     Run Process    docker    compose    -f    backend/docker-compose-ci.yml    kill    shell=True
+#     Run Process    docker    compose    -f    backend/docker-compose-ci.yml    rm    -f    -v    shell=True
 
 #     # Remove all test data
-#     Run Process    rm    -rf    backends/advanced/data/test_*    shell=True
+#     Run Process    rm    -rf    backend/data/test_*    shell=True
 
 #     # Clean up orphaned volumes
 #     Run Process    docker    volume    prune    -f    shell=True

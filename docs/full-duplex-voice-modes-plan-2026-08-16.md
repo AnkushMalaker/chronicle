@@ -179,10 +179,10 @@ An engine or profile transition ends the current capture session and starts anot
 Runtime reads are strict and contain no missing-field fallback.
 
 The only accommodation for older stored sessions is the offline command
-`advanced_omi_backend.scripts.backfill_capture_provenance`. Dry-run is the default:
+`backend.scripts.backfill_capture_provenance`. Dry-run is the default:
 
 ```bash
-cd backends/advanced
+cd backend
 uv run python src/scripts/backfill_capture_provenance.py \
   --maintenance-start 2026-08-16T12:00:00Z
 ```

@@ -229,7 +229,7 @@ config-all: config-docker config-k8s ## Generate all configuration files
 
 clean: ## Clean up generated configuration files
 	@echo "🧹 Cleaning up generated configuration files..."
-	@rm -f backends/advanced/.env
+	@rm -f backend/.env
 	@rm -f extras/speaker-recognition/.env
 	@rm -f extras/openmemory-mcp/.env
 	@rm -f extras/asr-services/.env
@@ -237,7 +237,7 @@ clean: ## Clean up generated configuration files
 	@rm -f backends/simple/.env
 	@rm -f backends/other-backends/omi-webhook-compatible/.env
 	@rm -f skaffold.env
-	@rm -f backends/charts/advanced-backend/templates/env-configmap.yaml
+	@rm -f backends/charts/backend/templates/env-configmap.yaml
 	@echo "✅ Generated files cleaned"
 
 # ========================================
@@ -257,12 +257,12 @@ endif
 
 deploy-docker: config-docker ## Deploy using Docker Compose
 	@echo "🐳 Deploying with Docker Compose..."
-	@cd backends/advanced && docker-compose up -d
+	@cd backend && docker-compose up -d
 	@echo "✅ Docker Compose deployment completed"
 
 deploy-k8s: config-k8s ## Deploy to Kubernetes using Skaffold
 	@echo "☸️  Deploying to Kubernetes with Skaffold..."
-	@set -a; source skaffold.env; set +a; skaffold run --profile=advanced-backend --default-repo=$(CONTAINER_REGISTRY)
+	@set -a; source skaffold.env; set +a; skaffold run --profile=backend --default-repo=$(CONTAINER_REGISTRY)
 	@echo "✅ Kubernetes deployment completed"
 
 deploy-k8s-full: deploy-infrastructure deploy-apps ## Deploy infrastructure + applications to Kubernetes
@@ -275,7 +275,7 @@ deploy-infrastructure: ## Deploy infrastructure services to Kubernetes
 
 deploy-apps: config-k8s ## Deploy application services to Kubernetes
 	@echo "📱 Deploying application services..."
-	@set -a; source skaffold.env; set +a; skaffold run --profile=advanced-backend --default-repo=$(CONTAINER_REGISTRY)
+	@set -a; source skaffold.env; set +a; skaffold run --profile=backend --default-repo=$(CONTAINER_REGISTRY)
 	@echo "✅ Application deployment completed"
 
 # ========================================
@@ -298,15 +298,15 @@ check-apps: ## Check if application services are running
 
 build-backend: ## Build backend Docker image
 	@echo "🔨 Building backend Docker image..."
-	@cd backends/advanced && docker build -t advanced-backend:latest .
+	@cd backend && docker build -t backend:latest .
 
 up-backend: config-docker ## Start backend services
 	@echo "🚀 Starting backend services..."
-	@cd backends/advanced && docker-compose up -d
+	@cd backend && docker-compose up -d
 
 down-backend: ## Stop backend services
 	@echo "🛑 Stopping backend services..."
-	@cd backends/advanced && docker-compose down
+	@cd backend && docker-compose down
 
 # ========================================
 # KUBERNETES UTILITIES

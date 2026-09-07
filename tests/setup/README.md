@@ -140,7 +140,7 @@ robot tests/endpoints/conversation_tests.robot
 robot tests/endpoints/memory_tests.robot
 
 # When done, cleanup manually if desired
-docker-compose -f backends/advanced/docker-compose-test.yml down -v
+docker-compose -f backend/docker-compose-test.yml down -v
 ```
 
 ### After Code Changes
@@ -194,8 +194,8 @@ BACKEND_URL=http://localhost:8001
 ### Containers Won't Start
 ```bash
 # Emergency cleanup
-docker-compose -f backends/advanced/docker-compose-test.yml down -v
-rm -rf backends/advanced/data/test_*
+docker-compose -f backend/docker-compose-test.yml down -v
+rm -rf backend/data/test_*
 
 # Fresh start
 FRESH_RUN=true robot tests/
@@ -220,7 +220,7 @@ docker logs advanced-mongo-test-1
 docker exec -it advanced-mongo-test-1 mongosh test_db
 
 # Cleanup when done
-docker-compose -f backends/advanced/docker-compose-test.yml down -v
+docker-compose -f backend/docker-compose-test.yml down -v
 ```
 
 ### Stale Data Between Test Runs
@@ -235,4 +235,4 @@ FRESH_RUN=true robot tests/
 
 - **[@AGENTS.md](../../AGENTS.md)**: Project overview and development guide
 - **[@tests/README.md](../README.md)**: Testing overview (if exists)
-- **[@backends/advanced/README.md](../../backends/advanced/README.md)**: Backend service documentation
+- **[@backend/README.md](../../backend/README.md)**: Backend service documentation

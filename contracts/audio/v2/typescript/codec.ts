@@ -14,7 +14,7 @@ import {
   type ClientControl,
   type MediaEnvelope,
   type ServerControl,
-} from './advanced_omi_backend/audio_contract/v2/audio_pb';
+} from './backend/audio_contract/v2/audio_pb';
 
 const MAX_CONTROL_BYTES = 64 * 1024;
 const MAX_MEDIA_BYTES = 4 * 1024;

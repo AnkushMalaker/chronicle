@@ -113,18 +113,18 @@ profiles:
               replica.replicaCount: "0"  # Single instance for development
 
   # Application profile - frequently updated
-  - name: advanced-backend
+  - name: backend
     build:
       local:
         push: true
         useDockerCLI: true
       artifacts:
-        - image: advanced-backend
-          context: backends/advanced
+        - image: backend
+          context: backend
           docker:
             dockerfile: Dockerfile.k8s
         - image: webui
-          context: backends/advanced/webui
+          context: backend/webui
           docker:
             dockerfile: Dockerfile
 
@@ -132,15 +132,15 @@ profiles:
       helm:
         releases:
           # Application components using custom charts
-          - name: advanced-backend
-            chartPath: backends/charts/advanced-backend
+          - name: backend
+            chartPath: backends/charts/backend
             namespace: "{{.APPLICATION_NAMESPACE}}"
             createNamespace: true
             valuesFiles:
-              - backends/charts/advanced-backend/ingress-values.yaml
+              - backends/charts/backend/ingress-values.yaml
             setValueTemplates:
-              image.repository: "{{.IMAGE_REPO_advanced_backend}}"
-              image.tag: "{{.IMAGE_TAG_advanced_backend}}"
+              image.repository: "{{.IMAGE_REPO_backend}}"
+              image.tag: "{{.IMAGE_TAG_backend}}"
               # Override specific Kubernetes-specific values (not in env file)
               env.MONGODB_URI: "mongodb://mongodb.{{.INFRASTRUCTURE_NAMESPACE}}.svc.cluster.local:27017/chronicle"
               env.REDIS_URL: "redis://redis-master.{{.INFRASTRUCTURE_NAMESPACE}}.svc.cluster.local:6379/0"
@@ -170,18 +170,18 @@ profiles:
     portForward:
       - resourceType: container
         resourceName: redis-test
-        namespace: advanced
+        namespace: backend
         localPort: 6379
         port: 6380
     build:
 
       artifacts:
         - image: chronicle-backend-test
-          context: backends/advanced
+          context: backend
           docker:
             dockerfile: Dockerfile
         - image: webui-test
-          context: backends/advanced/webui
+          context: backend/webui
           docker:
             dockerfile: Dockerfile
 

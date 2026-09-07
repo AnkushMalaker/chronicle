@@ -1,0 +1,158 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "AI-powered wearable ecosystem for audio capture, transcription, and memory extraction"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "protobuf>=5.29.0,<6",
+    "easy-audio-interfaces>=0.7.1", # we need to add local-audio for scripts/local-audio.py | If we don't need that, we can remove this, and then remove portaudio19-dev from Dockerfile
+    "fastapi>=0.115.12",
+    "fastmcp>=0.5.0", # MCP server for conversation access
+    "mcp>=1.20,<2.0", # MCP client used by the Swiggy interaction mode
+    "motor>=3.7.1",
+    "ollama>=0.4.8",
+    "chronicle-wearable-sdk",
+    "python-dotenv>=1.1.0",
+    "uvicorn>=0.34.2",
+    "wyoming>=1.6.1",
+    "aiohttp>=3.8.0",
+    "httpx>=0.28.0,<1.0.0",
+    "jsonschema>=4.25.1",
+    "fastapi-users[beanie]>=14.0.1",
+    "PyYAML>=6.0.1",
+    "ruamel-yaml>=0.18.0",
+    "omegaconf>=2.3.0",
+    "langfuse>=4.0.0",
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "openinference-instrumentation-openai>=0.1",
+    "spacy>=3.8.2",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+    "redis>=5.0.0",
+    "rq>=1.16.0",
+    "soundfile>=0.12.1",
+    "google-api-python-client>=2.0.0",
+    "google-auth-oauthlib>=1.0.0",
+    "google-auth-httplib2>=0.2.0",
+    "websockets>=12.0",
+    "croniter>=1.3.0",
+    "rich>=13.0.0",
+    "minidisc-python>=0.1.0",
+    "ten-vad @ git+https://github.com/TEN-framework/ten-vad.git@22a3bcd4509d0faaa8eef4881e8af5f39c178950",
+    "pillow>=11,<13",
+]
+
+[project.optional-dependencies]
+local-audio = [
+    "easy-audio-interfaces[local-audio]>=0.7.1",
+]
+galileo = [
+    "galileo>=1.0",
+    "opentelemetry-exporter-otlp>=1.20",
+]
+benchmark = [
+    "huggingface-hub>=0.23",  # loader.py downloads LongMemEval via hf_hub_download
+    "ijson>=3.2.0",           # streaming JSON parse for the large LongMemEval files
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.isort]
+profile = "black"
+
+[tool.poetry.dependencies]
+robotframework = "^6.1.1"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*", "*Tests"]
+python_functions = ["test_*"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--spec",
+    "-v",
+    "--tb=long",
+    "--color=yes",
+    "--durations=10",
+    "--showlocals",
+    "--capture=no",
+]
+markers = [
+    "integration: marks tests as integration tests (may be slow)",
+    "unit: marks tests as unit tests (fast, isolated)",
+    "smoke: marks tests as smoke tests (quick validation)",
+    "slow: marks tests as slow running tests",
+    "api: marks tests that test API endpoints",
+    "memory: marks tests that test memory functionality",
+    "transcription: marks tests that test transcription functionality",
+    "auth: marks tests that test authentication",
+    "database: marks tests that require database access",
+]
+asyncio_mode = "auto"
+filterwarnings = [
+    "error",
+    "ignore::UserWarning",
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    # opuslib 3.x uses `is not 0`, a SyntaxWarning on py3.12 that "error" would
+    # promote to SyntaxError on first (uncached) import. Third-party; not ours.
+    "ignore::SyntaxWarning:.*opuslib.*",
+]
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["backend"]
+
+[tool.coverage.paths]
+source = [
+    "src/backend",
+    "*/site-packages/backend",
+]
+
+[tool.coverage.report]
+precision = 1
+show_missing = true
+skip_empty = true
+
+[tool.coverage.xml]
+output = "coverage-reports/coverage.xml"
+
+[tool.coverage.html]
+directory = "coverage-reports/html"
+
+[dependency-groups]
+dev = [
+    "black>=25.1.0",
+    "isort>=6.0.1",
+    "pre-commit>=4.2.0",
+    "pre-commit-uv>=4.1.4",
+]
+test = [
+    "hypothesis>=6.138.0",
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.0.0",
+    "pytest-spec>=3.2.0",
+    "pytest-cov>=6.0.0",
+    "pytest-xdist>=3.6.0",
+    "pytest-mock>=3.14.0",
+    "requests-mock>=1.12.1",
+    "pytest-json-report>=1.5.0",
+    "pytest-html>=4.0.0",
+    "aiosqlite>=0.20.0",  # For test plugin event storage
+]
+
+[tool.uv.sources]
+# Sourced by git rather than a path dep: the Docker build context is this
+# directory, so ../extras is outside it. Tracks dev until this lands on main.
+chronicle-wearable-sdk = { git = "https://github.com/SimpleOpenSoftware/chronicle", subdirectory = "extras/chronicle-wearable-sdk", branch = "dev" }

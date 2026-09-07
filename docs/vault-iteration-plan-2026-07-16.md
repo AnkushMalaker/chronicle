@@ -3,7 +3,7 @@
 Follow-up to `memory-rebuild-audit-2026-07-16.md`. Two inputs were produced:
 
 1. **Transcript categorization** of all 169 vault-eligible conversations
-   (gpt-4.1-mini, artifacts in `backends/advanced/data/transcript_categorization/`).
+   (gpt-4.1-mini, artifacts in `backend/data/transcript_categorization/`).
 2. **Deep fidelity audit** of 8 good conversations (transcript vs vault note vs
    linked entity notes) plus a whole-vault structural audit, run as three
    independent read-only agent passes over rebuild `970899d4dea6`.

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
-from advanced_omi_backend.config import get_config, reload_config
+from backend.config import get_config, reload_config
 
 
 @pytest.fixture

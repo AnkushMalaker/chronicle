@@ -28,7 +28,7 @@ The root orchestrator handles service selection and delegates configuration to i
 - **Does NOT**: Handle service-specific configuration or duplicate setup logic
 
 ### Service Scripts
-- **Backend**: `backends/advanced/init.py` - Complete Python-based interactive setup
+- **Backend**: `backend/init.py` - Complete Python-based interactive setup
 - **Speaker Recognition**: `extras/speaker-recognition/init.py` - Python-based interactive setup
 - **ASR Services**: `extras/asr-services/setup.sh` - Service startup script
 
@@ -60,8 +60,8 @@ that against the working directory. Each `init.py` finds its own files from
 `__file__`, so this does not change which `.env` it writes.
 
 ```bash
-# Advanced Backend only
-uv run --with-requirements setup-requirements.txt python backends/advanced/init.py
+# Chronicle Backend only
+uv run --with-requirements setup-requirements.txt python backend/init.py
 
 # Speaker Recognition only
 uv run --with-requirements setup-requirements.txt python extras/speaker-recognition/init.py
@@ -72,7 +72,7 @@ uv run --with-requirements setup-requirements.txt python extras/asr-services/ini
 
 ## Service Details
 
-### Advanced Backend
+### Chronicle Backend
 - **Interactive setup** for authentication, LLM, and transcription (memory is the agentic Markdown vault — no provider choice)
 - **Accepts arguments**: `--speaker-service-url`, `--parakeet-asr-url`
 - **Generates**: Complete `.env` file with all required configuration
@@ -116,7 +116,7 @@ Note (Linux): If `host.docker.internal` is unavailable, add `extra_hosts: - "hos
 
 | Service | API Port | Web UI Port | Access URL |
 |---------|----------|-------------|------------|
-| **Advanced Backend** | 8000 | 5173 | http://localhost:8000 (API), http://localhost:5173 (Dashboard) |
+| **Chronicle Backend** | 8000 | 5173 | http://localhost:8000 (API), http://localhost:5173 (Dashboard) |
 | **Speaker Recognition** | 8085 | 5175* | http://localhost:8085 (API), http://localhost:5175 (WebUI) |
 | **Langfuse** | 3002 | 3002 | http://localhost:3002 (WebUI/API) |
 | **Parakeet ASR** | 8767 | - | http://localhost:8767 (API) |
@@ -129,7 +129,7 @@ Note: Browsers require HTTPS for microphone access over network.
 
 | Service | HTTP Port | HTTPS Port | Access URL |
 |---------|-----------|------------|------------|
-| **Advanced Backend** | 80->443 | 443 | https://localhost/ (Main), https://localhost/api/ (API) |
+| **Chronicle Backend** | 80->443 | 443 | https://localhost/ (Main), https://localhost/api/ (API) |
 | **Speaker Recognition** | 8081->8444 | 8444 | https://localhost:8444/ (Main), https://localhost:8444/api/ (API) |
 | **Langfuse** | 3002 (direct fallback) | 3443 | https://localhost:3443/ (WebUI/API) |
 
@@ -164,7 +164,7 @@ Docker Desktop/WSL2) a container can't bind the Tailscale interface to advertise
 - **Manual control**: `uv run --with-requirements setup-requirements.txt python services.py manager start|stop|restart`
 - **Identity / cluster**: `GET /node` (host, Tailscale name/IP, arch, GPU) and `GET /cluster` (live tailnet view); both token-gated. `GET /health` is unauthed.
 - **Port**: 8775 (override with `SERVICE_MANAGER_PORT`)
-- **Auth**: bearer token, auto-generated into `backends/advanced/.env` as `SERVICE_MANAGER_TOKEN` on first start; the backend reads the same value and proxies admin-only requests (`/api/admin/services/*`) to the agent
+- **Auth**: bearer token, auto-generated into `backend/.env` as `SERVICE_MANAGER_TOKEN` on first start; the backend reads the same value and proxies admin-only requests (`/api/admin/services/*`) to the agent
 - **Distributed setups**: run the agent on the machine that hosts the services and point the backend at it via `SERVICE_MANAGER_URL` (e.g. `http://gpu-box.ts.net:8775`); copy the token into both machines' configuration
 - **Logs / PID**: `edge/service-manager.log`, `edge/.service-manager.pid`
 - **Remote service nodes**: a GPU box / RPi that runs a single service joins the cluster either via the wizard (*Setup type → Join a cluster*) or the one-liner `edge/install.sh <service>` — **both default to the node agent** (advertise + control + reboot persistence) and need no `SERVICE_MANAGER_URL` wiring. The legacy advertise-only `edge-agent` sidecar (`--profile edge`) is the secondary fallback via `edge/install.sh --advertise-only`, for boxes where you don't want a host process (no control, no WSL2). See [edge/README.md](../edge/README.md).
@@ -284,8 +284,8 @@ uv run --with-requirements setup-requirements.txt python services.py stop asr-se
 You can also manage services individually:
 
 ```bash
-# Advanced Backend
-cd backends/advanced && docker compose up --build -d
+# Chronicle Backend
+cd backend && docker compose up --build -d
 
 # Speaker Recognition
 cd extras/speaker-recognition && docker compose up --build -d
@@ -297,7 +297,7 @@ cd extras/asr-services && docker compose up --build -d
 ## Configuration Files
 
 ### Generated Files
-- `backends/advanced/.env` - Backend configuration with all services
+- `backend/.env` - Backend configuration with all services
 - `extras/speaker-recognition/.env` - Speaker service configuration
 - All services backup existing `.env` files automatically
 
@@ -353,7 +353,7 @@ curl http://localhost:8767/health
 docker compose logs [service-name]
 
 # Backend logs
-cd backends/advanced && docker compose logs chronicle-backend
+cd backend && docker compose logs chronicle-backend
 
 # Speaker Recognition logs
 cd extras/speaker-recognition && docker compose logs speaker-service

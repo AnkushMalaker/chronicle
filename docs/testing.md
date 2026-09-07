@@ -11,7 +11,7 @@ configuration.
 From the repository root:
 
 ```bash
-PYTHONPATH=backends/advanced/src uv run \
+PYTHONPATH=backend/src uv run \
   --with-requirements setup-requirements.txt \
   --with pytest \
   --with pytest-cov \
@@ -23,13 +23,13 @@ PYTHONPATH=backends/advanced/src uv run \
   --cov-report=html
 ```
 
-### Advanced backend
+### Chronicle backend
 
 ```bash
-cd backends/advanced
+cd backend
 uv sync --locked --group test
 uv run --group test pytest \
-  --cov=advanced_omi_backend \
+  --cov=backend \
   --cov-report=term-missing \
   --cov-report=xml \
   --cov-report=html
@@ -37,7 +37,7 @@ uv run --group test pytest \
 
 Twenty of these tests exercise a real Redis or MongoDB rather than a mock, because
 what they assert only exists in the real thing: vault writes take a Redis lock that
-[fails closed by design](../backends/advanced/src/advanced_omi_backend/services/memory/vault_lock.py),
+[fails closed by design](../backend/src/backend/services/memory/vault_lock.py),
 and the audio-chunk and silence-trim tests assert on stored Mongo documents.
 
 **Without those services they skip**, naming the command to start them — so a bare

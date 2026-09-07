@@ -9,11 +9,11 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from advanced_omi_backend.models.conversation import Conversation
-from advanced_omi_backend.models.user import User
-from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
-from advanced_omi_backend.utils.logging_utils import mask_dict
-from advanced_omi_backend.utils.user_time import format_user_datetime
+from backend.models.conversation import Conversation
+from backend.models.user import User
+from backend.plugins.base import BasePlugin, PluginContext, PluginResult
+from backend.utils.logging_utils import mask_dict
+from backend.utils.user_time import format_user_datetime
 
 from .email_service import SMTPEmailService
 from .templates import format_html_email, format_text_email

@@ -2,7 +2,7 @@
 
 ## Origin
 This design system was **authored inside Claude Design** (not built by the `/design-sync`
-converter). It was reverse-engineered from `backends/advanced/webui/` — lifting the recurring
+converter). It was reverse-engineered from `backend/webui/` — lifting the recurring
 inline-Tailwind patterns into real tokens + primitives.
 
 - Source project (regular Design type, `PROJECT_TYPE_PROJECT`): `68c42a87-8bda-43b0-a922-63cfb79a3abb`

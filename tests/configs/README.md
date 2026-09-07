@@ -28,21 +28,23 @@ Symlink to `parakeet-ollama.yml` for convenience.
 ### With run-test.sh
 
 ```bash
+cd backend
+
 # Test with Deepgram + OpenAI (cloud)
-CONFIG_FILE=../../tests/configs/deepgram-openai.yml ./backends/advanced/run-test.sh
+CONFIG_FILE=../tests/configs/deepgram-openai.yml ./run-test.sh
 
 # Test with Parakeet + Ollama (local)
-CONFIG_FILE=../../tests/configs/parakeet-ollama.yml ./backends/advanced/run-test.sh
+CONFIG_FILE=../tests/configs/parakeet-ollama.yml ./run-test.sh
 
 # Using the full-local alias
-CONFIG_FILE=../../tests/configs/full-local.yml ./backends/advanced/run-test.sh
+CONFIG_FILE=../tests/configs/full-local.yml ./run-test.sh
 ```
 
 ### With Docker Compose
 
 ```bash
-# From backends/advanced/
-CONFIG_FILE=../../tests/configs/deepgram-openai.yml docker compose -f docker-compose-test.yml up
+# From backend/
+CONFIG_FILE=../tests/configs/deepgram-openai.yml docker compose -f docker-compose-test.yml up
 ```
 
 ### Matrix Testing
@@ -52,7 +54,7 @@ Test all configurations:
 ```bash
 for cfg in tests/configs/*.yml; do
   echo "Testing with: $cfg"
-  CONFIG_FILE=$cfg ./backends/advanced/run-test.sh || exit 1
+  CONFIG_FILE=$cfg ./run-test.sh || exit 1
 done
 ```
 

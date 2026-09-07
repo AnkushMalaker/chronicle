@@ -17,6 +17,7 @@ def frame(
     trigger: str = "app_switch",
     text: str = "",
     text_source: str = "accessibility",
+    device_name: str | None = None,
 ):
     return {
         "id": identifier,
@@ -27,6 +28,7 @@ def frame(
         "capture_trigger": trigger,
         "full_text": text,
         "text_source": text_source,
+        "device_name": device_name,
     }
 
 
@@ -274,3 +276,55 @@ def test_short_shortlist_is_returned_whole():
         {"frame_id": 1, "score": 0.9, "captured_at": "2026-07-23T10:00:01Z"},
     ]
     assert [c["frame_id"] for c in stratify_candidates(candidates)] == [1, 3]
+
+
+def test_tracker_rejects_frames_from_another_display_track():
+    tracker = ObservationTracker(
+        capture_source_id="screenpipe-rainbow", track_id="Display 1"
+    )
+    tracker.process_rows(
+        [frame(1, 0, "Code", "collector.py", device_name="Display 1")],
+        "2026-07-23T10:00:11Z",
+    )
+
+    try:
+        tracker.process_rows(
+            [frame(2, 12, "Video", "Movie", device_name="Display 2")],
+            "2026-07-23T10:00:12Z",
+        )
+    except ValueError as error:
+        assert "Display 2" in str(error)
+        assert "Display 1" in str(error)
+    else:
+        raise AssertionError("a display-local tracker accepted another display")
+
+    assert tracker.active is not None
+    assert tracker.active["device_name"] == "Display 1"
+
+
+def test_observation_event_carries_a_typed_display_locator():
+    tracker = ObservationTracker(
+        capture_source_id="screenpipe-rainbow", track_id="Display 2"
+    )
+
+    [opened] = tracker.process_rows(
+        [
+            frame(
+                7,
+                0,
+                "Video",
+                "Movie",
+                trigger="click",
+                device_name="Display 2",
+            )
+        ],
+        "2026-07-23T10:00:00Z",
+    )
+
+    assert opened["locator"] == {
+        "capture_source_id": "screenpipe-rainbow",
+        "modality": "screen",
+        "track_id": "Display 2",
+    }
+    assert opened["metadata"]["device_name"] == "Display 2"
+    assert opened["metadata"]["locator"] == opened["locator"]

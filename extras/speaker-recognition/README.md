@@ -813,9 +813,9 @@ curl -X POST "https://your-domain/v1/listen" \
 | **Live Inference** | `/v1/ws_listen` WebSocket (true Deepgram streaming replacement) | Production use, existing Deepgram clients |
 | **Live Inference (Complex)** | Direct Deepgram streaming, client-side coordination | Advanced features, maximum control |
 
-## Integration with Advanced Backend
+## Integration with Chronicle Backend
 
-The advanced backend communicates with this service through the `client.py` module, which provides both async and sync interfaces for backward compatibility.
+The Chronicle backend communicates with this service through the `client.py` module, which provides both async and sync interfaces for backward compatibility.
 
 ## Laptop Client
 
@@ -908,9 +908,9 @@ The service provides two Docker Compose configurations:
 | `docker-compose.yml` | Development/Production | 8085 | Normal usage, WebUI access |
 | `docker-compose-test.yml` | Testing | 8086 | Integration tests, isolated environment |
 
-## Integration with Advanced Backend
+## Integration with Chronicle Backend
 
-The advanced backend communicates with this service through the `client.py` module, which provides both async and sync interfaces for backward compatibility.
+The Chronicle backend communicates with this service through the `client.py` module, which provides both async and sync interfaces for backward compatibility.
 
 ## Performance Notes
 

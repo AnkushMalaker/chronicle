@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from advanced_omi_backend.integrations.swiggy import (
+from backend.integrations.swiggy import (
     FileTokenStore,
     Server,
     SwiggyAuthError,
@@ -18,19 +18,15 @@ from advanced_omi_backend.integrations.swiggy import (
     SwiggyError,
     search_products,
 )
-from advanced_omi_backend.integrations.swiggy.payment_job import (
-    enqueue_instamart_payment_monitor,
-)
-from advanced_omi_backend.llm_client import async_chat_with_tools
-from advanced_omi_backend.plugins import (
+from backend.integrations.swiggy.payment_job import enqueue_instamart_payment_monitor
+from backend.llm_client import async_chat_with_tools
+from backend.plugins import (
     BasePlugin,
     InteractionContext,
     InteractionModeDefinition,
     InteractionResult,
 )
-from advanced_omi_backend.services.interaction_modes.registry import (
-    normalize_interaction_text,
-)
+from backend.services.interaction_modes.registry import normalize_interaction_text
 
 from .cart import (
     cart_fingerprint,

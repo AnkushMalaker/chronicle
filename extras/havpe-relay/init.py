@@ -41,7 +41,7 @@ class HavpeRelaySetup:
         self.backend_env_path = (
             Path(__file__).resolve().parent.parent.parent
             / "backends"
-            / "advanced"
+            / "backend"
             / ".env"
         )
 

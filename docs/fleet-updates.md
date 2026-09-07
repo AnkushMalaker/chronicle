@@ -63,7 +63,7 @@ Updating the **hub** restarts the backend — the WebUI briefly disconnects.
 
 ## GitHub → users flow
 
-1. CI (`advanced-docker-compose-build.yml`) builds images on release/main and
+1. CI (`backend-docker-compose-build.yml`) builds images on release/main and
    pushes to GHCR with `CHRONICLE_BUILD_VERSION` baked in.
 2. A node's update check compares its checkout against its upstream branch or
    the latest `v*` release tag (via `git fetch`, no GitHub API dependency).

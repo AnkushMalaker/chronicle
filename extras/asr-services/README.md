@@ -250,7 +250,7 @@ Pre-configured `.env` files in `configs/`:
 Configure the Chronicle backend to use your ASR service:
 
 ```bash
-# In backends/advanced/.env
+# In backend/.env
 PARAKEET_ASR_URL=http://host.docker.internal:8767
 ```
 

@@ -89,4 +89,4 @@ ssh -o StrictHostKeyChecking=no "$SSH_USER@$K8S_NODE_IP" "curl -s http://$REGIST
 
 echo ""
 echo "🚀 Now you can deploy your application!"
-echo "Run: skaffold run --profile=advanced-backend --default-repo=$REGISTRY"
+echo "Run: skaffold run --profile=backend --default-repo=$REGISTRY"

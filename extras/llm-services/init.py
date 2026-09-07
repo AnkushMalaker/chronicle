@@ -251,7 +251,7 @@ class LLMServicesSetup:
         """HF token, in priority order: --hf-token arg, backend .env, repo-root .env,
         this service's own .env.
 
-        Mirrors how the wizard sources shared secrets: ``backends/advanced/.env`` is
+        Mirrors how the wizard sources shared secrets: ``backend/.env`` is
         the canonical hub on a main machine; the repo-root ``.env`` is the per-node
         store for backend-less cluster-join nodes. Both are two levels up from here.
         """
@@ -259,7 +259,7 @@ class LLMServicesSetup:
         if arg_token:
             return arg_token
         for path in (
-            str(REPO_ROOT / "backends/advanced/.env"),
+            str(REPO_ROOT / "backend/.env"),
             str(REPO_ROOT / ".env"),
             str(SERVICE_DIR / ".env"),
         ):
@@ -303,7 +303,7 @@ class LLMServicesSetup:
                 raise ValueError(
                     f"A non-loopback {label} bind requires LLAMA_API_KEY. "
                     "Set the same key in extras/llm-services/.env and "
-                    "backends/advanced/.env."
+                    "backend/.env."
                 )
             return host, address
 

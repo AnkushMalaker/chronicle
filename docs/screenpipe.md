@@ -449,8 +449,8 @@ recorder and should not be re-enabled as the login owner.
 
 - `extras/screenpipe-collector/`: collector CLI, observation state machine, checkpoints, and service installation
 - `extras/screenpipe-collector/chronicle_screenpipe/meeting.py`: PipeWire meeting detection and audio-chunk tagging
-- `backends/advanced/src/advanced_omi_backend/routers/modules/device_input_routes.py`: capture-node ingestion API
-- `backends/advanced/src/advanced_omi_backend/services/device_audio_ingest.py`: meeting-aware audio sessionization into conversations
-- `backends/advanced/src/advanced_omi_backend/services/timeline/memory.py`: settled-day episode memory into the vault
+- `backend/src/backend/routers/modules/device_input_routes.py`: capture-node ingestion API
+- `backend/src/backend/services/device_audio_ingest.py`: meeting-aware audio sessionization into conversations
+- `backend/src/backend/services/timeline/memory.py`: settled-day episode memory into the vault
 - `extras/vault-sync/vault_core.py` and `syncthing_manager.py`: vault sync core and Syncthing pairing/control
 - `extras/chronicle-tray/chronicle_tray/sections/vault.py`: unified tray UI adapter (imports the vault-sync core in place)

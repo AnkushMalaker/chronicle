@@ -9,10 +9,10 @@ on:
       - "tests/unit/**"
       - "extras/chronicle-setup/**"
       - "extras/chronicle-client/**"
-      - "backends/advanced/src/**"
-      - "backends/advanced/tests/**"
-      - "backends/advanced/pyproject.toml"
-      - "backends/advanced/uv.lock"
+      - "backend/src/**"
+      - "backend/tests/**"
+      - "backend/pyproject.toml"
+      - "backend/uv.lock"
       - "extras/asr-services/common/**"
       - "extras/asr-services/providers/**"
       - "extras/asr-services/tests/**"
@@ -34,7 +34,7 @@ jobs:
     env:
       # services.py and status.py live at the repo root, so tests/unit needs the
       # workspace itself importable, not just the backend package.
-      PYTHONPATH: ${{ github.workspace }}/backends/advanced/src:${{ github.workspace }}
+      PYTHONPATH: ${{ github.workspace }}/backend/src:${{ github.workspace }}
 
     steps:
       - name: Checkout code
@@ -111,13 +111,13 @@ jobs:
           --with pytest
           pytest extras/chronicle-client/tests -q
 
-  advanced-backend-unit:
-    name: Advanced backend unit tests
+  backend-unit:
+    name: Backend unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
       run:
-        working-directory: backends/advanced
+        working-directory: backend
     services:
       # Some backend tests hit real local services (vault locks are Redis-backed
       # and fail closed; the audio-chunk and silence-trim tests assert on real
@@ -159,15 +159,15 @@ jobs:
 
       - name: Run unit tests with coverage
         # chronicle_setup comes in on the command line rather than as a path dep:
-        # tests/test_memory_setup_wizard.py loads backends/advanced/init.py, which
-        # imports it, but ../../extras is outside the Docker build context, so
+        # tests/test_memory_setup_wizard.py loads backend/init.py, which
+        # imports it, but ../extras is outside the Docker build context, so
         # declaring it in pyproject.toml would break the image build. Same reasoning
         # as the chronicle-wearable-sdk git source there.
         run: >-
           uv run --group test
-          --with ../../extras/chronicle-setup
+          --with ../extras/chronicle-setup
           pytest
-          --cov=advanced_omi_backend
+          --cov=backend
           --cov-report=term-missing
           --cov-report=xml
           --cov-report=html
@@ -176,8 +176,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: advanced-backend-unit-coverage
-          path: backends/advanced/coverage-reports/
+          name: backend-unit-coverage
+          path: backend/coverage-reports/
           if-no-files-found: warn
           retention-days: 14
 

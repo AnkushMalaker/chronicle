@@ -4,7 +4,7 @@ Email Summarizer Plugin Setup Wizard
 
 Configures SMTP credentials and plugin settings.
 Follows Chronicle's clean configuration architecture:
-- Secrets → backends/advanced/.env
+- Secrets → backend/.env
 - Non-secret settings → plugins/email_summarizer/config.yml
 - Orchestration → config/plugins.yml
 """
@@ -20,7 +20,7 @@ from rich.prompt import Confirm
 from ruamel.yaml import YAML
 
 # This used to be parents[6], correct only back when plugins lived under
-# backends/advanced/src/advanced_omi_backend/plugins. From the repository root
+# backend/src/backend/plugins. From the repository root
 # it resolves to "/", so every config path below pointed outside the checkout.
 project_root = find_repo_root()
 
@@ -91,7 +91,7 @@ def main():
     console.print("This plugin sends email summaries when conversations complete.\n")
 
     # Path to main backend .env file
-    env_path = str(project_root / "backends" / "advanced" / ".env")
+    env_path = str(project_root / "backend" / ".env")
 
     # SMTP Configuration
     console.print("[bold]SMTP Configuration[/bold]")
@@ -154,7 +154,7 @@ def main():
     set_key(env_path, "FROM_EMAIL", from_email)
     set_key(env_path, "FROM_NAME", from_name)
 
-    console.print("[green]✅ SMTP credentials saved to backends/advanced/.env[/green]")
+    console.print("[green]✅ SMTP credentials saved to backend/.env[/green]")
 
     # Auto-update plugins.yml with orchestration settings only
     console.print("\n📝 [bold]Updating plugin configuration...[/bold]")
@@ -174,9 +174,7 @@ def main():
         "\n[bold cyan]✅ Email Summarizer configured successfully![/bold cyan]"
     )
     console.print("\n[bold]Configuration saved to:[/bold]")
-    console.print(
-        "  • [green]backends/advanced/.env[/green] - SMTP credentials (secrets)"
-    )
+    console.print("  • [green]backend/.env[/green] - SMTP credentials (secrets)")
     console.print(
         "  • [green]config/plugins.yml[/green] - Plugin orchestration (enabled, events)"
     )
@@ -191,12 +189,10 @@ def main():
         console.print()
 
     console.print("[bold]Restart backend to apply:[/bold]")
-    console.print("  [dim]cd backends/advanced && docker compose restart[/dim]")
+    console.print("  [dim]cd backend && docker compose restart[/dim]")
     console.print()
     console.print("[yellow]⚠️  SECURITY: Never commit secrets to git![/yellow]")
-    console.print(
-        "[yellow]    • Secrets go in backends/advanced/.env (gitignored)[/yellow]"
-    )
+    console.print("[yellow]    • Secrets go in backend/.env (gitignored)[/yellow]")
     console.print("[yellow]    • Config files use ${ENV_VAR} references only[/yellow]")
 
 

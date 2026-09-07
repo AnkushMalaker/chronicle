@@ -11,7 +11,7 @@ on the line(s) directly above it, saying why it has to live there:
 
     def build_router():
         # Imported here to break the circular import with plugins.router.
-        from advanced_omi_backend.plugins.router import PluginRouter
+        from backend.plugins.router import PluginRouter
 
 Module-level imports are never flagged, including `if TYPE_CHECKING:` blocks and
 `try/except ImportError` fallbacks. Nor is a nested import guarded by

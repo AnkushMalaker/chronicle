@@ -24,7 +24,7 @@ Use a 1440×1000 viewport, a fixed device scale factor, `full_page=True`, and wa
 
 The web dashboard is protected by a JWT. Prefer UI login when testing authentication. For screenshot-only work, an API login is faster:
 
-1. Read `ADMIN_EMAIL` and `ADMIN_PASSWORD` from `backends/advanced/.env` or the process environment without printing them.
+1. Read `ADMIN_EMAIL` and `ADMIN_PASSWORD` from `backend/.env` or the process environment without printing them.
 2. `POST {backend}/auth/jwt/login` as form fields `username` and `password`.
 3. Before navigating to a protected route, inject the returned `access_token` into local storage. The key is `{base-path-or-root}_token` (`root_token` for the normal `/` base path).
 4. Load the route and verify it did not redirect to `/login`. The app verifies the token through `GET /users/me`.
@@ -34,7 +34,7 @@ Never put a token, password, or authenticated screenshot with personal data in a
 ## Dashboard workflow
 
 1. Start the dashboard and backend using the repository’s normal commands. Confirm the actual URL and port.
-2. Read `backends/advanced/webui/src/App.tsx` and build the route inventory from its current `<Route>` entries. Exclude wildcard fallbacks and redirect-only aliases; do not copy a static inventory into the capture script.
+2. Read `backend/webui/src/App.tsx` and build the route inventory from its current `<Route>` entries. Exclude wildcard fallbacks and redirect-only aliases; do not copy a static inventory into the capture script.
 3. Use a real recording ID for `/recordings/:id` and a real episode ID for `/timeline/:episodeId`; discover them through the UI or an authenticated API request. Never invent an ID and call that page complete.
 4. Vite's HMR socket keeps the page from ever reaching `networkidle`. Wait on `domcontentloaded` plus the page's own content, not on network quiet. Never reject a page merely because its text contains “Loading”; detect blank/error pages and record unresolved loading indicators as review findings.
 5. Capture `/login` unauthenticated. Log in through the UI, then capture every protected route with the same viewport, theme, and browser state.

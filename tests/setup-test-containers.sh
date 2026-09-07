@@ -18,7 +18,7 @@ print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # Navigate to backend directory
 SCRIPT_DIR="$(dirname "$0")"
-cd "$SCRIPT_DIR/../backends/advanced" || exit 1
+cd "$SCRIPT_DIR/../backend" || exit 1
 
 # Load environment variables for tests
 if [ -f "$SCRIPT_DIR/setup/.env.test" ]; then

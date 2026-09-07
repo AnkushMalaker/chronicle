@@ -1,7 +1,7 @@
 # Hourly Recap Plugin Configuration
 #
 # This file contains non-secret configuration for the hourly recap plugin.
-# Secrets (SMTP credentials) are stored in backends/advanced/.env
+# Secrets (SMTP credentials) are stored in backend/.env
 # Plugin orchestration (enabled, events) is in config/plugins.yml
 
 # How far back to look for conversations (in minutes)

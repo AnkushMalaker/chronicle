@@ -1,0 +1,535 @@
+"""
+Conversation utilities - speech detection, title/summary generation.
+
+Extracted from legacy TranscriptionService to be reusable across V2 architecture.
+"""
+
+import asyncio
+import logging
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from backend.config import get_speech_detection_settings
+from backend.constants import TITLE_NOT_GENERATED
+from backend.llm_client import async_generate
+from backend.models.conversation import Conversation
+from backend.prompt_optimizer import get_user_prompt
+from backend.prompt_registry import get_prompt_registry
+
+logger = logging.getLogger(__name__)
+
+
+def has_legacy_title_summary_fallback(
+    *, title: Optional[str], summary: Optional[str], transcript: str
+) -> bool:
+    """Detect the retired exception fallback that copied raw transcript prefixes.
+
+    This fingerprint is intentionally exact. It identifies known-corrupt historical
+    output without guessing that every naturally short or quoted title is invalid.
+    """
+    if not transcript:
+        return False
+    words = transcript.split()[:6]
+    fallback_title = " ".join(words)
+    if len(fallback_title) > 40:
+        fallback_title = f"{fallback_title[:40]}..."
+    fallback_summary = f"{transcript[:120]}..." if len(transcript) > 120 else transcript
+    return title == fallback_title or summary == fallback_summary
+
+
+def is_meaningful_speech(combined_results: dict) -> bool:
+    """
+    Convenience wrapper to check if combined transcription results contain meaningful speech.
+
+    This is a shared helper used by both speech detection and conversation timeout logic.
+
+    Args:
+        combined_results: Combined results from TranscriptionResultsAggregator with:
+            - "text": str - Full transcript text
+            - "words": list - Word-level data with confidence and timing
+            - "segments": list - Speaker segments
+            - "chunk_count": int - Number of chunks processed
+
+    Returns:
+        bool: True if meaningful speech detected, False otherwise
+
+    Example:
+        >>> combined = await aggregator.get_combined_results(session_id)
+        >>> if is_meaningful_speech(combined):
+        >>>     print("Meaningful speech detected!")
+    """
+    if not combined_results.get("text"):
+        return False
+
+    transcript_data = {
+        "text": combined_results["text"],
+        "words": combined_results.get("words", []),
+    }
+
+    speech_analysis = analyze_speech(transcript_data)
+    return speech_analysis["has_speech"]
+
+
+def analyze_speech(transcript_data: dict) -> dict:
+    """
+    Analyze transcript for meaningful speech to determine if conversation should be created.
+
+    Uses configurable thresholds from environment:
+    - SPEECH_DETECTION_MIN_WORDS (default: 10)
+    - SPEECH_DETECTION_MIN_CONFIDENCE (default: 0.7)
+    - SPEECH_DETECTION_MIN_DURATION (default: 10.0)
+
+    Args:
+        transcript_data: Dictionary with:
+            - "text": str - Full transcript text
+            - "words": list - Word-level data with confidence and timing (optional)
+                [{"text": str, "confidence": float, "start": float, "end": float}, ...]
+
+    Returns:
+        dict: {
+            "has_speech": bool,
+            "reason": str,
+            "word_count": int,
+            "duration": float (seconds, 0.0 if no timing data),
+            "speech_start": float (optional),
+            "speech_end": float (optional),
+            "fallback": bool (optional, true if text-only analysis)
+        }
+
+    Example:
+        >>> result = analyze_speech({"text": "Hello world", "words": [...]})
+        >>> if result["has_speech"]:
+        >>>     print(f"Speech detected: {result['word_count']} words, {result['duration']}s")
+    """
+    settings = get_speech_detection_settings()
+    words = transcript_data.get("words", [])
+
+    logger.info(
+        f"🔬 analyze_speech: words_list_length={len(words)}, settings={settings}"
+    )
+    if words and len(words) > 0:
+        logger.info(f"📝 First 3 words: {words[:3]}")
+
+    # Method 1: Word-level analysis (preferred - has confidence scores and timing)
+    if words:
+        # Filter by confidence threshold
+        valid_words = [
+            w for w in words if (w.get("confidence") or 0) >= settings["min_confidence"]
+        ]
+
+        if len(valid_words) < settings["min_words"]:
+            # Not enough valid words in word-level data - fall through to text-only analysis
+            # This handles cases where word-level data is incomplete or low confidence
+            logger.debug(
+                f"Only {len(valid_words)} valid words, falling back to text-only analysis"
+            )
+            # Continue to Method 2 (don't return early)
+        else:
+            # Calculate speech duration from word timing
+            if valid_words:
+                speech_start = valid_words[0].get("start", 0)
+                speech_end = valid_words[-1].get("end", 0)
+                speech_duration = speech_end - speech_start
+
+                # Debug logging for timestamp investigation
+                logger.info(
+                    f"🕐 Speech timing: start={speech_start:.2f}s, end={speech_end:.2f}s, "
+                    f"duration={speech_duration:.2f}s (first_word={valid_words[0]}, last_word={valid_words[-1]})"
+                )
+
+                # If no timing data (duration = 0), fall back to text-only analysis
+                # This happens with some streaming transcription services
+                if speech_duration == 0:
+                    logger.debug(
+                        "Word timing data missing, falling back to text-only analysis"
+                    )
+                    # Continue to Method 2 (text-only fallback)
+                else:
+                    # Check minimum duration threshold when we have timing data
+                    min_duration = settings.get("min_duration", 10.0)
+                    logger.info(
+                        f"📏 Comparing duration {speech_duration:.1f}s vs threshold {min_duration:.1f}s"
+                    )
+                    if speech_duration < min_duration:
+                        return {
+                            "has_speech": False,
+                            "reason": f"Speech too short ({speech_duration:.1f}s < {min_duration}s)",
+                            "word_count": len(valid_words),
+                            "duration": speech_duration,
+                        }
+
+                    return {
+                        "has_speech": True,
+                        "word_count": len(valid_words),
+                        "speech_start": speech_start,
+                        "speech_end": speech_end,
+                        "duration": speech_duration,
+                        "reason": f"Valid speech detected ({len(valid_words)} words, {speech_duration:.1f}s)",
+                    }
+
+    # Method 2: Text-only fallback (when no word-level data available)
+    text = transcript_data.get("text", "").strip()
+    if text:
+        word_count = len(text.split())
+        if word_count >= settings["min_words"]:
+            return {
+                "has_speech": True,
+                "word_count": word_count,
+                "speech_start": 0.0,
+                "speech_end": 0.0,
+                "duration": 0.0,
+                "reason": f"Valid speech detected ({word_count} words, no timing data)",
+                "fallback": True,
+            }
+
+    # No speech detected
+    return {
+        "has_speech": False,
+        "reason": "No meaningful speech content detected",
+        "word_count": 0,
+        "duration": 0.0,
+    }
+
+
+def _format_conversation_for_summary(
+    text: str, segments: Optional[list]
+) -> tuple[str, bool]:
+    """Return speaker-formatted transcript text and whether speakers were present."""
+    conversation_text = text
+    include_speakers = False
+    if segments:
+        formatted_lines = []
+        speakers_in_conversation = set()
+        for segment in segments:
+            speaker = segment.speaker or ""
+            segment_text = segment.text.strip() if segment.text else ""
+            if not segment_text:
+                continue
+            if speaker:
+                formatted_lines.append(f"{speaker}: {segment_text}")
+                speakers_in_conversation.add(speaker)
+            else:
+                formatted_lines.append(segment_text)
+        if formatted_lines:
+            conversation_text = "\n".join(formatted_lines)
+            include_speakers = bool(speakers_in_conversation)
+    return conversation_text, include_speakers
+
+
+async def generate_conversation_title(
+    text: str,
+    segments: Optional[list] = None,
+    user_id: Optional[str] = None,
+) -> str:
+    """Generate a concise title independently from both summaries."""
+    conversation_text, _ = _format_conversation_for_summary(text, segments)
+    if not conversation_text or len(conversation_text.strip()) < 10:
+        return TITLE_NOT_GENERATED
+
+    prompt_text = await get_user_prompt("conversation.title", user_id)
+    prompt = f"""{prompt_text}
+
+TRANSCRIPT:
+"{conversation_text}"
+"""
+    response = await async_generate(prompt, operation="conversation_title")
+    for line in response.strip().split("\n"):
+        line = line.strip()
+        if line.startswith("Title:"):
+            return line.replace("Title:", "").strip().strip('"').strip("'")
+    return response.strip().strip('"').strip("'") or TITLE_NOT_GENERATED
+
+
+async def generate_short_summary(
+    text: str,
+    segments: Optional[list] = None,
+    user_id: Optional[str] = None,
+) -> str:
+    """Generate the short list-view summary independently from the title."""
+    conversation_text, include_speakers = _format_conversation_for_summary(
+        text, segments
+    )
+    if not conversation_text or len(conversation_text.strip()) < 10:
+        return "No content"
+
+    speaker_instruction = (
+        '- Include speaker names when relevant (e.g., "John discusses X with Sarah")\n'
+        if include_speakers
+        else ""
+    )
+    prompt_text = await get_user_prompt(
+        "conversation.short_summary",
+        user_id,
+        speaker_instruction=speaker_instruction,
+    )
+    prompt = f"""{prompt_text}
+
+TRANSCRIPT:
+"{conversation_text}"
+"""
+    response = await async_generate(prompt, operation="short_summary")
+    for line in response.strip().split("\n"):
+        line = line.strip()
+        if line.startswith("Summary:"):
+            return line.replace("Summary:", "").strip().strip('"').strip("'")
+    return response.strip().strip('"').strip("'") or "No content"
+
+
+async def generate_detailed_summary(
+    text: str,
+    segments: Optional[list] = None,
+    memory_context: Optional[str] = None,
+) -> str:
+    """
+    Generate a comprehensive, detailed summary of the conversation.
+
+    This summary provides full information about what was discussed and said,
+    correcting transcript errors and removing filler words to create a higher
+    quality information set. Not word-for-word like the transcript, but captures
+    all key points, context, and meaningful content.
+
+    Args:
+        text: Conversation transcript (used if segments not provided)
+        segments: Optional list of speaker segments with structure:
+            [{"speaker": str, "text": str, "start": float, "end": float}, ...]
+            If provided, includes speaker attribution in detailed summary
+        memory_context: Optional context from prior conversations/memories.
+            When provided, injected into the prompt so the LLM can produce
+            more informed, contextual summaries.
+
+    Returns:
+        str: Comprehensive detailed summary (multiple paragraphs) or fallback
+    """
+    conversation_text, include_speakers = _format_conversation_for_summary(
+        text, segments
+    )
+
+    if not conversation_text or len(conversation_text.strip()) < 10:
+        return "No meaningful content to summarize"
+
+    speaker_instruction = (
+        """- Attribute key points and statements to specific speakers when relevant
+- Capture the flow of conversation between participants
+- Note any agreements, disagreements, or important exchanges
+"""
+        if include_speakers
+        else ""
+    )
+
+    memory_section = ""
+    if memory_context:
+        memory_section = f"""CONTEXT ABOUT THE USER (from prior conversations):
+{memory_context}
+
+"""
+
+    registry = get_prompt_registry()
+    prompt_text = await registry.get_prompt(
+        "conversation.detailed_summary",
+        speaker_instruction=speaker_instruction,
+        memory_section=memory_section,
+    )
+
+    prompt = f"""{prompt_text}
+
+TRANSCRIPT:
+"{conversation_text}"
+"""
+
+    summary = await async_generate(prompt, operation="detailed_summary")
+    return summary.strip().strip('"').strip("'") or "No meaningful content to summarize"
+
+
+# ============================================================================
+# Conversation Job Helpers
+# ============================================================================
+
+
+def extract_speakers_from_segments(segments: list) -> List[str]:
+    """
+    Extract unique speaker names from segments.
+
+    Args:
+        segments: List of segments (dict or SpeakerSegment objects)
+
+    Returns:
+        List of unique speaker names (excluding "Unknown")
+    """
+    speakers = []
+    if segments:
+        for seg in segments:
+            speaker = (
+                seg.get("speaker", "Unknown")
+                if isinstance(seg, dict)
+                else (seg.speaker or "Unknown")
+            )
+            if speaker and speaker != "Unknown" and speaker not in speakers:
+                speakers.append(speaker)
+    return speakers
+
+
+async def track_speech_activity(
+    speech_analysis: Dict[str, Any],
+    last_word_count: int,
+    conversation_id: str,
+    redis_client,
+) -> tuple[float, int]:
+    """
+    Track new speech activity and update last speech timestamp using audio timestamps.
+
+    Uses word count to detect new speech, and audio timestamps (speech_end) to track
+    when the last speech occurred in the audio stream (not wall-clock time).
+
+    Args:
+        speech_analysis: Speech analysis results from analyze_speech() with:
+            - word_count: Number of words detected
+            - speech_end: Audio timestamp of last word (if available)
+            - fallback: True if using text-only analysis without timing
+        last_word_count: Previous word count
+        conversation_id: Conversation ID for Redis key
+        redis_client: Redis client instance
+
+    Returns:
+        Tuple of (last_meaningful_speech_time, new_word_count)
+        Note: last_meaningful_speech_time is audio timestamp, NOT wall-clock time
+    """
+    current_word_count = speech_analysis.get("word_count", 0)
+
+    if current_word_count > last_word_count:
+        # Use audio timestamp (speech_end) when available
+        speech_end = speech_analysis.get("speech_end")
+        is_fallback = speech_analysis.get("fallback", False)
+
+        if speech_end is not None and speech_end > 0:
+            # Preferred: Use audio timestamp from word-level timing
+            last_meaningful_speech_time = speech_end
+            logger.debug(
+                f"🗣️ New speech detected (word count: {current_word_count}), "
+                f"audio timestamp: {speech_end:.2f}s"
+            )
+        else:
+            # Fallback: Use wall-clock time when word-level timing unavailable
+            # This happens with text-only transcription or missing timing data
+            last_meaningful_speech_time = time.time()
+            logger.warning(
+                f"⚠️ Using wall-clock time for speech tracking (no audio timestamps available). "
+                f"Word count: {current_word_count}, fallback={is_fallback}"
+            )
+
+        # Store timestamp in Redis for visibility/debugging
+        await redis_client.set(
+            f"conversation:last_speech:{conversation_id}",
+            last_meaningful_speech_time,
+            ex=86400,  # 24 hour TTL
+        )
+
+        return last_meaningful_speech_time, current_word_count
+
+    # No new speech - return None to indicate no update
+    return None, last_word_count
+
+
+async def update_job_progress_metadata(
+    current_job,
+    conversation_id: str,
+    session_id: str,
+    client_id: str,
+    combined: Dict[str, Any],
+    speech_analysis: Dict[str, Any],
+    speakers: List[str],
+    last_meaningful_speech_time: float,
+) -> None:
+    """
+    Update job metadata with current conversation progress.
+
+    Args:
+        current_job: Current RQ job instance
+        conversation_id: Conversation ID
+        session_id: Session ID
+        client_id: Client ID
+        combined: Combined transcription results
+        speech_analysis: Speech analysis results
+        speakers: List of speakers
+        last_meaningful_speech_time: Timestamp of last speech
+    """
+    if not current_job:
+        return
+
+    if not current_job.meta:
+        current_job.meta = {}
+
+    # Set created_at only once (first time we update metadata)
+    if "created_at" not in current_job.meta:
+        current_job.meta["created_at"] = datetime.now().isoformat()
+
+    # Calculate inactivity based on audio-relative timestamps
+    # Both current_audio_time and last_meaningful_speech_time are seconds into the audio stream
+    current_audio_time = speech_analysis.get("speech_end", 0.0)
+    inactivity_seconds = (
+        current_audio_time - last_meaningful_speech_time
+        if current_audio_time > 0 and last_meaningful_speech_time > 0
+        else 0
+    )
+
+    current_job.meta.update(
+        {
+            "conversation_id": conversation_id,
+            "client_id": client_id,  # Ensure client_id is always present
+            "transcript": (
+                combined["text"][:500] + "..."
+                if len(combined["text"]) > 500
+                else combined["text"]
+            ),  # First 500 chars
+            "transcript_length": len(combined["text"]),
+            "speakers": speakers,
+            "word_count": speech_analysis.get("word_count", 0),
+            "duration_seconds": speech_analysis.get("duration", 0),
+            "has_speech": speech_analysis.get("has_speech", False),
+            "last_update": datetime.now().isoformat(),
+            "inactivity_seconds": inactivity_seconds,
+            "chunks_processed": combined["chunk_count"],
+        }
+    )
+    current_job.save_meta()
+
+
+async def mark_conversation_deleted(conversation_id: str, deletion_reason: str) -> None:
+    """
+    Mark a conversation as deleted with a specific reason.
+
+    Uses soft delete pattern - conversation remains in database but marked as deleted.
+
+    Args:
+        conversation_id: Conversation ID to mark as deleted
+        deletion_reason: Reason for deletion (e.g., "no_meaningful_speech", "audio_file_not_ready")
+    """
+    logger.warning(
+        f"🗑️ Marking conversation {conversation_id} as deleted - reason: {deletion_reason}"
+    )
+
+    conversation = await Conversation.find_one(
+        Conversation.conversation_id == conversation_id
+    )
+    if conversation:
+        conversation.deleted = True
+        conversation.deletion_reason = deletion_reason
+        conversation.deleted_at = datetime.now(timezone.utc)
+        # These are no-transcript dead-ends (no meaningful speech / audio never
+        # arrived). Settle the status from facts so the conversation doesn't stay
+        # stuck at "active": the finalizer that normally owns the status is skipped
+        # or stranded on this path, and the status reconciler ignores deleted rows.
+        conversation.apply_status(settled=True)
+        # Clear any in-flight placeholder title left by the reprocess/recording entry
+        # points (e.g. "Reprocessing...", "Audio Recording (...)") — these convs never
+        # get a real LLM title since title_summary doesn't run without a transcript.
+        title = conversation.title or ""
+        if "Audio Recording (" in title or title in (
+            "Reprocessing...",
+            "Recording...",
+            "Transcribing...",
+        ):
+            conversation.title = None
+        await conversation.save()
+        logger.info(f"✅ Marked conversation {conversation_id} as deleted")

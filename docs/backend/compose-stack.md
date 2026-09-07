@@ -1,6 +1,6 @@
-# The advanced backend compose stack
+# The Chronicle backend compose stack
 
-Reference for `backends/advanced/docker-compose.yml` — what each service is for and
+Reference for `backend/docker-compose.yml` — what each service is for and
 why the non-obvious settings are the way they are. The compose file itself carries
 only short pointers back here.
 
@@ -40,7 +40,7 @@ and embedding access.
 `LLM_BIND_HOST` and `EMBED_BIND_HOST` are explicit escape hatches for a deployment
 that genuinely needs host-interface publication. Any non-loopback bind must also set
 `LLAMA_API_KEY` to the same value in `extras/llm-services/.env` and
-`backends/advanced/.env`; the shipped model definitions forward that key to the
+`backend/.env`; the shipped model definitions forward that key to the
 OpenAI-compatible client. Do not persist a `100.x` Tailnet address as a bind target:
 it can change. Tailscale remains the authenticated ingress to Chronicle itself, not
 to the raw model server.
@@ -66,9 +66,9 @@ The three backend containers mount the same set:
 | Mount | Why |
 |---|---|
 | `./src → /app/src` | source is bind-mounted, so backend code changes need a **restart**, not a rebuild |
-| `../../config → /app/config` | whole config directory: `config.yml`, `defaults.yml`, `plugins.yml` |
-| `../../plugins → /app/plugins` | external plugins, discovered at startup |
-| `../../discovery.py` | service-discovery module (read-only) |
+| `../config → /app/config` | whole config directory: `config.yml`, `defaults.yml`, `plugins.yml` |
+| `../plugins → /app/plugins` | external plugins, discovered at startup |
+| `../discovery.py` | service-discovery module (read-only) |
 | `./data`, `./data/audio_chunks`, `./data/debug_dir` | audio, vault, and debug artifacts on the host |
 | `./benchmark` (backend only) | LongMemEval benchmark harness |
 | `${CODEX_HOME_DIR:-./data/codex-home} → /codex-home` | Codex CLI auth when `memory.agents.write.backend: codex`; the wizard points it at the host's `~/.codex`, and it is read-write because Codex rotates its tokens |
@@ -162,7 +162,7 @@ Optional; enable with the `annotation` profile.
 Classifies a voice command as a home-automation request versus a general agent/chat
 query (sub-millisecond Model2Vec + logistic regression). It lives in its own image so
 the ML dependencies do not bloat the backend image; the Home Assistant plugin calls
-`http://intent-router:8791/classify`. `../../extras/intent-router` is mounted live, so
+`http://intent-router:8791/classify`. `../extras/intent-router` is mounted live, so
 a retrained classifier takes effect without a rebuild.
 
 ### `caddy`

@@ -90,7 +90,7 @@ def test_run_service_setup_asr_uses_strix_provider_and_runtime(monkeypatch):
 
     ok = wizard.run_service_setup(
         service_name="asr-services",
-        selected_services=["advanced", "asr-services"],
+        selected_services=["backend", "asr-services"],
         transcription_provider="parakeet",
         hardware_profile="strixhalo",
     )
@@ -120,7 +120,7 @@ def test_run_service_setup_asr_vibevoice_uses_strix_variant(monkeypatch):
 
     ok = wizard.run_service_setup(
         service_name="asr-services",
-        selected_services=["advanced", "asr-services"],
+        selected_services=["backend", "asr-services"],
         transcription_provider="vibevoice",
         hardware_profile="strixhalo",
     )
@@ -150,7 +150,7 @@ def test_run_service_setup_speaker_forces_strix_compute(monkeypatch):
 
     ok = wizard.run_service_setup(
         service_name="speaker-recognition",
-        selected_services=["advanced", "speaker-recognition"],
+        selected_services=["backend", "speaker-recognition"],
         hf_token="hf_token",
         hardware_profile="strixhalo",
     )
@@ -183,7 +183,7 @@ def test_select_hardware_profile_skips_when_not_needed(monkeypatch):
     monkeypatch.setattr(wizard.Prompt, "ask", lambda *args, **kwargs: "2")
 
     result = wizard.select_hardware_profile(
-        selected_services=["advanced"],
+        selected_services=["backend"],
         transcription_provider="deepgram",
         streaming_provider=None,
     )

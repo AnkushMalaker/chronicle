@@ -74,6 +74,12 @@ def test_confirmed_sighting_opens_a_meeting_observation():
     assert event["captured_at"] == at(0)
     assert event["metadata"]["observation_type"] == "meeting"
     assert event["metadata"]["platform"] == "zoom"
+    assert event["locator"] == {
+        "capture_source_id": "screenpipe",
+        "modality": "context",
+        "track_id": "meeting-detector",
+    }
+    assert event["metadata"]["locator"] == event["locator"]
     assert event["frame_candidates"] == []
     assert event["sample"] is None
     assert tracker.active_platform() == "zoom"
@@ -175,6 +181,11 @@ def test_recorder_open_row_emits_an_open_event():
     assert events[0]["source_item_id"] == "meeting:recorder:7"
     assert events[0]["metadata"]["platform"] == "google-meet"
     assert events[0]["metadata"]["detection_source"] == "recorder"
+    assert events[0]["locator"] == {
+        "capture_source_id": "screenpipe",
+        "modality": "context",
+        "track_id": "meeting-detector",
+    }
     assert log.active_platform() == "google-meet"
 
 

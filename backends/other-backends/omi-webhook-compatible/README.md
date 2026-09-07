@@ -99,8 +99,8 @@ audio_recordings/
 
 ## Integration
 
-### With Advanced Backend
-For full transcription and memory features, use the [Advanced Backend](../../advanced/) instead, which provides:
+### With Chronicle Backend
+For full transcription and memory features, use the [Chronicle Backend](../../../backend/) instead, which provides:
 - Real-time transcription
 - Memory extraction
 - Speaker recognition
@@ -184,11 +184,11 @@ docker compose down && docker compose up -d
 
 - **No Real-time Processing**: Audio is stored but not automatically transcribed
 - **Manual File Management**: Audio files require manual processing
-- **Basic Webhook Interface**: Limited compared to advanced backend features
+- **Basic Webhook Interface**: Limited compared to Chronicle backend features
 - **ngrok Dependency**: Requires ngrok for public access
 
 ## Related Documentation
 
-- **[Advanced Backend](../../advanced/)**: Full-featured alternative with transcription
+- **[Chronicle Backend](../../../backend/)**: Full-featured alternative with transcription
 - **[Simple Backend](../../simple/)**: WebSocket-based audio streaming
 - **[ASR Services](../../../extras/asr-services/)**: Offline transcription services

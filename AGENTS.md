@@ -156,7 +156,7 @@ For detailed setup instructions and troubleshooting, see:
 ### Wizard Architecture
 The initialization system uses a **root orchestrator pattern**:
 - **`wizard.py`**: Root setup orchestrator for service selection and delegation
-- **`backends/advanced/init.py`**: Backend configuration wizard
+- **`backend/init.py`**: Backend configuration wizard
 - **`extras/speaker-recognition/init.py`**: Speaker recognition setup
 - **Service setup scripts**: Individual setup for ASR services
 
@@ -170,9 +170,9 @@ Key features:
 
 ## Development Commands
 
-### Backend Development (Advanced Backend - Primary)
+### Backend Development (Chronicle Backend - Primary)
 ```bash
-cd backends/advanced
+cd backend
 
 # Start full stack with Docker
 docker compose up --build -d
@@ -194,7 +194,7 @@ uv run pytest tests/test_memory_service.py  # Single test file
 cp .env.template .env  # Configure environment variables
 
 # Reset data (development)
-sudo rm -rf backends/advanced/data/
+sudo rm -rf backend/data/
 ```
 
 ### Running Tests
@@ -457,7 +457,7 @@ SPEAKER_SERVICE_URL=http://speaker-recognition:8085
 
 **Three-File Separation**:
 
-1. **backends/advanced/.env** - Secrets (gitignored)
+1. **backend/.env** - Secrets (gitignored)
    ```bash
    SMTP_PASSWORD=abcdefghijklmnop
    OPENAI_API_KEY=sk-proj-...
@@ -509,7 +509,7 @@ curl -s -H "Authorization: Bearer YOUR_TOKEN" \
 ### Development Reset Commands
 ```bash
 # Reset all data (development only)
-cd backends/advanced
+cd backend
 sudo rm -rf data/
 
 # Reset Docker volumes
@@ -722,7 +722,7 @@ tailscale ip -4
     ```python
     def build_router():
         # Imported here to break the circular import with plugins.router.
-        from advanced_omi_backend.plugins.router import PluginRouter
+        from backend.plugins.router import PluginRouter
     ```
     An import guarded by `try/except ImportError` needs no comment — the structure
     already says "optional dependency". The repository is currently clean, so any
@@ -806,7 +806,7 @@ installed `frontend-design-principles` skill for hierarchy and visual judgment, 
 the repository `screenshots` skill for rendered-page verification.
 
 Check if the src/ is volume mounted. If not, do compose build so that code changes are reflected. Do not simply run `docker compose restart` as it will not rebuild the image.
-Check `docs/backend/` for up-to-date information on the advanced backend.
+Check `docs/backend/` for up-to-date information on the Chronicle backend.
 All docker projects have .dockerignore following the exclude pattern. That means files need to be included for them to be visible to docker.
 The uv package manager is used for all python projects. Wherever you'd call `python3 main.py` you'd call `uv run python main.py`
 For temporary Python-backed tooling that is not part of the repo dependencies, prefer `uv run --with <package> python ...` instead of installing packages into the project. Use `uvx --from <package> <entrypoint>` when invoking a package's own CLI. For browser scripts/screenshots, use `uv run --with playwright python - <<'PY'` and import `playwright.sync_api`; for the Playwright CLI use `uvx --from playwright playwright ...`. Do not add transient Playwright/npm packages to `package.json` just to drive a one-off check.

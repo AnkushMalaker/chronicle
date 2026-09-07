@@ -41,6 +41,7 @@ def _import_services():
     _stub_missing("dotenv", {"dotenv_values": lambda path: {}})
     _stub_missing("rich", {})
     _stub_missing("rich.console", {"Console": MagicMock})
+    _stub_missing("rich.markup", {"escape": lambda value: value})
     _stub_missing("rich.table", {"Table": MagicMock})
     _stub_missing(
         "chronicle_setup",
@@ -210,7 +211,7 @@ def _has_chronicle_vars(image_str: str | None) -> bool:
 
 
 class TestBackendDockerComposeImages:
-    COMPOSE = _load_compose("backends/advanced/docker-compose.yml")
+    COMPOSE = _load_compose("backend/docker-compose.yml")
 
     def test_chronicle_backend_has_image_field(self):
         assert _has_chronicle_vars(_image_for(self.COMPOSE, "chronicle-backend"))
@@ -229,12 +230,12 @@ class TestBackendDockerComposeImages:
     def test_webui_dev_build_and_runtime_include_audio_v2_contracts(self):
         webui = self.COMPOSE["services"]["webui-dev"]
         assert webui["build"] == {
-            "context": "../..",
-            "dockerfile": "backends/advanced/webui/Dockerfile.dev",
+            "context": "..",
+            "dockerfile": "backend/webui/Dockerfile.dev",
         }
         volumes = webui["volumes"]
         assert (
-            "../../contracts/audio/v2/typescript:"
+            "../contracts/audio/v2/typescript:"
             "/workspace/contracts/audio/v2/typescript:ro"
         ) in volumes
         assert not any("voice_protocol/v1" in volume for volume in volumes)
@@ -243,11 +244,11 @@ class TestBackendDockerComposeImages:
         volumes = self.COMPOSE["services"]["webui-dev"]["volumes"]
         assert (
             "./webui/tailwind.config.js:"
-            "/workspace/backends/advanced/webui/tailwind.config.js:ro"
+            "/workspace/backend/webui/tailwind.config.js:ro"
         ) in volumes
         assert (
             "./webui/chronicle-espresso-preset.js:"
-            "/workspace/backends/advanced/webui/chronicle-espresso-preset.js:ro"
+            "/workspace/backend/webui/chronicle-espresso-preset.js:ro"
         ) in volumes
 
     def test_backend_services_share_same_image_name(self):

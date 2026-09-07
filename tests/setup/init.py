@@ -2,7 +2,7 @@
 Chronicle Test Environment Setup Script.
 
 Interactive configuration for test API keys (Deepgram, OpenAI).
-Follows the same pattern as backends/advanced/init.py.
+Follows the same pattern as backend/init.py.
 """
 
 import argparse

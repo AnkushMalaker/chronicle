@@ -8,7 +8,7 @@ const speakerServiceTarget = `http://${speakerServiceHost}:${speakerServicePort}
 // https://vitejs.dev/config/
 // The dev server runs plain HTTP. When HTTPS is enabled, Caddy terminates TLS
 // (Tailscale/Let's Encrypt cert) and reverse-proxies to this server over HTTP —
-// same as the advanced backend's webui-dev. No self-signed cert in the dev server.
+// same as the Chronicle backend's webui-dev. No self-signed cert in the dev server.
 export default defineConfig({
   plugins: [react()],
   server: {

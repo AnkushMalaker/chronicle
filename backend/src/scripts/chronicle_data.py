@@ -1,0 +1,488 @@
+#!/usr/bin/env python3
+"""Administrative CLI for Chronicle data archives and memory reconstruction."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+from rich.prompt import Confirm
+from rich.table import Table
+
+from backend.database import get_database
+from backend.services.data_archive import (
+    ARCHIVE_SUFFIX,
+    ArchiveError,
+    ArchiveProgress,
+    create_data_archive,
+    import_data_archive,
+    verify_data_archive,
+    verify_data_archive_snapshot,
+)
+from backend.services.memory.rebuild import (
+    TIMELINE_STAGES,
+    VAULT_ROOTS,
+    MemoryRebuildError,
+    RebuildStage,
+    build_rebuild_plan,
+    build_timeline_days,
+    create_vault_backup,
+    execute_memory_rebuild,
+)
+
+console = Console()
+DATA_DIR = Path("/app/data")
+
+IMPORT_STAGE_LABELS = {
+    "export_database": "Export MongoDB",
+    "export_files": "Export filesystem",
+    "finalize_archive": "Finalize archive",
+    "verify": "Verify checksums",
+    "restore_database": "Restore MongoDB",
+    "restore_files": "Restore filesystem",
+}
+
+
+class ArchiveProgressDisplay:
+    """Persistent, stage-aware rendering for long archive operations."""
+
+    def __init__(self, stage_order: list[str]):
+        self.stage_order = stage_order
+        self.task_ids: dict[str, int] = {}
+        self.progress = Progress(
+            SpinnerColumn(finished_text="[green]✓[/green]"),
+            TextColumn("{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("{task.fields[amount]}"),
+            TextColumn("[dim]{task.fields[detail]}[/dim]"),
+            TimeElapsedColumn(),
+            console=console,
+        )
+
+    def __enter__(self):
+        self.progress.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return self.progress.__exit__(exc_type, exc_value, traceback)
+
+    def update(self, event: ArchiveProgress) -> None:
+        if event.stage not in self.stage_order:
+            self.stage_order.append(event.stage)
+        task_id = self.task_ids.get(event.stage)
+        total = max(event.total, 1)
+        if task_id is None:
+            stage_number = self.stage_order.index(event.stage) + 1
+            label = IMPORT_STAGE_LABELS.get(
+                event.stage, event.stage.replace("_", " ").title()
+            )
+            task_id = self.progress.add_task(
+                f"Stage {stage_number}/{len(self.stage_order)} · {label}",
+                total=total,
+                amount="",
+                detail="",
+            )
+            self.task_ids[event.stage] = task_id
+        completed = total if event.completed else min(event.current, total)
+        amount = (
+            f"{_human_size(event.current)} / {_human_size(event.total)}"
+            if event.unit == "bytes"
+            else f"{event.current:,} / {event.total:,} {event.unit}"
+        )
+        self.progress.update(
+            task_id,
+            completed=completed,
+            total=total,
+            amount=amount,
+            detail=event.detail,
+        )
+        if event.completed:
+            self.progress.stop_task(task_id)
+
+
+def _human_size(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024 or unit == "TiB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    raise AssertionError("unreachable")
+
+
+def _default_archive_path() -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return DATA_DIR / "backups" / f"chronicle_{timestamp}{ARCHIVE_SUFFIX}"
+
+
+def _manifest_table(manifest: dict) -> Table:
+    table = Table(title="Archive contents")
+    table.add_column("Collection")
+    table.add_column("Documents", justify="right")
+    for name, metadata in manifest["collections"].items():
+        table.add_row(name, str(metadata["documents"]))
+    data_files = sum(
+        metadata.get("kind") == "data_file" for metadata in manifest["files"].values()
+    )
+    table.add_section()
+    table.add_row("Filesystem files", str(data_files))
+    return table
+
+
+def _require_confirmation(message: str, force: bool) -> None:
+    if force:
+        return
+    console.print(Panel(message, title="Destructive operation", border_style="red"))
+    if not Confirm.ask("Proceed?", default=False):
+        raise KeyboardInterrupt
+
+
+async def _connect_database():
+    database = get_database()
+    await database.command("ping")
+    return database
+
+
+async def _run_export(args: argparse.Namespace) -> None:
+    database = await _connect_database()
+    output = args.output or _default_archive_path()
+    with ArchiveProgressDisplay(
+        ["export_database", "export_files", "finalize_archive"]
+    ) as progress:
+        summary = await create_data_archive(
+            database,
+            output,
+            data_dir=args.data_dir,
+            overwrite=args.overwrite,
+            base_archives=args.base_archive or (),
+            progress=progress.update,
+        )
+    excluded_note = ""
+    if (
+        summary.excluded_audio_chunks
+        or summary.excluded_documents
+        or summary.excluded_files
+    ):
+        excluded_note = (
+            "\n[yellow]Unchanged data omitted:[/yellow] "
+            f"{summary.excluded_audio_chunks} audio chunks, "
+            f"{summary.excluded_documents} MongoDB documents, and "
+            f"{summary.excluded_files} files already covered by the base archive "
+            "chain; restore the bases first."
+        )
+    console.print(
+        Panel(
+            f"[green]Archive created[/green]\n"
+            f"Path: {summary.path}\n"
+            f"Collections: {summary.collections}\n"
+            f"Documents: {summary.documents}\n"
+            f"Filesystem files: {summary.files}\n"
+            f"Archive size: {_human_size(summary.bytes_written)}"
+            f"{excluded_note}",
+            border_style="green",
+        )
+    )
+
+
+async def _run_verify(args: argparse.Namespace) -> None:
+    with ArchiveProgressDisplay(["verify"]) as progress:
+        manifest = verify_data_archive(args.archive, progress=progress.update)
+    console.print(_manifest_table(manifest))
+    console.print("[green]Archive verification passed.[/green]")
+
+
+async def _rebuild(database, args: argparse.Namespace):
+    from_stage = RebuildStage(args.rebuild_from)
+    console.print(
+        f"[cyan]Rebuild stage 1/3 · Plan inputs from {from_stage.value}[/cyan]"
+    )
+    plan = await build_rebuild_plan(
+        database,
+        args.user_id,
+        from_stage=from_stage,
+    )
+    console.print(
+        f"Rebuild plan from {from_stage.value}: {plan.speaker_count} speaker inputs, "
+        f"{plan.memory_count} memory inputs across {len(plan.user_ids)} users."
+    )
+    if from_stage is RebuildStage.SPEAKERS:
+        skipped_count = plan.count - plan.speaker_count
+        if skipped_count:
+            console.print(
+                f"[yellow]Speaker stage will skip {skipped_count} transcript-only "
+                "conversations with no stored audio.[/yellow]"
+            )
+    if from_stage in TIMELINE_STAGES:
+        days = await build_timeline_days(database, plan.user_ids)
+        diarize = (
+            "re-diarizing every recording first"
+            if from_stage is RebuildStage.TIMELINE
+            else "reusing the speaker transcripts already on those recordings"
+        )
+        console.print(
+            f"{from_stage.value.title()} stage will re-analyse {len(days)} local "
+            f"day(s) with captured audio and record each one, {diarize}; the "
+            "per-conversation memory path does not run."
+        )
+    if getattr(args, "dry_run", False):
+        console.print("[green]✓ Rebuild stage 1/3 · Plan complete (dry run)[/green]")
+        return None
+    extra = (
+        " Existing timeline runs, days, and episodes are deleted so analysis starts "
+        "from evidence rather than from the boundaries being replaced."
+        if from_stage in TIMELINE_STAGES
+        else ""
+    )
+    _require_confirmation(
+        "This deletes the selected users' current Markdown memory vaults and memory "
+        "audit history, then recreates them from active transcripts. Syncthing "
+        f"pairing markers are retained.{extra}",
+        args.force,
+    )
+    backup_dir = None if args.no_vault_backup else args.data_dir / "backups"
+    console.print(
+        "[green]✓ Rebuild stage 1/3 · Plan complete[/green]\n"
+        "[cyan]Rebuild stage 2/3 · Clear derived state and queue day work[/cyan]"
+    )
+    result = await execute_memory_rebuild(
+        database,
+        plan,
+        data_dir=args.data_dir,
+        backup_dir=backup_dir,
+        from_stage=from_stage,
+    )
+    backup_text = str(result.vault_backup) if result.vault_backup else "not needed"
+    console.print(
+        "[green]✓ Rebuild stage 2/3 · Derived state cleared and jobs queued[/green]\n"
+        "[cyan]Rebuild stage 3/3 · Workers process days chronologically[/cyan]"
+    )
+    console.print(
+        Panel(
+            f"[green]Memory rebuild queued[/green]\n"
+            f"Run ID: {result.run_id}\n"
+            f"Speaker jobs: {len(result.speaker_jobs)}\n"
+            f"Speaker skipped (no audio): "
+            f"{len(result.skipped_speaker_conversations)}\n"
+            f"Memory jobs: {len(result.memory_jobs)}\n"
+            f"Timeline day jobs: {len(result.timeline_jobs)}\n"
+            f"Deleted timeline documents: {result.deleted_timeline_documents}\n"
+            f"Users: {len(result.user_ids)}\n"
+            f"Deleted vault files: {result.deleted_vault_files}\n"
+            f"Deleted audit entries: {result.deleted_audit_entries}\n"
+            f"Previous vault backup: {backup_text}\n\n"
+            "Stages run chronologically within each user; different users may "
+            "rebuild in parallel.",
+            border_style="green",
+        )
+    )
+    return result
+
+
+async def _run_import(args: argparse.Namespace) -> None:
+    if args.rebuild_from and args.user_id:
+        raise ArchiveError(
+            "--user-id cannot be combined with --rebuild-from import because the "
+            "archive contains all users. Import first, then run rebuild-memory "
+            "--user-id for a selective rebuild."
+        )
+    restore_files = not args.database_only and not args.rebuild_from
+    stage_order = ["verify", "restore_database"]
+    if restore_files:
+        stage_order.append("restore_files")
+    with ArchiveProgressDisplay(stage_order) as progress:
+        verified_archive = verify_data_archive_snapshot(
+            args.archive,
+            progress=progress.update,
+        )
+        console.print(_manifest_table(verified_archive.manifest))
+        destructive = args.replace or args.rebuild_from
+        if destructive:
+            _require_confirmation(
+                "Replace mode clears each archived Mongo collection before restore. Fresh "
+                "rebuild mode also deletes current derived vault and audit state.",
+                args.force,
+            )
+            # One confirmation covers the complete import + derived-data rebuild.
+            if args.rebuild_from:
+                args.force = True
+
+        database = await _connect_database()
+        summary = await import_data_archive(
+            database,
+            args.archive,
+            data_dir=args.data_dir,
+            replace=args.replace,
+            restore_files=restore_files,
+            fresh_memory=bool(args.rebuild_from),
+            progress=progress.update,
+            verified_archive=verified_archive,
+        )
+    console.print(
+        f"[green]Imported {summary.documents} documents from "
+        f"{summary.collections} collections and {summary.files} files.[/green]"
+    )
+    if summary.skipped_collections:
+        console.print(
+            "Skipped derived collections: " + ", ".join(summary.skipped_collections)
+        )
+    if args.rebuild_from:
+        await _rebuild(database, args)
+
+
+async def _run_rebuild(args: argparse.Namespace) -> None:
+    database = await _connect_database()
+    await _rebuild(database, args)
+
+
+async def _run_backup_vault(args: argparse.Namespace) -> None:
+    user_ids = tuple(sorted(set(args.user_id or [])))
+    if not user_ids:
+        roots = [args.data_dir / root_name for root_name in VAULT_ROOTS]
+        user_ids = tuple(
+            sorted(
+                {
+                    path.name
+                    for root in roots
+                    if root.is_dir()
+                    for path in root.iterdir()
+                    if path.is_dir()
+                }
+            )
+        )
+    if not user_ids:
+        raise MemoryRebuildError("No user vaults found")
+    backup = create_vault_backup(
+        args.data_dir,
+        user_ids,
+        args.data_dir / "backups",
+        description=args.description,
+    )
+    if backup is None:
+        raise MemoryRebuildError("No vault files found for the selected users")
+    console.print(
+        Panel(
+            f"[green]Vault backup complete[/green]\n"
+            f"Path: {backup}\n"
+            f"Users: {len(user_ids)}\n"
+            f"Description: {args.description or '(none)'}"
+        )
+    )
+
+
+def _add_common_data_dir(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=DATA_DIR,
+        help="Chronicle data directory inside the container (default: /app/data)",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Export, import, and reconstruct Chronicle's durable data"
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    export_parser = subparsers.add_parser("export", help="Create a full data archive")
+    export_parser.add_argument("output", nargs="?", type=Path)
+    export_parser.add_argument("--overwrite", action="store_true")
+    export_parser.add_argument(
+        "--base-archive",
+        type=Path,
+        action="append",
+        help=(
+            "Verified earlier .chronicle archive whose unchanged audio, Mongo "
+            "documents, and files should not be stored again; repeat for a base chain"
+        ),
+    )
+    _add_common_data_dir(export_parser)
+    export_parser.set_defaults(handler=_run_export)
+
+    verify_parser = subparsers.add_parser(
+        "verify", help="Verify archive structure and checksums"
+    )
+    verify_parser.add_argument("archive", type=Path)
+    verify_parser.set_defaults(handler=_run_verify)
+
+    vault_parser = subparsers.add_parser(
+        "backup-vault", help="Create a dated, checksummed Markdown-vault backup"
+    )
+    vault_parser.add_argument("--user-id", action="append")
+    vault_parser.add_argument(
+        "--description", help="Human-readable reason stored in manifest.json"
+    )
+    _add_common_data_dir(vault_parser)
+    vault_parser.set_defaults(handler=_run_backup_vault)
+
+    import_parser = subparsers.add_parser("import", help="Import a data archive")
+    import_parser.add_argument("archive", type=Path)
+    import_parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="Clear each archived collection before restoring it",
+    )
+    import_parser.add_argument(
+        "--database-only",
+        action="store_true",
+        help="Do not restore vault or legacy audio files",
+    )
+    import_parser.add_argument(
+        "--rebuild-from",
+        choices=[stage.value for stage in RebuildStage],
+        help=(
+            "Skip archived derived memory and rebuild from this stage; "
+            "'speakers' runs speaker recognition before memory"
+        ),
+    )
+    import_parser.add_argument("--user-id", action="append")
+    import_parser.add_argument("--no-vault-backup", action="store_true")
+    import_parser.add_argument("--force", action="store_true")
+    _add_common_data_dir(import_parser)
+    import_parser.set_defaults(handler=_run_import, dry_run=False)
+
+    rebuild_parser = subparsers.add_parser(
+        "rebuild-memory", help="Recreate Markdown memories from active transcripts"
+    )
+    rebuild_parser.add_argument("--user-id", action="append")
+    rebuild_parser.add_argument(
+        "--rebuild-from",
+        choices=[stage.value for stage in RebuildStage],
+        default=RebuildStage.MEMORY.value,
+        help="Earliest stage to rerun (default: memory)",
+    )
+    rebuild_parser.add_argument("--dry-run", action="store_true")
+    rebuild_parser.add_argument("--no-vault-backup", action="store_true")
+    rebuild_parser.add_argument("--force", action="store_true")
+    _add_common_data_dir(rebuild_parser)
+    rebuild_parser.set_defaults(handler=_run_rebuild)
+    return parser
+
+
+async def main() -> None:
+    args = build_parser().parse_args()
+    await args.handler(args)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        console.print("[yellow]Cancelled.[/yellow]")
+        sys.exit(130)
+    except (ArchiveError, MemoryRebuildError, OSError) as exc:
+        console.print(f"[bold red]Error:[/bold red] {exc}")
+        sys.exit(1)

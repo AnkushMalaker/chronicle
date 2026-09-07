@@ -18,7 +18,7 @@ import opuslib
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [
     str(ROOT / "extras/chronicle-client"),
-    str(ROOT / "backends/advanced/src"),
+    str(ROOT / "backend/src"),
 ]
 
 from audio_contract.v2 import audio_pb2

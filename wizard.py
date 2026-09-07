@@ -87,10 +87,10 @@ def setup_command(script_path: str) -> list:
 
 SERVICES = {
     "backend": {
-        "advanced": {
-            "path": "backends/advanced",
-            "cmd": setup_command("backends/advanced/init.py"),
-            "description": "Advanced AI backend with full feature set",
+        "backend": {
+            "path": "backend",
+            "cmd": setup_command("backend/init.py"),
+            "description": "Chronicle backend with full feature set",
             "required": True,
         }
     },
@@ -166,7 +166,7 @@ def discover_available_plugins():
         }
     """
     # Plugin implementations live at the repository root; only the framework
-    # (base.py, router.py, ...) is under advanced_omi_backend/plugins. Scanning
+    # (base.py, router.py, ...) is under backend/plugins. Scanning
     # the framework directory found zero plugins, so none were ever offered.
     plugins_dir = REPO_ROOT / "plugins"
 
@@ -203,7 +203,7 @@ def check_service_exists(service_name, service_config):
 
     # For services with Python init scripts, check if init.py exists
     if service_name in [
-        "advanced",
+        "backend",
         "speaker-recognition",
         "asr-services",
         "langfuse",
@@ -242,8 +242,8 @@ def select_services(
 
     # Backend is required
     console.print("📱 [bold]Backend (Required):[/bold]")
-    console.print("  ✅ Advanced Backend - Full AI features")
-    selected.append("advanced")
+    console.print("  ✅ Chronicle Backend - Full AI features")
+    selected.append("backend")
 
     # Services that will be auto-added based on provider choices
     auto_added = set()
@@ -338,11 +338,8 @@ def persist_enabled_services(selected_services):
     stale or half-written ``.env`` never counts as "configured". Secrets in ``.env``
     are left untouched.
     """
-    # Lifecycle service names = services.py registry keys. The wizard calls the
-    # backend "advanced"; the lifecycle calls it "backend".
     lifecycle_names = ["backend"] + list(SERVICES["extras"].keys())
-    wizard_to_lifecycle = {"advanced": "backend"}
-    selected_lifecycle = {wizard_to_lifecycle.get(s, s) for s in selected_services}
+    selected_lifecycle = set(selected_services)
 
     enabled = {name: (name in selected_lifecycle) for name in lifecycle_names}
     ConfigManager().set_enabled_services(enabled)
@@ -379,10 +376,10 @@ def run_service_setup(
     tts_discover=False,
 ):
     """Execute individual service setup script"""
-    if service_name == "advanced":
+    if service_name == "backend":
         service = SERVICES["backend"][service_name]
 
-        # For advanced backend, pass URLs of other selected services and HTTPS config
+        # For the Chronicle backend, pass URLs of other selected services and HTTPS config.
         cmd = service["cmd"].copy()
         # Speaker Recognition URL: local service → compose DNS name; otherwise honor
         # the wizard's source choice (remote endpoint, or discover on the Tailnet).
@@ -479,7 +476,7 @@ def run_service_setup(
                 )
 
             # Pass Deepgram API key from backend if available
-            backend_env_path = "backends/advanced/.env"
+            backend_env_path = "backend/.env"
             deepgram_key = read_env_value(backend_env_path, "DEEPGRAM_API_KEY")
             if deepgram_key and not is_placeholder(
                 deepgram_key, "your_deepgram_api_key_here", "your-deepgram-api-key-here"
@@ -607,9 +604,9 @@ def show_service_status():
     console.print("\n📋 [bold]Service Status:[/bold]")
 
     # Check backend
-    exists, msg = check_service_exists("advanced", SERVICES["backend"]["advanced"])
+    exists, msg = check_service_exists("backend", SERVICES["backend"]["backend"])
     status = "✅" if exists else "❌"
-    console.print(f"  {status} Advanced Backend - {msg}")
+    console.print(f"  {status} Chronicle Backend - {msg}")
 
     # Check extras
     for service_name, service_config in SERVICES["extras"].items():
@@ -744,7 +741,7 @@ def _existing_hf_token():
     store for backend-less join nodes), then the legacy speaker-recognition .env.
     """
     for path in (
-        "backends/advanced/.env",
+        "backend/.env",
         ROOT_ENV_PATH,
         "extras/speaker-recognition/.env",
     ):
@@ -764,7 +761,7 @@ def _persist_hf_token(hf_token):
     (main machine), else the repo-root .env (backend-less join node). Both are
     gitignored. Each service's init.py reads from the same locations.
     """
-    backend_env = REPO_ROOT / "backends" / "advanced" / ".env"
+    backend_env = REPO_ROOT / "backend" / ".env"
     target = str(backend_env) if backend_env.exists() else ROOT_ENV_PATH
     Path(target).touch(mode=0o600, exist_ok=True)
     set_key(target, "HF_TOKEN", hf_token, quote_mode="never")
@@ -1271,7 +1268,7 @@ def setup_langfuse_choice():
     console.print()
     console.print("[bold]Enter your external LangFuse connection details:[/bold]")
 
-    backend_env_path = "backends/advanced/.env"
+    backend_env_path = "backend/.env"
 
     existing_host = read_env_value(backend_env_path, "LANGFUSE_HOST")
     # Don't treat the local docker host as an existing external value
@@ -1958,7 +1955,7 @@ def main():
     # Hub flow defaults to "on this hub", but offers own/external endpoint, pinning a
     # Tailnet-advertised node, or deferring to runtime discovery. A *remote* ASR/LLM
     # choice (own/Tailnet/later) also suppresses auto-adding the local service below.
-    backend_env = "backends/advanced/.env"
+    backend_env = "backend/.env"
     OFFLINE_DISCOVERABLE_ASR = {"parakeet", "qwen3-asr", "gemma4", "af-next"}
     _ASR_ENV_KEY = {
         "parakeet": "PARAKEET_ASR_URL",
@@ -2111,9 +2108,9 @@ def main():
 
     # Check if we have services that benefit from HTTPS
     https_services = {
-        "advanced",
+        "backend",
         "speaker-recognition",
-    }  # advanced will always need https then
+    }  # backend always needs HTTPS.
     needs_https = bool(https_services.intersection(selected_services))
 
     if needs_https:
@@ -2123,7 +2120,7 @@ def main():
         )
 
         # Default to existing HTTPS_ENABLED setting
-        existing_https = read_env_value("backends/advanced/.env", "HTTPS_ENABLED")
+        existing_https = read_env_value("backend/.env", "HTTPS_ENABLED")
         default_https = existing_https == "true"
 
         try:
@@ -2169,7 +2166,7 @@ def main():
             console.print("Examples: localhost, myhost.tail1234.ts.net, 100.64.1.2")
 
             # Check for existing SERVER_IP from backend .env
-            backend_env_path = "backends/advanced/.env"
+            backend_env_path = "backend/.env"
             existing_ip = read_env_value(backend_env_path, "SERVER_IP")
 
             # Use existing value, or auto-detected address, or localhost as default
@@ -2271,14 +2268,14 @@ def main():
     setup_order = []
     if "langfuse" in selected_services:
         setup_order.append("langfuse")
-    if "advanced" in selected_services:
-        setup_order.append("advanced")
+    if "backend" in selected_services:
+        setup_order.append("backend")
     for service in selected_services:
         if service not in setup_order:
             setup_order.append(service)
 
     # Read admin credentials from existing backend .env (for langfuse init reuse)
-    backend_env_path = "backends/advanced/.env"
+    backend_env_path = "backend/.env"
     wizard_admin_email = read_env_value(backend_env_path, "ADMIN_EMAIL")
     wizard_admin_password = read_env_value(backend_env_path, "ADMIN_PASSWORD")
 
@@ -2335,7 +2332,7 @@ def main():
 
     # Optional: install the native host agents (service manager + discovery) as
     # systemd user services so they auto-start on boot like the containers do.
-    if "advanced" in selected_services:
+    if "backend" in selected_services:
         maybe_install_agent_services()
         # Optional (off by default): a Claude remote-control session so you can
         # start Claude Code sessions on this host from the Claude mobile app.
@@ -2380,7 +2377,7 @@ def main():
     console.print("3. Or start individual services:")
 
     configured_services = []
-    if "advanced" in selected_services and "advanced" not in failed_services:
+    if "backend" in selected_services and "backend" not in failed_services:
         configured_services.append("backend")
     if (
         "speaker-recognition" in selected_services
@@ -2446,7 +2443,7 @@ def main():
     # Show individual service usage
     console.print(f"\n💡 [dim]Tip: You can also setup services individually:[/dim]")
     console.print(
-        f"[dim]   uv run --with-requirements setup-requirements.txt python backends/advanced/init.py[/dim]"
+        f"[dim]   uv run --with-requirements setup-requirements.txt python backend/init.py[/dim]"
     )
     console.print(
         f"[dim]   uv run --with-requirements setup-requirements.txt python extras/speaker-recognition/init.py[/dim]"

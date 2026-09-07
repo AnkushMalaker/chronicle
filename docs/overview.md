@@ -66,8 +66,8 @@ Audio/Images/Data  →  Ingestion  →  Processing  →  Memories
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| **Backend** | `backends/advanced/` | FastAPI server, audio processing, API |
-| **Web UI** | `backends/advanced/webui/` | React dashboard for conversations and memories |
+| **Backend** | `backend/` | FastAPI server, audio processing, API |
+| **Web UI** | `backend/webui/` | React dashboard for conversations and memories |
 | **Mobile App** | `app/` | React Native app for OMI device pairing |
 | **Speaker Recognition** | `extras/speaker-recognition/` | Voice identification service |
 | **ASR Services** | `extras/asr-services/` | Local speech-to-text (Parakeet) |

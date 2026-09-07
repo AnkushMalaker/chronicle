@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 
-from advanced_omi_backend.utils.logging_utils import mask_dict
+from backend.utils.logging_utils import mask_dict
 
 logger = logging.getLogger(__name__)
 

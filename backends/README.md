@@ -1,10 +1,10 @@
 # Chronicle Backends
 
-This directory contains different backend implementations for Chronicle, each designed for specific use cases and deployment scenarios.
+The primary Chronicle backend lives in [`../backend/`](../backend/). This directory contains alternative implementations and the Helm chart.
 
 ## Available Backends
 
-### [Advanced Backend](advanced/) (Recommended)
+### [Chronicle Backend](../backend/) (Recommended)
 Full-featured backend with comprehensive AI capabilities:
 - Real-time audio processing and transcription
 - Memory system with conversation analysis
@@ -41,14 +41,14 @@ Backends can integrate with transcription services from the [ASR Services](../ex
 ## Getting Started
 
 Each backend includes its own README with specific setup instructions:
-- [Advanced Backend Setup](advanced/README.md)
+- [Chronicle Backend Setup](../backend/README.md)
 - [Simple Backend Setup](simple/README.md)
 - [OMI-Webhook-Compatible Setup](other-backends/omi-webhook-compatible/README.md)
 - [Example Satellite Setup](other-backends/example-satellite/README.md)
 
 ## Choosing a Backend
 
-**For production use**: Start with the Advanced Backend for full features and scalability.
+**For production use**: Start with the Chronicle Backend for full features and scalability.
 
 **For testing**: Use the Simple Backend to understand basic audio processing.
 

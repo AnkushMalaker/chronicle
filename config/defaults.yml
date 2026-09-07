@@ -1091,9 +1091,8 @@ cron_jobs:
   episode_memory_review:
     description: "Generate potential memory from reviewed timeline episodes"
     enabled: true
-    # Cheap to run and a no-op until a person finalizes a day's episode account.
-    # Only the oldest reviewed day may generate against the accepted vault.
-    schedule: "20 * * * *"
+    # Recover explicit selection requests; source date never orders memory work.
+    schedule: "* * * * *"
   episode_thumbnails:
     description: "Give timeline episodes a representative frame from their own interval"
     enabled: true
@@ -1126,6 +1125,14 @@ cron_jobs:
     # changing is looked at shortly after, and forced progress is never delayed by
     # more than one tick.
     schedule: "*/5 * * * *"
+  timeline_publication_recovery:
+    description: "Roll forward crash-interrupted Timeline publication journals"
+    enabled: true
+    schedule: "*/5 * * * *"
+  timeline_episode_dispatch_recovery:
+    description: "Recover stable Timeline episode summary and completion dispatch"
+    enabled: true
+    schedule: "*/5 * * * *"
   notification_dispatch:
     description: "Enqueue due durable push-notification intents"
     enabled: true
@@ -1134,10 +1141,6 @@ cron_jobs:
     description: "Resolve Expo tickets into provider-acceptance receipts"
     enabled: true
     schedule: "*/5 * * * *"
-  timeline_analysis:
-    description: "Disabled: Timeline reconciliation requires an explicit Immich-ready day request"
-    enabled: false
-    schedule: "0 */4 * * *"
   timeline_consolidation_prefetch:
     description: "Keep grouping suggestions ready ahead of the Timeline review cursor"
     enabled: true
@@ -1162,9 +1165,6 @@ timeline:
   max_text_chars_per_window: 60000
   max_anchor_images_per_window: 4
   executor: codex
-  # Run identity. Must match services/timeline/prompt.py's PROMPT_VERSION; changing the
-  # prompt text without bumping both leaves completed days cached on the old rules.
-  prompt_version: timeline-episodes-v18
   codex:
     model: gpt-5.6-luna
     service_tier: ""              # set to priority for Codex Fast mode (higher usage)
@@ -1209,9 +1209,10 @@ timeline:
     operation: timeline_thumbnail
     timeout_seconds: 600
   immich_visual_evidence:
-    # Explicit reconciliation only: fetch small server thumbnails for the already
-    # selected day candidates, derive bounded text, then discard the pixels.
+    # Complete metadata inventory; bounded pixel exploration of photo-led events.
     max_assets_per_day: 12
+    max_rounds: 4
+    max_image_views: 48
     backend: model
     operation: immich_visual_evidence
     timeout_seconds: 600

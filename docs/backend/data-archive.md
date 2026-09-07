@@ -61,7 +61,7 @@ Export is not a transactional MongoDB snapshot. For a consistent archive, stop
 new device ingestion and the services that write data while running maintenance:
 
 ```bash
-cd backends/advanced
+cd backend
 docker compose stop chronicle-backend workers annotation-cron
 ./chronicle-data.sh export
 docker compose start chronicle-backend workers annotation-cron

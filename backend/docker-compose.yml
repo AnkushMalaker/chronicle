@@ -1,0 +1,362 @@
+# The Chronicle backend stack. What each service is for, and why the non-obvious
+# settings below are the way they are: docs/backend/compose-stack.md
+# Drive it with ./start.sh / ./stop.sh / ./restart.sh, not by hand.
+
+# Explicit DNS upstreams; Tailscale's resolver first. Without these, aardvark
+# (Podman) can silently stop forwarding external queries; with only public ones,
+# *.ts.net stops resolving. See docs/backend/compose-stack.md#dns-pinning-x-public-dns
+x-public-dns: &public-dns
+  - 100.100.100.100
+  - 1.1.1.1
+  - 8.8.8.8
+
+services:
+  chronicle-backend:
+    image: ${CHRONICLE_REGISTRY:-}chronicle-backend:${CHRONICLE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: prod  # Use prod stage without test dependencies
+      args:
+        # git describe, exported by services.py; must match the other services
+        # sharing this image tag. See compose-stack.md#the-shared-backend-image
+        CHRONICLE_BUILD_VERSION: ${CHRONICLE_BUILD_VERSION:-dev}
+    ports:
+      - "8000:8000"
+    dns: *public-dns
+    env_file:
+      - .env
+    # Shared mounts (src/config/plugins are bind-mounted, so code changes need a
+    # restart, not a rebuild): compose-stack.md#shared-mounts
+    volumes:
+      - ./src:/app/src
+      - ./benchmark:/app/benchmark  # LongMemEval benchmark harness (Phase A+)
+      - ./data/audio_chunks:/app/audio_chunks
+      - ./data/debug_dir:/app/debug_dir
+      - ./data:/app/data
+      - ../config:/app/config
+      - ../plugins:/app/plugins
+      - ../discovery.py:/app/discovery.py:ro
+      # The DIRECTORY, not the socket file — a mounted socket goes stale on every
+      # tailscaled restart. compose-stack.md#the-tailscale-socket-directory
+      - /var/run/tailscale:/var/run/tailscale:ro
+      - ${CODEX_HOME_DIR:-./data/codex-home}:/codex-home  # Codex CLI auth (rw: it rotates tokens)
+    environment:
+      - CODEX_HOME=/codex-home
+      - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
+      - HF_TOKEN=${HF_TOKEN}
+      - SPEAKER_SERVICE_URL=${SPEAKER_SERVICE_URL}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - ADMIN_EMAIL=${ADMIN_EMAIL}
+      - AUTH_SECRET_KEY=${AUTH_SECRET_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - HA_TOKEN=${HA_TOKEN}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173,http://localhost:8000,https://localhost:5173,https://localhost:8000,https://localhost,app://obsidian.md}
+      - REDIS_URL=redis://redis:6379/0
+      - MONGODB_URI=mongodb://mongo:27017
+      - MONGODB_DATABASE=${MONGODB_DATABASE:-chronicle}
+      # Service endpoints — what each is for: compose-stack.md#chronicle-backend
+      - VAULT_SYNC_SYNCTHING_URL=http://vault-syncthing:8384
+      - VAULT_SYNC_API_KEY=${VAULT_SYNC_API_KEY:-}
+      - VAULT_SYNC_ADDRESS=${VAULT_SYNC_ADDRESS:-}
+      - WAKEWORD_SERVICE_URL=${WAKEWORD_SERVICE_URL:-http://chronicle-wakeword-service:8770}
+      - CHRONICLE_TTS_URL=${CHRONICLE_TTS_URL:-}  # empty → discover chronicle-tts on the Tailnet
+      - SERVICE_MANAGER_URL=${SERVICE_MANAGER_URL:-http://host.docker.internal:8775}
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Access host's Tailscale network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/readiness"]
+      interval: 30s
+      timeout: 30s
+      retries: 5
+      start_period: 5s
+    # Uvicorn drains requests for 2s, leaving the rest of this hard ceiling for
+    # FastAPI lifespan cleanup. Long-lived SSE responses are cancelled first.
+    stop_grace_period: 15s
+    restart: unless-stopped
+
+  # The whole worker fleet in one container (RQ workers + audio persistence +
+  # stream consumers), supervised by worker_orchestrator.py. No CUDA — workers
+  # orchestrate jobs and call external services. compose-stack.md#workers
+  workers:
+    image: ${CHRONICLE_REGISTRY:-}chronicle-backend:${CHRONICLE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: prod  # Use prod stage without test dependencies
+      args:
+        # Must match chronicle-backend's build args (same image tag).
+        CHRONICLE_BUILD_VERSION: ${CHRONICLE_BUILD_VERSION:-dev}
+    command: ["python", "worker_orchestrator.py"]
+    dns: *public-dns
+    env_file:
+      - .env
+    # Same shared mounts as chronicle-backend: compose-stack.md#shared-mounts
+    volumes:
+      - ./src:/app/src
+      - ./worker_orchestrator.py:/app/worker_orchestrator.py
+      - ./worker_healthcheck.py:/app/worker_healthcheck.py
+      - ./data/audio_chunks:/app/audio_chunks
+      - ./data:/app/data
+      - ../config:/app/config
+      - ../plugins:/app/plugins
+      - ../discovery.py:/app/discovery.py:ro
+      # The DIRECTORY, not the socket file. compose-stack.md#the-tailscale-socket-directory
+      - /var/run/tailscale:/var/run/tailscale:ro
+      - ${CODEX_HOME_DIR:-./data/codex-home}:/codex-home  # Codex CLI auth (memory jobs run here)
+    environment:
+      - CODEX_HOME=/codex-home
+      - PARAKEET_ASR_URL=${PARAKEET_ASR_URL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - HA_TOKEN=${HA_TOKEN}
+      - REDIS_URL=redis://redis:6379/0
+      - MONGODB_URI=mongodb://mongo:27017
+      - MONGODB_DATABASE=${MONGODB_DATABASE:-chronicle}
+      # Orchestrator tunables (optional - defaults shown): compose-stack.md#workers
+      - WORKER_CHECK_INTERVAL=${WORKER_CHECK_INTERVAL:-10}
+      - MIN_RQ_WORKERS=${MIN_RQ_WORKERS:-6}
+      - WORKER_STARTUP_GRACE_PERIOD=${WORKER_STARTUP_GRACE_PERIOD:-30}
+      # One fleet-wide warm-stop window; stragglers are force-stopped afterward.
+      - WORKER_SHUTDOWN_TIMEOUT=${WORKER_SHUTDOWN_TIMEOUT:-8}
+      - CHRONICLE_TTS_URL=${CHRONICLE_TTS_URL:-}  # TTS dispatcher runs here too
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Access host services
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+    # Probes the actual work, not the process — catches wedged-but-alive workers.
+    # compose-stack.md#workers
+    healthcheck:
+      test: ["CMD", "python", "worker_healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 3
+    stop_grace_period: 15s
+
+  # Periodic AI-annotation jobs (daily error surfacing, weekly fine-tuning).
+  # DEV_MODE=true gives 1-minute intervals. compose-stack.md#annotation-cron
+  annotation-cron:
+    image: ${CHRONICLE_REGISTRY:-}chronicle-backend:${CHRONICLE_TAG:-latest}
+    dns: *public-dns
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: prod
+      args:
+        # Must match chronicle-backend's build args (same image tag).
+        CHRONICLE_BUILD_VERSION: ${CHRONICLE_BUILD_VERSION:-dev}
+    command: ["python", "-m", "backend.cron"]
+    container_name: chronicle-annotation-cron
+    env_file:
+      - .env
+    environment:
+      - MONGODB_URI=mongodb://mongo:27017
+      - MONGODB_DATABASE=${MONGODB_DATABASE:-chronicle}
+      - DEV_MODE=${DEV_MODE:-false}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - annotation  # Optional profile - enable with: docker compose --profile annotation up
+
+  # Classifies a voice command as home-automation vs general agent/chat query.
+  # Own image so its ML deps stay out of the backend. compose-stack.md#intent-router
+  intent-router:
+    build:
+      context: ../extras/intent-router
+      dockerfile: Dockerfile
+    image: chronicle-intent-router:latest
+    dns: *public-dns
+    container_name: chronicle-intent-router
+    volumes:
+      - ../extras/intent-router:/app  # live code + retrained classifier (no rebuild)
+    environment:
+      - INTENT_ROUTER_PORT=8791
+      - ROUTER_HOME_THRESHOLD=${ROUTER_HOME_THRESHOLD:-0.5}
+      - HF_HOME=/opt/hf
+      - HF_HUB_OFFLINE=1
+    ports:
+      - "8791:8791"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8791/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+
+  # HTTPS for the dashboard + Langfuse (browsers require it for mic access).
+  # Starts only under the https profile. See docs/ssl-certificates.md
+  caddy:
+    image: caddy:2-alpine
+    dns: *public-dns
+    ports:
+      - "443:443"
+      - "80:80"  # HTTP redirect to HTTPS
+      - "3443:3443"  # Langfuse HTTPS
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - ../certs:/certs:ro
+    depends_on:
+      chronicle-backend:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - https
+
+  # The only WebUI: Vite dev server on :5173 with hot reload, fronted by Caddy
+  # for HTTPS. compose-stack.md#webui-dev
+  webui-dev:
+    build:
+      context: ..
+      dockerfile: backend/webui/Dockerfile.dev
+    ports:
+      - "${WEBUI_DEV_PORT:-5173}:5173"
+    environment:
+      - VITE_BACKEND_URL=${VITE_BACKEND_URL-http://${HOST_IP}:${BACKEND_PUBLIC_PORT:-8000}}
+      - VITE_ALLOWED_HOSTS=${VITE_ALLOWED_HOSTS:-localhost 127.0.0.1}
+      - VITE_HMR_PORT=${VITE_HMR_PORT:-5173}
+    volumes:
+      - ./webui/src:/workspace/backend/webui/src
+      - ../contracts/audio/v2/typescript:/workspace/contracts/audio/v2/typescript:ro
+      - ./webui/public:/workspace/backend/webui/public
+      # Vite's entry document. Baked into the image otherwise, so edits to the
+      # page title/meta silently kept serving the built-in copy until a rebuild.
+      - ./webui/index.html:/workspace/backend/webui/index.html:ro
+      - ./webui/vite.config.ts:/workspace/backend/webui/vite.config.ts:ro
+      - ./webui/tailwind.config.js:/workspace/backend/webui/tailwind.config.js:ro
+      - ./webui/chronicle-espresso-preset.js:/workspace/backend/webui/chronicle-espresso-preset.js:ro
+    depends_on:
+      chronicle-backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:8.0.14
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./data/mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand({ ping: 1 })"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"  # Avoid conflict with dev on 6379
+    volumes:
+      - ./data/redis_data:/data
+    # Redis is the raw-audio WAL — fsync every append, or a host crash erases
+    # audio the system already accepted. docs/backend/audio-durability.md
+    command: redis-server --appendonly yes --appendfsync always
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Shares each user's vault (data/conversation_docs/{user_id}) to Obsidian.
+  # Configured exclusively by the backend's /api/vault-sync broker, never by
+  # hand. compose-stack.md#vault-syncthing
+  vault-syncthing:
+    image: syncthing/syncthing:latest
+    dns: *public-dns
+    container_name: chronicle-vault-syncthing
+    hostname: chronicle-vault-syncthing
+    environment:
+      - STGUIADDRESS=0.0.0.0:8384          # REST API — internal network only
+      - STGUIAPIKEY=${VAULT_SYNC_API_KEY}  # backend authenticates to Syncthing with this
+      - PUID=${VAULT_SYNC_PUID:-0}         # match conversation_docs file ownership
+      - PGID=${VAULT_SYNC_PGID:-0}
+    volumes:
+      - ./data/syncthing_config:/var/syncthing/config
+      - ./data/conversation_docs:/vaults   # backend exposes per-user folders under here
+      - ./data/memory_spaces:/memory-spaces # isolated space vaults are sibling folders
+    ports:
+      - "22000:22000/tcp"   # sync protocol (reachable via Tailscale)
+      - "22000:22000/udp"   # QUIC
+      - "21027:21027/udp"   # local network discovery
+    restart: unless-stopped
+    profiles:
+      - vault-sync
+
+  # Optional in-container tailnet membership; most deployments run Tailscale on
+  # the host instead. compose-stack.md#tailscale
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: backend-tailscale
+    hostname: chronicle-tailscale
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+      - TS_ACCEPT_DNS=true
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+    profiles:
+      - tailscale  # Optional profile
+    command: >
+      sh -c "tailscaled &
+             tailscale up --authkey=$${TS_AUTHKEY} --accept-dns=true &&
+             sleep infinity"
+
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: ollama
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+
+
+# Shared network for cross-project communication
+networks:
+  default:
+    name: chronicle-network
+    external: true
+
+volumes:
+  ollama_data:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+  tailscale-state:
+    driver: local

@@ -153,7 +153,7 @@ robot tests/endpoints/conversation_tests.robot
 robot tests/endpoints/memory_tests.robot
 
 # When done, manually stop containers
-docker-compose -f backends/advanced/docker-compose-test.yml down -v
+docker-compose -f backend/docker-compose-test.yml down -v
 ```
 
 ---
@@ -631,7 +631,7 @@ cd tests/
 ./run-robot-tests.sh
 
 # Or manually start services
-cd backends/advanced/
+cd backend/
 docker-compose -f docker-compose-test.yml up -d
 ```
 
@@ -728,7 +728,7 @@ docker logs advanced-chronicle-backend-test-1
 docker exec -it advanced-mongo-test-1 mongosh test_db
 
 # When done
-docker-compose -f backends/advanced/docker-compose-test.yml down -v
+docker-compose -f backend/docker-compose-test.yml down -v
 ```
 
 ---

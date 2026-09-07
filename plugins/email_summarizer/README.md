@@ -24,7 +24,7 @@ Automatically sends email summaries when conversations complete.
 
 Chronicle uses a clean three-file separation for plugin configuration:
 
-1. **`backends/advanced/.env`** - Secrets only (SMTP credentials, API keys)
+1. **`backend/.env`** - Secrets only (SMTP credentials, API keys)
    - Gitignored for security
    - Never commit to version control
 
@@ -61,7 +61,7 @@ This separation keeps secrets secure and configuration organized. See the
 
 ### Step 2: Configure Environment Variables
 
-Add to `backends/advanced/.env`:
+Add to `backend/.env`:
 
 ```bash
 # Email Summarizer Plugin
@@ -97,7 +97,7 @@ You typically don't need to edit `config.yml` - the defaults work for most users
 ### Step 4: Restart Backend
 
 ```bash
-cd backends/advanced
+cd backend
 docker compose restart
 ```
 
@@ -144,8 +144,8 @@ Conversation ID: 507f1f77bc...
 ### Test SMTP Connection
 
 ```bash
-cd backends/advanced
-uv run python -m advanced_omi_backend.services.email_service
+cd backend
+uv run python -m backend.services.email_service
 ```
 
 This will:
@@ -204,7 +204,7 @@ smtp_password: ${SMTP_PASSWORD}  # Reference to environment variable
 ```
 
 ```bash
-# backends/advanced/.env (gitignored)
+# backend/.env (gitignored)
 SMTP_PASSWORD=xnetcqctkkfgzllh  # Actual secret stored safely
 ```
 
@@ -212,13 +212,13 @@ SMTP_PASSWORD=xnetcqctkkfgzllh  # Actual secret stored safely
 
 The plugin system automatically:
 - ✅ Loads settings from `plugins/email_summarizer/config.yml`
-- ✅ Expands `${ENV_VAR}` references from `backends/advanced/.env`
+- ✅ Expands `${ENV_VAR}` references from `backend/.env`
 - ✅ Merges orchestration settings (enabled, events) from `config/plugins.yml`
 - ✅ Prevents accidental secret commits (only .env has secrets, and it's gitignored)
 
 **Always use the setup wizard** instead of manual configuration:
 ```bash
-uv run python backends/advanced/src/advanced_omi_backend/plugins/email_summarizer/setup.py
+uv run python backend/src/backend/plugins/email_summarizer/setup.py
 ```
 
 ### Additional Security Tips
@@ -251,9 +251,9 @@ plugins/email_summarizer/
 
 ### Dependencies
 
-- `advanced_omi_backend.database` - MongoDB access
-- `advanced_omi_backend.llm_client` - LLM generation
-- `advanced_omi_backend.services.email_service` - SMTP email sending
+- `backend.database` - MongoDB access
+- `backend.llm_client` - LLM generation
+- `backend.services.email_service` - SMTP email sending
 
 ## Future Enhancements
 

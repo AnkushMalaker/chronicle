@@ -1,7 +1,7 @@
 # Email Summarizer Plugin Configuration
 #
 # This file contains non-secret configuration for the email summarizer plugin.
-# Secrets (SMTP credentials) are stored in backends/advanced/.env
+# Secrets (SMTP credentials) are stored in backend/.env
 # Plugin orchestration (enabled, events) is in config/plugins.yml
 
 # Email content settings

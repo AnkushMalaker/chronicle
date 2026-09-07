@@ -113,10 +113,10 @@ to the graphical session (see `extras/chronicle-tray/README.md`).
 
 ## Server setup (once)
 
-On the machine running the advanced backend:
+On the machine running the Chronicle backend:
 
 1. Add a strong key and the sync address(es) the Mac should dial to
-   `backends/advanced/.env` — comma-separate several and the client tries each, e.g.
+   `backend/.env` — comma-separate several and the client tries each, e.g.
    your Tailnet name for remote devices plus the LAN IP for devices without Tailscale:
    ```bash
    VAULT_SYNC_API_KEY=<any long random string>
@@ -125,7 +125,7 @@ On the machine running the advanced backend:
 2. Start the Syncthing service (it's behind a compose profile) and (re)create the
    backend so it picks up the new env + the broker route:
    ```bash
-   cd backends/advanced
+   cd backend
    docker compose --profile vault-sync up -d vault-syncthing
    docker compose up -d --force-recreate chronicle-backend
    ```

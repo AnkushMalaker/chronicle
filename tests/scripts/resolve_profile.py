@@ -31,7 +31,7 @@ TESTS_DIR = Path(__file__).resolve().parents[1]
 MANIFEST = TESTS_DIR / "profiles.yml"
 
 # Where tests/configs is mounted inside the backend and worker containers
-# (see docker-compose-test.yml: ../../tests/configs:/app/test-configs:ro).
+# (see docker-compose-test.yml: ../tests/configs:/app/test-configs:ro).
 CONTAINER_CONFIG_DIR = "/app/test-configs"
 
 _ENV_REF = re.compile(r"\$\{(\w+)(?::-([^}]*))?\}")

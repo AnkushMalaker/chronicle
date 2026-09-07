@@ -28,13 +28,13 @@ on:
   pull_request:
     paths:
       - 'tests/**'
-      - 'backends/advanced/src/**'
+      - 'backend/src/**'
       - '.github/workflows/robot-tests.yml'
   push:
     branches: [dev, main]
     paths:
       - 'tests/**'
-      - 'backends/advanced/src/**'
+      - 'backend/src/**'
       - '.github/workflows/robot-tests.yml'
   workflow_dispatch:
     inputs:
@@ -89,7 +89,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ hashFiles('backends/advanced/Dockerfile', 'backends/advanced/pyproject.toml') }}
+          key: ${{ runner.os }}-buildx-${{ hashFiles('backend/Dockerfile', 'backend/pyproject.toml') }}
           restore-keys: ${{ runner.os }}-buildx-
 
       - uses: actions/setup-python@v5

@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import time
 import wave
@@ -5,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from chronicle_screenpipe import collector as collector_module
 from chronicle_screenpipe.collector import (
     Checkpoints,
@@ -12,6 +14,7 @@ from chronicle_screenpipe.collector import (
     Config,
     audio_duration,
     infer_audio_direction,
+    infer_audio_track_id,
 )
 from chronicle_screenpipe.meeting import CaptureApp, MeetingTracker, RecorderMeetingLog
 
@@ -25,6 +28,16 @@ def test_checkpoints_are_atomic(tmp_path: Path):
 def test_audio_direction_from_screenpipe_filename():
     assert infer_audio_direction("device (input)_2026.wav") == "input"
     assert infer_audio_direction("device (output)_2026.wav") == "output"
+
+
+def test_audio_track_id_keeps_device_identity_without_chunk_suffix():
+    assert infer_audio_track_id("Desk Mic (input)_2026-09-03_10-00.wav") == (
+        "Desk Mic (input)"
+    )
+    assert infer_audio_track_id("Desk Mic (input)_2026-09-03_10-01.wav") == (
+        "Desk Mic (input)"
+    )
+    assert infer_audio_track_id("Headset Mic (input)_42.wav") == ("Headset Mic (input)")
 
 
 def test_wav_duration_is_read_from_media(tmp_path: Path):
@@ -108,6 +121,48 @@ def test_collect_audio_tags_chunks_with_the_active_meeting(tmp_path: Path):
 
     assert collector.collect_audio(db) == 1
     assert posted["meeting_id"] == tracker.meeting["meeting_id"]
+    assert posted["track_id"] == "Microphone (input)"
+
+
+def test_collect_audio_keeps_checkpoint_when_backend_rejects_contract(tmp_path: Path):
+    chunk = tmp_path / "Microphone (input)_1.wav"
+    with wave.open(str(chunk), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16000)
+        audio.writeframes(b"\0\0" * 16000)
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE audio_chunks (id INTEGER, file_path TEXT, timestamp TEXT)")
+    db.execute(
+        "INSERT INTO audio_chunks VALUES (1, ?, ?)",
+        (str(chunk), "2026-07-22T10:00:30Z"),
+    )
+
+    class RejectingClient:
+        def post(self, _url, data=None, files=None):
+            return SimpleNamespace(status_code=422, text="missing track_id")
+
+    collector = object.__new__(Collector)
+    collector.config = Config(
+        backend_url="http://backend",
+        source_id="source-1",
+        token="token",
+        screenpipe_dir=tmp_path,
+    )
+    collector.checkpoints = Checkpoints(tmp_path / "state.json")
+    collector.rejections_path = tmp_path / "rejections.jsonl"
+    collector._meeting_tracker = None
+    collector._recorder_meetings = None
+    collector.client = RejectingClient()
+
+    with pytest.raises(RuntimeError, match="checkpoint retained"):
+        collector.collect_audio(db)
+
+    assert collector.checkpoints.get("audio") == 0
+    rejection = json.loads(collector.rejections_path.read_text().splitlines()[0])
+    assert rejection["source_item_id"] == 1
+    assert rejection["status"] == 422
 
 
 def test_collect_meetings_reads_the_recorders_meetings_table(tmp_path: Path):
@@ -156,6 +211,16 @@ def test_collect_meetings_reads_the_recorders_meetings_table(tmp_path: Path):
 
     assert collector.collect_meetings(db) == 2
     assert [event["event"] for event in sent_events] == ["open", "close"]
+    assert {event["locator"]["capture_source_id"] for event in sent_events} == {
+        "source-1"
+    }
+    assert {event["locator"]["modality"] for event in sent_events} == {"context"}
+    assert {event["locator"]["track_id"] for event in sent_events} == {
+        "meeting-detector"
+    }
+    assert all(
+        event["metadata"]["locator"] == event["locator"] for event in sent_events
+    )
     assert sent_events[0]["metadata"]["title"] == "Standup"
     # The recorder owns detection now, so no PipeWire sensing is attempted
     # and a second pass re-sends nothing.
@@ -167,6 +232,76 @@ def test_collect_meetings_reads_the_recorders_meetings_table(tmp_path: Path):
         )
         == "meeting:recorder:5"
     )
+
+
+def test_collect_meetings_uses_freshest_display_context_for_pipewire(
+    tmp_path: Path, monkeypatch
+):
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    sent_events = []
+
+    class FakeClient:
+        def post(self, _url, json=None):
+            sent_events.extend(json["events"])
+            return _Response({})
+
+    old_context = {
+        "captured_at": "2026-07-22T10:00:00Z",
+        "ended_at": "2026-07-22T10:00:01Z",
+        "browser_url": "https://example.com",
+    }
+    fresh_context = {
+        "captured_at": "2026-07-22T10:00:02Z",
+        "ended_at": "2026-07-22T10:00:03Z",
+        "browser_url": "https://meet.google.com/abc-defg-hij",
+    }
+    (tmp_path / "observations.json").write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "tracks": {
+                    "Display 1": {
+                        "schema": 1,
+                        "active": old_context,
+                        "candidate": None,
+                    },
+                    "Display 2": {
+                        "schema": 1,
+                        "active": fresh_context,
+                        "candidate": None,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "pipewire_capture_apps",
+        lambda: [CaptureApp(name="Chromium", binary="chromium")],
+    )
+    collector = object.__new__(Collector)
+    collector.config = Config(
+        backend_url="http://backend",
+        source_id="source-1",
+        token="token",
+        screenpipe_dir=tmp_path,
+    )
+    collector.meetings_path = tmp_path / "meetings.json"
+    collector.observations_path = tmp_path / "observations.json"
+    collector.metrics = {
+        "observation_opens": 0,
+        "observation_closes": 0,
+        "observation_samples": 0,
+    }
+    collector._meeting_tracker = None
+    collector._recorder_meetings = None
+    collector.client = FakeClient()
+
+    assert collector.collect_meetings(db) == 0
+    assert collector.collect_meetings(db) == 1
+    assert sent_events[0]["metadata"]["platform"] == "google-meet"
 
 
 def test_recorder_meetings_take_precedence_over_the_live_tracker():
@@ -436,3 +571,62 @@ def test_an_interval_with_no_frames_yields_an_empty_shortlist(monkeypatch):
         )
         == []
     )
+
+
+def test_collect_observations_keeps_interleaved_displays_independent(tmp_path: Path):
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.execute(
+        "CREATE TABLE frames (id INTEGER PRIMARY KEY, timestamp TEXT, app_name TEXT, "
+        "window_name TEXT, browser_url TEXT, capture_trigger TEXT, full_text TEXT, "
+        "text_source TEXT, device_name TEXT)"
+    )
+    db.executemany(
+        "INSERT INTO frames VALUES (?, ?, ?, ?, '', 'click', ?, 'accessibility', ?)",
+        [
+            (1, "2026-07-23T10:00:00Z", "Code", "collector.py", "code", "Display 1"),
+            (2, "2026-07-23T10:00:01Z", "Video", "Movie", "movie", "Display 2"),
+        ],
+    )
+    batches: list[list[dict]] = []
+
+    class FakeClient:
+        def post(self, _url, json=None):
+            batches.append(json["events"])
+            return _Response({})
+
+    collector = object.__new__(Collector)
+    collector.config = Config(
+        backend_url="http://backend",
+        source_id="screenpipe-rainbow",
+        token="token",
+        screenpipe_dir=tmp_path,
+    )
+    collector.checkpoints = Checkpoints(tmp_path / "checkpoints.json")
+    collector.observations_path = tmp_path / "observations.json"
+    collector.metrics = {
+        "observation_opens": 0,
+        "observation_closes": 0,
+        "observation_samples": 0,
+    }
+    collector.client = FakeClient()
+
+    assert collector.collect_observations(db) == 2
+    state = json.loads(collector.observations_path.read_text())
+    assert state["schema"] == 2
+    assert set(state["tracks"]) == {"Display 1", "Display 2"}
+    assert state["tracks"]["Display 1"]["active"]["app_name"] == "Code"
+    assert state["tracks"]["Display 2"]["active"]["app_name"] == "Video"
+    assert {event["locator"]["track_id"] for event in batches[0]} == {
+        "Display 1",
+        "Display 2",
+    }
+
+    db.execute(
+        "INSERT INTO frames VALUES (3, '2026-07-23T10:00:03Z', 'Browser', "
+        "'Docs', '', 'click', 'docs', 'accessibility', 'Display 1')"
+    )
+    assert collector.collect_observations(db) == 2
+    state = json.loads(collector.observations_path.read_text())
+    assert state["tracks"]["Display 1"]["active"]["app_name"] == "Browser"
+    assert state["tracks"]["Display 2"]["active"]["app_name"] == "Video"

@@ -243,7 +243,7 @@ class ASRServicesSetup:
         """HF token, in priority order: --hf-token arg, backend .env, repo-root .env,
         this service's own .env.
 
-        Mirrors how the wizard sources shared secrets: ``backends/advanced/.env`` is
+        Mirrors how the wizard sources shared secrets: ``backend/.env`` is
         the canonical hub on a main machine; the repo-root ``.env`` is the per-node
         store for backend-less cluster-join nodes. Both are two levels up from here.
         """
@@ -251,7 +251,7 @@ class ASRServicesSetup:
         if arg_token:
             return arg_token
         for path in (
-            str(REPO_ROOT / "backends/advanced/.env"),
+            str(REPO_ROOT / "backend/.env"),
             str(REPO_ROOT / ".env"),
             str(SERVICE_DIR / ".env"),
         ):
@@ -797,7 +797,7 @@ class ASRServicesSetup:
             # CHRONICLE_SERVICE_NAME is intentionally NOT set so the source stays
             # auto-derived per running provider (asr-<provider>) across switches.
             ingest_url, ingest_token = resolve_ingest_config(
-                [str(REPO_ROOT / "backends/advanced/.env"), str(REPO_ROOT / ".env")]
+                [str(REPO_ROOT / "backend/.env"), str(REPO_ROOT / ".env")]
             )
             if ingest_url and ingest_token:
                 self.config["CHRONICLE_INGEST_URL"] = ingest_url

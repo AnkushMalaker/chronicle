@@ -145,11 +145,11 @@ uv run --with-requirements setup-requirements.txt python services.py stop --all
 ### Development
 ```bash
 # Backend development
-cd backends/advanced
-uv run python src/advanced_omi_backend/main.py
+cd backend
+uv run python src/backend/main.py
 
 # Integration tests (needs a .env with API keys)
-./backends/advanced/run-test.sh
+./backend/run-test.sh
 
 # Mobile app
 cd app

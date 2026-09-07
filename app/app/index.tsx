@@ -309,7 +309,7 @@ export default function App() {
                     <Text style={s.setupSubtitle}>
                       {!backendConfigured
                         ? 'Scan the QR code from your Chronicle dashboard to pair this app.'
-                        : 'Log in to access advanced backend features.'}
+                        : 'Log in to access Chronicle backend features.'}
                     </Text>
                     <Text style={s.setupCta}>Open Settings ⚙</Text>
                   </TouchableOpacity>
@@ -355,7 +355,7 @@ export default function App() {
 
               {!settings.isAuthenticated && (
                 <InlineAlert tone="warning" style={s.authWarning}>
-                  Login is required for advanced backend features. Simple backend can be used without authentication.
+                  Login is required for Chronicle backend features. Simple backend can be used without authentication.
                 </InlineAlert>
               )}
 

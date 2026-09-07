@@ -307,7 +307,7 @@ class SpeakerRecognitionSetup:
 
         if enable_https:
             # The dev server stays plain HTTP; Caddy terminates TLS and proxies to it
-            # over HTTP (like the advanced backend's webui-dev). REACT_UI_HTTPS drives
+            # over HTTP (like the Chronicle backend's webui-dev). REACT_UI_HTTPS drives
             # both vite and the container healthcheck, so keep it false. Caddy-on is
             # tracked separately via HTTPS_CERT_MODE.
             self.config["REACT_UI_HTTPS"] = "false"
@@ -315,7 +315,7 @@ class SpeakerRecognitionSetup:
 
             # The Vite dev server enforces server.allowedHosts; Caddy preserves the
             # client Host header (the Tailscale name/domain), so it must be allowlisted
-            # or Vite returns 403 "This host is not allowed" (mirrors advanced backend).
+            # or Vite returns 403 "This host is not allowed" (mirrors Chronicle backend).
             self.config["VITE_ALLOWED_HOSTS"] = f"localhost 127.0.0.1 {server_ip}"
 
             # Decide how the TLS cert is managed (same logic the wizard uses).
@@ -538,7 +538,7 @@ class SpeakerRecognitionSetup:
             # locally. Source stays auto-derived (speaker-recognition), so
             # CHRONICLE_SERVICE_NAME is intentionally not set.
             ingest_url, ingest_token = resolve_ingest_config(
-                [str(REPO_ROOT / "backends/advanced/.env"), str(REPO_ROOT / ".env")]
+                [str(REPO_ROOT / "backend/.env"), str(REPO_ROOT / ".env")]
             )
             if ingest_url and ingest_token:
                 self.config["CHRONICLE_INGEST_URL"] = ingest_url

@@ -190,7 +190,7 @@ SERVICES = {
         "ui": {
             "http_port": "3002",
             "https_port": "3443",
-            "https_caddyfile": "backends/advanced/Caddyfile",
+            "https_caddyfile": "backend/Caddyfile",
             "https_marker": "langfuse-web:3000",
         },
         "health_endpoints": [
@@ -203,15 +203,15 @@ SERVICES = {
         ],
     },
     "backend": {
-        "path": "backends/advanced",
+        "path": "backend",
         "compose_file": "docker-compose.yml",
-        "description": "Advanced Backend + WebUI",
+        "description": "Chronicle Backend + WebUI",
         "ports": ["8000", "5173", "443"],
         "ui": {
             "http_port": "5173",
             "http_port_env": "WEBUI_DEV_PORT",
             "https_port": "443",
-            "https_caddyfile": "backends/advanced/Caddyfile",
+            "https_caddyfile": "backend/Caddyfile",
             "https_marker": "webui-dev:5173",
         },
         "health_endpoints": [
@@ -754,7 +754,7 @@ def _remove_advertised_services() -> None:
 
 
 def _get_backend_env_path() -> Path:
-    return Path(__file__).parent / "backends" / "advanced" / ".env"
+    return Path(__file__).parent / "backend" / ".env"
 
 
 def _langfuse_enabled_in_backend() -> bool:
@@ -1365,7 +1365,7 @@ def _ensure_service_manager_token() -> str:
             str(backend_env_path), "SERVICE_MANAGER_TOKEN", token, quote_mode="never"
         )
         console.print(
-            "[blue]ℹ️  Generated SERVICE_MANAGER_TOKEN in backends/advanced/.env[/blue]"
+            "[blue]ℹ️  Generated SERVICE_MANAGER_TOKEN in backend/.env[/blue]"
         )
     return token
 
@@ -2629,7 +2629,7 @@ def _compose_container_names(service_name):
     """Container names for a compose service, or [] if it isn't running.
 
     Goes through compose_ps_json so it works under both engines — the naming
-    differs (``advanced_caddy_1`` vs ``advanced-caddy-1``), so these must never
+    differs (``backend_caddy_1`` vs ``backend-caddy-1``), so these must never
     be hardcoded.
     """
     try:

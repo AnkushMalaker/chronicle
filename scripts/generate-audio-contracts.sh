@@ -3,8 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 proto_root="$repo_root/contracts/audio/v2/proto"
-proto_file="advanced_omi_backend/audio_contract/v2/audio.proto"
-python_out="$repo_root/backends/advanced/src"
+proto_file="backend/audio_contract/v2/audio.proto"
+python_out="$repo_root/backend/src"
 typescript_out="$repo_root/contracts/audio/v2/typescript"
 wakeword_python_out="$repo_root/extras/wakeword-service"
 client_python_out="$repo_root/extras/chronicle-client"
@@ -22,13 +22,13 @@ uv run --with grpcio-tools==1.71.0 python -m grpc_tools.protoc \
   "$proto_root/$proto_file"
 
 uv run --with grpcio-tools==1.71.0 python -m grpc_tools.protoc \
-  -I"$proto_root/advanced_omi_backend" \
+  -I"$proto_root/backend" \
   --python_out="$client_python_out" \
   --pyi_out="$client_python_out" \
   "$proto_root/$proto_file"
 
 uv run --with grpcio-tools==1.71.0 python -m grpc_tools.protoc \
-  -I"$proto_root/advanced_omi_backend" \
+  -I"$proto_root/backend" \
   --python_out="$wakeword_python_out" \
   --pyi_out="$wakeword_python_out" \
   "$proto_root/$proto_file"

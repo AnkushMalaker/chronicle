@@ -6,7 +6,7 @@ captures the patterns that already recur across the product and turns them into 
 tokens + components.
 
 ## Sources
-- Codebase: `chronicle/backends/advanced/webui/` (React + Vite + Tailwind, dark-mode via `dark:` class).
+- Codebase: `chronicle/backend/webui/` (React + Vite + Tailwind, dark-mode via `dark:` class).
   - Pages read: `pages/WakeWordLab.tsx`, `pages/DataAudit.tsx`, `components/layout/Layout.tsx`, `components/dataAudit/SpeakerConfidencePanel.tsx`, `components/finetuning/EnrollmentCandidates.tsx`.
   - Config: `tailwind.config.js` (default theme, no palette overrides), `src/index.css` (`font-family: system-ui, sans-serif`).
 - The tokens are the **default Tailwind palette/scale** as actually used — not a bespoke palette. The product's signature look is the **dark** theme, so dark is the default on `:root`; a `[data-theme="light"]` scope carries the `dark:`-variant light mode.

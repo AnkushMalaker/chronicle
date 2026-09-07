@@ -45,7 +45,7 @@ User-Loop Popup (Review Anomalies)
 | `train.py` | Fine-tune Whisper with LoRA adapter | ✅ Active |
 | `requirements.txt` | Python dependencies | ✅ Active |
 
-Anomaly flagging (setting `maybe_anomaly: true` in MongoDB) is handled by the backend script `backends/advanced/src/advanced_omi_backend/scripts/run_anomaly_detection.py`.
+Anomaly flagging (setting `maybe_anomaly: true` in MongoDB) is handled by the backend script `backend/src/backend/scripts/run_anomaly_detection.py`.
 
 ---
 
@@ -157,10 +157,10 @@ uv run python train.py \
 
 The backend provides a MongoDB scan job that sets `transcript_versions.$.maybe_anomaly = True` for transcripts that haven't been reviewed yet.
 
-From `backends/advanced/`:
+From `backend/`:
 
 ```bash
-uv run python src/advanced_omi_backend/scripts/run_anomaly_detection.py
+uv run python src/backend/scripts/run_anomaly_detection.py
 ```
 
 Notes:
@@ -288,10 +288,10 @@ The training JSONL file (`user_loop_feedback.jsonl`) uses this schema:
 # crontab -e
 
 # Export training data daily at 2 AM
-0 2 * * * cd /path/to/backends/advanced/event-detection && uv run python export_from_mongo.py --min_samples 50
+0 2 * * * cd /path/to/backend/event-detection && uv run python export_from_mongo.py --min_samples 50
 
 # Retrain adapter weekly on Sunday at 3 AM
-0 3 * * 0 cd /path/to/backends/advanced/event-detection && uv run python train.py --train_manifest user_loop_feedback.jsonl
+0 3 * * 0 cd /path/to/backend/event-detection && uv run python train.py --train_manifest user_loop_feedback.jsonl
 ```
 
 ### Adapter Versioning
@@ -433,7 +433,7 @@ const checkAnomaly = async () => {
 - ✅ GET /api/user-loop/events (returns anomalies)
 - ✅ POST /api/user-loop/accept (verifies)
 - ✅ POST /api/user-loop/reject (stashes to training)
-- ✅ Anomaly scan job: src/advanced_omi_backend/scripts/run_anomaly_detection.py (sets maybe_anomaly: true)
+- ✅ Anomaly scan job: src/backend/scripts/run_anomaly_detection.py (sets maybe_anomaly: true)
 ```
 
 ### Future Integration
@@ -454,7 +454,7 @@ To replace the placeholder scan with **model-based anomaly detection**:
 | **2. Storage** | MongoDB | Saves to `training_stash` collection |
 | **3. Export** | export_from_mongo.py | `uv run python export_from_mongo.py --min_samples 10` |
 | **4. Training** | train.py | `uv run python train.py --train_manifest user_loop_feedback.jsonl --output_dir ./sneeze_adapter` |
-| **5. Flagging** | Backend job | `cd .. && uv run python src/advanced_omi_backend/scripts/run_anomaly_detection.py` |
+| **5. Flagging** | Backend job | `cd .. && uv run python src/backend/scripts/run_anomaly_detection.py` |
 | **6. Deployment** | Backend | (Future) Use trained adapter inside the scan job |
 
 ---

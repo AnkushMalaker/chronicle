@@ -14,14 +14,14 @@ from typing import Any, Dict, List, Optional
 from bson import ObjectId
 from email_summarizer.email_service import SMTPEmailService
 
-from advanced_omi_backend.database import get_database
-from advanced_omi_backend.llm_client import async_generate
-from advanced_omi_backend.models.conversation import Conversation
-from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
-from advanced_omi_backend.plugins.events import PluginEvent
-from advanced_omi_backend.prompt_registry import get_prompt_registry
-from advanced_omi_backend.utils.logging_utils import mask_dict
-from advanced_omi_backend.utils.user_time import format_user_datetime
+from backend.database import get_database
+from backend.llm_client import async_generate
+from backend.models.conversation import Conversation
+from backend.plugins.base import BasePlugin, PluginContext, PluginResult
+from backend.plugins.events import PluginEvent
+from backend.prompt_registry import get_prompt_registry
+from backend.utils.logging_utils import mask_dict
+from backend.utils.user_time import format_user_datetime
 
 logger = logging.getLogger(__name__)
 

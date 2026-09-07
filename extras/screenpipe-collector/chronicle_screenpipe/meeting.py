@@ -141,14 +141,24 @@ def classify_capture(
 
 
 def _meeting_event(
-    action: str, meeting: dict[str, Any], *, ended_at: str | None = None
+    action: str,
+    meeting: dict[str, Any],
+    *,
+    capture_source_id: str,
+    ended_at: str | None = None,
 ) -> dict[str, Any]:
     """Shape a meeting boundary as a standard observation event."""
+    locator = {
+        "capture_source_id": capture_source_id,
+        "modality": "context",
+        "track_id": "meeting-detector",
+    }
     metadata = {
         "observation_type": "meeting",
         "platform": meeting["platform"],
         "app_name": meeting.get("app", ""),
         "browser_url": meeting.get("browser_url", ""),
+        "locator": locator,
     }
     if meeting.get("title"):
         metadata["title"] = meeting["title"]
@@ -157,6 +167,7 @@ def _meeting_event(
     return {
         "event": action,
         "source_item_id": meeting["meeting_id"],
+        "locator": locator,
         "captured_at": meeting["started_at"],
         "ended_at": ended_at,
         "metadata": metadata,
@@ -194,6 +205,7 @@ class RecorderMeetingLog:
         self,
         state: dict[str, Any] | None = None,
         *,
+        capture_source_id: str = "screenpipe",
         retain_seconds: float = 48 * 3600.0,
         owns_detection_seconds: float = 7 * 24 * 3600.0,
     ):
@@ -201,6 +213,7 @@ class RecorderMeetingLog:
         if state.get("schema") != self.SCHEMA:
             raise ValueError("unsupported recorder meeting state schema")
         self.state = state
+        self.capture_source_id = capture_source_id
         self.retain_seconds = retain_seconds
         self.owns_detection_seconds = owns_detection_seconds
 
@@ -222,15 +235,33 @@ class RecorderMeetingLog:
             known = self.state["rows"].get(row_id)
             if known is None:
                 self.state["rows"][row_id] = meeting
-                events.append(_meeting_event("open", meeting))
+                events.append(
+                    _meeting_event(
+                        "open", meeting, capture_source_id=self.capture_source_id
+                    )
+                )
                 if ended_at:
                     meeting["close_sent"] = True
-                    events.append(_meeting_event("close", meeting, ended_at=ended_at))
+                    events.append(
+                        _meeting_event(
+                            "close",
+                            meeting,
+                            capture_source_id=self.capture_source_id,
+                            ended_at=ended_at,
+                        )
+                    )
                 continue
             known.update({"ended_at": ended_at, "title": meeting["title"], "app": app})
             if ended_at and not known.get("close_sent"):
                 known["close_sent"] = True
-                events.append(_meeting_event("close", known, ended_at=ended_at))
+                events.append(
+                    _meeting_event(
+                        "close",
+                        known,
+                        capture_source_id=self.capture_source_id,
+                        ended_at=ended_at,
+                    )
+                )
         horizon = timestamp_seconds(iso_timestamp(now)) - self.retain_seconds
         self.state["rows"] = {
             row_id: row
@@ -284,6 +315,7 @@ class MeetingTracker:
         self,
         state: dict[str, Any] | None = None,
         *,
+        capture_source_id: str = "screenpipe",
         confirm_polls: int = 2,
         grace_seconds: float = 30.0,
         stale_seconds: float = 600.0,
@@ -300,6 +332,7 @@ class MeetingTracker:
         if state.get("schema") != self.SCHEMA:
             raise ValueError("unsupported meeting state schema")
         self.state = state
+        self.capture_source_id = capture_source_id
         self.confirm_polls = confirm_polls
         self.grace_seconds = grace_seconds
         self.stale_seconds = stale_seconds
@@ -317,7 +350,14 @@ class MeetingTracker:
     def _close_meeting(self, ended_at: str) -> list[dict[str, Any]]:
         meeting = self.meeting
         assert meeting is not None
-        events = [_meeting_event("close", meeting, ended_at=ended_at)]
+        events = [
+            _meeting_event(
+                "close",
+                meeting,
+                capture_source_id=self.capture_source_id,
+                ended_at=ended_at,
+            )
+        ]
         self.state["recent"].append(
             {
                 "meeting_id": meeting["meeting_id"],
@@ -382,7 +422,13 @@ class MeetingTracker:
                 self.state["confirm_count"] += 1
                 if self.state["confirm_count"] >= self.confirm_polls:
                     self.state["phase"] = "active"
-                    return [_meeting_event("open", meeting)]
+                    return [
+                        _meeting_event(
+                            "open",
+                            meeting,
+                            capture_source_id=self.capture_source_id,
+                        )
+                    ]
                 return []
             if phase == "ending":
                 self.state["phase"] = "active"

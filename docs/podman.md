@@ -73,7 +73,7 @@ internally by querying `podman ps` scoped to the compose project label.
 
 ## Migrating an existing Docker install
 
-- **Data ownership.** Docker creates bind-mounted data (`backends/advanced/data/...`)
+- **Data ownership.** Docker creates bind-mounted data (`backend/data/...`)
   owned by `root` (root-running containers) or by a service UID like `999`
   (mongo/redis drop privileges at runtime). Rootless Podman remaps container UIDs
   through your subuid range, so it can't write either until re-owned. `podman
@@ -82,11 +82,11 @@ internally by querying `podman ps` scoped to the compose project label.
   ```bash
   # 1) real root pulls everything back to your user (fixes root-owned dirs;
   #    container-root maps to you, so root-running services are then correct)
-  sudo chown -R "$(id -un):$(id -gn)" backends/advanced/data
+  sudo chown -R "$(id -un):$(id -gn)" backend/data
   # 2) remap services that run as a non-root UID inside (mongo + redis = 999),
   #    set from inside the podman user namespace
-  podman unshare chown -R 999:999 backends/advanced/data/mongo_data
-  podman unshare chown -R 999:999 backends/advanced/data/redis_data
+  podman unshare chown -R 999:999 backend/data/mongo_data
+  podman unshare chown -R 999:999 backend/data/redis_data
   ```
   General rule for any straggler that can't write: `podman unshare chown -R
   <container_uid>:<container_uid> <dir>`.
@@ -166,7 +166,7 @@ internally by querying `podman ps` scoped to the compose project label.
   podman exec <container> getent hosts mongo             # still works
   ```
   Chronicle prevents this by giving each service explicit `dns:` upstreams
-  (`x-public-dns` in `backends/advanced/docker-compose.yml`). On a DNS-enabled
+  (`x-public-dns` in `backend/docker-compose.yml`). On a DNS-enabled
   network these become aardvark's *per-container* upstreams — the container's
   `resolv.conf` still points at aardvark, so container-name resolution is
   unaffected, but the broken global fallback is bypassed. `./services.py doctor`

@@ -365,14 +365,14 @@ This experimental system can be integrated with the existing Chronicle backend:
 
 ### Potential Integration Points
 
-- `backends/advanced-backend/src/advanced_omi_backend/processors.py`
+- `backend/src/backend/processors.py`
 - `extras/speaker-recognition/speaker_service.py` (replacement)
 - New microservice alongside existing speaker recognition
 
 ## 🔗 Related Files
 
 - `../speaker-recognition/`: Traditional PyAnnote-based system
-- `../../backends/advanced-backend/`: Main Chronicle backend
+- `../../backend/`: Main Chronicle backend
 - `../../extras/test-audios/`: Sample audio files for testing
 
 ## 📝 Development Notes

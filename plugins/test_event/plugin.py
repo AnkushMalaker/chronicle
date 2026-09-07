@@ -8,7 +8,7 @@ Subscribes to all event types to verify event dispatch system works correctly.
 import logging
 from typing import Any, Dict, List, Optional
 
-from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
+from backend.plugins.base import BasePlugin, PluginContext, PluginResult
 
 from .event_storage import EventStorage
 

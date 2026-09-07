@@ -29,7 +29,7 @@ Chronicle's plugin system allows you to extend functionality by subscribing to e
 ### 1. Generate Plugin Boilerplate
 
 ```bash
-cd backends/advanced
+cd backend
 uv run python scripts/create_plugin.py my_awesome_plugin
 ```
 
@@ -73,7 +73,7 @@ plugins:
 ### 4. Restart Backend
 
 ```bash
-cd backends/advanced
+cd backend
 docker compose restart
 ```
 
@@ -86,7 +86,7 @@ Your plugin will be auto-discovered and loaded!
 All plugins inherit from `BasePlugin`:
 
 ```python
-from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
+from backend.plugins.base import BasePlugin, PluginContext, PluginResult
 
 class MyPlugin(BasePlugin):
     SUPPORTED_ACCESS_LEVELS = ['conversation']  # Which events you support
@@ -298,7 +298,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from advanced_omi_backend.plugins.base import BasePlugin, PluginContext, PluginResult
+from backend.plugins.base import BasePlugin, PluginContext, PluginResult
 
 logger = logging.getLogger(__name__)
 
@@ -355,7 +355,7 @@ class TodoExtractorPlugin(BasePlugin):
 
     async def _save_todos(self, user_id: str, todos: List[str]):
         """Save todos to database or external service."""
-        from advanced_omi_backend.database import get_database
+        from backend.database import get_database
 
         db = get_database()
         for todo in todos:
@@ -593,7 +593,7 @@ async def my_method(self):
 Use the global database handle:
 
 ```python
-from advanced_omi_backend.database import get_database
+from backend.database import get_database
 
 async def save_data(self, data):
     db = get_database()
@@ -605,7 +605,7 @@ async def save_data(self, data):
 Use the global LLM client:
 
 ```python
-from advanced_omi_backend.llm_client import async_generate
+from backend.llm_client import async_generate
 
 async def generate_summary(self, text):
     prompt = f"Summarize: {text}"
@@ -744,7 +744,7 @@ async def on_conversation_complete(self, context):
 **Solution**:
 - Restart backend after adding dependencies
 - Verify imports are from correct modules
-- Use absolute imports for framework classes: `from advanced_omi_backend.plugins.base import BasePlugin`
+- Use absolute imports for framework classes: `from backend.plugins.base import BasePlugin`
 
 ### Database Connection Issues
 
@@ -752,7 +752,7 @@ async def on_conversation_complete(self, context):
 
 **Solution**:
 ```python
-from advanced_omi_backend.database import get_database
+from backend.database import get_database
 
 async def my_method(self):
     db = get_database()  # Global database handle
@@ -822,13 +822,13 @@ class ExternalServicePlugin(BasePlugin):
 
 ## Resources
 
-- **Plugin Framework**: `backends/advanced/src/advanced_omi_backend/plugins/` (base.py, router.py, events.py, services.py)
+- **Plugin Framework**: `backend/src/backend/plugins/` (base.py, router.py, events.py, services.py)
 - **Plugin Implementations**: `plugins/` at repo root
   - Email Summarizer: `plugins/email_summarizer/`
   - Home Assistant: `plugins/homeassistant/`
   - Test Event: `plugins/test_event/`
   - Test Button Actions: `plugins/test_button_actions/`
-- **Plugin Generator**: `backends/advanced/scripts/create_plugin.py`
+- **Plugin Generator**: `backend/scripts/create_plugin.py`
 - **Configuration**: `config/plugins.yml.template`
 
 ## Contributing Plugins

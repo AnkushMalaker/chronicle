@@ -39,16 +39,16 @@ grep -A3 "| FAIL |" <test-output-file> | grep -v "^--$"
 ### Check Backend Logs During Test Run
 ```bash
 # Real-time backend errors
-docker logs -f advanced-backend-test-chronicle-backend-test-1 2>&1 | grep -E "(ERROR|Exception|Traceback)"
+docker logs -f backend-test-chronicle-backend-test-1 2>&1 | grep -E "(ERROR|Exception|Traceback)"
 
 # Recent errors from completed test run
-docker logs advanced-backend-test-chronicle-backend-test-1 --since=1h 2>&1 | grep -B5 -A10 "Traceback"
+docker logs backend-test-chronicle-backend-test-1 --since=1h 2>&1 | grep -B5 -A10 "Traceback"
 ```
 
 ### Find Errors for Specific Endpoint
 ```bash
 # Example: Find errors related to /api/conversations
-docker logs advanced-backend-test-chronicle-backend-test-1 2>&1 | grep -B10 -A10 "api/conversations"
+docker logs backend-test-chronicle-backend-test-1 2>&1 | grep -B10 -A10 "api/conversations"
 ```
 
 ## Common Failure Patterns
@@ -59,10 +59,10 @@ docker logs advanced-backend-test-chronicle-backend-test-1 2>&1 | grep -B10 -A10
 **Diagnosis**:
 ```bash
 # Check if controller function exists
-grep "async def function_name" backends/advanced/src/advanced_omi_backend/controllers/*.py
+grep "async def function_name" backend/src/backend/controllers/*.py
 
 # Check route calls the right function
-grep "controller\\.function_name" backends/advanced/src/advanced_omi_backend/routers/**/*.py
+grep "controller\\.function_name" backend/src/backend/routers/**/*.py
 ```
 
 **Fix**: Update route to call correct controller function name
@@ -76,7 +76,7 @@ grep "controller\\.function_name" backends/advanced/src/advanced_omi_backend/rou
 docker ps | grep chronicle-backend-test
 
 # Check backend crash logs
-docker logs advanced-backend-test-chronicle-backend-test-1 --tail=100
+docker logs backend-test-chronicle-backend-test-1 --tail=100
 ```
 
 **Fix**: Backend likely crashed - check for unhandled exceptions, restart container
@@ -97,7 +97,7 @@ docker logs advanced-backend-test-chronicle-backend-test-1 --tail=100
 **Diagnosis**:
 ```bash
 # Check worker logs
-docker logs advanced-backend-test-workers-test-1 --tail=100
+docker logs backend-test-workers-test-1 --tail=100
 
 # Check Redis queue status
 redis-cli -p 6380 LLEN rq:queue:default
@@ -133,18 +133,18 @@ grep -B5 -A10 "| FAIL |" <output-file> > failures.txt
 ### Step 3: Check Backend Logs (2 minutes)
 ```bash
 # Check for backend exceptions
-docker logs advanced-backend-test-chronicle-backend-test-1 --since=10m 2>&1 | grep -E "(ERROR|Exception|Traceback)" | tail -50
+docker logs backend-test-chronicle-backend-test-1 --since=10m 2>&1 | grep -E "(ERROR|Exception|Traceback)" | tail -50
 
 # For specific endpoint, grep for endpoint path
-docker logs advanced-backend-test-chronicle-backend-test-1 2>&1 | grep -B10 "/api/endpoint-path"
+docker logs backend-test-chronicle-backend-test-1 2>&1 | grep -B10 "/api/endpoint-path"
 ```
 
 ### Step 4: Fix and Verify (iterative)
 ```bash
 # After code fix, rebuild backend
-cd backends/advanced
+cd backend
 docker compose -f docker-compose-test.yml build chronicle-backend-test
-docker restart advanced-backend-test-chronicle-backend-test-1
+docker restart backend-test-chronicle-backend-test-1
 
 # Wait for healthy status
 docker ps | grep chronicle-backend-test
@@ -190,14 +190,14 @@ CLEANUP_CONTAINERS=false ./run-robot-tests.sh
 
 ### 1. Type Checking (Recommended)
 ```bash
-cd backends/advanced
+cd backend
 uv run mypy src/
 ```
 
 ### 2. Import Validation
 ```bash
 # Quick check if all imports resolve
-uv run python -c "from advanced_omi_backend.routers.modules import system_routes"
+uv run python -c "from backend.routers.modules import system_routes"
 ```
 
 ### 3. Lint Check
@@ -209,10 +209,10 @@ uv run ruff check src/
 
 | Service | Container Name | Logs Command |
 |---------|---------------|--------------|
-| Backend | `advanced-backend-test-chronicle-backend-test-1` | `docker logs <name>` |
-| Workers | `advanced-backend-test-workers-test-1` | `docker logs <name>` |
-| MongoDB | `advanced-backend-test-mongo-test-1` | `docker logs <name>` |
-| Redis | `advanced-backend-test-redis-test-1` | `docker logs <name>` |
+| Backend | `backend-test-chronicle-backend-test-1` | `docker logs <name>` |
+| Workers | `backend-test-workers-test-1` | `docker logs <name>` |
+| MongoDB | `backend-test-mongo-test-1` | `docker logs <name>` |
+| Redis | `backend-test-redis-test-1` | `docker logs <name>` |
 
 ## Tips for Faster Debugging
 

@@ -356,7 +356,7 @@ def resolve_hf_token(arg_token: Optional[str]) -> Optional[str]:
     """HF token, in priority order: --hf-token arg, backend .env, repo-root .env,
     this service's own .env.
 
-    Mirrors how the wizard sources shared secrets: ``backends/advanced/.env`` is the
+    Mirrors how the wizard sources shared secrets: ``backend/.env`` is the
     canonical hub on a main machine; the repo-root ``.env`` is the per-node store for
     backend-less cluster-join nodes. (TADA needs the token for the gated Llama base.)
     """
@@ -364,7 +364,7 @@ def resolve_hf_token(arg_token: Optional[str]) -> Optional[str]:
         return arg_token
     repo_root = SCRIPT_DIR.parent.parent
     for path in (
-        repo_root / "backends" / "advanced" / ".env",
+        repo_root / "backend" / ".env",
         repo_root / ".env",
         ENV_FILE,
     ):

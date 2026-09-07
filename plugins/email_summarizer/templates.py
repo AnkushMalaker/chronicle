@@ -8,7 +8,7 @@ import html
 from datetime import datetime
 from typing import Optional
 
-from advanced_omi_backend.utils.user_time import format_user_datetime
+from backend.utils.user_time import format_user_datetime
 
 
 def format_duration(seconds: float) -> str:

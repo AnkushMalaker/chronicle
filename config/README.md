@@ -87,7 +87,7 @@ For testing different provider combinations, see `tests/configs/`:
 
 Example:
 ```bash
-CONFIG_FILE=tests/configs/parakeet-ollama.yml ./backends/advanced/run-test.sh
+CONFIG_FILE=tests/configs/parakeet-ollama.yml ./backend/run-test.sh
 ```
 
 ## Hot Reload
@@ -111,7 +111,7 @@ config/plugins.yml           ← Orchestration (enabled, events)
                              ← Env var references: ${SMTP_PASSWORD}
                              ← Safe to commit ✅
 
-backends/advanced/.env       ← Actual secrets
+backend/.env       ← Actual secrets
                              ← SMTP_PASSWORD=abc123
                              ← Gitignored, never committed ✅
 
@@ -133,7 +133,7 @@ smtp_password: ${SMTP_PASSWORD}  # ✅ Reference to .env
 ```
 
 ```bash
-# backends/advanced/.env
+# backend/.env
 SMTP_PASSWORD=abcdefghijklmnop  # ✅ Actual secret here
 ```
 

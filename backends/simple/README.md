@@ -107,8 +107,8 @@ const ws = new WebSocket('ws://localhost:8000/ws');
 ws.send(opusAudioData);
 ```
 
-### Advanced Backend
-For full transcription and memory features, use the [Advanced Backend](../advanced/) instead.
+### Chronicle Backend
+For full transcription and memory features, use the [Chronicle Backend](../../backend/) instead.
 
 ## Monitoring
 
@@ -167,6 +167,6 @@ Client (Opus) → WebSocket → OmiOpusDecoder → PCM Buffer → WAV Files
 
 ## Related Services
 
-- **[Advanced Backend](../advanced/)**: Full-featured backend with transcription and memory
+- **[Chronicle Backend](../../backend/)**: Full-featured backend with transcription and memory
 - **[Mobile App](../../app/)**: React Native client for audio streaming
 - **[Speaker Recognition](../../extras/speaker-recognition/)**: Speaker identification service

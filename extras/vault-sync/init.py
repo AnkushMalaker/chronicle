@@ -41,7 +41,7 @@ class VaultSyncSetup:
         self.console = Console()
         self.config: Dict[str, Any] = {}
         self.args = args or argparse.Namespace()
-        self.backend_env_path = REPO_ROOT / "backends" / "advanced" / ".env"
+        self.backend_env_path = REPO_ROOT / "backend" / ".env"
         # Client configuration is consolidated in the repository-root .env, shared
         # by all of Chronicle's native client components (tray, vault sync, …).
         self.env_path = REPO_ROOT / ".env"
@@ -280,7 +280,7 @@ class VaultSyncSetup:
             self.console.print(
                 "[red][ERROR][/red] The server doesn't have vault sync enabled yet. "
                 "On the server:\n"
-                "  1. Add to backends/advanced/.env:\n"
+                "  1. Add to backend/.env:\n"
                 "     [cyan]VAULT_SYNC_API_KEY=<any long random string>[/cyan]\n"
                 "     [cyan]VAULT_SYNC_ADDRESS=tcp://<server-address>:22000[/cyan] "
                 "(comma-separate several)\n"

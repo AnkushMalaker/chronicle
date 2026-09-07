@@ -1,7 +1,7 @@
 # Home Assistant Plugin Configuration
 #
 # This file contains non-secret configuration for the Home Assistant plugin.
-# Secrets (HA_TOKEN) are stored in backends/advanced/.env
+# Secrets (HA_TOKEN) are stored in backend/.env
 # Plugin orchestration (enabled, events, condition) is in config/plugins.yml
 
 # Home Assistant server configuration

@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""
+Generic streaming transcription worker using registry-driven providers.
+
+Starts a consumer that reads from audio:stream:* streams and transcribes via configured provider.
+Provider configuration is loaded from config.yml (supports any streaming STT service).
+Publishes interim results to Redis Pub/Sub for real-time client display.
+Publishes final results to Redis Streams for storage.
+Triggers plugins on final results only.
+"""
+
+import asyncio
+import logging
+import signal
+import sys
+
+from backend.client_manager import initialize_redis_for_client_manager
+from backend.redis_factory import REDIS_URL, create_async_redis
+from backend.services.observability.loop_monitor import start_loop_monitor
+from backend.services.plugin_service import (
+    init_plugin_router,
+    initialize_plugins,
+    run_plugin_recovery,
+)
+from backend.services.transcription.streaming_consumer import (
+    StreamingTranscriptionConsumer,
+)
+from backend.speaker_recognition_client import SpeakerRecognitionClient
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+
+logger = logging.getLogger(__name__)
+
+try:
+    from backend.services.observability.log_handler import (
+        install_system_event_log_handler,
+    )
+
+    install_system_event_log_handler()
+except Exception:  # noqa: BLE001 — never block worker startup on observability
+    pass
+
+
+async def main():
+    """Main worker entry point."""
+    logger.info("🚀 Starting streaming transcription worker")
+    logger.info(
+        "📋 Provider configuration loaded from config.yml (defaults.stt_stream)"
+    )
+
+    # Create Redis client
+    try:
+        redis_client = create_async_redis(decode_responses=False)
+        logger.info(f"✅ Connected to Redis: {REDIS_URL}")
+
+        # Initialize ClientManager Redis for cross-container client→user mapping
+        initialize_redis_for_client_manager()
+
+    except Exception as e:
+        logger.error(f"Failed to connect to Redis: {e}", exc_info=True)
+        sys.exit(1)
+
+    # Initialize plugin router
+    recovery_task = None
+    try:
+        plugin_router = init_plugin_router()
+        if plugin_router:
+            logger.info(
+                f"✅ Plugin router initialized with {len(plugin_router.plugins)} plugins"
+            )
+
+            await initialize_plugins(plugin_router)
+            # Background recovery for plugins whose external dependency was
+            # unreachable at boot (e.g. Home Assistant on a server that's off).
+            recovery_task = asyncio.create_task(run_plugin_recovery(plugin_router))
+        else:
+            logger.warning("No plugin router available - plugins will not be triggered")
+    except Exception as e:
+        logger.error(f"Failed to initialize plugin router: {e}", exc_info=True)
+        plugin_router = None
+
+    # Initialize speaker recognition client
+    try:
+        speaker_client = SpeakerRecognitionClient()
+        if speaker_client.enabled:
+            logger.info(
+                f"Speaker recognition client initialized: {speaker_client.service_url}"
+            )
+        else:
+            logger.info(
+                "Speaker recognition disabled — streaming speaker identification off"
+            )
+            speaker_client = None
+    except Exception as e:
+        logger.warning(f"Failed to initialize speaker recognition client: {e}")
+        speaker_client = None
+
+    # Create streaming transcription consumer (uses registry-driven provider from config.yml)
+    try:
+        consumer = StreamingTranscriptionConsumer(
+            redis_client=redis_client,
+            plugin_router=plugin_router,
+            speaker_client=speaker_client,
+        )
+        logger.info("Streaming transcription consumer created")
+    except Exception as e:
+        logger.error(
+            f"Failed to create streaming transcription consumer: {e}", exc_info=True
+        )
+        logger.error(
+            "Ensure config.yml has defaults.stt_stream configured with valid provider"
+        )
+        await redis_client.aclose()
+        sys.exit(1)
+
+    # The wake-word dispatcher runs as its own worker (wakeword_dispatch_worker),
+    # decoupled from the live-transcription mode so the acoustic wake-word path keeps
+    # working under windowed_batch too.
+
+    # Setup signal handlers for graceful shutdown
+    def signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}, shutting down...")
+        asyncio.create_task(consumer.stop())
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    try:
+        logger.info("✅ Streaming transcription worker ready")
+        logger.info("📡 Listening for audio streams on audio:stream:* pattern")
+        logger.info(
+            "📢 Publishing interim results to transcription:interim:{session_id}"
+        )
+        logger.info("💾 Publishing final results to transcription:results:{session_id}")
+
+        # The streaming consumer is the only task here; the wake-word dispatcher
+        # runs as its own worker (wakeword_dispatch_worker).
+        # heartbeat_name lets the workers healthcheck detect a wedged loop; the
+        # loop monitor measures the sub-second stalls long before that threshold,
+        # which here mean audio is not being drained from Redis.
+        start_loop_monitor("streaming-stt")
+        await consumer.start_consuming(heartbeat_name="streaming-stt")
+
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received, shutting down...")
+    except Exception as e:
+        logger.error(f"Worker error: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
+        if recovery_task is not None:
+            recovery_task.cancel()
+        await redis_client.aclose()
+        logger.info("👋 Streaming transcription worker stopped")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
