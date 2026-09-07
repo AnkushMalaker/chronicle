@@ -45,6 +45,7 @@ CompletionReason = Literal[
     "inactivity_timeout",
     "max_duration",
     "all_jobs_complete",
+    "protocol_error",
 ]
 
 

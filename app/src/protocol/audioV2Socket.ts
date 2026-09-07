@@ -76,6 +76,7 @@ export interface AudioV2SocketOptions {
   sourceId: string;
   displayName: string;
   deviceKind: DeviceKind;
+  uplinkFrameDurationMs: 20 | 60;
   onPacketAccepted?: (sequence: number) => void;
   onPlaybackPacket?: (packet: PlaybackMediaPacket) => void;
   onControl?: (control: ServerControl) => void;
@@ -114,12 +115,12 @@ function eventId() {
   return create(EventIdSchema, { value: createClientEventIdValue() });
 }
 
-function uplinkSpec() {
+function uplinkSpec(frameDurationMs: 20 | 60) {
   return create(AudioSpecSchema, {
     codec: AudioCodec.OPUS,
     sampleRateHz: 16_000,
     channelCount: 1,
-    frameDuration: create(DurationSchema, { nanos: 20_000_000 }),
+    frameDuration: create(DurationSchema, { nanos: frameDurationMs * 1_000_000 }),
     bitrateBps: 24_000,
   });
 }
@@ -175,7 +176,7 @@ export class AudioV2Socket {
               sourceId: create(CaptureSourceIdSchema, { value: this.options.sourceId }),
               deviceKind: this.options.deviceKind,
               displayName: this.options.displayName,
-              supportedUplink: [uplinkSpec()],
+              supportedUplink: [uplinkSpec(this.options.uplinkFrameDurationMs)],
               supportedDownlink: [downlinkSpec()],
             }),
           });
@@ -212,7 +213,7 @@ export class AudioV2Socket {
         processingProfile: options.processingProfile,
         dataPurpose: options.dataPurpose ?? DataPurpose.NORMAL_CAPTURE,
         deliveryClass: options.deliveryClass,
-        audioSpec: uplinkSpec(),
+        audioSpec: uplinkSpec(this.options.uplinkFrameDurationMs),
         capabilities: options.capabilities,
         recoveryBatchId: options.recoveryBatchId ?? '',
       }),

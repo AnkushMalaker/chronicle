@@ -23,19 +23,40 @@ class AudioProtocolV2Error(ValueError):
     """A v2 envelope failed schema or Chronicle invariant validation."""
 
 
-class RawOpusDecoder:
-    """Stateful decoder for Chronicle's 16 kHz mono, 20 ms raw-Opus uplink."""
+CANONICAL_FRAME_MS = 20
+UPLINK_FRAME_MS = frozenset({20, 60})
 
-    def __init__(self) -> None:
+
+class RawOpusNormalizer:
+    """Decode one declared uplink packet into canonical 20 ms PCM frames."""
+
+    def __init__(self, frame_duration_ms: int) -> None:
+        if frame_duration_ms not in UPLINK_FRAME_MS:
+            raise AudioProtocolV2Error("uplink Opus requires 20 or 60 ms packets")
+        self._frame_duration_ms = frame_duration_ms
         self._decoder = opuslib.Decoder(16_000, 1)
 
-    def decode_packet(self, payload: bytes) -> bytes:
+    def decode_frames(self, payload: bytes) -> tuple[bytes, ...]:
         if not payload:
             raise AudioProtocolV2Error("capture packet has no Opus payload")
         try:
-            return self._decoder.decode(payload, 320, decode_fec=False)
+            pcm = self._decoder.decode(
+                payload,
+                16 * self._frame_duration_ms,
+                decode_fec=False,
+            )
         except Exception as error:
             raise AudioProtocolV2Error("invalid raw Opus packet") from error
+        expected_bytes = 32 * self._frame_duration_ms
+        if len(pcm) != expected_bytes:
+            raise AudioProtocolV2Error(
+                f"Opus packet decoded to {len(pcm)} bytes; expected {expected_bytes}"
+            )
+        canonical_bytes = 32 * CANONICAL_FRAME_MS
+        return tuple(
+            pcm[offset : offset + canonical_bytes]
+            for offset in range(0, len(pcm), canonical_bytes)
+        )
 
 
 def _require_id(value: str, label: str) -> None:
@@ -117,16 +138,25 @@ def serialize_server_control_json(message: audio_pb2.ServerControl) -> str:
     )
 
 
+def frame_duration_ms(spec: audio_pb2.AudioSpec) -> int:
+    if not spec.HasField("frame_duration"):
+        raise AudioProtocolV2Error("audio_spec requires frame_duration")
+    if spec.frame_duration.seconds != 0:
+        raise AudioProtocolV2Error("audio frame duration must be below one second")
+    return spec.frame_duration.nanos // 1_000_000
+
+
 def validate_audio_spec(spec: audio_pb2.AudioSpec, *, live_uplink: bool) -> None:
     if spec.codec != audio_pb2.AUDIO_CODEC_OPUS:
         raise AudioProtocolV2Error("live audio requires raw Opus")
     expected_rate = 16_000 if live_uplink else 24_000
     if spec.sample_rate_hz != expected_rate or spec.channel_count != 1:
         raise AudioProtocolV2Error(f"live audio requires {expected_rate} Hz mono Opus")
-    if not spec.HasField("frame_duration"):
-        raise AudioProtocolV2Error("audio_spec requires frame_duration")
-    if spec.frame_duration.seconds != 0 or spec.frame_duration.nanos != 20_000_000:
-        raise AudioProtocolV2Error("live Opus requires 20 ms packets")
+    duration_ms = frame_duration_ms(spec)
+    allowed = UPLINK_FRAME_MS if live_uplink else {CANONICAL_FRAME_MS}
+    if spec.frame_duration.nanos % 1_000_000 or duration_ms not in allowed:
+        expected = "20 or 60 ms" if live_uplink else "20 ms"
+        raise AudioProtocolV2Error(f"live Opus requires {expected} packets")
 
 
 def validate_start_capture(message: audio_pb2.StartCapture) -> None:

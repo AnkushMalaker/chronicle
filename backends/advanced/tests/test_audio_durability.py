@@ -123,6 +123,7 @@ class _PersistedCapture:
     status = "active"
     time_basis = "received"
     ended_at = None
+    failure = None
 
     async def save(self):
         return None

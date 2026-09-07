@@ -1,6 +1,5 @@
 import { create } from '@bufbuild/protobuf';
-import NetInfo from '@react-native-community/netinfo';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Platform } from 'react-native';
 // @ts-ignore - no type declarations available
 import base64 from 'react-native-base64';
@@ -27,58 +26,52 @@ import {
 import { AudioV2Socket } from '../protocol/audioV2Socket';
 import type { CapturedOpusFrame } from '../protocol/capturedOpusFrame';
 import type { VoiceCapabilities } from '../protocol/audioCapabilities';
-import { getValidToken, isTokenExpired } from '../services/auth';
-import { durableAudioSpool, type SpoolPacket } from '../services/durableAudioSpool';
+import type { PhoneCaptureSession } from './usePhoneAudioRecorder';
+import { getValidToken } from '../services/auth';
+import {
+  durableAudioSpool,
+  type AudioSpoolSource,
+  type SpoolPacket,
+} from '../services/durableAudioSpool';
 import { phoneAudioDiagnostics } from '../services/phoneAudioDiagnostics';
 
-interface UseAudioStreamerOptions {
-  onTokenRefreshed?: (token: string) => void;
-  autoReconnectEnabled?: boolean;
-}
-
-export interface StreamStartConfig {
-  phoneVoice?: {
-    captureEpoch: number;
-    capabilities: VoiceCapabilities;
-    restartCapture: () => Promise<NonNullable<StreamStartConfig['phoneVoice']>>;
-    stopCapture: () => Promise<void>;
-  };
-}
+export type AudioStreamSource =
+  | {
+    kind: 'wearable';
+    sourceId: string;
+  }
+  | ({ kind: 'phone' } & PhoneCaptureSession);
 
 interface UseAudioStreamer {
   isStreaming: boolean;
   isConnecting: boolean;
   error: string | null;
   phonePlaybackState: 'started' | 'done' | 'cancelled' | 'failed' | null;
-  startStreaming: (url: string, config?: StreamStartConfig) => Promise<void>;
-  getWebSocketReadyState: () => number | undefined;
+  startStreaming: (url: string, source: AudioStreamSource) => Promise<void>;
   stopStreaming: () => Promise<void>;
-  sendDurableAudio: (audioBytes: Uint8Array) => void;
-  sendInteractiveFrame: (frame: CapturedOpusFrame) => void;
+  sendFrame: (source: AudioSpoolSource, frame: CapturedOpusFrame) => void;
 }
 
 const HEARTBEAT_MS = 25_000;
-const RECONNECT_BASE_MS = 3_000;
-const RECONNECT_MAX_MS = 30_000;
 
 function recoveryBatchId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
-function socketOptions(urlText: string, phone: boolean) {
-  const url = new URL(urlText);
-  const bearerToken = url.searchParams.get('token') ?? '';
-  const displayName = url.searchParams.get('device_name') ?? (phone ? 'phone-mic' : 'omi');
-  url.search = '';
-  url.pathname = '/ws/audio';
+function socketSource(source: AudioStreamSource) {
+  if (source.kind === 'wearable') {
+    return {
+      sourceId: source.sourceId,
+      displayName: 'wearable',
+      deviceKind: DeviceKind.OMI,
+      uplinkFrameDurationMs: 60 as const,
+    };
+  }
   return {
-    url: url.toString(),
-    bearerToken,
-    sourceId: displayName,
-    displayName,
-    deviceKind: phone
-      ? (Platform.OS === 'ios' ? DeviceKind.IOS_PHONE : DeviceKind.ANDROID_PHONE)
-      : DeviceKind.OMI,
+    sourceId: 'phone-mic',
+    displayName: 'phone-mic',
+    deviceKind: Platform.OS === 'ios' ? DeviceKind.IOS_PHONE : DeviceKind.ANDROID_PHONE,
+    uplinkFrameDurationMs: 20 as const,
   };
 }
 
@@ -122,25 +115,20 @@ function processingProfile(capabilities: VoiceCapabilities): ProcessingProfile {
   return ProcessingProfile.HALF_DUPLEX;
 }
 
-export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStreamer => {
+export const useAudioStreamer = (): UseAudioStreamer => {
   const [isStreaming, setIsStreaming] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [phonePlaybackState, setPhonePlaybackState] = useState<UseAudioStreamer['phonePlaybackState']>(null);
   const socketRef = useRef<AudioV2Socket | null>(null);
-  const optionsRef = useRef(options);
-  optionsRef.current = options;
-  const configRef = useRef<StreamStartConfig | undefined>(undefined);
+  const sourceRef = useRef<AudioStreamSource | null>(null);
   const urlRef = useRef('');
   const stoppedRef = useRef(false);
-  const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const reconnectAttemptRef = useRef(0);
   const liveSequenceRef = useRef(0);
   const liveStartedAtRef = useRef(0);
   const acceptedRef = useRef(new Map<number, SpoolPacket>());
   const acceptedWaitersRef = useRef(new Map<number, () => void>());
-  const connectingRef = useRef<Promise<void> | null>(null);
   const deliveryModeRef = useRef<'idle' | 'recovering' | 'live'>('idle');
   const playbackRef = useRef<{
     responseId: string;
@@ -188,10 +176,13 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     return true;
   }, []);
 
-  const drainRecovery = useCallback(async (socket: AudioV2Socket) => {
+  const drainRecovery = useCallback(async (
+    socket: AudioV2Socket,
+    source: AudioSpoolSource,
+  ) => {
     let recoverySequence = 0;
     while (true) {
-      const packets = await durableAudioSpool.pendingPackets();
+      const packets = await durableAudioSpool.pendingPackets(source);
       if (!packets.length) return;
       await socket.beginCapture({
         // Recovery is a source-native capture, whose protocol epoch is always zero.
@@ -223,9 +214,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
   const stopStreaming = useCallback(async () => {
     stoppedRef.current = true;
     deliveryModeRef.current = 'idle';
-    if (reconnectRef.current) clearTimeout(reconnectRef.current);
     if (heartbeatRef.current) clearInterval(heartbeatRef.current);
-    reconnectRef.current = null;
     heartbeatRef.current = null;
     try {
       await socketRef.current?.stopCapture();
@@ -237,7 +226,10 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
       routeSubscriptionRef.current?.remove();
       routeSubscriptionRef.current = null;
       playbackRef.current = null;
-      await configRef.current?.phoneVoice?.stopCapture();
+      if (sourceRef.current?.kind === 'phone') {
+        await sourceRef.current.stopCapture();
+      }
+      sourceRef.current = null;
       durableAudioSpool.close();
       setIsStreaming(false);
       setIsConnecting(false);
@@ -246,33 +238,21 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
 
   const startStreaming = useCallback(async (
     url: string,
-    config?: StreamStartConfig,
+    source: AudioStreamSource,
   ): Promise<void> => {
-    if (connectingRef.current) return connectingRef.current;
-    const operation = (async () => {
-      stoppedRef.current = false;
-      urlRef.current = url;
-      configRef.current = config ?? configRef.current;
-      setIsConnecting(true);
-      setError(null);
-      const phoneVoice = configRef.current?.phoneVoice;
-      let parsed = socketOptions(url, Boolean(phoneVoice));
-      const managedToken = await getValidToken();
-      const token = managedToken ?? (
-        parsed.bearerToken && !isTokenExpired(parsed.bearerToken)
-          ? parsed.bearerToken
-          : null
-      );
+    stoppedRef.current = false;
+    urlRef.current = url;
+    sourceRef.current = source;
+    setIsConnecting(true);
+    setError(null);
+    try {
+      const phoneVoice = source.kind === 'phone' ? source : null;
+      const token = await getValidToken();
       if (!token) throw new Error('Audio authentication expired');
-      if (token !== parsed.bearerToken) {
-        optionsRef.current?.onTokenRefreshed?.(token);
-        const refreshed = new URL(url);
-        refreshed.searchParams.set('token', token);
-        urlRef.current = refreshed.toString();
-        parsed = socketOptions(urlRef.current, Boolean(phoneVoice));
-      }
       const socket = new AudioV2Socket({
-        ...parsed,
+        url,
+        bearerToken: token,
+        ...socketSource(source),
         onPacketAccepted: packetAccepted,
         onControl: control => {
           if (control.event.case === 'playbackOffer') {
@@ -324,23 +304,9 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
         },
         onClosed: () => {
           if (phoneVoice) phoneAudioDiagnostics.socketClosed(stoppedRef.current);
+          deliveryModeRef.current = 'idle';
           setIsStreaming(false);
-          if (
-            !stoppedRef.current &&
-            (optionsRef.current?.autoReconnectEnabled ?? true) &&
-            !reconnectRef.current
-          ) {
-            const delay = Math.min(
-              RECONNECT_MAX_MS,
-              RECONNECT_BASE_MS * (2 ** reconnectAttemptRef.current++)
-            );
-            reconnectRef.current = setTimeout(() => {
-              reconnectRef.current = null;
-              startStreaming(urlRef.current).catch(cause => {
-                setError(cause instanceof Error ? cause.message : 'Audio reconnect failed');
-              });
-            }, delay);
-          }
+          if (!stoppedRef.current) setError('Audio connection closed');
         },
         onDiagnostic: event => {
           if (phoneVoice) phoneAudioDiagnostics.socketStage(event.stage, event.detail);
@@ -351,7 +317,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
       await socket.connect();
       if (phoneVoice) phoneAudioDiagnostics.socketOpen();
       deliveryModeRef.current = 'recovering';
-      await drainRecovery(socket);
+      await drainRecovery(socket, source.kind);
       liveStartedAtRef.current = Date.now();
       liveSequenceRef.current = 0;
       const capabilities = phoneVoice
@@ -396,30 +362,24 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
           if (heartbeatRef.current) clearInterval(heartbeatRef.current);
           heartbeatRef.current = null;
           socket.stopCapture()
-            .catch(() => undefined)
             .then(() => {
               socket.close();
               return phoneVoice.restartCapture();
             })
-            .then(restarted => startStreaming(urlRef.current, { phoneVoice: restarted }))
+            .then(restarted => startStreaming(urlRef.current, { kind: 'phone', ...restarted }))
             .catch(cause => {
               setError(cause instanceof Error ? cause.message : 'Audio route restart failed');
             });
         });
       }
-      reconnectAttemptRef.current = 0;
       heartbeatRef.current = setInterval(
         () => socket.heartbeat(performance.now()),
         HEARTBEAT_MS,
       );
       setIsConnecting(false);
       setIsStreaming(true);
-    })();
-    connectingRef.current = operation;
-    try {
-      await operation;
     } catch (cause) {
-      if (configRef.current?.phoneVoice) phoneAudioDiagnostics.failure('websocket_start', cause);
+      if (source.kind === 'phone') phoneAudioDiagnostics.failure('websocket_start', cause);
       setIsConnecting(false);
       setIsStreaming(false);
       const message = cause instanceof Error ? cause.message : 'Audio V2 connection failed';
@@ -432,46 +392,20 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
       routeSubscriptionRef.current = null;
       deliveryModeRef.current = 'idle';
       throw cause;
-    } finally {
-      connectingRef.current = null;
     }
   }, [drainRecovery, encodeBase64, packetAccepted]);
 
-  const enqueueLive = useCallback((opus: Uint8Array, capturedAtMs: number) => {
-    if (!opus.length) return;
-    const packet = durableAudioSpool.append(opus, capturedAtMs);
-    if (deliveryModeRef.current === 'live') {
+  const sendFrame = useCallback((
+    source: AudioSpoolSource,
+    frame: CapturedOpusFrame,
+  ) => {
+    if (!frame.opus.length) return;
+    if (source === 'phone') phoneAudioDiagnostics.frameEnqueued(frame.opus.length);
+    const packet = durableAudioSpool.append(source, frame.opus, frame.capturedAtMs);
+    if (deliveryModeRef.current === 'live' && sourceRef.current?.kind === source) {
       sendSpoolPacket(packet, liveSequenceRef.current++);
     }
   }, [sendSpoolPacket]);
-
-  const sendDurableAudio = useCallback((audioBytes: Uint8Array) => {
-    enqueueLive(audioBytes, Date.now());
-  }, [enqueueLive]);
-
-  const sendInteractiveFrame = useCallback((frame: CapturedOpusFrame) => {
-    phoneAudioDiagnostics.frameEnqueued(frame.opus.length);
-    enqueueLive(frame.opus, frame.capturedAtMs);
-  }, [enqueueLive]);
-
-  useEffect(() => {
-    const unsubscribe = NetInfo.addEventListener(state => {
-      if (
-        state.isConnected &&
-        state.isInternetReachable &&
-        !stoppedRef.current &&
-        socketRef.current?.readyState !== WebSocket.OPEN &&
-        urlRef.current
-      ) {
-        startStreaming(urlRef.current).catch(() => undefined);
-      }
-    });
-    return () => {
-      unsubscribe();
-      stoppedRef.current = true;
-      socketRef.current?.close();
-    };
-  }, [startStreaming]);
 
   return {
     isStreaming,
@@ -479,9 +413,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     error,
     phonePlaybackState,
     startStreaming,
-    getWebSocketReadyState: () => socketRef.current?.readyState,
     stopStreaming,
-    sendDurableAudio,
-    sendInteractiveFrame,
+    sendFrame,
   };
 };

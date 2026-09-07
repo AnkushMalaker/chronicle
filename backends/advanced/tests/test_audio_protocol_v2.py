@@ -9,11 +9,12 @@ from opuslib import Encoder
 from advanced_omi_backend.audio_contract.v2 import audio_pb2
 from advanced_omi_backend.audio_contract.v2.codec import (
     AudioProtocolV2Error,
-    RawOpusDecoder,
+    RawOpusNormalizer,
     parse_client_control_json,
     parse_media_envelope,
     serialize_client_control_json,
     serialize_media_envelope,
+    validate_audio_spec,
 )
 from advanced_omi_backend.controllers.audio_v2_controller import (
     _subscribe_v2_transcripts,
@@ -42,7 +43,28 @@ def test_raw_opus_decoder_accepts_three_byte_silence_packet():
     packet = Encoder(16_000, 1, "audio").encode(bytes(640), 320)
     assert len(packet) == 3
 
-    assert len(RawOpusDecoder().decode_packet(packet)) == 640
+    assert RawOpusNormalizer(20).decode_frames(packet) == (bytes(640),)
+
+
+def test_raw_opus_normalizer_splits_one_neo_packet_into_canonical_frames():
+    packet = Encoder(16_000, 1, "audio").encode(bytes(1_920), 960)
+
+    frames = RawOpusNormalizer(60).decode_frames(packet)
+
+    assert len(frames) == 3
+    assert all(len(frame) == 640 for frame in frames)
+
+
+def test_uplink_spec_accepts_only_declared_20_or_60_ms_packets():
+    validate_audio_spec(_spec(), live_uplink=True)
+    sixty_ms = _spec()
+    sixty_ms.frame_duration.nanos = 60_000_000
+    validate_audio_spec(sixty_ms, live_uplink=True)
+
+    forty_ms = _spec()
+    forty_ms.frame_duration.nanos = 40_000_000
+    with pytest.raises(AudioProtocolV2Error, match="20 or 60 ms"):
+        validate_audio_spec(forty_ms, live_uplink=True)
 
 
 def test_generated_control_json_round_trips_without_dictionary_contracts():

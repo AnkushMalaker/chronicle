@@ -7,15 +7,15 @@ from google.protobuf import duration_pb2, timestamp_pb2
 
 from advanced_omi_backend.audio_contract.v2 import audio_pb2
 from advanced_omi_backend.audio_contract.v2.codec import AudioProtocolV2Error
-from advanced_omi_backend.controllers import audio_v2_controller
+from advanced_omi_backend.controllers import audio_v2_controller, capture_lifecycle
 
 pytestmark = pytest.mark.unit
 
 
 class Decoder:
-    def decode_packet(self, payload):
+    def decode_frames(self, payload):
         assert payload == b"raw-opus"
-        return b"\x00\x00" * 320
+        return (b"\x00\x00" * 320,)
 
 
 def _packet(delivery_class=audio_pb2.DELIVERY_CLASS_LIVE):
@@ -98,8 +98,8 @@ async def test_v2_opus_decodes_once_then_crosses_realtime_and_durable_seams(
 ):
     monkeypatch.setattr(
         audio_v2_controller,
-        "_decode_opus",
-        AsyncMock(return_value=b"\x00\x00" * 320),
+        "_decode_opus_frames",
+        AsyncMock(return_value=(b"\x00\x00" * 320,)),
     )
     state = SimpleNamespace(
         stream_session_id="capture-1",
@@ -112,25 +112,25 @@ async def test_v2_opus_decodes_once_then_crosses_realtime_and_durable_seams(
     user = SimpleNamespace(user_id="user-1", email="user@example.com")
     streams = SimpleNamespace(publish_frame=AsyncMock())
 
-    await audio_v2_controller.ingest_capture_packet(
-        websocket=object(),
+    next_sequence = await audio_v2_controller.ingest_capture_packet(
         packet=_packet(),
         client_state=state,
-        audio_stream_producer=producer,
-        user=user,
-        decoder=Decoder(),
+        normalizer=Decoder(),
         v2_streams=streams,
+        canonical_sequence=7,
     )
 
+    assert next_sequence == 8
     assert streams.publish_frame.await_args.args[0].WhichOneof("event") == "frame"
+    assert streams.publish_frame.await_args.args[0].frame.sequence == 7
     assert streams.publish_frame.await_args.args[0].frame.pcm_s16le == b"\x00\x00" * 320
 
 
 async def test_recovered_packet_enters_only_typed_durable_stream(monkeypatch):
     monkeypatch.setattr(
         audio_v2_controller,
-        "_decode_opus",
-        AsyncMock(return_value=b"\x00\x00" * 320),
+        "_decode_opus_frames",
+        AsyncMock(return_value=(b"\x00\x00" * 320,)),
     )
     state = SimpleNamespace(
         stream_session_id="capture-1",
@@ -142,13 +142,11 @@ async def test_recovered_packet_enters_only_typed_durable_stream(monkeypatch):
 
     streams = SimpleNamespace(publish_frame=AsyncMock())
     await audio_v2_controller.ingest_capture_packet(
-        websocket=object(),
         packet=_packet(audio_pb2.DELIVERY_CLASS_RECOVERED),
         client_state=state,
-        audio_stream_producer=SimpleNamespace(redis_client=object()),
-        user=SimpleNamespace(user_id="user-1", email="user@example.com"),
-        decoder=Decoder(),
+        normalizer=Decoder(),
         v2_streams=streams,
+        canonical_sequence=0,
     )
 
     streams.publish_frame.assert_awaited_once()
@@ -160,7 +158,6 @@ async def test_v2_media_rejects_stale_connection_binding():
 
     with pytest.raises(AudioProtocolV2Error, match="stale session"):
         await audio_v2_controller.ingest_capture_packet(
-            websocket=object(),
             packet=packet,
             client_state=SimpleNamespace(
                 stream_session_id="capture-1",
@@ -169,8 +166,91 @@ async def test_v2_media_rejects_stale_connection_binding():
                 data_purpose="normal_capture",
                 client_id="client-1",
             ),
-            audio_stream_producer=SimpleNamespace(redis_client=object()),
-            user=SimpleNamespace(user_id="user-1", email="user@example.com"),
-            decoder=Decoder(),
+            normalizer=Decoder(),
             v2_streams=SimpleNamespace(publish_frame=AsyncMock()),
+            canonical_sequence=0,
         )
+
+
+async def test_v2_60_ms_packet_publishes_three_contiguous_canonical_frames(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        audio_v2_controller,
+        "_decode_opus_frames",
+        AsyncMock(
+            return_value=(
+                b"\x01\x00" * 320,
+                b"\x02\x00" * 320,
+                b"\x03\x00" * 320,
+            )
+        ),
+    )
+    state = SimpleNamespace(
+        stream_session_id="capture-1",
+        voice_session_id="voice-1",
+        capture_epoch=9,
+        data_purpose="normal_capture",
+    )
+    streams = SimpleNamespace(publish_frame=AsyncMock())
+
+    next_sequence = await audio_v2_controller.ingest_capture_packet(
+        packet=_packet(),
+        client_state=state,
+        normalizer=Decoder(),
+        v2_streams=streams,
+        canonical_sequence=30,
+    )
+
+    assert next_sequence == 33
+    frames = [call.args[0].frame for call in streams.publish_frame.await_args_list]
+    assert [frame.sequence for frame in frames] == [30, 31, 32]
+    assert [frame.monotonic_offset_us for frame in frames] == [
+        240_000,
+        260_000,
+        280_000,
+    ]
+    assert [frame.captured_at.nanos for frame in frames] == [0, 20_000_000, 40_000_000]
+
+
+async def test_protocol_rejection_marks_the_capture_failed(monkeypatch):
+    updates = []
+
+    class QueryField:
+        def __eq__(self, value):
+            return value
+
+    class Capture:
+        async def set(self, values):
+            updates.append(values)
+
+    class CaptureModel:
+        capture_session_id = QueryField()
+        find_one = AsyncMock(return_value=Capture())
+
+    monkeypatch.setattr(capture_lifecycle, "AudioCaptureSession", CaptureModel)
+    monkeypatch.setattr(capture_lifecycle, "publish_sse_event_async", AsyncMock())
+    state = SimpleNamespace(
+        stream_session_id="capture-1",
+        markers=[],
+        last_persistence_healthcheck=5.0,
+    )
+    producer = SimpleNamespace(
+        finalize_session=AsyncMock(),
+        store=SimpleNamespace(mark_complete=AsyncMock(), set_markers=AsyncMock()),
+    )
+
+    await capture_lifecycle.finalize_capture_session(
+        client_state=state,
+        producer=producer,
+        user_id="user-1",
+        client_id="client-1",
+        completion_reason="protocol_error",
+        failure="invalid raw Opus packet",
+    )
+
+    producer.finalize_session.assert_awaited_once_with(
+        "capture-1", completion_reason="protocol_error"
+    )
+    assert updates == [{"status": "failed", "failure": "invalid raw Opus packet"}]
+    assert state.stream_session_id is None

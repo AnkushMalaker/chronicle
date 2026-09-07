@@ -256,6 +256,7 @@ async function runNetworkProbe(
       sourceId: 'phone-audio-diagnostics',
       displayName: 'phone-audio-diagnostics',
       deviceKind: Platform.OS === 'ios' ? DeviceKind.IOS_PHONE : DeviceKind.ANDROID_PHONE,
+      uplinkFrameDurationMs: 20,
       onPacketAccepted: sequence => {
         acked.add(sequence);
         if (acked.size >= payload.packets.length) finishAcknowledgements();

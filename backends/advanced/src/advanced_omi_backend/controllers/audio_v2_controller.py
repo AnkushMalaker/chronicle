@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import partial
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -20,7 +20,8 @@ from google.protobuf import timestamp_pb2
 from advanced_omi_backend.audio_contract.v2 import audio_pb2
 from advanced_omi_backend.audio_contract.v2.codec import (
     AudioProtocolV2Error,
-    RawOpusDecoder,
+    RawOpusNormalizer,
+    frame_duration_ms,
     parse_client_control_json,
     parse_media_envelope,
     serialize_media_envelope,
@@ -224,10 +225,12 @@ async def _subscribe_v2_transcripts(
         await pubsub.close()
 
 
-async def _decode_opus(decoder: RawOpusDecoder, payload: bytes) -> bytes:
+async def _decode_opus_frames(
+    normalizer: RawOpusNormalizer, payload: bytes
+) -> tuple[bytes, ...]:
     return await asyncio.get_running_loop().run_in_executor(
         DECODER_EXECUTOR,
-        partial(decoder.decode_packet, payload),
+        partial(normalizer.decode_frames, payload),
     )
 
 
@@ -319,15 +322,13 @@ def _voice_capabilities(
 
 async def ingest_capture_packet(
     *,
-    websocket: WebSocket,
     packet: audio_pb2.CaptureMediaPacket,
     client_state,
-    audio_stream_producer,
-    user,
-    decoder: RawOpusDecoder,
+    normalizer: RawOpusNormalizer,
     v2_streams: AudioV2Streams,
-) -> None:
-    """Decode one bound Opus packet and cross the durable/realtime seams."""
+    canonical_sequence: int,
+) -> int:
+    """Normalize one bound Opus packet and publish canonical 20 ms frames."""
 
     session_id = client_state.stream_session_id
     if session_id is None:
@@ -340,34 +341,30 @@ async def ingest_capture_packet(
     if packet.binding.voice_session_id.value != expected_voice:
         raise AudioProtocolV2Error("capture packet has a stale voice binding")
 
-    pcm = await _decode_opus(decoder, packet.opus_payload)
-    expected_bytes = 16_000 * 1 * 2 * 20 // 1_000
-    if not pcm or len(pcm) != expected_bytes:
-        raise AudioProtocolV2Error(
-            f"Opus packet decoded to {len(pcm) if pcm else 0} bytes; "
-            f"expected {expected_bytes}"
+    frames = await _decode_opus_frames(normalizer, packet.opus_payload)
+    for index, pcm in enumerate(frames):
+        captured_at = timestamp_pb2.Timestamp()
+        captured_at.FromDatetime(
+            packet.captured_at.ToDatetime(tzinfo=timezone.utc)
+            + timedelta(milliseconds=index * 20)
         )
-
-    await v2_streams.publish_frame(
-        audio_pb2.CaptureStreamEvent(
-            frame=audio_pb2.CanonicalPcmFrame(
-                binding=packet.binding,
-                sequence=packet.sequence,
-                captured_at=packet.captured_at,
-                monotonic_offset_us=packet.monotonic_offset_us,
-                delivery_class=packet.delivery_class,
-                pcm_s16le=pcm,
-                data_purpose={
-                    "normal_capture": audio_pb2.DATA_PURPOSE_NORMAL_CAPTURE,
-                    "annotation": audio_pb2.DATA_PURPOSE_ANNOTATION,
-                }[client_state.data_purpose],
+        await v2_streams.publish_frame(
+            audio_pb2.CaptureStreamEvent(
+                frame=audio_pb2.CanonicalPcmFrame(
+                    binding=packet.binding,
+                    sequence=canonical_sequence + index,
+                    captured_at=captured_at,
+                    monotonic_offset_us=packet.monotonic_offset_us + index * 20_000,
+                    delivery_class=packet.delivery_class,
+                    pcm_s16le=pcm,
+                    data_purpose={
+                        "normal_capture": audio_pb2.DATA_PURPOSE_NORMAL_CAPTURE,
+                        "annotation": audio_pb2.DATA_PURPOSE_ANNOTATION,
+                    }[client_state.data_purpose],
+                )
             )
         )
-    )
-    if packet.delivery_class == audio_pb2.DELIVERY_CLASS_RECOVERED:
-        # Recovery is durable-only by construction. The typed persistence consumer
-        # will promote this event to Mongo; it must never enter the old live stream.
-        return
+    return canonical_sequence + len(frames)
 
 
 async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
@@ -383,6 +380,7 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
     interim_task = None
     downlink_task = None
     v2_streams = None
+    active_binding = None
     try:
         first = await websocket.receive_text()
         hello_control = parse_client_control_json(first)
@@ -428,9 +426,10 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
             ),
         )
 
-        decoder = RawOpusDecoder()
+        normalizer = None
         active_delivery_class = audio_pb2.DELIVERY_CLASS_UNSPECIFIED
         last_sequence = -1
+        canonical_sequence = 0
         while True:
             incoming = await websocket.receive()
             if incoming.get("type") == "websocket.disconnect":
@@ -443,6 +442,8 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                         raise AudioProtocolV2Error("capture is already active")
                     start = control.start_capture
                     active_delivery_class = start.delivery_class
+                    source_frame_duration_ms = frame_duration_ms(start.audio_spec)
+                    normalizer = RawOpusNormalizer(source_frame_duration_ms)
                     provenance = _start_provenance(start)
                     if provenance.memory_space_id:
                         try:
@@ -465,7 +466,7 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                             "rate": 16_000,
                             "width": 2,
                             "channels": 1,
-                            "frame_duration_ms": 20,
+                            "frame_duration_ms": source_frame_duration_ms,
                             "mode": "streaming",
                         },
                         provenance=provenance,
@@ -479,6 +480,7 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                         ),
                         capture_epoch=client_state.capture_epoch,
                     )
+                    active_binding = binding
                     v2_streams = await AudioV2Streams.open(
                         producer.redis_client,
                         event=audio_pb2.CaptureStreamEvent(
@@ -557,7 +559,10 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                         interim_task = None
                     active_delivery_class = audio_pb2.DELIVERY_CLASS_UNSPECIFIED
                     last_sequence = -1
+                    canonical_sequence = 0
+                    normalizer = None
                     v2_streams = None
+                    active_binding = None
                 elif event == "heartbeat":
                     await _send_control(websocket, heartbeat=control.heartbeat)
                 elif event == "voice_ready":
@@ -638,14 +643,14 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                     raise AudioProtocolV2Error("packet sequence is not increasing")
                 if v2_streams is None:
                     raise AudioProtocolV2Error("media arrived before stream open")
-                await ingest_capture_packet(
-                    websocket=websocket,
+                if normalizer is None:
+                    raise AudioProtocolV2Error("media arrived before capture start")
+                canonical_sequence = await ingest_capture_packet(
                     packet=packet,
                     client_state=client_state,
-                    audio_stream_producer=producer,
-                    user=user,
-                    decoder=decoder,
+                    normalizer=normalizer,
                     v2_streams=v2_streams,
+                    canonical_sequence=canonical_sequence,
                 )
                 await _send_control(
                     websocket,
@@ -666,6 +671,29 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
             getattr(client_state, "stream_session_id", None),
             error,
         )
+        if (
+            client_state is not None
+            and client_state.stream_session_id is not None
+            and producer is not None
+            and v2_streams is not None
+            and active_binding is not None
+        ):
+            await finalize_capture_session(
+                client_state=client_state,
+                producer=producer,
+                user_id=user.user_id,
+                client_id=client_id,
+                completion_reason="protocol_error",
+                failure=str(error),
+            )
+            await v2_streams.end(
+                audio_pb2.CaptureStreamEvent(
+                    ended=audio_pb2.CaptureStreamEnded(
+                        binding=active_binding,
+                        reason=audio_pb2.STOP_REASON_AUDIO_DISCONNECT,
+                    )
+                )
+            )
         try:
             await _send_control(
                 websocket,

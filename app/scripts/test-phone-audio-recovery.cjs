@@ -33,6 +33,8 @@ const ProcessingProfile = {
 const DeliveryClass = { LIVE: 1, RECOVERED: 2 };
 const beginCaptureCalls = [];
 const socketBearerTokens = [];
+const socketFrameDurations = [];
+const pendingSources = [];
 let pendingReads = 0;
 
 class MockAudioV2Socket {
@@ -40,6 +42,7 @@ class MockAudioV2Socket {
     this.options = options;
     this.activeBinding = null;
     socketBearerTokens.push(options.bearerToken);
+    socketFrameDurations.push(options.uplinkFrameDurationMs);
   }
 
   async connect() {}
@@ -102,11 +105,11 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
   '../protocol/audioV2Socket': { AudioV2Socket: MockAudioV2Socket },
   '../services/auth': {
     getValidToken: async () => 'fresh-token',
-    isTokenExpired: (token) => token === 'expired-token',
   },
   '../services/durableAudioSpool': {
     durableAudioSpool: {
-      async pendingPackets() {
+      async pendingPackets(source) {
+        pendingSources.push(source);
         pendingReads += 1;
         return pendingReads === 1
           ? [{
@@ -129,11 +132,7 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
 });
 
 (async () => {
-  const refreshedTokens = [];
-  const streamer = useAudioStreamer({
-    autoReconnectEnabled: false,
-    onTokenRefreshed: (token) => refreshedTokens.push(token),
-  });
+  const streamer = useAudioStreamer();
   const phoneVoice = {
     captureEpoch: 1,
     capabilities: {
@@ -149,12 +148,13 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
   };
 
   await streamer.startStreaming(
-    'https://chronicle.invalid/ws/audio?token=expired-token&device_name=phone-mic',
-    { phoneVoice },
+    'wss://chronicle.invalid/ws/audio',
+    { kind: 'phone', ...phoneVoice },
   );
 
-  assert.deepEqual(socketBearerTokens, ['fresh-token'], 'audio must replace an expired URL token before opening the socket');
-  assert.deepEqual(refreshedTokens, ['fresh-token'], 'the refreshed token must propagate to app settings');
+  assert.deepEqual(socketBearerTokens, ['fresh-token'], 'audio must use the managed token source');
+  assert.deepEqual(socketFrameDurations, [20], 'phone capture must declare 20 ms Opus');
+  assert.deepEqual(pendingSources, ['phone', 'phone'], 'recovery must read only the active source queue');
   assert.equal(beginCaptureCalls.length, 2, 'queued audio must recover before live capture starts');
   assert.deepEqual(
     {
@@ -184,6 +184,14 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
   );
 
   await streamer.stopStreaming();
+
+  const wearableStreamer = useAudioStreamer();
+  await wearableStreamer.startStreaming(
+    'wss://chronicle.invalid/ws/audio',
+    { kind: 'wearable', sourceId: 'neo-1' },
+  );
+  assert.deepEqual(socketFrameDurations, [20, 60], 'wearable capture must declare 60 ms Opus');
+  await wearableStreamer.stopStreaming();
   console.log('phone audio recovery tests passed');
 })().catch((error) => {
   console.error(error);

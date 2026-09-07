@@ -26,10 +26,50 @@ function loadTypeScript(sourcePath, mocks) {
 
 const writes = [];
 const socketSourcePath = path.join(__dirname, '../src/protocol/audioV2Socket.ts');
-const { createClientEventIdValue } = loadTypeScript(socketSourcePath, {
+const serverControls = {
+  hello: { event: { case: 'hello', value: {} } },
+  captureStarted: {
+    event: {
+      case: 'captureStarted',
+      value: {
+        binding: {
+          captureSessionId: { value: 'capture-1' },
+          voiceSessionId: { value: '' },
+          captureEpoch: 0,
+        },
+      },
+    },
+  },
+};
+const { AudioV2Socket, createClientEventIdValue } = loadTypeScript(socketSourcePath, {
   '@bufbuild/protobuf': { create: (_schema, value) => value },
   '@bufbuild/protobuf/wkt': {},
-  './audioV2': { EventIdSchema: {}, ProcessingProfile: { SOURCE_NATIVE: 2 } },
+  './audioV2': {
+    AudioCodec: { OPUS: 1 },
+    AudioSpecSchema: {},
+    CaptureBindingSchema: {},
+    CaptureMediaPacketSchema: {},
+    CaptureSourceIdSchema: {},
+    ClientHelloSchema: {},
+    ClientControlSchema: {},
+    DataPurpose: { NORMAL_CAPTURE: 1 },
+    DeliveryClass: { UNSPECIFIED: 0, LIVE: 1 },
+    EventIdSchema: {},
+    HeartbeatSchema: {},
+    MediaEnvelopeSchema: {},
+    PlaybackAcknowledgementSchema: {},
+    ProcessingProfile: { SOURCE_NATIVE: 2 },
+    ResponseIdSchema: {},
+    StartCaptureSchema: {},
+    StopCaptureSchema: {},
+    StopReason: { USER_REQUESTED: 1 },
+    VoiceReadySchema: {},
+    decodeMediaEnvelope: value => value,
+    decodeServerControl: value => serverControls[value],
+    encodeClientControl: value => value,
+    encodeMediaEnvelope: value => value,
+    timestampFromUnixMs: value => value,
+  },
 });
 const fallbackEventId = createClientEventIdValue(null);
 const nextFallbackEventId = createClientEventIdValue(null);
@@ -40,6 +80,57 @@ assert.equal(
   'native-random-uuid',
   'native randomUUID should be used when the runtime provides it',
 );
+
+global.WebSocket = { OPEN: 1 };
+
+class FakeWebSocket {
+  constructor() {
+    this.readyState = 0;
+    this.sent = [];
+  }
+
+  open() {
+    this.readyState = WebSocket.OPEN;
+    this.onopen();
+  }
+
+  receive(value) {
+    this.onmessage({ data: value });
+  }
+
+  send(value) {
+    this.sent.push(value);
+  }
+
+  close() {}
+}
+
+async function declaredUplinkDuration(frameDurationMs) {
+  const transport = new FakeWebSocket();
+  const socket = new AudioV2Socket({
+    url: 'wss://chronicle.invalid/ws/audio',
+    bearerToken: 'token',
+    sourceId: 'source',
+    displayName: 'source',
+    deviceKind: 4,
+    uplinkFrameDurationMs: frameDurationMs,
+    webSocketFactory: () => transport,
+  });
+  const connecting = socket.connect();
+  transport.open();
+  transport.receive('hello');
+  await connecting;
+  const starting = socket.beginCapture({
+    captureEpoch: 0,
+    processingProfile: 2,
+    deliveryClass: 1,
+  });
+  transport.receive('captureStarted');
+  await starting;
+  return transport.sent.map(control => (
+    control.event.value.audioSpec ?? control.event.value.supportedUplink?.[0]
+  )).filter(Boolean).map(spec => spec.frameDuration.nanos);
+}
 
 const sourcePath = path.join(__dirname, '../src/services/phoneAudioDiagnostics.ts');
 const { PhoneAudioDiagnostics } = loadTypeScript(sourcePath, {
@@ -135,18 +226,13 @@ assert.match(integrationSources.recorder, /native_frame_timeout/, 'a silent nati
 assert.match(integrationSources.streamer, /packetAccepted\(sequence\)/, 'backend acknowledgements must be logged');
 assert.match(
   integrationSources.streamer,
-  /const optionsRef = useRef\(options\)/,
-  'rerenders must not replace the WebSocket lifecycle callback through a fresh options object',
-);
-assert.match(
-  integrationSources.streamer,
   /onDiagnostic: event =>/,
   'production phone streaming must log each WebSocket handshake phase',
 );
 assert.doesNotMatch(
   integrationSources.streamer,
-  /\}, \[drainRecovery, encodeBase64, options, packetAccepted\]\);/,
-  'startStreaming must not close an active socket merely because its options object was recreated',
+  /autoReconnectEnabled|NetInfo/,
+  'audio transport must expose failure instead of running a second reconnect state machine',
 );
 assert.match(integrationSources.orchestrator, /beginAttempt\(\)/, 'the phone button must open a diagnostic attempt');
 assert.match(integrationSources.ios, /"audioLevel": audioLevel/, 'iOS must emit PCM audio levels');
@@ -180,30 +266,30 @@ assert.match(integrationSources.android, /"audioLevel" to DuplexAudioPolicy\.aud
 
 const orchestratorPath = path.join(__dirname, '../src/hooks/useAudioStreamingOrchestrator.ts');
 const noDiagnostics = new Proxy({}, { get: () => () => {} });
-global.WebSocket = { OPEN: 1 };
 const { useAudioStreamingOrchestrator } = loadTypeScript(orchestratorPath, {
   react: {
     useCallback: (callback) => callback,
     useState: (value) => [value, () => {}],
   },
   'react-native': { Alert: { alert: () => {} } },
-  'friend-lite-react-native': {},
+  'friend-lite-react-native': { BleAudioCodec: { OPUS: 'opus' } },
   '../services/phoneAudioDiagnostics': { phoneAudioDiagnostics: noDiagnostics },
 });
 
 (async () => {
+  assert.deepEqual(await declaredUplinkDuration(20), [20_000_000, 20_000_000]);
+  assert.deepEqual(await declaredUplinkDuration(60), [60_000_000, 60_000_000]);
   const queuedFrames = [];
+  const starts = [];
   const frame = { captureEpoch: 1, capturedAtMs: 1_780_000_000_000, opus: new Uint8Array([1, 2, 3]) };
   const orchestrator = useAudioStreamingOrchestrator({
     omiConnection: { isConnected: () => false },
     deviceConnection: { connectedDeviceId: null },
     audioStreamer: {
       isStreaming: false,
-      startStreaming: async () => {},
+      startStreaming: async (url, source) => starts.push({ url, source }),
       stopStreaming: async () => {},
-      sendDurableAudio: () => {},
-      sendInteractiveFrame: (value) => queuedFrames.push(value),
-      getWebSocketReadyState: () => 0,
+      sendFrame: (source, value) => queuedFrames.push({ source, value }),
     },
     phoneAudioRecorder: {
       isRecording: false,
@@ -235,7 +321,70 @@ const { useAudioStreamingOrchestrator } = loadTypeScript(orchestratorPath, {
   });
 
   await orchestrator.handleTogglePhoneAudio();
-  assert.deepEqual(queuedFrames, [frame], 'phone frames must enter the durable spool while the socket reconnects');
+  assert.deepEqual(
+    queuedFrames,
+    [{ source: 'phone', value: frame }],
+    'phone frames must enter the one source-tagged queue',
+  );
+  assert.equal(starts[0].url, 'wss://chronicle.invalid/ws/audio');
+  assert.equal(starts[0].source.kind, 'phone');
+  assert.equal(new URL(starts[0].url).search, '', 'audio credentials must never enter the URL');
+
+  let listenerStarts = 0;
+  let wearableSocketStarts = 0;
+  const nonOpus = useAudioStreamingOrchestrator({
+    omiConnection: {
+      isConnected: () => true,
+      getAudioCodec: async () => 'pcm8',
+    },
+    deviceConnection: { connectedDeviceId: 'neo-1' },
+    audioStreamer: {
+      isStreaming: false,
+      startStreaming: async () => { wearableSocketStarts += 1; },
+      stopStreaming: async () => {},
+      sendFrame: () => {},
+    },
+    phoneAudioRecorder: {
+      isRecording: false,
+      startRecording: async () => { throw new Error('not used'); },
+      stopRecording: async () => {},
+    },
+    originalStartAudioListener: async () => { listenerStarts += 1; },
+    originalStopAudioListener: async () => {},
+    settings: { webSocketUrl: 'https://chronicle.invalid' },
+  });
+  await nonOpus.handleStartAudioListeningAndStreaming();
+  assert.equal(listenerStarts, 0, 'a non-Opus wearable must fail before capture starts');
+  assert.equal(wearableSocketStarts, 0, 'a non-Opus wearable must not open Audio V2');
+
+  const wearableFrames = [];
+  const wearableStarts = [];
+  const opusWearable = useAudioStreamingOrchestrator({
+    omiConnection: {
+      isConnected: () => true,
+      getAudioCodec: async () => 'opus',
+    },
+    deviceConnection: { connectedDeviceId: 'neo-1' },
+    audioStreamer: {
+      isStreaming: false,
+      startStreaming: async (url, source) => wearableStarts.push({ url, source }),
+      stopStreaming: async () => {},
+      sendFrame: (source, value) => wearableFrames.push({ source, value }),
+    },
+    phoneAudioRecorder: {
+      isRecording: false,
+      startRecording: async () => { throw new Error('not used'); },
+      stopRecording: async () => {},
+    },
+    originalStartAudioListener: async onData => onData(new Uint8Array([4, 5, 6])),
+    originalStopAudioListener: async () => {},
+    settings: { webSocketUrl: 'https://chronicle.invalid' },
+  });
+  await opusWearable.handleStartAudioListeningAndStreaming();
+  assert.equal(wearableStarts[0].source.kind, 'wearable');
+  assert.equal(wearableStarts[0].source.sourceId, 'neo-1');
+  assert.equal(wearableFrames[0].source, 'wearable');
+  assert.equal(wearableFrames[0].value.frameDurationMs, 60);
   console.log('phone audio diagnostics tests passed');
 })().catch((error) => {
   console.error(error);

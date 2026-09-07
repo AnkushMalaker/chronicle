@@ -6,6 +6,8 @@ const SEGMENT_MS = 30_000;
 const HEADER_BYTES = 16;
 const ACK_PREFIX = 'chronicle.audioSpool.ack.';
 
+export type AudioSpoolSource = 'phone' | 'wearable';
+
 export interface SpoolPacket {
   fileName: string;
   /**
@@ -23,6 +25,7 @@ export interface SpoolPacket {
 interface ActiveSegment {
   file: File;
   handle: FileHandle;
+  source: AudioSpoolSource;
   segmentId: string;
   startedAtMs: number;
   nextSequence: number;
@@ -34,9 +37,10 @@ const makeSegmentId = (): string =>
 /**
  * Append-only, document-directory audio spool.
  *
- * Every BLE packet reaches this file before it is offered to the WebSocket. Files
- * are retained until the backend acknowledges the packet sequence after writing
- * the decoded audio to its Redis WAL. Old files are discovered after app restart.
+ * Every captured packet reaches a source-tagged segment before it is offered to the
+ * WebSocket. Files remain until the backend accepts their decoded PCM into Redis.
+ * Phone and wearable packets never share a recovery capture because their declared
+ * Opus durations differ.
  */
 export class DurableAudioSpool {
   private readonly directory = new Directory(Paths.document, 'chronicle-audio-spool');
@@ -55,14 +59,15 @@ export class DurableAudioSpool {
     this.active = null;
   }
 
-  private startSegment(capturedAtMs: number): ActiveSegment {
+  private startSegment(source: AudioSpoolSource, capturedAtMs: number): ActiveSegment {
     this.ensureDirectory();
     const segmentId = makeSegmentId();
-    const file = new File(this.directory, `${segmentId}.spool`);
+    const file = new File(this.directory, `${source}-${segmentId}.spool`);
     file.create({ overwrite: false, intermediates: true });
     const active = {
       file,
       handle: file.open(),
+      source,
       segmentId,
       startedAtMs: capturedAtMs,
       nextSequence: 0,
@@ -71,11 +76,19 @@ export class DurableAudioSpool {
     return active;
   }
 
-  append(payload: Uint8Array, capturedAtMs = Date.now()): SpoolPacket {
+  append(
+    source: AudioSpoolSource,
+    payload: Uint8Array,
+    capturedAtMs = Date.now(),
+  ): SpoolPacket {
     let segment = this.active;
-    if (!segment || capturedAtMs - segment.startedAtMs >= SEGMENT_MS) {
+    if (
+      !segment ||
+      segment.source !== source ||
+      capturedAtMs - segment.startedAtMs >= SEGMENT_MS
+    ) {
       this.closeActive();
-      segment = this.startSegment(capturedAtMs);
+      segment = this.startSegment(source, capturedAtMs);
     }
 
     const sequence = segment.nextSequence++;
@@ -96,12 +109,14 @@ export class DurableAudioSpool {
     };
   }
 
-  async pendingPackets(): Promise<SpoolPacket[]> {
+  async pendingPackets(source: AudioSpoolSource): Promise<SpoolPacket[]> {
     this.ensureDirectory();
     const packets: SpoolPacket[] = [];
     const files = this.directory
       .list()
-      .filter((entry): entry is File => entry instanceof File && entry.name.endsWith('.spool'));
+      .filter((entry): entry is File => (
+        entry instanceof File && entry.name.startsWith(`${source}-`) && entry.name.endsWith('.spool')
+      ));
 
     for (const file of files) {
       await this.acknowledgmentChains.get(file.name)?.catch(() => undefined);

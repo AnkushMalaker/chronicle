@@ -513,7 +513,15 @@ async def audio_streaming_persistence_job(
     # stale object here would replace the producer's wall-clock ``ended_at`` with
     # an absent or recorded-audio timestamp. Update only the field this worker
     # owns; audio evidence keeps its independent captured clock on each chunk.
-    await capture.set({"status": "complete"})
+    completed_capture = await AudioCaptureSession.find_one(
+        AudioCaptureSession.capture_session_id == session_id
+    )
+    if completed_capture is None:
+        raise AudioPersistenceInvariantError(
+            f"Capture session {session_id} disappeared before completion"
+        )
+    if completed_capture.failure is None:
+        await completed_capture.set({"status": "complete"})
 
     await redis_client.delete(f"audio_persistence:session:{session_id}")
     logger.info(
