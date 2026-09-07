@@ -188,16 +188,15 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
     return true;
   }, []);
 
-  const drainRecovery = useCallback(async (
-    socket: AudioV2Socket,
-    captureEpoch: number,
-  ) => {
+  const drainRecovery = useCallback(async (socket: AudioV2Socket) => {
     let recoverySequence = 0;
     while (true) {
       const packets = await durableAudioSpool.pendingPackets();
       if (!packets.length) return;
       await socket.beginCapture({
-        captureEpoch,
+        // Recovery is a source-native capture, whose protocol epoch is always zero.
+        // The native phone epoch belongs only to the subsequent live voice session.
+        captureEpoch: 0,
         processingProfile: ProcessingProfile.SOURCE_NATIVE,
         dataPurpose: DataPurpose.NORMAL_CAPTURE,
         deliveryClass: DeliveryClass.RECOVERED,
@@ -347,7 +346,7 @@ export const useAudioStreamer = (options?: UseAudioStreamerOptions): UseAudioStr
       await socket.connect();
       if (phoneVoice) phoneAudioDiagnostics.socketOpen();
       deliveryModeRef.current = 'recovering';
-      await drainRecovery(socket, phoneVoice?.captureEpoch ?? 0);
+      await drainRecovery(socket);
       liveStartedAtRef.current = Date.now();
       liveSequenceRef.current = 0;
       const capabilities = phoneVoice
