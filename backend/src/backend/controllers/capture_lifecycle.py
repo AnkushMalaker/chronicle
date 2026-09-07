@@ -14,7 +14,7 @@ from backend.client_manager import (
     track_client_user_relationship_async,
 )
 from backend.model_registry import get_models_registry
-from backend.models.audio_capture import CaptureStartProvenance
+from backend.models.audio_capture import AudioCaptureSession, CaptureStartProvenance
 from backend.plugins.events import BUTTON_STATE_TO_EVENT, ButtonState
 from backend.redis_factory import create_async_redis
 from backend.services.audio_stream.durability import (
@@ -22,7 +22,11 @@ from backend.services.audio_stream.durability import (
     inspect_stream_retention,
 )
 from backend.services.audio_stream.producer import get_audio_stream_producer
-from backend.services.audio_stream.session_store import SessionStatus, SessionStore
+from backend.services.audio_stream.session_store import (
+    CompletionReason,
+    SessionStatus,
+    SessionStore,
+)
 from backend.services.plugin_service import get_plugin_router
 from backend.services.sse_publisher import publish_sse_event_async
 from backend.services.voice_sessions import VoiceSessionCoordinator
@@ -196,20 +200,37 @@ async def initialize_capture_session(
 
 
 async def finalize_capture_session(
-    *, client_state, producer, user_id: str, client_id: str
+    *,
+    client_state,
+    producer,
+    user_id: str,
+    client_id: str,
+    completion_reason: CompletionReason = "user_stopped",
+    failure: str | None = None,
 ) -> None:
     session_id = client_state.stream_session_id
     if session_id is None:
         return
-    await producer.finalize_session(session_id, completion_reason="user_stopped")
+    await producer.finalize_session(session_id, completion_reason=completion_reason)
+    if failure is not None:
+        capture = await AudioCaptureSession.find_one(
+            AudioCaptureSession.capture_session_id == session_id
+        )
+        if capture is None:
+            raise RuntimeError(f"Capture session {session_id} disappeared")
+        await capture.set({"status": "failed", "failure": failure})
     if client_state.markers:
         await producer.store.set_markers(session_id, client_state.markers)
         client_state.markers.clear()
-    await producer.store.mark_complete(session_id, "user_stopped")
+    await producer.store.mark_complete(session_id, completion_reason)
     await publish_sse_event_async(
         user_id,
         "session.ended",
-        {"session_id": session_id, "client_id": client_id, "reason": "user_stopped"},
+        {
+            "session_id": session_id,
+            "client_id": client_id,
+            "reason": completion_reason,
+        },
     )
     client_state.stream_session_id = None
     client_state.last_persistence_healthcheck = 0.0

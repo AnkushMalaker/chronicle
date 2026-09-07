@@ -87,6 +87,7 @@ class _PersistedCapture:
     time_basis = "received"
     status = "active"
     ended_at = None
+    failure = None
 
     async def save(self):
         return None
@@ -210,4 +211,55 @@ async def test_persistence_completion_preserves_concurrent_capture_finalization(
     assert persisted == {
         "status": "complete",
         "ended_at": producer_ended_at,
+    }
+
+
+@pytest.mark.asyncio
+async def test_persistence_completion_preserves_protocol_failure(monkeypatch):
+    redis = _RaceRedis()
+    persisted = {"status": "failed", "failure": "invalid raw Opus packet"}
+
+    class FailedCapture(_PersistedCapture):
+        status = "failed"
+        failure = "invalid raw Opus packet"
+
+        async def set(self, updates):
+            persisted.update(updates)
+
+    class FakeCapture:
+        capture_session_id = _QueryField()
+        find_one = AsyncMock(return_value=FailedCapture())
+
+    class FakeAudioChunk:
+        source_stream = _QueryField()
+        source_first_message_id = _QueryField()
+        capture_session_id = _QueryField()
+        find_one = AsyncMock(return_value=None)
+        find = staticmethod(lambda *_args, **_kwargs: _EmptyFind())
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        async def insert(self):
+            return None
+
+    monkeypatch.setattr(audio_jobs, "SessionStore", _RaceSessionStore)
+    monkeypatch.setattr(audio_jobs, "AudioCaptureSession", FakeCapture)
+    monkeypatch.setattr(audio_jobs, "AudioChunkDocument", FakeAudioChunk)
+    monkeypatch.setattr(audio_jobs, "get_current_job", lambda: object())
+    monkeypatch.setattr(audio_jobs, "check_job_alive", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        audio_jobs, "encode_pcm_to_opus", AsyncMock(return_value=b"opus")
+    )
+
+    await audio_jobs.audio_streaming_persistence_job.__wrapped__(
+        "session-1",
+        "user-1",
+        "client-1",
+        redis_client=redis,
+    )
+
+    assert persisted == {
+        "status": "failed",
+        "failure": "invalid raw Opus packet",
     }
