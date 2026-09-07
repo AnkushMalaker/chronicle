@@ -16,13 +16,8 @@ describe('episodeDisplayTitle', () => {
 })
 
 describe('isSemanticMemoryEligible', () => {
-  it('keeps automatic media reference-only while remembering ordinary activity', () => {
-    expect(isSemanticMemoryEligible({ kind: 'media', memory_policy: 'auto' })).toBe(false)
-    expect(isSemanticMemoryEligible({ kind: 'conversation', memory_policy: 'auto' })).toBe(true)
-  })
-
-  it('honors explicit remember and reference choices', () => {
-    expect(isSemanticMemoryEligible({ kind: 'media', memory_policy: 'remember' })).toBe(true)
-    expect(isSemanticMemoryEligible({ kind: 'conversation', memory_policy: 'reference' })).toBe(false)
+  it('uses evidence eligibility returned by the backend', () => {
+    expect(isSemanticMemoryEligible({ memory_eligible: false })).toBe(false)
+    expect(isSemanticMemoryEligible({ memory_eligible: true })).toBe(true)
   })
 })

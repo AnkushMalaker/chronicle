@@ -41,7 +41,7 @@ describe('EpisodeLabelBar', () => {
     const onAdjust = vi.fn()
     render(
       <EpisodeLabelBar
-        episode={{ ...episode, kind: 'media', memory_policy: 'auto' }}
+        episode={{ ...episode, kind: 'media', requires_activity_review: true, memory_eligible: true, memory_policy: 'auto' }}
         selected={false}
         onToggleSelected={vi.fn()}
         onAdjust={onAdjust}

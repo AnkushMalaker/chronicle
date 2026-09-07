@@ -2,9 +2,16 @@
 
 from pathlib import Path
 
+import pytest
 from omegaconf import OmegaConf
 
-from backend.model_registry import ModelDef, ResolvedLLMOperation
+from backend.model_registry import (
+    AppModels,
+    LLMOperationConfig,
+    ModelDef,
+    ResolvedLLMOperation,
+)
+from backend.services.memory.agent.pi_agent import _thinking_level
 
 
 def _operation(model_name: str) -> ResolvedLLMOperation:
@@ -61,6 +68,7 @@ def test_muse_sampling_and_reasoning_prompt_follow_model_card():
     operation = ResolvedLLMOperation(
         model_def=ModelDef(
             name="muse-glimmer-llm",
+            reasoning_policy="per_operation",
             model_name="meta-models/Muse-Glimmer-30B-GGUF:kquant-17gb",
             model_type="llm",
             model_provider="llamacpp",
@@ -100,3 +108,75 @@ def test_detailed_summary_disables_local_model_thinking():
     )
 
     assert defaults.llm_operations.detailed_summary.reasoning_effort == "none"
+
+
+def test_timeline_merge_emits_json_without_hidden_reasoning():
+    defaults = OmegaConf.load(
+        Path(__file__).resolve().parents[2] / "config" / "defaults.yml"
+    )
+    config = defaults.llm_operations.timeline_merge
+    operation = ResolvedLLMOperation(
+        model_def=ModelDef(
+            name="qwen",
+            model_name="Qwen3.8-27B",
+            model_type="llm",
+            model_provider="llamacpp",
+            model_url="http://localhost:8080/v1",
+            thinking=True,
+        ),
+        temperature=config.temperature,
+        max_tokens=config.max_tokens,
+        reasoning_effort=config.reasoning_effort,
+    )
+    assert (
+        operation.to_api_params()["extra_body"]["chat_template_kwargs"][
+            "enable_thinking"
+        ]
+        is False
+    )
+
+
+@pytest.mark.parametrize("effort", [None, "none", "low", "high"])
+@pytest.mark.parametrize(
+    "operation_name", ["chat", "memory_write", "new_unconfigured_operation"]
+)
+@pytest.mark.parametrize("allow", [False, True])
+def test_local_reasoning_requires_model_permission_and_operation_opt_in(
+    effort, operation_name, allow
+):
+    model = ModelDef(
+        name="local",
+        model_name="Qwen3.8-27B",
+        model_type="llm",
+        model_provider="llamacpp",
+        model_url="http://localhost:8080/v1",
+        thinking=True,
+        reasoning_policy="per_operation" if allow else "off",
+        model_params={"reasoning_effort": "high", "max_tokens": 2000},
+    )
+    registry = AppModels(
+        defaults={"llm": "local"},
+        models={"local": model},
+        llm_operations={operation_name: LLMOperationConfig(reasoning_effort=effort)},
+    )
+    operation = registry.get_llm_operation(operation_name)
+    enabled = operation.to_api_params()["extra_body"]["chat_template_kwargs"][
+        "enable_thinking"
+    ]
+    assert enabled is (allow and effort in {"low", "high"})
+
+
+def test_pi_adapter_override_cannot_bypass_model_reasoning_policy():
+    operation = ResolvedLLMOperation(
+        model_def=ModelDef(
+            name="local",
+            model_name="Qwen3.8-27B",
+            model_type="llm",
+            model_provider="llamacpp",
+            model_url="http://localhost:8080/v1",
+            thinking=True,
+        ),
+        temperature=0.0,
+        reasoning_effort="high",
+    )
+    assert _thinking_level("high", operation) == "off"

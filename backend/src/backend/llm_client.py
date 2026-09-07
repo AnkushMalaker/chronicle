@@ -355,6 +355,7 @@ async def async_generate(
     Tracing is handled automatically by the OTEL instrumentor; use
     ``set_otel_session()`` at job boundaries to group calls by session.
     """
+    operation = operation or "default"
     if operation:
         registry = get_models_registry()
         if registry:

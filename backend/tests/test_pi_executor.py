@@ -59,6 +59,7 @@ def _runtime_config(
     timeout_seconds=30,
 ):
     return _PiRuntimeConfig(
+        reasoning_allowed=True,
         binary="/opt/pi/bin/pi",
         provider="chronicle-llamacpp",
         model="qwen3.6-27b",
@@ -313,17 +314,20 @@ def test_config_uses_registry_operation_budget_without_backend_model_override(
         model_provider="Llama.cpp Local",
         api_family="openai",
         thinking=True,
+        reasoning_allowed=True,
         model_params={"context_window": 16384},
         capabilities=[],
         system_prompt_prefix="You are Qwen.",
     )
     resolved = SimpleNamespace(
+        reasoning_allowed=True,
         model_def=model_def,
         model_name="upstream/qwen:Q4_K_M",
         base_url="http://kraken:8083/v1",
         api_key=None,
         max_tokens=9000,
         reasoning_effort="medium",
+        effective_reasoning_effort="medium",
         temperature=0.37,
         response_format=None,
     )
@@ -387,6 +391,7 @@ def test_config_accepts_max_thinking_and_explicit_compat_overrides(monkeypatch):
         model_provider="custom-openai",
         api_family="openai",
         thinking=True,
+        reasoning_allowed=True,
         capabilities=["vision"],
         system_prompt_prefix="",
         model_params={
@@ -397,12 +402,14 @@ def test_config_accepts_max_thinking_and_explicit_compat_overrides(monkeypatch):
         },
     )
     resolved = SimpleNamespace(
+        reasoning_allowed=True,
         model_def=model_def,
         model_name="deepseek-r1",
         base_url="https://models.example/v1",
         api_key="secret",
         max_tokens=2048,
         reasoning_effort="high",
+        effective_reasoning_effort="high",
         temperature=0.41,
         response_format=None,
     )
@@ -465,17 +472,20 @@ def test_config_rejects_output_budget_without_prompt_headroom(monkeypatch):
         model_provider="llamacpp",
         api_family="openai",
         thinking=True,
+        reasoning_allowed=True,
         model_params={},
         capabilities=[],
         system_prompt_prefix="",
     )
     resolved = SimpleNamespace(
+        reasoning_allowed=True,
         model_def=model_def,
         model_name="qwen",
         base_url="http://localhost/v1",
         api_key="none-needed",
         max_tokens=7500,
         reasoning_effort="low",
+        effective_reasoning_effort="low",
         temperature=0.2,
     )
     registry = SimpleNamespace(

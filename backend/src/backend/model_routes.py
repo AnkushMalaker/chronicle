@@ -87,7 +87,13 @@ def _operation_route(
         "location": endpoint_location(provider, endpoint),
         "source": str(explanation["source"] or ""),
         "max_tokens": resolved.max_tokens,
-        "reasoning_effort": resolved.reasoning_effort,
+        "reasoning_effort": resolved.effective_reasoning_effort,
+        "requested_reasoning_effort": resolved.reasoning_effort,
+        "reasoning_policy": (
+            resolved.model_def.reasoning_policy
+            if resolved.model_def.thinking
+            else "provider"
+        ),
         "response_format": (
             "json" if resolved.response_format == {"type": "json_object"} else "text"
         ),

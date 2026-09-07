@@ -1755,18 +1755,16 @@ async def test_llm_model(model_name: Optional[str]):
                     "status": "error",
                 }
 
-        client = create_openai_client(
-            api_key=model_def.api_key or "",
-            base_url=model_def.resolved_url(),
-            is_async=True,
-        )
-
+        operation = registry.get_llm_operation(
+            "model_test", model_override=model_def.name
+        ).model_copy(update={"temperature": 0.0, "max_tokens": 64})
+        client = operation.get_client(is_async=True)
         start = time.time()
         response = await client.chat.completions.create(
-            model=model_def.model_name,
-            messages=[{"role": "user", "content": "Say hello in one word."}],
-            temperature=0,
-            max_tokens=10,
+            **operation.to_api_params(),
+            messages=operation.prepare_messages(
+                [{"role": "user", "content": "Say hello in one word."}]
+            ),
         )
         latency_ms = int((time.time() - start) * 1000)
 

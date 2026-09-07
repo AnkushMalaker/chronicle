@@ -197,6 +197,11 @@ class _PiRuntimeConfig:
     input_modalities: List[str] = field(default_factory=lambda: ["text"])
     system_prompt_prefix: str = ""
     compat: Dict[str, Any] = field(default_factory=dict)
+    reasoning_allowed: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.reasoning_allowed:
+            object.__setattr__(self, "thinking", "off")
 
 
 @dataclass
@@ -280,10 +285,12 @@ def _provider_slug(provider: str) -> str:
 
 
 def _thinking_level(value: Any, operation: ResolvedLLMOperation) -> str:
+    if not operation.reasoning_allowed:
+        return "off"
     if value is None or value == "":
-        value = operation.reasoning_effort
+        value = operation.effective_reasoning_effort
     if value is None or value == "":
-        value = "low" if operation.model_def.thinking else "off"
+        value = "off"
     if isinstance(value, bool):
         value = "low" if value else "off"
     level = str(value).strip().lower()
@@ -450,6 +457,7 @@ def _resolve_pi_config(
             default=DEFAULT_TIMEOUT_SECONDS,
         ),
         reasoning=bool(model_def.thinking),
+        reasoning_allowed=resolved.reasoning_allowed,
         temperature=resolved.temperature,
         response_format=resolved.response_format,
         seed=_optional_seed(settings.get("seed", model_params.get("seed"))),
@@ -921,6 +929,7 @@ def _extension_source(
     token: str,
     temperature: float = 0.2,
     response_format: Optional[Dict[str, Any]] = None,
+    disable_thinking: bool = False,
     seed: Optional[int] = None,
     max_tool_rounds: int = MAX_TOOL_ROUNDS,
     max_tool_calls: int = MAX_PI_WRITE_TOOL_CALLS,
@@ -934,6 +943,7 @@ const bearerToken = {json.dumps(token)};
 const toolDefinitions = {json.dumps(tool_defs, separators=(",", ":"))};
 const temperature = {json.dumps(temperature)};
 const responseFormat = {json.dumps(response_format, separators=(",", ":"))};
+const disableThinking = {json.dumps(disable_thinking)};
 const seed = {json.dumps(seed)};
 const maxToolRounds = {max_tool_rounds};
 const maxToolCalls = {max_tool_calls};
@@ -949,6 +959,7 @@ export default function (pi) {{
     temperature,
     ...(responseFormat === null ? {{}} : {{ response_format: responseFormat }}),
     ...(seed === null ? {{}} : {{ seed }}),
+    ...(disableThinking ? {{ chat_template_kwargs: {{ ...event.payload.chat_template_kwargs, enable_thinking: false }} }} : {{}}),
   }}));
 
   pi.on("turn_start", () => {{
@@ -1500,6 +1511,7 @@ async def _invoke_pi(
                     token=gateway.token,
                     temperature=config.temperature,
                     response_format=config.response_format,
+                    disable_thinking=not config.reasoning_allowed,
                     seed=config.seed,
                     max_tool_rounds=max_tool_rounds,
                     max_tool_calls=max_tool_calls,

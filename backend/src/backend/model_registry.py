@@ -13,7 +13,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import yaml
 from pydantic import (
@@ -135,6 +135,15 @@ class ModelDef(BaseModel):
             "model (e.g. gemma/qwen served by llama.cpp)."
         ),
     )
+    reasoning_policy: Literal["off", "per_operation"] = Field(
+        default="off",
+        description="Permission for local thinking models. Off overrides operation and adapter effort; per_operation requires an explicit operation effort to enable reasoning.",
+    )
+
+    @property
+    def reasoning_allowed(self) -> bool:
+        return not self.thinking or self.reasoning_policy == "per_operation"
+
     embedding_dimensions: Optional[int] = Field(
         default=None, ge=1, description="Embedding vector dimensions"
     )
@@ -286,6 +295,23 @@ class ResolvedLLMOperation(BaseModel):
     reasoning_effort: Optional[str] = None  # OpenAI reasoning models OR thinking models
 
     @property
+    def reasoning_allowed(self) -> bool:
+        if not self.model_def.thinking:
+            return True
+        return self.model_def.reasoning_allowed and str(
+            self.effective_reasoning_effort
+        ).strip().lower() not in {"none", "minimal", "off", "0"}
+
+    @property
+    def effective_reasoning_effort(self) -> Optional[str]:
+        """Model permission is authoritative; model capability is not an opt-in."""
+        if self.model_def.thinking:
+            if not self.model_def.reasoning_allowed:
+                return "none"
+            return self.reasoning_effort or "none"
+        return self.reasoning_effort
+
+    @property
     def model_name(self) -> str:
         return self.model_def.model_name
 
@@ -331,9 +357,10 @@ class ResolvedLLMOperation(BaseModel):
         if model_params.get("top_k") is not None:
             extra_body["top_k"] = model_params["top_k"]
 
-        if self.reasoning_effort:
+        effective_effort = self.effective_reasoning_effort
+        if effective_effort:
             if openai_reasoning:
-                effort = self.reasoning_effort.strip().lower()
+                effort = effective_effort.strip().lower()
                 # "none" is accepted by versioned GPT-5.1+ models. Earlier GPT-5
                 # variants (gpt-5, gpt-5-mini/nano) require "minimal" instead.
                 unqualified_model_name = model_name.lower().rsplit("/", 1)[-1]
@@ -343,12 +370,10 @@ class ResolvedLLMOperation(BaseModel):
                     effort = "minimal"
                 params["reasoning_effort"] = effort
             elif self.model_def.model_provider == "openrouter":
-                extra_body["reasoning"] = {
-                    "effort": self.reasoning_effort.strip().lower()
-                }
+                extra_body["reasoning"] = {"effort": effective_effort.strip().lower()}
             elif self.model_def.thinking:
                 # "none"/"minimal"/"off"/"0" → thinking off; any other level → on.
-                enable = self.reasoning_effort.strip().lower() not in (
+                enable = effective_effort.strip().lower() not in (
                     "none",
                     "minimal",
                     "off",
@@ -544,7 +569,7 @@ class AppModels(BaseModel):
         reasoning_effort = (
             op_config.reasoning_effort
             if op_config.reasoning_effort is not None
-            else model_params.get("reasoning_effort")
+            else (None if model_def.thinking else model_params.get("reasoning_effort"))
         )
 
         # Convert "json" shorthand to OpenAI format

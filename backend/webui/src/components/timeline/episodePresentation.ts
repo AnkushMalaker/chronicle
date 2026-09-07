@@ -4,11 +4,9 @@ export function isMediaKind(kind: string) {
   return kind.toLowerCase().split(/[^a-z0-9]+/).includes('media')
 }
 
-/** Mirrors the memory digest rule: explicit choices win; automatic media stays reference-only. */
-export function isSemanticMemoryEligible(episode: Pick<TimelineEpisode, 'kind' | 'memory_policy'>) {
-  if (episode.memory_policy === 'remember') return true
-  if (episode.memory_policy === 'reference') return false
-  return !isMediaKind(episode.kind)
+/** The backend applies evidence eligibility and the person's memory policy together. */
+export function isSemanticMemoryEligible(episode: Pick<TimelineEpisode, 'memory_eligible'>) {
+  return episode.memory_eligible
 }
 
 const MEDIA_ACTIVITY_PREFIX = /^(?:watching|viewing|listening\s+to|playing|discussing|showing|media(?:\s+(?:about|with))?)\s+/i

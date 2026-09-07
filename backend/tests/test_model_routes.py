@@ -82,6 +82,8 @@ def test_effective_routes_make_every_selected_runtime_model_visible():
         "source": "llm_operations.timeline_segmentation.model",
         "max_tokens": None,
         "reasoning_effort": None,
+        "requested_reasoning_effort": None,
+        "reasoning_policy": "provider",
         "response_format": "text",
     }
     assert indexed["timeline.immich_visual_evidence"]["model"] == "qwen3.8-llm"
