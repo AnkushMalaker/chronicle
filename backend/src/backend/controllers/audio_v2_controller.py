@@ -466,7 +466,6 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                         },
                         provenance=provenance,
                     )
-                    active_binding = binding
                     binding = audio_pb2.CaptureBinding(
                         capture_session_id=audio_pb2.CaptureSessionId(
                             value=client_state.stream_session_id
@@ -476,6 +475,7 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                         ),
                         capture_epoch=client_state.capture_epoch,
                     )
+                    active_binding = binding
                     v2_streams = await AudioV2Streams.open(
                         producer.redis_client,
                         event=audio_pb2.CaptureStreamEvent(
