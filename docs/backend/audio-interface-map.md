@@ -12,9 +12,9 @@ test and a deployed trace both exist.
 | IOS-CAPTURE | AVAudioEngine → app transport | PCM base64 map | native Opus `CaptureMediaPacket` | amber: source complete, native build pending | Expo typecheck; TestFlight/Xcode compile required |
 | ANDROID-CAPTURE | AudioRecord → app transport | PCM base64 map | native Opus `CaptureMediaPacket` | amber: source complete, Gradle/device pending | MediaCodec Opus adapter; Expo typecheck |
 | WEB-CAPTURE | Web Audio → backend | paired-header PCM | WebCodecs raw Opus packets | green source/build; browser E2E pending | `RecordingContext.test.tsx`; WebUI production build |
-| OMI-NEO | BLE → app/tray → backend | raw Opus via Wyoming | Opus packet adapter | green app + tray adapters; physical device pending | `AudioV2Socket`; shared Python `AudioV2Client` test |
+| OMI-NEO | BLE → app/tray → backend | raw Opus via Wyoming | declared 60 ms Opus normalized to canonical frames | amber: source/tests green; physical retest pending | real 60 ms Opus decode; app and shared-client duration tests |
 | HAVPE | firmware → relay → backend | device-local JSONL/PCM → relay V2 adapter | generated V2 at backend boundary | green source; physical pending | PCM normalizer/raw-Opus round trip; typed button/playback adapter |
-| RECOVERY | phone spool → backend | inferred bare packets | typed recovered packets | green app + ingress + persistence | typed packet ACK; `test_audio_durability.py` |
+| RECOVERY | external recovery client → backend | inferred bare packets | typed recovered packets | backend supported; removed from Expo live path | `test_audio_durability.py` |
 | DURABLE-REDIS | ingress → persistence | string fields/magic end marker | `CaptureStreamEvent` binary | green V2 producer + persistence consumer | `test_audio_v2_streams.py`, `test_audio_durability.py` |
 | REALTIME-REDIS | ingress → ASR/wake/turns | wildcard string-field streams | typed `CanonicalPcmFrame` | green producer + all three consumers | backend streaming tests; wakeword consumer tests |
 | MONGO-AUDIO | persistence → claims | fixed Opus chunks | retained; stricter domain types | green deployed | live completed session + 1 canonical 1.1 s chunk |
@@ -30,7 +30,8 @@ test and a deployed trace both exist.
 
 ## Fixed invariants
 
-- Live uplink is 16 kHz mono raw Opus in 20 ms packets.
+- Live uplink is declared 16 kHz mono raw Opus: 20 ms from phone/web/HAVPE or
+  60 ms from OMI/Neo. Ingress normalizes both to canonical 20 ms PCM frames.
 - Live downlink is 24 kHz mono raw Opus in 20 ms packets.
 - PCM S16LE is internal only.
 - Recovered packets never enter a live wake, turn, or action path.
@@ -39,6 +40,28 @@ test and a deployed trace both exist.
 - Historical Mongo Opus chunks and absolute capture clocks remain unchanged.
 
 ## Worklog
+
+### 2026-09-08
+
+- Removed the Expo durable spool/recovery state machine after a physical iPhone
+  trace caught recovery and user-stop competing for the same `captureStopped`
+  waiter. One button press now owns one live capture and one stop; frames flow
+  directly through that binding, with captured/sent/accepted counts retained in
+  the exported diagnostics. This deliberately drops offline/reconnect replay from
+  the app instead of layering another lifecycle guard around it.
+- Collapsed mobile capture to one explicit three-operation interface: start a named
+  source, enqueue a source-tagged frame, and stop. Removed URL-carried credentials,
+  optional phone/wearable inference, duplicate URL builders, caller-side socket
+  readiness checks, and the second reconnect state machine.
+- Made source packet duration part of the socket interface. Phone declares 20 ms;
+  OMI/Neo declares its native 60 ms packets; HAVPE remains explicit 20 ms. The
+  backend decodes one declared packet and publishes one or three contiguous
+  canonical 20 ms frames.
+- The app refuses non-Opus wearable capture before installing the BLE listener.
+- Protocol rejection now finalizes the technical stream with `failure` and status
+  `failed`; the Mongo persistence worker preserves that result instead of replacing
+  it with `complete`. Verification is source-level only until backend deployment and
+  a physical Neo trace prove Redis and Mongo persistence.
 
 ### 2026-08-29
 
@@ -239,7 +262,7 @@ test and a deployed trace both exist.
 
 ## Remaining verification gates
 
-- Record one physical iPhone capture/recovery/playback trace and one physical
+- Record one physical iPhone capture/playback trace and one physical
   OMI/Neo or HAVPE capture trace through ingress, Redis, Mongo, inference, and action.
 - Restore or replace the exhausted OpenRouter allowance, then verify short summary,
   detailed summary, and memory extraction on one of the E2E-created Conversations.
