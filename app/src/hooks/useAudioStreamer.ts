@@ -115,7 +115,7 @@ export const useAudioStreamer = (): UseAudioStreamer => {
   const stoppedRef = useRef(false);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const liveSequenceRef = useRef(0);
-  const liveStartedAtRef = useRef(0);
+  const liveMonotonicOriginRef = useRef<number | null>(null);
   const playbackRef = useRef<{
     responseId: string;
     generation: number;
@@ -236,7 +236,7 @@ export const useAudioStreamer = (): UseAudioStreamer => {
       if (phoneVoice) phoneAudioDiagnostics.socketConnecting();
       await socket.connect();
       if (phoneVoice) phoneAudioDiagnostics.socketOpen();
-      liveStartedAtRef.current = performance.now();
+      liveMonotonicOriginRef.current = null;
       liveSequenceRef.current = 0;
       const capabilities = phoneVoice
         ? typedCapabilities(phoneVoice.capabilities)
@@ -305,12 +305,15 @@ export const useAudioStreamer = (): UseAudioStreamer => {
       if (activeSource.kind !== 'phone' || frame.captureEpoch !== activeSource.captureEpoch) return;
       phoneAudioDiagnostics.frameSent(frame.opus.length);
     }
+    liveMonotonicOriginRef.current ??= frame.monotonicTimestampMs;
     socket.sendPacket({
       sequence: liveSequenceRef.current++,
       capturedAtMs: frame.capturedAtMs,
       monotonicOffsetUs: Math.max(
         0,
-        Math.round((frame.monotonicTimestampMs - liveStartedAtRef.current) * 1000),
+        Math.round(
+          (frame.monotonicTimestampMs - liveMonotonicOriginRef.current) * 1000,
+        ),
       ),
       opus: frame.opus,
     });

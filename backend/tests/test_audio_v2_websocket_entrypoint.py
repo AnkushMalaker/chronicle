@@ -91,6 +91,14 @@ class PhoneWebSocket:
 async def test_registered_audio_websocket_accepts_phone_frame_and_stops(monkeypatch):
     """The server-testable phone path must survive hello through durable ingress."""
 
+    async def run_inline(function, /, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    # The registered entrypoint owns the orchestration under test; the executor is
+    # only a process boundary here and otherwise leaves pytest's loop teardown
+    # waiting on an idle default-executor thread.
+    monkeypatch.setattr(audio_v2_controller.asyncio, "to_thread", run_inline)
+
     audio_spec = audio_pb2.AudioSpec(
         codec=audio_pb2.AUDIO_CODEC_OPUS,
         sample_rate_hz=16_000,

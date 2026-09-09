@@ -322,6 +322,7 @@ async def ingest_capture_packet(
     normalizer: RawOpusNormalizer,
     v2_streams: AudioV2Streams,
     canonical_sequence: int,
+    previous_monotonic_offset_us: int | None = None,
 ) -> int:
     """Normalize one bound Opus packet and publish canonical 20 ms frames."""
 
@@ -335,6 +336,12 @@ async def ingest_capture_packet(
     expected_voice = client_state.voice_session_id or ""
     if packet.binding.voice_session_id.value != expected_voice:
         raise AudioProtocolV2Error("capture packet has a stale voice binding")
+    if (
+        packet.delivery_class == audio_pb2.DELIVERY_CLASS_LIVE
+        and previous_monotonic_offset_us is not None
+        and packet.monotonic_offset_us <= previous_monotonic_offset_us
+    ):
+        raise AudioProtocolV2Error("live capture clock did not advance")
 
     frames = await _decode_opus_frames(normalizer, packet.opus_payload)
     for index, pcm in enumerate(frames):
@@ -424,6 +431,7 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
         normalizer = None
         active_delivery_class = audio_pb2.DELIVERY_CLASS_UNSPECIFIED
         last_sequence = -1
+        last_monotonic_offset_us = None
         canonical_sequence = 0
         while True:
             incoming = await websocket.receive()
@@ -554,6 +562,7 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                         interim_task = None
                     active_delivery_class = audio_pb2.DELIVERY_CLASS_UNSPECIFIED
                     last_sequence = -1
+                    last_monotonic_offset_us = None
                     canonical_sequence = 0
                     normalizer = None
                     v2_streams = None
@@ -646,6 +655,7 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                     normalizer=normalizer,
                     v2_streams=v2_streams,
                     canonical_sequence=canonical_sequence,
+                    previous_monotonic_offset_us=last_monotonic_offset_us,
                 )
                 await _send_control(
                     websocket,
@@ -655,6 +665,7 @@ async def handle_audio_v2_websocket(websocket: WebSocket) -> None:
                     ),
                 )
                 last_sequence = packet.sequence
+                last_monotonic_offset_us = packet.monotonic_offset_us
             else:
                 raise AudioProtocolV2Error("unsupported WebSocket message")
     except WebSocketDisconnect:

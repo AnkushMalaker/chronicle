@@ -85,6 +85,14 @@ const noDiagnostics = new Proxy({
   packetAccepted: sequence => diagnostics.push(['accepted', sequence]),
 }, { get: (target, property) => target[property] ?? (() => {}) });
 
+// React Native's JavaScript performance clock and the native audio clock are
+// monotonic, but their origins are not part of the bridge contract. Keep them
+// deliberately different so this integration catches cross-clock subtraction.
+Object.defineProperty(global, 'performance', {
+  configurable: true,
+  value: { now: () => 50_000 },
+});
+
 const sourcePath = path.join(__dirname, '../src/hooks/useAudioStreamer.ts');
 const { useAudioStreamer } = loadTypeScript(sourcePath, {
   '@bufbuild/protobuf': { create: (_schema, value) => value },
@@ -146,33 +154,48 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
   assert.equal(beginCaptureCalls[0].processingProfile, ProcessingProfile.DUPLEX_AEC);
   assert.equal(beginCaptureCalls[0].recoveryBatchId, undefined, 'the clean path has no recovery capture');
 
-  const now = performance.now();
+  const nativeNow = 1_000;
   streamer.sendFrame('phone', {
     captureEpoch: 6,
     capturedAtMs: 1_780_000_000_000,
-    monotonicTimestampMs: now,
+    monotonicTimestampMs: nativeNow,
     frameDurationMs: 20,
     opus: new Uint8Array([9]),
   });
   streamer.sendFrame('phone', {
     captureEpoch: 7,
     capturedAtMs: 1_780_000_000_020,
-    monotonicTimestampMs: now + 20,
+    monotonicTimestampMs: nativeNow + 20,
     frameDurationMs: 20,
     opus: new Uint8Array([1, 2, 3]),
   });
-  assert.equal(sentPackets.length, 1, 'only the active native epoch may send');
+  streamer.sendFrame('phone', {
+    captureEpoch: 7,
+    capturedAtMs: 1_780_000_000_040,
+    monotonicTimestampMs: nativeNow + 40,
+    frameDurationMs: 20,
+    opus: new Uint8Array([4, 5, 6]),
+  });
+  assert.equal(sentPackets.length, 2, 'only the active native epoch may send');
   assert.equal(sentPackets[0].sequence, 0);
   assert.equal(sentPackets[0].capturedAtMs, 1_780_000_000_020);
   assert.deepEqual(Array.from(sentPackets[0].opus), [1, 2, 3]);
-  assert.deepEqual(diagnostics, [['sent', 3], ['accepted', 0]]);
+  assert.deepEqual(
+    sentPackets.map(packet => packet.monotonicOffsetUs),
+    [0, 20_000],
+    'live coordinates must use the native frame clock with its own origin',
+  );
+  assert.deepEqual(diagnostics, [
+    ['sent', 3], ['accepted', 0],
+    ['sent', 3], ['accepted', 1],
+  ]);
 
   duringBackendStop = async () => {
     const before = sentPackets.length;
     streamer.sendFrame('phone', {
       captureEpoch: 7,
-      capturedAtMs: 1_780_000_000_040,
-      monotonicTimestampMs: now + 40,
+      capturedAtMs: 1_780_000_000_060,
+      monotonicTimestampMs: nativeNow + 60,
       opus: new Uint8Array([4]),
     });
     assert.equal(sentPackets.length, before, 'queued native callbacks must not send after stop');
@@ -211,7 +234,7 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
     const packetsBefore = sentPackets.length;
     failingStreamer.sendFrame('phone', {
       captureEpoch: 7, capturedAtMs: 1_780_000_000_060,
-      monotonicTimestampMs: now + 60, opus: new Uint8Array([5]),
+      monotonicTimestampMs: nativeNow + 80, opus: new Uint8Array([5]),
     });
     assert.equal(sentPackets.length, packetsBefore, 'failed stop must leave capture inactive');
   }

@@ -9,7 +9,7 @@ test and a deployed trace both exist.
 | WS-CONTROL | first-party clients → backend | removed | generated `ClientControl` JSON | green deployed | `test_audio_protocol_v2.py`; live hello/start/stop trace |
 | WS-MEDIA | first-party clients → backend | removed | atomic binary `MediaEnvelope` | green deployed | `test_audio_v2_ingress.py`; 55/55 live packet ACKs |
 | CONNECTION | socket → client/session lifecycle | cleanup by stable client id | exact `ConnectionId` lease | green | `test_client_connection_lease.py` |
-| IOS-CAPTURE | AVAudioEngine → app transport | PCM base64 map | native Opus `CaptureMediaPacket` | amber: source complete, native build pending | Expo typecheck; TestFlight/Xcode compile required |
+| IOS-CAPTURE | AVAudioEngine → app transport | PCM base64 map | native Opus `CaptureMediaPacket` | amber: source fix complete, physical retest pending | `test-phone-audio-streaming.cjs`; Expo typecheck; TestFlight/Xcode compile required |
 | ANDROID-CAPTURE | AudioRecord → app transport | PCM base64 map | native Opus `CaptureMediaPacket` | amber: source complete, Gradle/device pending | MediaCodec Opus adapter; Expo typecheck |
 | WEB-CAPTURE | Web Audio → backend | paired-header PCM | WebCodecs raw Opus packets | green source/build; browser E2E pending | `RecordingContext.test.tsx`; WebUI production build |
 | OMI-NEO | BLE → app/tray → backend | raw Opus via Wyoming | declared 60 ms Opus normalized to canonical frames | amber: source/tests green; physical retest pending | real 60 ms Opus decode; app and shared-client duration tests |
@@ -314,3 +314,27 @@ test and a deployed trace both exist.
   draining serially on the local GPU (three completed at the last checkpoint, one
   running, 21 queued); they remain deliberately serialized to avoid competing VRAM
   peaks.
+
+### 10 Sep phone wake-coordinate regression
+
+- **01:00 IST:** traced Build 87 capture
+  `a421c9-phone-mic-c661a561b56b4132b4d9c506bad8992b` across the phone log,
+  Audio V2 Redis frames, committed turns, wake activations, and the deployed Hermes
+  gateway. Transport and persistence were healthy (**3,505/3,505** packets accepted),
+  and the two wake detections were strong, but all 3,505 live canonical frames carried
+  `monotonic_offset_us=0`. The resulting committed turns were only `0–20 ms`, so they
+  could not contain command intervals `23,048.65–24,748.65 ms` and
+  `33,867.65–41,547.65 ms`. Hermes therefore received no completion POST.
+- The app subtracted the JavaScript performance clock from each native audio frame's
+  separately-originated monotonic clock. It then clamped the invalid cross-clock
+  result to zero. Live coordinates now establish their origin from the first outbound
+  active native frame while preserving `captured_at` as independent wall-clock evidence. The
+  backend also rejects a live packet clock that does not strictly advance, instead of
+  silently publishing turns that wake activation can never claim.
+- The existing phone-stream integration gate now gives the JavaScript and native
+  monotonic clocks deliberately different origins and requires consecutive outbound
+  packets at `0` and `20,000 µs`. The wake consumer regression commits
+  `23,000–24,920 ms` and proves it contains the first observed command interval. Expo
+  typecheck, the backend ingress/protocol/router tests, and wake turn tests pass. A
+  new TestFlight build plus one physical iPhone wake-to-Hermes trace is still required
+  before this boundary can be called green deployed.
