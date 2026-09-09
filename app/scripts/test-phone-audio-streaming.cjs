@@ -38,6 +38,7 @@ const socketFrameDurations = [];
 const diagnostics = [];
 let backendStops = 0;
 let socketCloses = 0;
+let duringBackendStop = () => {};
 
 class MockAudioV2Socket {
   constructor(options) {
@@ -66,6 +67,7 @@ class MockAudioV2Socket {
 
   async stopCapture() {
     backendStops += 1;
+    await duringBackendStop();
     this.activeBinding = null;
   }
 
@@ -165,7 +167,19 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
   assert.deepEqual(Array.from(sentPackets[0].opus), [1, 2, 3]);
   assert.deepEqual(diagnostics, [['sent', 3], ['accepted', 0]]);
 
+  duringBackendStop = async () => {
+    const before = sentPackets.length;
+    streamer.sendFrame('phone', {
+      captureEpoch: 7,
+      capturedAtMs: 1_780_000_000_040,
+      monotonicTimestampMs: now + 40,
+      opus: new Uint8Array([4]),
+    });
+    assert.equal(sentPackets.length, before, 'queued native callbacks must not send after stop');
+    assert.equal(nativeStops, 1, 'microphone must stop before waiting for the backend');
+  };
   await streamer.stopStreaming();
+  duringBackendStop = () => {};
   assert.equal(backendStops, 1, 'the capture has one stop owner');
   assert.equal(nativeStops, 1, 'stopping the stream also stops the native phone session');
   assert.equal(socketCloses, 1);
@@ -179,6 +193,28 @@ const { useAudioStreamer } = loadTypeScript(sourcePath, {
   assert.equal(beginCaptureCalls.length, 2, 'wearable also uses one live capture');
   assert.equal(beginCaptureCalls[1].deliveryClass, DeliveryClass.LIVE);
   await wearableStreamer.stopStreaming();
+
+  for (const failureAt of ['native', 'backend']) {
+    const failingStreamer = useAudioStreamer();
+    const expected = new Error(`${failureAt} stop failed`);
+    await failingStreamer.startStreaming('wss://chronicle.invalid/ws/audio', {
+      kind: 'phone',
+      ...phoneVoice,
+      stopCapture: async () => {
+        if (failureAt === 'native') throw expected;
+      },
+    });
+    const closesBefore = socketCloses;
+    duringBackendStop = async () => { throw expected; };
+    await assert.rejects(failingStreamer.stopStreaming(), error => error === expected);
+    assert.equal(socketCloses, closesBefore + 1, 'stop failure must still close the transport');
+    const packetsBefore = sentPackets.length;
+    failingStreamer.sendFrame('phone', {
+      captureEpoch: 7, capturedAtMs: 1_780_000_000_060,
+      monotonicTimestampMs: now + 60, opus: new Uint8Array([5]),
+    });
+    assert.equal(sentPackets.length, packetsBefore, 'failed stop must leave capture inactive');
+  }
 
   console.log('phone audio streaming tests passed');
 })().catch(error => {

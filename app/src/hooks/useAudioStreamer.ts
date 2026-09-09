@@ -142,6 +142,9 @@ export const useAudioStreamer = (): UseAudioStreamer => {
     heartbeatRef.current = null;
     const socket = socketRef.current;
     try {
+      if (sourceRef.current?.kind === 'phone') {
+        await sourceRef.current.stopCapture();
+      }
       await socket?.stopCapture();
     } finally {
       socket?.close();
@@ -149,9 +152,6 @@ export const useAudioStreamer = (): UseAudioStreamer => {
       playbackSubscriptionRef.current?.remove();
       playbackSubscriptionRef.current = null;
       playbackRef.current = null;
-      if (sourceRef.current?.kind === 'phone') {
-        await sourceRef.current.stopCapture();
-      }
       sourceRef.current = null;
       setIsStreaming(false);
       setIsConnecting(false);
@@ -297,7 +297,7 @@ export const useAudioStreamer = (): UseAudioStreamer => {
     source: AudioStreamSource['kind'],
     frame: CapturedOpusFrame,
   ) => {
-    if (!frame.opus.length) return;
+    if (stoppedRef.current || !frame.opus.length) return;
     const activeSource = sourceRef.current;
     const socket = socketRef.current;
     if (!socket?.activeBinding || activeSource?.kind !== source) return;

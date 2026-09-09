@@ -28,6 +28,7 @@ const writes = [];
 const socketSourcePath = path.join(__dirname, '../src/protocol/audioV2Socket.ts');
 const serverControls = {
   hello: { event: { case: 'hello', value: {} } },
+  captureStopped: { event: { case: 'captureStopped', value: {} } },
   captureStarted: {
     event: {
       case: 'captureStarted',
@@ -127,6 +128,15 @@ async function declaredUplinkDuration(frameDurationMs) {
   });
   transport.receive('captureStarted');
   await starting;
+  let stopped = false;
+  const stopping = socket.stopCapture().then(() => { stopped = true; });
+  await Promise.resolve();
+  assert.equal(stopped, false, 'stop must await the server acknowledgement');
+  assert.equal(transport.sent.at(-1).event.case, 'stopCapture');
+  transport.receive('captureStopped');
+  await stopping;
+  assert.equal(socket.activeBinding, null, 'acknowledged stop must release the capture');
+  socket.close();
   return transport.sent.map(control => (
     control.event.value.audioSpec ?? control.event.value.supportedUplink?.[0]
   )).filter(Boolean).map(spec => spec.frameDuration.nanos);
